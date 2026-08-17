@@ -2335,7 +2335,10 @@ public partial class ScriptControlViewModel : ViewModel
         }
     }
 
-    public async Task OnContinueTaskProgressAsync(string name, List<TaskProgress>? taskProgresses = null)
+    public async Task OnContinueTaskProgressAsync(
+        string name,
+        List<TaskProgress>? taskProgresses = null,
+        bool propagateExceptions = false)
     {
         if (taskProgresses == null)
         {
@@ -2364,17 +2367,21 @@ public partial class ScriptControlViewModel : ViewModel
             TaskProgressManager.GenerNextProjectInfo(taskProgress, sg);
             if (taskProgress.Next == null)
             {
-                _logger.LogWarning("无法定位到下一个要执行的项目：next为空（" + taskProgress.Name + ")");
+                var message = $"无法定位到下一个要执行的项目：next为空（{taskProgress.Name}）";
+                _logger.LogWarning("{Message}", message);
+                TaskProgressResumeFailurePolicy.ThrowIfManaged(message, propagateExceptions);
             }
             else
             {
-                await StartGroups(sg, taskProgress);
+                await StartGroups(sg, taskProgress, propagateExceptions: propagateExceptions);
             }
 
         }
         else
         {
-            _logger.LogWarning("无法定位到下一个要执行的项目:taskProgress为空");
+            var message = $"无法定位任务进度记录：taskProgress为空（{name}）";
+            _logger.LogWarning("{Message}", message);
+            TaskProgressResumeFailurePolicy.ThrowIfManaged(message, propagateExceptions);
         }
     }
 
@@ -2395,7 +2402,7 @@ public partial class ScriptControlViewModel : ViewModel
             taskProgressName = names[0];
         }
 
-        await OnContinueTaskProgressAsync(taskProgressName);
+        await OnContinueTaskProgressAsync(taskProgressName, propagateExceptions: true);
     }
 
     [RelayCommand]
@@ -2539,31 +2546,28 @@ public partial class ScriptControlViewModel : ViewModel
         {
             ReadScriptGroup();
         }
-        List<ScriptGroup> scriptGroups = new List<ScriptGroup>();
-        foreach (var name in names)
-        {
-            try
-            {
-                var group = ScriptGroups.First(x => x.Name == name);
-                scriptGroups.Add(group);
-            }
-            catch (InvalidOperationException)
-            {
-                _logger.LogWarning("传入的配置组名称不存在:{Name}", name);
-            }
-        }
 
-        if (scriptGroups.Count > 0)
+        var requestedNames = names.ToList();
+        var missingNames = ManagedScriptGroupSelectionPolicy.GetMissingNames(
+            requestedNames,
+            ScriptGroups.Select(group => group.Name));
+        foreach (var missingName in missingNames)
         {
-            await StartGroups(scriptGroups);
+            _logger.LogWarning("传入的配置组名称不存在:{Name}", missingName);
         }
-        else
-        {
-            _logger.LogWarning("需要执行的配置组为空");
-        }
+        ManagedScriptGroupSelectionPolicy.ThrowIfInvalid(requestedNames, missingNames);
+
+        var scriptGroups = requestedNames
+            .Select(name => ScriptGroups.First(group => group.Name == name))
+            .ToList();
+        await StartGroups(scriptGroups, propagateExceptions: true);
     }
 
-    public async Task StartGroups(List<ScriptGroup> scriptGroups, TaskProgress? taskProgress = null, bool loop = false)
+    public async Task StartGroups(
+        List<ScriptGroup> scriptGroups,
+        TaskProgress? taskProgress = null,
+        bool loop = false,
+        bool propagateExceptions = false)
     {
         _logger.LogInformation("开始连续执行选中配置组:{Names}", string.Join(",", scriptGroups.Select(x => x.Name)));
         try
@@ -2592,7 +2596,11 @@ public partial class ScriptControlViewModel : ViewModel
                 }
                 taskProgress.CurrentScriptGroupName = scriptGroup.Name;
                 TaskProgressManager.SaveTaskProgress(taskProgress);
-                await _scriptService.RunMulti(GetNextProjects(scriptGroup), scriptGroup.Name, taskProgress);
+                await _scriptService.RunMulti(
+                    GetNextProjects(scriptGroup),
+                    scriptGroup.Name,
+                    taskProgress,
+                    propagateExceptions);
                 await Task.Delay(2000);
             }
 
@@ -2602,7 +2610,7 @@ public partial class ScriptControlViewModel : ViewModel
                 taskProgress.LastScriptGroupName = null;
                 taskProgress.LastSuccessScriptGroupProjectInfo = null;
                 taskProgress.Next = null;
-                await StartGroups(scriptGroups, taskProgress);
+                await StartGroups(scriptGroups, taskProgress, propagateExceptions: propagateExceptions);
             }
             else
             {
@@ -2618,6 +2626,10 @@ public partial class ScriptControlViewModel : ViewModel
         catch (Exception e)
         {
             Debug.WriteLine(e.Message);
+            if (propagateExceptions)
+            {
+                throw;
+            }
         }
         finally
         {
@@ -2625,5 +2637,46 @@ public partial class ScriptControlViewModel : ViewModel
         }
 
 
+    }
+}
+
+internal static class TaskProgressResumeFailurePolicy
+{
+    internal static void ThrowIfManaged(string message, bool propagateExceptions)
+    {
+        if (propagateExceptions)
+        {
+            throw new InvalidOperationException(message);
+        }
+    }
+}
+
+internal static class ManagedScriptGroupSelectionPolicy
+{
+    internal static IReadOnlyList<string> GetMissingNames(
+        IEnumerable<string> requestedNames,
+        IEnumerable<string> availableNames)
+    {
+        var availableNameSet = availableNames.ToHashSet(StringComparer.Ordinal);
+        return requestedNames
+            .Where(name => !availableNameSet.Contains(name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    internal static void ThrowIfInvalid(
+        IReadOnlyCollection<string> requestedNames,
+        IReadOnlyCollection<string> missingNames)
+    {
+        if (requestedNames.Count == 0)
+        {
+            throw new InvalidOperationException("需要执行的配置组为空。");
+        }
+
+        if (missingNames.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"传入的配置组名称不存在：{string.Join("、", missingNames)}");
+        }
     }
 }

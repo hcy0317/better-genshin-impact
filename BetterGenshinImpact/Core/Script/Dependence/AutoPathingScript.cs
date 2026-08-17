@@ -14,12 +14,23 @@ public class AutoPathingScript
     private object? _config = null;
     private string _rootPath;
     private readonly LimitedFile _autoPathingFile;
+    private readonly Action<string, Exception> _logFailure;
 
     public AutoPathingScript(string rootPath, object? config)
+        : this(rootPath, config, new LimitedFile(Global.Absolute(@"User\AutoPathing")), LogFailure)
+    {
+    }
+
+    internal AutoPathingScript(
+        string rootPath,
+        object? config,
+        LimitedFile autoPathingFile,
+        Action<string, Exception> logFailure)
     {
         _config = config;
         _rootPath = rootPath;
-        _autoPathingFile = new LimitedFile(Global.Absolute(@"User\AutoPathing"));
+        _autoPathingFile = autoPathingFile;
+        _logFailure = logFailure;
     }
 
     public async Task Run(string json)
@@ -44,25 +55,25 @@ public class AutoPathingScript
         }
         catch (Exception e)
         {
-            TaskControl.Logger.LogDebug(e,"执行地图追踪时候发生错误");
-            TaskControl.Logger.LogError("执行地图追踪时候发生错误: {Msg}",e.Message);
+            _logFailure("执行地图追踪时候发生错误", e);
             throw;
         }
     }
 
     public async Task RunFile(string path)
     {
+        string json;
         try
         {
-            var json = await new LimitedFile(_rootPath).ReadText(path);
-            await Run(json, ScriptUtils.NormalizePath(_rootPath, path));
+            json = await new LimitedFile(_rootPath).ReadTextOrThrow(path);
         }
         catch (Exception e)
         {
-            TaskControl.Logger.LogDebug(e,"读取文件时发生错误");
-            TaskControl.Logger.LogError("读取文件时发生错误: {Msg}",e.Message);
+            _logFailure("读取文件时发生错误", e);
             throw;
         }
+
+        await Run(json, ScriptUtils.NormalizePath(_rootPath, path));
     }
 
     /// <summary>
@@ -71,7 +82,7 @@ public class AutoPathingScript
     /// <param name="path">在 `\User\AutoPathing` 目录下获取文件</param>
     public async Task RunFileFromUser(string path)
     {
-        var json = await AutoPathingFile.ReadText(path);
+        var json = await AutoPathingFile.ReadTextOrThrow(path);
         await Run(json, ScriptUtils.NormalizePath(Global.Absolute(@"User\AutoPathing"), path));
     }
 
@@ -122,4 +133,10 @@ public class AutoPathingScript
     /// LimitedFile 实例，用于操作 AutoPathing 目录
     /// </summary>
     private LimitedFile AutoPathingFile => _autoPathingFile;
+
+    private static void LogFailure(string message, Exception exception)
+    {
+        TaskControl.Logger.LogDebug(exception, message);
+        TaskControl.Logger.LogError("{Message}: {ExceptionMessage}", message, exception.Message);
+    }
 }

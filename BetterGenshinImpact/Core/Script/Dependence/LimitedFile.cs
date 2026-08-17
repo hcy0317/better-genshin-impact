@@ -195,6 +195,17 @@ public class LimitedFile(string rootPath)
     }
 
     /// <summary>
+    /// Read all text from a file asynchronously and preserve the original exception on failure.
+    /// </summary>
+    /// <param name="path">File path.</param>
+    /// <returns>Text read from file.</returns>
+    public async Task<string> ReadTextOrThrow(string path)
+    {
+        path = NormalizePath(path);
+        return await File.ReadAllTextAsync(path);
+    }
+
+    /// <summary>
     /// Read all text from a file.
     /// </summary>
     /// <param name="path">File path.</param>

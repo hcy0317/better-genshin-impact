@@ -6,6 +6,8 @@ using BetterGenshinImpact.View.Drawable;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Simulator;
@@ -61,6 +63,7 @@ public class TaskRunner
             TaskRunnerFailurePolicy.ThrowIfLockUnavailable(propagateExceptions);
             return;
         }
+        Exception? executionException = null;
         try
         {
             _logger.LogInformation("→ {Text}", _name + "任务启动！");
@@ -79,21 +82,19 @@ public class TaskRunner
         {
             Notify.Event(NotificationEvent.TaskCancel).Success("任务手动取消，或正常结束");
             _logger.LogInformation("任务中断:{Msg}", e.Message);
-            if (RunnerContext.Instance.IsContinuousRunGroup)
-            {
-                // 连续执行时，抛出异常，终止执行
-                throw;
-            }
+            executionException = TaskRunnerFailurePolicy.GetTerminationException(
+                e,
+                RunnerContext.Instance.IsContinuousRunGroup,
+                propagateExceptions);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException e)
         {
             Notify.Event(NotificationEvent.TaskCancel).Success("任务被手动取消");
             _logger.LogInformation("任务中断:{Msg}", "任务被取消");
-            if (RunnerContext.Instance.IsContinuousRunGroup)
-            {
-                // 连续执行时，抛出异常，终止执行
-                throw;
-            }
+            executionException = TaskRunnerFailurePolicy.GetTerminationException(
+                e,
+                RunnerContext.Instance.IsContinuousRunGroup,
+                propagateExceptions);
         }
         catch (Exception e)
         {
@@ -101,14 +102,15 @@ public class TaskRunner
             _logger.LogError(e, "任务执行异常: {Message}", e.Message);
             if (propagateExceptions)
             {
-                throw;
+                executionException = e;
             }
         }
         finally
         {
+            IReadOnlyList<Exception> cleanupFailures;
             try
             {
-                TaskRunnerCleanup.RunAll(
+                cleanupFailures = TaskRunnerCleanup.RunAll(
                 [
                     ("任务资源", End),
                     ("结束日志", () => _logger.LogInformation("→ {Text}", _name + "任务结束")),
@@ -119,11 +121,17 @@ public class TaskRunner
             }
             finally
             {
+                // 信号量必须由最外层 finally 释放，不能被任何清理异常阻断。
                 if (hasLock)
                 {
                     TaskSemaphore.Release();
                 }
             }
+
+            TaskRunnerFailurePolicy.ThrowAfterCleanup(
+                executionException,
+                cleanupFailures,
+                propagateExceptions);
         }
     }
 
@@ -196,7 +204,7 @@ public class TaskRunner
             return;
         }
 
-        TaskRunnerCleanup.RunAll(
+        var cleanupFailures = TaskRunnerCleanup.RunAll(
         [
             ("释放模拟输入", Simulation.ReleaseAllKey),
             ("还原实时任务触发器", () =>
@@ -208,6 +216,7 @@ public class TaskRunner
             ("关闭 HTML 遮罩", HtmlMaskWindow.CloseAll)
         ],
         LogCleanupFailure);
+        TaskRunnerFailurePolicy.ThrowCleanupFailures(cleanupFailures);
     }
 
     private void LogCleanupFailure(string step, Exception exception)
@@ -219,10 +228,11 @@ public class TaskRunner
 
 internal static class TaskRunnerCleanup
 {
-    internal static void RunAll(
+    internal static IReadOnlyList<Exception> RunAll(
         IEnumerable<(string Name, Action Action)> steps,
         Action<string, Exception> onFailure)
     {
+        var failures = new List<Exception>();
         foreach (var (name, action) in steps)
         {
             try
@@ -231,25 +241,95 @@ internal static class TaskRunnerCleanup
             }
             catch (Exception exception)
             {
+                failures.Add(exception);
                 try
                 {
                     onFailure(name, exception);
                 }
                 catch
                 {
+                    // 清理诊断本身失败时仍需继续执行后续清理步骤。
                 }
             }
         }
+
+        return failures;
     }
 }
 
 internal static class TaskRunnerFailurePolicy
 {
+    internal static void ThrowIfStartupCancelled(
+        CancellationToken cancellationToken,
+        bool propagateExceptions,
+        bool isContinuousRunGroup = false)
+    {
+        if (propagateExceptions || isContinuousRunGroup)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+
+    internal static void ThrowIfTaskCancelled(
+        CancellationToken cancellationToken,
+        bool propagateExceptions,
+        bool isContinuousRunGroup = false)
+    {
+        ThrowIfStartupCancelled(
+            cancellationToken,
+            propagateExceptions,
+            isContinuousRunGroup);
+    }
+
+    internal static Exception? GetTerminationException(
+        Exception exception,
+        bool isContinuousRunGroup,
+        bool propagateExceptions)
+    {
+        return isContinuousRunGroup || propagateExceptions ? exception : null;
+    }
+
     internal static void ThrowIfLockUnavailable(bool propagateExceptions)
     {
         if (propagateExceptions)
         {
             throw new InvalidOperationException("任务启动失败：当前存在正在运行中的独立任务。");
+        }
+    }
+
+    internal static void ThrowAfterCleanup(
+        Exception? executionException,
+        IReadOnlyList<Exception> cleanupFailures,
+        bool propagateCleanupFailures)
+    {
+        if (executionException is NormalEndException or OperationCanceledException)
+        {
+            ExceptionDispatchInfo.Capture(executionException).Throw();
+        }
+
+        if (executionException is not null && propagateCleanupFailures && cleanupFailures.Count > 0)
+        {
+            throw new AggregateException(
+                "任务执行和清理均失败。",
+                new[] { executionException }.Concat(cleanupFailures));
+        }
+
+        if (executionException is not null)
+        {
+            ExceptionDispatchInfo.Capture(executionException).Throw();
+        }
+
+        if (propagateCleanupFailures)
+        {
+            ThrowCleanupFailures(cleanupFailures);
+        }
+    }
+
+    internal static void ThrowCleanupFailures(IReadOnlyList<Exception> cleanupFailures)
+    {
+        if (cleanupFailures.Count > 0)
+        {
+            throw new AggregateException("任务结束清理失败。", cleanupFailures);
         }
     }
 }
