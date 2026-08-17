@@ -11,6 +11,7 @@ using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.Helpers;
+using BetterGenshinImpact.Service.ChildSession;
 using BetterGenshinImpact.Service.Instance;
 using Microsoft.Extensions.Logging;
 using Wpf.Ui;
@@ -22,7 +23,8 @@ namespace BetterGenshinImpact.Service;
 /// </summary>
 public class ApplicationHostService(
     IServiceProvider serviceProvider,
-    InstanceService instanceService) : IHostedService
+    InstanceService instanceService,
+    ChildSessionAutomationService childSessionAutomationService) : IHostedService
 {
     private INavigationWindow? _navigationWindow;
     private readonly ILogger<ApplicationHostService> _logger = App.GetLogger<ApplicationHostService>();
@@ -84,6 +86,12 @@ public class ApplicationHostService(
                                 oneDragon.RunCommandLineAsync(cmdOptions.OneDragonConfigName),
                                 "一条龙");
                         }
+                        break;
+
+                    case CommandLineAction.ChildSessionOneDragon:
+                        _ = childSessionAutomationService.StartAsync(
+                            cmdOptions,
+                            hideRootWhenDone: true);
                         break;
 
                     case CommandLineAction.StartGroups:

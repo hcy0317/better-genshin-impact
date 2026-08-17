@@ -37,7 +37,7 @@ public class TrapEscaper(CancellationToken ct)
         OpenCvSharp.Point2f position;
         using (var initialScreen = CaptureToRectArea())
         {
-            position = Navigation.GetPosition(initialScreen, waypoint.MapName, waypoint.MapMatchMethod);
+            position = Navigation.GetPosition(initialScreen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector);
         }
         LastActionTime = DateTime.UtcNow;
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
@@ -59,7 +59,7 @@ public class TrapEscaper(CancellationToken ct)
             }
 
             using var screen = CaptureToRectArea();
-            position = Navigation.GetPosition(screen, waypoint.MapName, waypoint.MapMatchMethod);
+            position = Navigation.GetPosition(screen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector);
 
             // 旋转视角
             /* 这里的角度增加了一个randomAngle角度，用来在原角度不适用的情况下修改角度以适应复杂环境

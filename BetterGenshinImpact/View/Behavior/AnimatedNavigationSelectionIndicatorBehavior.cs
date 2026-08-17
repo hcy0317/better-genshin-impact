@@ -337,7 +337,7 @@ public sealed class AnimatedNavigationSelectionIndicatorBehavior : Behavior<Navi
         }
     }
 
-    private static T? FindVisualAncestor<T>(DependencyObject child) where T : DependencyObject
+    internal static T? FindVisualAncestor<T>(DependencyObject child) where T : DependencyObject
     {
         for (DependencyObject? current = child;
              current is not null;
@@ -352,17 +352,20 @@ public sealed class AnimatedNavigationSelectionIndicatorBehavior : Behavior<Navi
         return null;
     }
 
-    private static DependencyObject? GetParent(DependencyObject element)
+    private static DependencyObject? GetParent(DependencyObject child)
     {
-        if (element is ContentElement contentElement)
+        if (child is ContentElement contentElement)
         {
             return ContentOperations.GetParent(contentElement)
                    ?? (contentElement as FrameworkContentElement)?.Parent;
         }
 
-        return element is Visual or System.Windows.Media.Media3D.Visual3D
-            ? VisualTreeHelper.GetParent(element)
-            : LogicalTreeHelper.GetParent(element);
+        if (child is Visual or Visual3D)
+        {
+            return VisualTreeHelper.GetParent(child);
+        }
+
+        return LogicalTreeHelper.GetParent(child);
     }
 
     private static T? FindVisualDescendant<T>(

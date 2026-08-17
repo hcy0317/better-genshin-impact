@@ -5,14 +5,16 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using BetterGenshinImpact.Service.ChildSession;
+using Microsoft.Win32;
 using DrawingSize = System.Drawing.Size;
 
 namespace BetterGenshinImpact.View.Controls.ChildSession;
 
 internal sealed class RdpActiveXHost : AxHost
 {
-    // Windows 10+ 自带的非脚本化 RDP ActiveX 控件（MsRdpClient10）。
-    private const string RdpClientClsid = "A0C63C30-F08D-4AB4-907C-34905D770C7D";
+    // MsTscAx 会同时注册多个版本；必须使用系统 CurVer 指向的兼容版本。
+    // 固定使用更高版本的 CLSID 可能可以创建控件，却在 Child Session 握手前超时。
+    private const string FallbackRdpClientClsid = "8B918B82-7985-4C24-89DF-C33AD2BBFBCD";
     private const short VariantFalse = 0;
     private const short VariantTrue = -1;
     private const int RedirectAudioToClient = 0;
@@ -41,9 +43,36 @@ internal sealed class RdpActiveXHost : AxHost
         _lastConnectionDiagnostic;
 
     internal RdpActiveXHost()
-        : base(RdpClientClsid)
+        : base(ResolveRdpClientClsid())
     {
         Dock = DockStyle.Fill;
+    }
+
+    private static string ResolveRdpClientClsid()
+    {
+        try
+        {
+            using var currentVersionKey = Registry.ClassesRoot.OpenSubKey(
+                @"MsTscAx.MsTscAx\CurVer",
+                writable: false);
+            var currentVersion = currentVersionKey?.GetValue(null) as string;
+            if (string.IsNullOrWhiteSpace(currentVersion))
+            {
+                return FallbackRdpClientClsid;
+            }
+
+            using var clsidKey = Registry.ClassesRoot.OpenSubKey(
+                $@"{currentVersion}\CLSID",
+                writable: false);
+            return clsidKey?.GetValue(null) is string clsid
+                   && Guid.TryParse(clsid, out _)
+                ? clsid
+                : FallbackRdpClientClsid;
+        }
+        catch
+        {
+            return FallbackRdpClientClsid;
+        }
     }
 
     internal int ConnectedState
@@ -72,8 +101,13 @@ internal sealed class RdpActiveXHost : AxHost
         var client = GetRequiredOcx();
         var width = Math.Clamp(desktopSize.Width, 200, 8192);
         var height = Math.Clamp(desktopSize.Height, 200, 8192);
+        var savedCredential = ChildSessionCredentialStore.TryRead();
 
         SetComProperty(client, "Server", "localhost");
+        if (savedCredential is not null)
+        {
+            SetComProperty(client, "UserName", savedCredential.UserName);
+        }
         SetComProperty(client, "DesktopWidth", width);
         SetComProperty(client, "DesktopHeight", height);
         SetComProperty(client, "ColorDepth", 32);
@@ -102,6 +136,12 @@ internal sealed class RdpActiveXHost : AxHost
                 ChildSessionNativeMethods.GetConfiguredRdpPort()));
         RunComStep("启用 CredSSP", () =>
             SetComProperty(advancedSettings, "EnableCredSspSupport", true));
+        if (savedCredential is not null)
+        {
+            RunComStep("应用 BetterGI 桌面分身凭据", () =>
+                ((IMsRdpClientNonScriptable)client).put_ClearTextPassword(
+                    savedCredential.Password));
+        }
         RunComStep("启用远程 Windows 键", () =>
             SetComProperty(advancedSettings, "EnableWindowsKey", 1));
         RunComStep("设置显示缩放", () =>

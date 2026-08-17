@@ -298,7 +298,7 @@ namespace BetterGenshinImpact.GameTask.AutoFishing
         {
             TaskControl.Sleep(millisecondsTimeout);
         }
-        
+
         /// <summary>
          /// 检查是否在钓鱼界面
          /// 方法是找右下角的退出钓鱼按钮

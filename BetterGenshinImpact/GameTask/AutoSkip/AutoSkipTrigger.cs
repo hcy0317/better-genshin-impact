@@ -53,6 +53,7 @@ public partial class AutoSkipTrigger : ITaskTrigger
             if (!value)
             {
                 ReleaseChooseOptionWait("触发器关闭");
+                ResetPageCloseRecognition();
             }
         }
     }
@@ -69,6 +70,7 @@ public partial class AutoSkipTrigger : ITaskTrigger
     public bool IsUseInteractionKey { get; set; } = false;
     
     private const int PlayingFlagDisappearDelaySeconds = 10; // 播放标识消失后继续识别的秒数
+    private const int PageCloseRecognitionDelayMilliseconds = 200;
 
     private readonly AutoSkipConfig _config;
     private readonly DialogueOptionAudioWaiter _dialogueOptionAudioWaiter = new();
@@ -184,6 +186,7 @@ public partial class AutoSkipTrigger : ITaskTrigger
     private DateTime _prevBringToFrontTime = DateTime.MinValue;
     private DateTime _chooseOptionDelayUntil = DateTime.MinValue;
     private DateTime _chooseOptionWaitRecheckUntil = DateTime.MinValue;
+    private DateTime _pageCloseRecognitionStartTime = DateTime.MinValue;
     private bool _pendingBringToFront;
 
     public void OnCapture(CaptureContent content)
@@ -213,6 +216,7 @@ public partial class AutoSkipTrigger : ITaskTrigger
             else
             {
                 UpdateChooseOptionWait();
+                ResetPageCloseRecognition();
                 return;
             }
         }
@@ -244,6 +248,10 @@ public partial class AutoSkipTrigger : ITaskTrigger
                 CloseItemPopup(content);
                 CloseCharacterPopup(content);
             }
+            else
+            {
+                ResetPageCloseRecognition();
+            }
 
             // 自动剧情点击3s内判断
             if ((DateTime.Now - _prevPlayingTime).TotalMilliseconds < 3000)
@@ -259,6 +267,10 @@ public partial class AutoSkipTrigger : ITaskTrigger
                     return;
                 }
             }
+        }
+        else
+        {
+            ResetPageCloseRecognition();
         }
 
         if (isPlaying)
@@ -537,10 +549,9 @@ public partial class AutoSkipTrigger : ITaskTrigger
                 return true;
             }
 
-            var fKey = AutoPickAssets.Get(region, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickVk;
             if (_config.IsClickFirstChatOption())
             {
-                _postMessageSimulator?.KeyPressBackground(fKey);
+                PressPickKeyForDialogue(region);
             }
             else if (_config.IsClickRandomChatOption())
             {
@@ -554,13 +565,13 @@ public partial class AutoSkipTrigger : ITaskTrigger
                 }
 
                 Thread.Sleep(50);
-                _postMessageSimulator?.KeyPressBackground(fKey);
+                PressPickKeyForDialogue(region);
             }
             else
             {
                 _postMessageSimulator?.KeyPressBackground(User32.VK.VK_W);
                 Thread.Sleep(100);
-                _postMessageSimulator?.KeyPressBackground(fKey);
+                PressPickKeyForDialogue(region);
             }
             
             AutoSkipLog("交互键点击(后台)");
@@ -569,6 +580,18 @@ public partial class AutoSkipTrigger : ITaskTrigger
         }
 
         return false;
+    }
+
+    private void PressPickKeyForDialogue(ImageRegion region)
+    {
+        var pickAssets = AutoPickAssets.Get(region, TaskContext.Instance().Config.AutoPickConfig.PickKey);
+        if (pickAssets.UseControllerY)
+        {
+            pickAssets.PressPickKey();
+            return;
+        }
+
+        _postMessageSimulator?.KeyPressBackground(pickAssets.PickVk);
     }
 
     /// <summary>
@@ -801,7 +824,7 @@ public partial class AutoSkipTrigger : ITaskTrigger
             using var pickRa = region.Find(pickAssets.ChatPickRo);
             if (pickRa.IsExist())
             {
-                _postMessageSimulator?.KeyPressBackground(pickAssets.PickVk);
+                PressPickKeyForDialogue(region);
                 AutoSkipLog("无气泡图标，但存在交互键，直接按下交互键");
             }
         }
@@ -1008,19 +1031,48 @@ public partial class AutoSkipTrigger : ITaskTrigger
     {
         if (!_config.ClosePopupPagedEnabled)
         {
+            ResetPageCloseRecognition();
             return;
         }
         
         content.CaptureRectArea.Find(GetRecognitionObject("PageClose", content.CaptureRectArea), pageCloseRoRa =>
         {
-            if (!Bv.IsInBigMapUi(content.CaptureRectArea))
+            using (pageCloseRoRa)
             {
-                TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE);
+                var now = DateTime.Now;
+                if (_pageCloseRecognitionStartTime == DateTime.MinValue)
+                {
+                    _pageCloseRecognitionStartTime = now;
+                    return;
+                }
 
-                AutoSkipLog("关闭弹出页");
-                pageCloseRoRa.Dispose();
+                if ((now - _pageCloseRecognitionStartTime).TotalMilliseconds < PageCloseRecognitionDelayMilliseconds)
+                {
+                    return;
+                }
+
+                using var guidingNotesRa = content.CaptureRectArea.Find(GetRecognitionObject("GuidingNotes", content.CaptureRectArea));
+                using var chatHistoryRa = content.CaptureRectArea.Find(GetRecognitionObject("ChatHistory", content.CaptureRectArea));
+                using var valiantChroniclesRa = content.CaptureRectArea.Find(GetRecognitionObject("ValiantChronicles", content.CaptureRectArea));
+                if (!guidingNotesRa.IsEmpty() || !chatHistoryRa.IsEmpty()|| !valiantChroniclesRa.IsEmpty())
+                {
+                    return;
+                }
+
+                if (!Bv.IsInBigMapUi(content.CaptureRectArea))
+                {
+                    TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE);
+
+                    AutoSkipLog("关闭弹出页");
+                    ResetPageCloseRecognition();
+                }
             }
-        });
+        }, ResetPageCloseRecognition);
+    }
+
+    private void ResetPageCloseRecognition()
+    {
+        _pageCloseRecognitionStartTime = DateTime.MinValue;
     }
     
     private DateTime _prevCloseItemTime = DateTime.MinValue;

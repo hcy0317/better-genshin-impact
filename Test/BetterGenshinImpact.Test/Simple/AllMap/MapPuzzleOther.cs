@@ -60,11 +60,11 @@ public class MapPuzzleOther
             // } 
             
             // 旧日之海
-            // if (!imagePath.Contains("UI_MapBack_DeepSea_1_4.png") 
+            // if (!imagePath.Contains("UI_MapBack_DeepSea_1_4.png")
             //     &&!imagePath.Contains("UI_MapBack_DeepSea_1_3.png"))
             // {
             //     continue;
-            // } 
+            // }
 
             // 获取文件大小
             var fileInfo = new FileInfo(imagePath);

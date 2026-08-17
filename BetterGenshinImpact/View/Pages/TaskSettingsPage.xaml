@@ -1021,10 +1021,10 @@
                         </StackPanel>
                     </ui:CardExpander>
                 </Grid>
-                
+
                 <Separator Margin="-18,0"
                            BorderThickness="0,1,0,0" />
-                
+
                 <ui:CardExpander Margin="16,10,52,12"
                                  ContentPadding="0"
                                  IsExpanded="False">
@@ -1605,6 +1605,7 @@
                                 Minimum="0"
                                 SmallChange="1"
                                 LargeChange="5"
+                                ClearButtonEnabled="False"
                                 SpinButtonPlacementMode="Inline"
                                 Width="120" />
                         </StackPanel>
@@ -1620,6 +1621,7 @@
                                 Minimum="0"
                                 SmallChange="1"
                                 LargeChange="5"
+                                ClearButtonEnabled="False"
                                 SpinButtonPlacementMode="Inline"
                                 Width="120" />
                         </StackPanel>
@@ -1635,6 +1637,7 @@
                                 Minimum="0"
                                 SmallChange="1"
                                 LargeChange="5"
+                                ClearButtonEnabled="False"
                                 SpinButtonPlacementMode="Inline"
                                 Width="120" />
                         </StackPanel>
@@ -1650,6 +1653,7 @@
                                 Minimum="0"
                                 SmallChange="1"
                                 LargeChange="5"
+                                ClearButtonEnabled="False"
                                 SpinButtonPlacementMode="Inline"
                                 Width="120" />
                         </StackPanel>

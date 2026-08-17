@@ -138,14 +138,14 @@ public class ImageRegion : Region
             {
                 var roi = GetTemplateMatchSource(ro, out ownedRoi);
 
-                if (!ImageRegionReferenceSearchHelper.TryGetReferenceSearchRegion(this, ro, out var effectiveRegionOfInterest, out var referenceScale))
+                if (!ImageRegionReferenceSearchHelper.TryGetReferenceSearchRegion(this, ro, out var effectiveRegionOfInterest, out var effectiveReferenceBoundingBoxSize))
                 {
                     failAction?.Invoke();
                     return new Region();
                 }
 
                 // 参考搜索会根据输入截图尺寸同步缩放模板和 mask，普通搜索则直接复用原始 Mat。
-                var effectiveTemplate = ImageRegionReferenceSearchHelper.GetEffectiveTemplate(ro, template, referenceScale, out var shouldDisposeTemplate);
+                var effectiveTemplate = ImageRegionReferenceSearchHelper.GetEffectiveTemplate(ro, template, effectiveReferenceBoundingBoxSize, out var shouldDisposeTemplate);
                 Mat? effectiveMask = null;
                 var shouldDisposeMask = false;
                 try
@@ -407,14 +407,14 @@ public class ImageRegion : Region
             {
                 var roi = GetTemplateMatchSource(ro, out ownedRoi);
 
-                if (!ImageRegionReferenceSearchHelper.TryGetReferenceSearchRegion(this, ro, out var effectiveRegionOfInterest, out var referenceScale))
+                if (!ImageRegionReferenceSearchHelper.TryGetReferenceSearchRegion(this, ro, out var effectiveRegionOfInterest, out var effectiveReferenceBoundingBoxSize))
                 {
                     failAction?.Invoke();
                     return [];
                 }
 
                 // 参考搜索会根据输入截图尺寸同步缩放模板和 mask，普通搜索则直接复用原始 Mat。
-                var effectiveTemplate = ImageRegionReferenceSearchHelper.GetEffectiveTemplate(ro, template, referenceScale, out var shouldDisposeTemplate);
+                var effectiveTemplate = ImageRegionReferenceSearchHelper.GetEffectiveTemplate(ro, template, effectiveReferenceBoundingBoxSize, out var shouldDisposeTemplate);
                 Mat? effectiveMask = null;
                 var shouldDisposeMask = false;
                 try
@@ -501,21 +501,27 @@ public class ImageRegion : Region
             var roi = ownedRoi ?? SrcMat;
 
             var result = OcrFactory.Paddle.OcrResult(roi);
-
-            if (result.Regions.Length > 0)
+            var resRaList = new List<Region>();
+            foreach (var ocrRegion in result.Regions)
             {
-                var resRaList = result.Regions.Select(r =>
+                // PaddleOCR 的旋转文本框在取外接矩形时可能略微超出输入图像，必须先按 OCR 输入范围裁剪。
+                var rect = ocrRegion.Rect.BoundingRect().ClampTo(roi);
+                if (rect.Width <= 0 || rect.Height <= 0)
                 {
-                    var newRa = this.Derive(r.Rect.BoundingRect() + effectiveRegionOfInterest.Location);
-                    newRa.Text = ApplyTextReplacements(r.Text, ro.ReplaceDictionary);
-                    return newRa;
-                }).ToList();
+                    continue;
+                }
+
+                var newRa = Derive(rect + effectiveRegionOfInterest.Location);
+                newRa.Text = ApplyTextReplacements(ocrRegion.Text, ro.ReplaceDictionary);
+                resRaList.Add(newRa);
+            }
+
+            if (resRaList.Count > 0)
+            {
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
                     // 画出OCR识别到的区域
-                    var drawList = result.Regions.Select(item =>
-                        this.ToRectDrawable(item.Rect.BoundingRect() + effectiveRegionOfInterest.Location, ro.Name,
-                            ro.DrawOnWindowPen)).ToList();
+                    var drawList = resRaList.Select(item => item.SelfToRectDrawable(ro.Name, ro.DrawOnWindowPen)).ToList();
                     VisionContext.Instance().DrawContent.PutOrRemoveRectList(ro.Name, drawList);
                 }
 

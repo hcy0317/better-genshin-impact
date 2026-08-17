@@ -247,7 +247,7 @@ public class TaskRunnerTests
             TaskRunnerFailurePolicy.ThrowAfterCleanup(null, failures, propagateCleanupFailures: true));
 
         Assert.True(completed);
-        Assert.Equal([cleanupException], exception.InnerExceptions);
+        Assert.Equal(new Exception[] { cleanupException }, exception.InnerExceptions);
     }
 
     [Fact]
@@ -262,7 +262,7 @@ public class TaskRunnerTests
                 [cleanupException],
                 propagateCleanupFailures: true));
 
-        Assert.Equal([executionException, cleanupException], exception.InnerExceptions);
+        Assert.Equal(new Exception[] { executionException, cleanupException }, exception.InnerExceptions);
     }
 
     [Theory]
@@ -325,7 +325,7 @@ public class TaskRunnerTests
                 () => Task.FromException(finalCheckException),
                 () => throw completionException));
 
-        Assert.Equal([finalCheckException, completionException], exception.InnerExceptions);
+        Assert.Equal(new Exception[] { finalCheckException, completionException }, exception.InnerExceptions);
     }
 
     [Fact]
