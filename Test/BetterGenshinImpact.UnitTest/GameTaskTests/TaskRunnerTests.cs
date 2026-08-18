@@ -315,6 +315,21 @@ public class TaskRunnerTests
     }
 
     [Fact]
+    public async Task OneDragonFinalizerRunsCompletionActionWhenTaskBodyFails()
+    {
+        var expected = new InvalidOperationException("role cultivation failed");
+        var events = new List<string>();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            OneDragonFinalizer.RunWithFailureCompletionAsync(
+                () => Task.FromException(expected),
+                () => events.Add("completion action")));
+
+        Assert.Equal(["completion action"], events);
+        Assert.Same(expected, exception);
+    }
+
+    [Fact]
     public async Task OneDragonFinalizerReportsBothFailures()
     {
         var finalCheckException = new InvalidOperationException("daily reward was not claimed");

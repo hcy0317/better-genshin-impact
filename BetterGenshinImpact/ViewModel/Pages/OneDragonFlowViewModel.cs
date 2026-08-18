@@ -559,6 +559,27 @@ public partial class OneDragonFlowViewModel : ViewModel
 
     internal async Task RunOneDragonAsync(bool propagateExceptions)
     {
+        var completionActionAttempted = false;
+        try
+        {
+            await RunOneDragonCoreAsync(propagateExceptions, () =>
+            {
+                completionActionAttempted = true;
+                ExecuteCompletionAction();
+            });
+        }
+        catch (Exception exception) when (
+            !completionActionAttempted &&
+            exception is not OperationCanceledException and not NormalEndException)
+        {
+            await OneDragonFinalizer.RunWithFailureCompletionAsync(
+                () => Task.FromException(exception),
+                ExecuteCompletionAction);
+        }
+    }
+
+    private async Task RunOneDragonCoreAsync(bool propagateExceptions, Action completionAction)
+    {
         _logger.LogInformation($"启用一条龙配置：{SelectedConfig.Name}");
 
         // 启动等待之前先进行取消操作的初始化，便于在任务开始前终止任务.
@@ -707,7 +728,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                     Notify.Event(NotificationEvent.DragonEnd).Success("一条龙和配置组任务结束");
                 }
                 _logger.LogInformation("一条龙和配置组任务结束");
-            }, ExecuteCompletionAction, exception =>
+            }, completionAction, exception =>
             {
                 _logger.LogError(exception, "一条龙收尾检查失败，将按配置执行完成动作");
                 if (propagateExceptions)
@@ -1131,6 +1152,33 @@ public partial class OneDragonFlowViewModel : ViewModel
 
 internal static class OneDragonFinalizer
 {
+    internal static async Task RunWithFailureCompletionAsync(
+        Func<Task> action,
+        Action completionAction)
+    {
+        try
+        {
+            await action();
+        }
+        catch (Exception actionException) when (
+            actionException is not OperationCanceledException and not NormalEndException)
+        {
+            try
+            {
+                completionAction();
+            }
+            catch (Exception completionException)
+            {
+                throw new AggregateException(
+                    "一条龙任务和完成动作均执行失败。",
+                    actionException,
+                    completionException);
+            }
+
+            ExceptionDispatchInfo.Capture(actionException).Throw();
+        }
+    }
+
     internal static async Task RunAsync(
         Func<Task> finalCheck,
         Action completionAction,
