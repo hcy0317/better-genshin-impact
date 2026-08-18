@@ -2062,6 +2062,9 @@ async function runList(list = [], key = "", current_name = "", parent_name = "",
             // 执行单个路径，并传入停止标识
             await runPath(path, onePath.rootName, parent_name, current_name);
         } catch (error) {
+            if (pathingScript.isCancellationRequested) {
+                throw error;
+            }
             log.error('执行路径列表中的路径失败: {path}, 错误: {error}', path, error.message);
             Record.errorPaths.add(path)
             await saveRecord();

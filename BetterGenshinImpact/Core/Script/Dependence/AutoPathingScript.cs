@@ -33,6 +33,11 @@ public class AutoPathingScript
         _logFailure = logFailure;
     }
 
+    /// <summary>
+    /// 获取当前脚本任务是否已收到取消请求。
+    /// </summary>
+    public bool IsCancellationRequested => CancellationContext.Instance.IsCancellationRequested;
+
     public async Task Run(string json)
     {
         await Run(json, null);
