@@ -15,8 +15,8 @@ public class ReturnMainUiTask
 
     public async Task Start(CancellationToken ct)
     {
-        using var initialCapture = CaptureToRectArea();
-        if (Bv.IsInMainUi(initialCapture))
+        var isInMainUi = CaptureScope.Use(CaptureToRectArea(), Bv.IsInMainUi);
+        if (isInMainUi)
         {
             return;
         }

@@ -103,8 +103,8 @@ public class ClaimEncounterPointsRewardsTask
         await Delay(1000, ct);
 
         // 领取
-        using var claimCapture = CaptureToRectArea();
-        if (ClickClaimBtn(claimCapture))
+        var claimed = CaptureScope.Use(CaptureToRectArea(), ClickClaimBtn);
+        if (claimed)
         {
             await Delay(1000, ct);
 
