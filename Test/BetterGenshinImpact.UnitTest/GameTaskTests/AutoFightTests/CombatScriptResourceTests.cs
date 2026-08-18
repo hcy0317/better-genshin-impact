@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using BetterGenshinImpact.Core.Script.Dependence;
 using BetterGenshinImpact.GameTask.AutoPathing.Handler;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.AutoFight;
@@ -269,6 +270,29 @@ public class CombatScriptResourceTests
         Assert.Contains("let recordStateInitialized = false", source, StringComparison.Ordinal);
         Assert.Contains("recordStateInitialized = true", source, StringComparison.Ordinal);
         Assert.Contains("if (recordStateInitialized)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FourHundredEliteScript_ShouldRethrowCancellationBeforeRecordingRouteFailure()
+    {
+        var path = SourcePath(
+            "BetterGenshinImpact",
+            "User",
+            "JsScript",
+            "FullyAutoAndSemiAutoTools",
+            "main.js");
+        var source = File.ReadAllText(path);
+        var runList = SourceSection(source, "async function runList(", "async function runMap(");
+        var failureCheckpoint = SourceSection(runList, "catch (error)", "Record.paths.add(path)");
+
+        var cancellationCheckIndex = failureCheckpoint.IndexOf("if (pathingScript.isCancellationRequested)", StringComparison.Ordinal);
+        var rethrowIndex = failureCheckpoint.IndexOf("throw error;", StringComparison.Ordinal);
+        var failureRecordIndex = failureCheckpoint.IndexOf("Record.errorPaths.add(path)", StringComparison.Ordinal);
+
+        Assert.NotNull(typeof(AutoPathingScript).GetProperty("IsCancellationRequested"));
+        Assert.True(cancellationCheckIndex >= 0, "The route loop must check the host cancellation state.");
+        Assert.True(rethrowIndex > cancellationCheckIndex, "Cancellation must rethrow the original error.");
+        Assert.True(failureRecordIndex > rethrowIndex, "Cancellation must exit before recording a route failure.");
     }
 
     [Fact]
