@@ -235,6 +235,43 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
+    public void FourHundredEliteScript_ShouldCheckpointEveryCompletedRouteWithoutDuplicatingRecords()
+    {
+        var path = SourcePath(
+            "BetterGenshinImpact",
+            "User",
+            "JsScript",
+            "FullyAutoAndSemiAutoTools",
+            "main.js");
+        var source = File.ReadAllText(path);
+        var runList = SourceSection(source, "async function runList(", "async function runMap(");
+        var successCheckpoint = SourceSection(runList, "Record.paths.add(path)", "路径列表执行完成");
+        var failureCheckpoint = SourceSection(runList, "catch (error)", "Record.paths.add(path)");
+        var saveRecordPaths = SourceSection(source, "async function saveRecordPaths()", "async function saveRecord()");
+        var saveRecord = SourceSection(source, "async function saveRecord()", "function getTimeDifference(");
+
+        Assert.Contains("RecordPath.paths.add(value)", successCheckpoint, StringComparison.Ordinal);
+        Assert.Contains("await saveRecordPaths();", successCheckpoint, StringComparison.Ordinal);
+        Assert.Contains("await saveRecord();", successCheckpoint, StringComparison.Ordinal);
+
+        Assert.Contains("Record.errorPaths.add(path)", failureCheckpoint, StringComparison.Ordinal);
+        Assert.Contains("await saveRecord();", failureCheckpoint, StringComparison.Ordinal);
+        Assert.Contains("continue;", failureCheckpoint, StringComparison.Ordinal);
+        Assert.DoesNotContain("throw new Error", failureCheckpoint, StringComparison.Ordinal);
+        Assert.DoesNotContain("Record.paths.add(path)", failureCheckpoint, StringComparison.Ordinal);
+
+        Assert.Contains("RecordPathList = RecordPathList.filter(item => item.uid !== Record.uid);", saveRecordPaths, StringComparison.Ordinal);
+        Assert.DoesNotContain("temp.paths = [...recordToSave.paths, ...temp.paths]", saveRecordPaths, StringComparison.Ordinal);
+        Assert.Contains("const otherRecords = RecordList.filter", saveRecord, StringComparison.Ordinal);
+        Assert.Contains("RecordList = [...otherRecords, recordToSave];", saveRecord, StringComparison.Ordinal);
+        Assert.DoesNotContain("RecordList.push(recordToSave)", saveRecord, StringComparison.Ordinal);
+
+        Assert.Contains("let recordStateInitialized = false", source, StringComparison.Ordinal);
+        Assert.Contains("recordStateInitialized = true", source, StringComparison.Ordinal);
+        Assert.Contains("if (recordStateInitialized)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ZhongXinNaWanStrategy_ShouldParseAndRefreshKokomiBeforeShield()
     {
         var path = SourcePath("BetterGenshinImpact", "User", "AutoFight", "00-钟心那万.txt");
@@ -326,6 +363,17 @@ public class CombatScriptResourceTests
             .Select(line => line.Trim())
             .Where(line => line.Length > 0 && !line.StartsWith("//", StringComparison.Ordinal) && !line.StartsWith("#", StringComparison.Ordinal))
             .ToList();
+    }
+
+    private static string SourceSection(string source, string startToken, string endToken)
+    {
+        var startIndex = source.IndexOf(startToken, StringComparison.Ordinal);
+        Assert.True(startIndex >= 0, $"missing source token: {startToken}");
+
+        var endIndex = source.IndexOf(endToken, startIndex + startToken.Length, StringComparison.Ordinal);
+        Assert.True(endIndex >= 0, $"missing source token after {startToken}: {endToken}");
+
+        return source[startIndex..endIndex];
     }
 
     private static string SourcePath(params string[] parts)
