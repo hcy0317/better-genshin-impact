@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -182,6 +181,7 @@ public partial class ScriptService : IScriptService
             .RunThreadAsync(async () =>
             {
                 var stopwatch = new Stopwatch();
+                var managedFailures = new ManagedTaskFailureCollector();
                 int projectIndex = -1;
                 for (int x = 0; x < list.Count; x++)
                 {
@@ -338,7 +338,7 @@ public partial class ScriptService : IScriptService
                         }
 
 
-                        Exception? executionException = null;
+                        var projectFailed = false;
                         for (var i = 0; i < exeProject.RunNum; i++)
                         {
                             try
@@ -383,7 +383,8 @@ public partial class ScriptService : IScriptService
                                 }
                                 if (propagateExceptions)
                                 {
-                                    executionException = e;
+                                    managedFailures.Add(e);
+                                    projectFailed = true;
                                 }
                             }
                             finally
@@ -396,7 +397,7 @@ public partial class ScriptService : IScriptService
                                 _logger.LogInformation("------------------------------");
                             }
 
-                            if (executionException is not null)
+                            if (projectFailed)
                             {
                                 break;
                             }
@@ -430,12 +431,10 @@ public partial class ScriptService : IScriptService
                             }
                         }
 
-                        if (executionException is not null)
-                        {
-                            ExceptionDispatchInfo.Capture(executionException).Throw();
-                        }
                     }
                 }
+
+                managedFailures.ThrowIfAny($"配置组 {groupName} 中有脚本执行失败。");
             }, propagateExceptions);
         
 

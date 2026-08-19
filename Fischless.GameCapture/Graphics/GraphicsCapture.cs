@@ -38,6 +38,7 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
     private Mat? _latestFrame;
     private readonly ReaderWriterLockSlim _frameAccessLock = new();
     private readonly FrameCallbackLifetime _frameCallbackLifetime = new();
+    private readonly object _captureLifecycleSync = new();
 
     // 用于获取帧数据的临时纹理和暂存资源
     private Texture2D? _stagingTexture;
@@ -58,79 +59,82 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
 
     public void Start(nint hWnd, Dictionary<string, object>? settings = null)
     {
-        Stop();
-        _frameCallbackLifetime.Reset();
-        try
-        {
-            _hWnd = hWnd;
-            (_region, _captureRect) = GetGameScreenInfo(hWnd);
-
-            _captureItem = CaptureHelper.CreateItemForWindow(_hWnd);
-
-            if (_captureItem == null)
-            {
-                throw new InvalidOperationException("Failed to create capture item.");
-            }
-
-            _surfaceWidth = _captureItem.Size.Width;
-            _surfaceHeight = _captureItem.Size.Height;
-
-            // 创建D3D设备
-            _d3dDevice = Direct3D11Helper.CreateDevice();
-
-            // 创建帧池
-            try
-            {
-                if (!_isHdrEnabled)
-                {
-                    // 不处理 HDR，直接抛异常走 SDR 分支
-                    throw new Exception();
-                }
-
-                _pixelFormat = DirectXPixelFormat.R16G16B16A16Float;
-                _captureFramePool = Direct3D11CaptureFramePool.Create(
-                    _d3dDevice,
-                    _pixelFormat,
-                    2,
-                    _captureItem.Size);
-            }
-            catch (Exception)
-            {
-                // Fallback
-                _pixelFormat = DirectXPixelFormat.B8G8R8A8UIntNormalized;
-                _captureFramePool = Direct3D11CaptureFramePool.Create(
-                    _d3dDevice,
-                    _pixelFormat,
-                    2,
-                    _captureItem.Size);
-                _isHdrEnabled = false;
-            }
-
-            _captureItem.Closed += CaptureItemOnClosed;
-            _captureFramePool.FrameArrived += OnFrameArrived;
-
-            _captureSession = _captureFramePool.CreateCaptureSession(_captureItem);
-            if (ApiInformation.IsPropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession",
-                    nameof(GraphicsCaptureSession.IsCursorCaptureEnabled)))
-            {
-                _captureSession.IsCursorCaptureEnabled = false;
-            }
-
-            if (ApiInformation.IsWriteablePropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession",
-                    nameof(GraphicsCaptureSession.IsBorderRequired)))
-            {
-                _captureSession.IsBorderRequired = false;
-            }
-
-            _lastFrameTime = 0;
-            _frameTimer.Restart();
-            _captureSession.StartCapture();
-            IsCapturing = true;
-        }
-        catch
+        lock (_captureLifecycleSync)
         {
             Stop();
-            throw;
+            _frameCallbackLifetime.Reset();
+            try
+            {
+                _hWnd = hWnd;
+                (_region, _captureRect) = GetGameScreenInfo(hWnd);
+
+                _captureItem = CaptureHelper.CreateItemForWindow(_hWnd);
+
+                if (_captureItem == null)
+                {
+                    throw new InvalidOperationException("Failed to create capture item.");
+                }
+
+                _surfaceWidth = _captureItem.Size.Width;
+                _surfaceHeight = _captureItem.Size.Height;
+
+                // 创建D3D设备
+                _d3dDevice = Direct3D11Helper.CreateDevice();
+
+                // 使用内部工作线程交付帧事件，避免 UI Dispatcher 中排队的 WinRT 回调晚于资源释放抵达。
+                try
+                {
+                    if (!_isHdrEnabled)
+                    {
+                        // 不处理 HDR，直接抛异常走 SDR 分支
+                        throw new Exception();
+                    }
+
+                    _pixelFormat = DirectXPixelFormat.R16G16B16A16Float;
+                    _captureFramePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
+                        _d3dDevice,
+                        _pixelFormat,
+                        2,
+                        _captureItem.Size);
+                }
+                catch (Exception)
+                {
+                    // Fallback
+                    _pixelFormat = DirectXPixelFormat.B8G8R8A8UIntNormalized;
+                    _captureFramePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
+                        _d3dDevice,
+                        _pixelFormat,
+                        2,
+                        _captureItem.Size);
+                    _isHdrEnabled = false;
+                }
+
+                _captureItem.Closed += CaptureItemOnClosed;
+                _captureFramePool.FrameArrived += OnFrameArrived;
+
+                _captureSession = _captureFramePool.CreateCaptureSession(_captureItem);
+                if (ApiInformation.IsPropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession",
+                        nameof(GraphicsCaptureSession.IsCursorCaptureEnabled)))
+                {
+                    _captureSession.IsCursorCaptureEnabled = false;
+                }
+
+                if (ApiInformation.IsWriteablePropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession",
+                        nameof(GraphicsCaptureSession.IsBorderRequired)))
+                {
+                    _captureSession.IsBorderRequired = false;
+                }
+
+                _lastFrameTime = 0;
+                _frameTimer.Restart();
+                _captureSession.StartCapture();
+                IsCapturing = true;
+            }
+            catch
+            {
+                Stop();
+                throw;
+            }
         }
     }
 
@@ -300,39 +304,51 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
 
     public void Stop()
     {
-        _frameCallbackLifetime.BeginStopAndWait();
-        _frameAccessLock.EnterWriteLock();
-        try
+        lock (_captureLifecycleSync)
         {
             IsCapturing = false;
             _hWnd = 0;
             _frameTimer.Reset();
 
-            if (_captureItem != null)
-            {
-                _captureItem.Closed -= CaptureItemOnClosed;
-            }
-            if (_captureFramePool != null)
-            {
-                _captureFramePool.FrameArrived -= OnFrameArrived;
-            }
+            CaptureShutdownCoordinator.Stop(
+                _frameCallbackLifetime,
+                [
+                    ("capture item event", () =>
+                    {
+                        if (_captureItem != null)
+                        {
+                            _captureItem.Closed -= CaptureItemOnClosed;
+                        }
+                    }),
+                    ("frame arrived event", () =>
+                    {
+                        if (_captureFramePool != null)
+                        {
+                            _captureFramePool.FrameArrived -= OnFrameArrived;
+                        }
+                    }),
+                    ("capture session", () => DisposeAndClear(ref _captureSession))
+                ],
+                [
+                    ("captured frames", ReleaseCapturedFrames),
+                    ("capture frame pool", () => DisposeAndClear(ref _captureFramePool)),
+                    ("staging texture", () => DisposeAndClear(ref _stagingTexture)),
+                    ("HDR output texture", () => DisposeAndClear(ref _hdrOutputTexture)),
+                    ("HDR compute shader", () => DisposeAndClear(ref _hdrComputeShader)),
+                    ("D3D device", () => DisposeAndClear(ref _d3dDevice)),
+                    ("capture item", () => _captureItem = null)
+                ]);
+        }
+    }
 
-            _captureSession?.Dispose();
-            _captureSession = null;
-            _captureFramePool?.Dispose();
-            _captureFramePool = null;
-            _captureItem = null;
-            _latestFrame?.Dispose();
-            _latestFrame = null;
+    private void ReleaseCapturedFrames()
+    {
+        _frameAccessLock.EnterWriteLock();
+        try
+        {
+            DisposeAndClear(ref _latestFrame);
             _captureRect = null;
-            _stagingTexture?.Dispose();
-            _stagingTexture = null;
-            _hdrOutputTexture?.Dispose();
-            _hdrOutputTexture = null;
-            _hdrComputeShader?.Dispose();
-            _hdrComputeShader = null;
-            _d3dDevice?.Dispose();
-            _d3dDevice = null;
+            _region = null;
         }
         finally
         {
@@ -340,8 +356,22 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
         }
     }
 
+    private static void DisposeAndClear<T>(ref T? resource) where T : class, IDisposable
+    {
+        var current = resource;
+        resource = null;
+        current?.Dispose();
+    }
+
     private void CaptureItemOnClosed(GraphicsCaptureItem sender, object args)
     {
-        Stop();
+        try
+        {
+            Stop();
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"Failed to stop capture after the target window closed: {exception}");
+        }
     }
 }
