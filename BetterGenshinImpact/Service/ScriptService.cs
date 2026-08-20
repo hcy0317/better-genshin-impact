@@ -24,6 +24,7 @@ using BetterGenshinImpact.Service.Interface;
 using BetterGenshinImpact.Service.Notification;
 using BetterGenshinImpact.Service.Notification.Model.Enum;
 using BetterGenshinImpact.ViewModel.Pages;
+using Fischless.WindowsInput;
 using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.Service;
@@ -634,6 +635,7 @@ public partial class ScriptService : IScriptService
                     var first = true;
                     var sw = Stopwatch.StartNew();
                     var loseFocusCount = 0;
+                    var inputDispatchFailureLogged = false;
                     while (true)
                     {
                         if (sw.Elapsed >= TimeSpan.FromMinutes(5))
@@ -684,7 +686,21 @@ public partial class ScriptService : IScriptService
                             //自启动游戏，如果鼠标在游戏外面，将无法自动开门，这里尝试移动到游戏界面
                             if (sw.Elapsed.TotalSeconds < 200)
                             {
-                                GlobalMethod.MoveMouseTo(300, 300);
+                                if (!GameStartupInputRecovery.TryExecute(
+                                        () => GlobalMethod.MoveMouseTo(300, 300),
+                                        out var inputDispatchFailure))
+                                {
+                                    if (!inputDispatchFailureLogged)
+                                    {
+                                        inputDispatchFailureLogged = true;
+                                        TaskControl.Logger.LogWarning(
+                                            inputDispatchFailure,
+                                            "RDP 会话暂时无法发送开门兜底鼠标消息；重新激活游戏并继续等待主界面");
+                                    }
+
+                                    SystemControl.ActivateWindow();
+                                    await Task.Delay(2000);
+                                }
                             }
 
                         }
@@ -699,6 +715,26 @@ public partial class ScriptService : IScriptService
         {
             await pendingUpdate;
             ScriptRepoUpdater.Instance.CommandLineAutoUpdateTask = null;
+        }
+    }
+}
+
+internal static class GameStartupInputRecovery
+{
+    internal static bool TryExecute(Action inputAction, out InputDispatchException? failure)
+    {
+        ArgumentNullException.ThrowIfNull(inputAction);
+
+        try
+        {
+            inputAction();
+            failure = null;
+            return true;
+        }
+        catch (InputDispatchException exception)
+        {
+            failure = exception;
+            return false;
         }
     }
 }

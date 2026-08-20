@@ -81,7 +81,9 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
                 // 创建D3D设备
                 _d3dDevice = Direct3D11Helper.CreateDevice();
 
-                // 使用内部工作线程交付帧事件，避免 UI Dispatcher 中排队的 WinRT 回调晚于资源释放抵达。
+                // 使用创建截图器的 DispatcherQueue 交付帧事件。BetterGI 的 WPF 主线程负责泵送该队列；
+                // 在 loopback RDP 桌面中，FreeThreaded 帧池可能成功启动却始终不交付首帧。
+                // Stop() 会先退订并停止生产者，再等待已进入的回调，因此无需依赖 FreeThreaded 规避晚到回调。
                 try
                 {
                     if (!_isHdrEnabled)
@@ -91,7 +93,7 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
                     }
 
                     _pixelFormat = DirectXPixelFormat.R16G16B16A16Float;
-                    _captureFramePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
+                    _captureFramePool = Direct3D11CaptureFramePool.Create(
                         _d3dDevice,
                         _pixelFormat,
                         2,
@@ -101,7 +103,7 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
                 {
                     // Fallback
                     _pixelFormat = DirectXPixelFormat.B8G8R8A8UIntNormalized;
-                    _captureFramePool = Direct3D11CaptureFramePool.CreateFreeThreaded(
+                    _captureFramePool = Direct3D11CaptureFramePool.Create(
                         _d3dDevice,
                         _pixelFormat,
                         2,

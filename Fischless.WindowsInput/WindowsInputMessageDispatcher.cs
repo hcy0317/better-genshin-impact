@@ -25,7 +25,7 @@ internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
         {
             var errorCode = Marshal.GetLastWin32Error();
             using var process = Process.GetCurrentProcess();
-            throw new InvalidOperationException(CreateFailureMessage(
+            throw new InputDispatchException(CreateFailureMessage(
                 inputs.Length,
                 num,
                 errorCode,
