@@ -70,6 +70,7 @@ internal class GoToSereniteaPotTask
         {
             Logger.LogDebug(e, "领取尘歌壶奖励异常");
             Logger.LogError("领取尘歌壶奖励异常: {Msg}", e.Message);
+            throw;
         }
         finally
         {
@@ -617,21 +618,19 @@ internal class GoToSereniteaPotTask
         if (quitOption != TalkOptionRes.FoundAndClick)
         {
             using var mainUiCapture = CaptureToRectArea();
-            if (!Bv.IsInMainUi(mainUiCapture))
+            isMainUi = Bv.IsInMainUi(mainUiCapture);
+            if (SereniteaPotExitPolicy.ShouldRecoverMainUi(quitOption, isMainUi))
             {
-                Logger.LogError("领取尘歌壶奖励:{text}", "阿圆对话框退出出错。");
-                return;
-            }
-            else
-            {
-                isMainUi = true;
+                Logger.LogWarning("领取尘歌壶奖励:{text}", "未找到“再见”选项，尝试强制退出阿圆对话。");
+                await new ReturnMainUiTask().Start(ct);
+                isMainUi = CaptureScope.Use(CaptureToRectArea(), Bv.IsInMainUi);
             }
         }
 
         if (!isMainUi)
         {
             await Delay(300, ct);
-            await NewRetry.WaitForAction(() =>
+            isMainUi = await NewRetry.WaitForAction(() =>
             {
                 using var ra = CaptureToRectArea();
                 if (!Bv.IsInMainUi(ra))
@@ -643,6 +642,8 @@ internal class GoToSereniteaPotTask
                     return true;
             }, ct);
         }
+
+        SereniteaPotExitPolicy.EnsureRecovered(isMainUi);
 
         // TP回主世界
         var tp = new TpTask(ct);

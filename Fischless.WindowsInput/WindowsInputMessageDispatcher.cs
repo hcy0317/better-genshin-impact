@@ -7,6 +7,20 @@ namespace Fischless.WindowsInput;
 
 internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
 {
+    private readonly Action? _beforeInputDispatch;
+
+    [DllImport("kernel32.dll")]
+    private static extern void SetLastError(uint errorCode);
+
+    internal WindowsInputMessageDispatcher()
+    {
+    }
+
+    internal WindowsInputMessageDispatcher(Action beforeInputDispatch)
+    {
+        _beforeInputDispatch = beforeInputDispatch ?? throw new ArgumentNullException(nameof(beforeInputDispatch));
+    }
+
     public void DispatchInput(User32.INPUT[] inputs)
     {
         if (inputs == null)
@@ -19,6 +33,9 @@ internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
             throw new ArgumentException("The input array was empty", nameof(inputs));
         }
 
+        InvokeBeforeInputDispatch();
+
+        SetLastError(0);
         uint num = User32.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(User32.INPUT)));
 
         if (num != inputs.Length)
@@ -33,6 +50,11 @@ internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
                 process.Id,
                 process.SessionId));
         }
+    }
+
+    internal void InvokeBeforeInputDispatch()
+    {
+        _beforeInputDispatch?.Invoke();
     }
 
     internal static string CreateFailureMessage(
