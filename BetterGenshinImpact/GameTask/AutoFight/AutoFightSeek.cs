@@ -14,7 +14,6 @@ using System.Linq;
 using System.Collections.Generic;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
-using  OpenCvSharp;
 using BetterGenshinImpact.GameTask.Model.Area;
 
 namespace BetterGenshinImpact.GameTask.AutoFight
@@ -27,7 +26,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             await MoveForwardAsync(scalarLower, scalarHigher, logger, ct);
         }
 
-        public static Task<bool?> MoveForwardAsync(Scalar scalarLower, Scalar scalarHigher, ILogger logger, CancellationToken ct)
+        public static async Task<bool?> MoveForwardAsync(Scalar scalarLower, Scalar scalarHigher, ILogger logger, CancellationToken ct)
         {
             using var image2 = CaptureToRectArea();
             using var imageCrop = image2.DeriveCrop(0, 0, image2.Width * 1570 / 1920, image2.Height * 970 / 1080);
@@ -43,20 +42,16 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
             int numLabels2 = Cv2.ConnectedComponentsWithStats(mask2, labels2, stats2, centroids2, connectivity: PixelConnectivity.Connectivity4, ltype: MatType.CV_32S);
 
-            // logger.LogInformation("检测数量：{numLabels2}", numLabels2 - 1);
-
             if (numLabels2 > 1)
             {
-                // 获取第一个连通对象的统计信息（标签1）
-                using Mat firstRow = stats2.Row(1); // 获取第1行（标签1）的数据
+                using Mat firstRow = stats2.Row(1);
                 int[] stats;
-                bool success = firstRow.GetArray(out stats); // 使用 out 参数来接收数组数据
+                bool success = firstRow.GetArray(out stats);
 
                 if (success)
                 {
                     int x = stats[0];
                     int y = stats[1];
-                    // int width = stats[2];
                     int height = stats[3];
 
                     Point firstPixel = new Point(x, y);
@@ -64,102 +59,56 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     
                     if (firstPixel.X < 580 || firstPixel.X > 1315 || firstPixel.Y > 800)
                     {
-                        // 非中心区域的处理逻辑
                         if (firstPixel.X < 500 && firstPixel.Y < 800)
                         {
-                            // 左上区域
                             if (height <= 6)
                             {
                                 logger.LogInformation("敌人在左上，向前加向左移动");
-                                Task.Run(() =>
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveLeft, KeyType.KeyDown);
-                                    Task.Delay(1000, ct).Wait();
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveLeft, KeyType.KeyUp);
-                                }, ct);
+                                await MoveWithKeysAsync(ct, GIActions.MoveForward, GIActions.MoveLeft);
                             }
                         }
                         else if (firstPixel.X > 1315 && firstPixel.Y < 800)
                         {
-                            // 右上区域
                             if (height <= 6)
                             {
                                 logger.LogInformation("敌人在右上，向前加向右移动");
-                                Task.Run(() =>
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveRight, KeyType.KeyDown);
-                                    Task.Delay(1000, ct).Wait();
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveRight, KeyType.KeyUp);
-                                }, ct);
+                                await MoveWithKeysAsync(ct, GIActions.MoveForward, GIActions.MoveRight);
                             }
                         }
                         else if (firstPixel.X < 500 && firstPixel.Y > 800)
                         {
-                            // 左下区域
                             if (height <= 6)
                             {
                                 logger.LogInformation("敌人在左下，向后加向左移动");
-                                Task.Run(() =>
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveLeft, KeyType.KeyDown);
-                                    Task.Delay(1000, ct).Wait();
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveLeft, KeyType.KeyUp);
-                                }, ct);
+                                await MoveWithKeysAsync(ct, GIActions.MoveBackward, GIActions.MoveLeft);
                             }
                         }
                         else if (firstPixel.X > 1315 && firstPixel.Y > 800)
                         {
-                            // 右下区域
                             if (height <= 6)
                             {
                                 logger.LogInformation("敌人在右下，向后加向右移动");
-                                Task.Run(() =>
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveRight, KeyType.KeyDown);
-                                    Task.Delay(1000, ct).Wait();
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveRight, KeyType.KeyUp);
-                                }, ct);
+                                await MoveWithKeysAsync(ct, GIActions.MoveBackward, GIActions.MoveRight);
                             }
                         }
                         else if (firstPixel.Y < 800)
                         {
-                            // 上方区域
                             if (height <= 6)
                             {
                                 logger.LogInformation("敌人在上方，向前移动");
-                                Task.Run(() =>
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                                    Task.Delay(1000, ct).Wait();
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                                }, ct);
+                                await MoveWithKeysAsync(ct, GIActions.MoveForward);
                             }
                         }
                         else if (firstPixel.Y > 800)
                         {
-                            // 下方区域
                             if (height <= 6)
                             {
                                 logger.LogInformation("敌人在下方，向后移动");
-                                Task.Run(() =>
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
-                                    Task.Delay(1000, ct).Wait();
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
-                                }, ct);
+                                await MoveWithKeysAsync(ct, GIActions.MoveBackward);
                             }
                         }
                         else
                         {
-                            // 非上述区域且非中心区域，判断左右
                             if (firstPixel.X < 920 && height > 6)
                             {
                                 Simulation.SendInput.SimulateAction(GIActions.MoveBackward);
@@ -172,7 +121,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                             }
                         }
                     }
-                    else // 中心区域
+                    else
                     {
                         if (height > 6)
                         {
@@ -182,22 +131,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         else if (firstPixel.X < 1315 && firstPixel.X > 500 && firstPixel.Y < 800 && height > 2)
                         {
                             logger.LogInformation("敌人在上方，向前移动");
-                            Task.Run(() =>
-                            {
-                                Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                                Task.Delay(1000, ct).Wait();
-                                Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                            }, ct);
+                            await MoveWithKeysAsync(ct, GIActions.MoveForward);
                         }
                         else if (firstPixel.X < 1315 && firstPixel.X > 500 && firstPixel.Y > 800 && height > 2)
                         {
                             logger.LogInformation("敌人在下方，向后移动");
-                            Task.Run(() =>
-                            {
-                                Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
-                                Task.Delay(1000, ct).Wait();
-                                Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
-                            }, ct);
+                            await MoveWithKeysAsync(ct, GIActions.MoveBackward);
                         }
                         else if (height < 3)
                         {
@@ -217,13 +156,51 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
             }
             
-            return Task.FromResult<bool?>(null);
+            return null;
         }
+
+        private static async Task MoveWithKeysAsync(CancellationToken ct, params GIActions[] actions)
+        {
+            var pressedActions = new List<GIActions>();
+            try
+            {
+                foreach (var action in actions)
+                {
+                    Simulation.SendInput.SimulateAction(action, KeyType.KeyDown);
+                    pressedActions.Add(action);
+                }
+
+                await Task.Delay(1000, ct);
+            }
+            finally
+            {
+                foreach (var action in pressedActions)
+                {
+                    Simulation.SendInput.SimulateAction(action, KeyType.KeyUp);
+                }
+            }
+        }
+    }
+
+    internal enum AutoFightSeekAction
+    {
+        Scan,
+        Approach,
+        KeepFighting
     }
 
     public class AutoFightSeek
     {
         public static int RotationCount = 0;
+
+        private const int VerticalSeekScaleNumerator = 4;
+        private const int VerticalSeekScaleDenominator = 10;
+        private const int VerticalSeekMaxTargetOffset = 3200;
+        private const int MaxVerticalMouseStep = 240;
+        private const int SeekViewportHeight = 900;
+
+        private static readonly int[] VerticalSeekWave = { 0, -1, 0, 1 };
+        private static readonly int[] VerticalSeekTrackCenters = { -2, 0, 2 };
         
         private static readonly Dictionary<int, int> RotaryFactorMapping = new Dictionary<int, int> //旋转因子映射表
         {
@@ -241,81 +218,32 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             // Logger.LogInformation("开始寻找敌人 {Text} ...",adjustedX);
             
             int retryCount = isEndCheck? 1 : 0;
+            var currentVerticalTarget = 0;
+
+            var initialAction = CaptureSeekAction(bloodLower, out _, out _);
+            if (await HandleDetectedEnemyAsync(initialAction, bloodLower, logger, ct))
+            {
+                return false;
+            }
+
+            if (ShouldRecenterCameraBeforeSeek())
+            {
+                await ResetSeekCameraPitchAsync(logger, ct);
+            }
+
+            currentVerticalTarget = GetSeekCameraVerticalTargetOffset(SeekViewportHeight, RotationCount, retryCount);
+            logger.LogDebug("寻敌进入波浪轨迹: y={Y}, rotation={RotationCount}, retry={RetryCount}",
+                currentVerticalTarget, RotationCount, retryCount);
+            await MoveSeekCameraVerticallyAsync(currentVerticalTarget, ct);
 
             while (retryCount < 25+(int)(adjustedX / 5))
             {
-                int imageWidth;
-                int imageHeight;
-                using (var image = CaptureToRectArea())
-                using (var imageCrop = image.DeriveCrop(0, 0, 1500, 900))
-                using (var mask = OpenCvCommonHelper.Threshold(imageCrop.SrcMat, bloodLower))
-                using (var labels = new Mat())
-                using (var stats = new Mat())
-                using (var centroids = new Mat())
+                var action = CaptureSeekAction(bloodLower, out var imageWidth, out var imageHeight);
+                if (await HandleDetectedEnemyAsync(action, bloodLower, logger, ct))
                 {
-                    imageWidth = image.Width;
-                    imageHeight = image.Height;
-                    int numLabels = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centroids,
-                        connectivity: PixelConnectivity.Connectivity4, ltype: MatType.CV_32S);
-                    // if (retryCount == 0) logger.LogInformation("敌人初检数量： {numLabels}", numLabels - 1);
-
-                    if (numLabels > 1)
-                    {
-                        // logger.LogInformation("检测画面内疑似有敌人，继续战斗...");
-
-                        using Mat firstRow = stats.Row(1);
-                        bool success = firstRow.GetArray(out int[] statsArray);
-                        if (success && statsArray.Length >= 4)
-                        {
-                            int height = statsArray[3];
-                            int x = statsArray[0];
-                            // Logger.LogInformation("敌人位置: ({x}，血量高度: {height}", x, height);
-
-                            if (isEndCheck)
-                            {
-                                await Task.Run(() =>
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                                    Task.Delay(100, ct).Wait();;
-                                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                                }, ct);
-                            }
-                            else
-                            {
-                                Simulation.SendInput.SimulateAction(GIActions.MoveForward);
-                                Simulation.SendInput.SimulateAction(GIActions.MoveForward);
-                            }
-
-                            if (height > 2 && height < 7)
-                            {
-                                // logger.LogInformation("画面内有找到敌人，尝试移动...");
-                                Task.Run(() => { MoveForwardTask.MoveForwardAsync(bloodLower, bloodLower, logger, ct); }, ct);
-                                return false;
-                            }
-
-                            if (height > 6 && height < 25)
-                            {
-                                if ((x == 758 || x == 722) && (height ==7 || height == 8))//固定血条的怪物，尝试旋转寻找
-                                {
-                                    await Task.Run(() =>
-                                    {
-                                        Simulation.SendInput.Mouse.MoveMouseBy(960, 0);
-                                        Task.Delay(200, ct).Wait();
-                                        Simulation.SendInput.Mouse.MiddleButtonClick();
-                                    }, ct);
-                                }
-                                // logger.LogInformation("画面内有找到敌人，继续战斗...");
-                                return false;
-                            }
-
-                            if (height < 3 || height > 25)
-                            {
-                                return  null;
-                            }
-                        }
-                    }
+                    return false;
                 }
-                
+
                 if (retryCount == 0)
                 {
                     await Delay(delayTime,ct);
@@ -337,84 +265,168 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     }
                 }
 
-                if (RotationCount == 3 && retryCount == 0)
-                {
-                    Simulation.SendInput.Mouse.MiddleButtonClick();
-                    await Task.Delay(500, ct);
-                }
-                
-                if (retryCount <= 2)
-                {
-                   var offsets = new (int x, int y)[] {
-                        (imageWidth / 6, imageHeight / 7),
-                        (imageWidth / 6, 0),
-                        (imageWidth / 6, -imageHeight / 5),
-                        (imageWidth / 6, -imageHeight),
-                    };
-
-                    var offsetIndex = RotationCount < 2 ? 0 : (RotationCount == 2) ? 1 : (RotationCount >= 3) ? 2 : 3;
-                    Simulation.SendInput.Mouse.MoveMouseBy(offsets[offsetIndex].x, offsets[offsetIndex].y);
-                }
-                else
-                {
-                    Simulation.SendInput.Mouse.MoveMouseBy(imageWidth / 6, 0);
-                }
+                var offset = GetSeekCameraOffset(imageWidth, imageHeight, RotationCount, retryCount);
+                currentVerticalTarget = GetSeekCameraVerticalTargetOffset(imageHeight, RotationCount, retryCount + 1);
+                logger.LogDebug("寻敌调整视角: x={X}, y={Y}, rotation={RotationCount}, retry={RetryCount}",
+                    offset.x, offset.y, RotationCount, retryCount);
+                await MoveSeekCameraAsync(offset, ct);
 
                 await Task.Delay(50+(int)(adjustedX/adjustedDivisor),ct);
 
-                using (var image = CaptureToRectArea())
-                using (var secondImageCrop = image.DeriveCrop(0, 0, 1500, 900))
-                using (var mask = OpenCvCommonHelper.Threshold(secondImageCrop.SrcMat, bloodLower))
-                using (var labels = new Mat())
-                using (var stats = new Mat())
-                using (var centroids = new Mat())
+                var actionAfterMove = CaptureSeekAction(bloodLower, out _, out _);
+                if (await HandleDetectedEnemyAsync(actionAfterMove, bloodLower, logger, ct))
                 {
-                    int numLabels = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centroids,
-                        connectivity: PixelConnectivity.Connectivity4, ltype: MatType.CV_32S);
-
-                    if (numLabels > 1)
-                    {
-                        // logger.LogInformation("检测敌人第 {retryCount} 次： {numLabels}", retryCount + 1, numLabels - 1);
-                        using Mat firstRow2 = stats.Row(1); // 获取第1行（标签1）的数据
-                        bool success2 = firstRow2.GetArray(out int[] statsArray2); // 使用 out 参数来接收数组数据
-                        if (success2 && statsArray2.Length >= 4)
-                        {
-                            int height2 = statsArray2[3];
-                            // logger.LogInformation("敌人血量 ：{height2}", height2);
-
-                            if (isEndCheck) await Task.Run(() =>
-                            {
-                                Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                                Task.Delay(100, ct).Wait();
-                                Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                            }, ct);
-
-                            if (height2 > 2 && height2 < 7)
-                            {
-                                // logger.LogInformation("画面内有找到敌人，尝试移动...");
-                                Task.Run(() => { MoveForwardTask.MoveForwardAsync(bloodLower, bloodLower, logger, ct); }, ct);
-                                return false;
-                            }
-
-                            if (height2 > 6 && height2 < 25)
-                            {
-                                // logger.LogInformation("画面内有找到敌人，继续战斗...");
-                                return false;
-                            }
-
-                            if (height2 < 3 || height2 > 25)
-                            {
-                                return null;
-                            }
-                        }
-                    }
+                    return false;
                 }
-                
+
                 retryCount++;
             }
             
+            await ReturnSeekCameraPitchToCenterAsync(logger, currentVerticalTarget, ct);
             logger.LogInformation("寻找敌人：{Text}", "无");
             return null;
+        }
+
+        internal static AutoFightSeekAction GetSeekAction(int x, int height)
+        {
+            if ((x == 758 || x == 722) && (height == 7 || height == 8))
+            {
+                return AutoFightSeekAction.Scan;
+            }
+
+            if (height > 2 && height < 7)
+            {
+                return AutoFightSeekAction.Approach;
+            }
+
+            return height > 6 && height < 25
+                ? AutoFightSeekAction.KeepFighting
+                : AutoFightSeekAction.Scan;
+        }
+
+        internal static int GetNextRotationCount(int currentRotationCount, bool? seekResult)
+        {
+            return seekResult == null ? currentRotationCount + 1 : 0;
+        }
+
+        private static AutoFightSeekAction CaptureSeekAction(
+            Scalar bloodLower,
+            out int imageWidth,
+            out int imageHeight)
+        {
+            using var image = CaptureToRectArea();
+            using var imageCrop = image.DeriveCrop(0, 0, 1500, 900);
+            using var mask = OpenCvCommonHelper.Threshold(imageCrop.SrcMat, bloodLower);
+            using var labels = new Mat();
+            using var stats = new Mat();
+            using var centroids = new Mat();
+
+            imageWidth = image.Width;
+            imageHeight = image.Height;
+            var numLabels = Cv2.ConnectedComponentsWithStats(
+                mask,
+                labels,
+                stats,
+                centroids,
+                connectivity: PixelConnectivity.Connectivity4,
+                ltype: MatType.CV_32S);
+
+            if (numLabels <= 1)
+            {
+                return AutoFightSeekAction.Scan;
+            }
+
+            using var firstRow = stats.Row(1);
+            return firstRow.GetArray(out int[] statsArray) && statsArray.Length >= 4
+                ? GetSeekAction(statsArray[0], statsArray[3])
+                : AutoFightSeekAction.Scan;
+        }
+
+        private static async Task<bool> HandleDetectedEnemyAsync(
+            AutoFightSeekAction action,
+            Scalar bloodLower,
+            ILogger logger,
+            CancellationToken ct)
+        {
+            if (action == AutoFightSeekAction.Scan)
+            {
+                return false;
+            }
+
+            if (action == AutoFightSeekAction.Approach)
+            {
+                await MoveForwardTask.MoveForwardAsync(bloodLower, bloodLower, logger, ct);
+            }
+
+            return true;
+        }
+
+        internal static (int x, int y) GetSeekCameraOffset(int imageWidth, int imageHeight, int rotationCount, int retryCount)
+        {
+            var horizontalStep = Math.Max(80, imageWidth / 6);
+            var currentVerticalTarget = GetSeekCameraVerticalTargetOffset(imageHeight, rotationCount, retryCount);
+            var nextVerticalTarget = GetSeekCameraVerticalTargetOffset(imageHeight, rotationCount, retryCount + 1);
+            return (horizontalStep, nextVerticalTarget - currentVerticalTarget);
+        }
+
+        internal static int GetSeekCameraVerticalTargetOffset(int imageHeight, int rotationCount, int retryCount)
+        {
+            var safeRotationCount = Math.Max(0, rotationCount);
+            var trackCenter = VerticalSeekTrackCenters[safeRotationCount % VerticalSeekTrackCenters.Length];
+            var phaseOffset = safeRotationCount / VerticalSeekTrackCenters.Length * 2;
+            var waveBand = VerticalSeekWave[(Math.Max(0, retryCount) + phaseOffset) % VerticalSeekWave.Length];
+            var verticalBand = trackCenter + waveBand;
+            return Math.Clamp(
+                imageHeight * verticalBand * VerticalSeekScaleNumerator / VerticalSeekScaleDenominator,
+                -VerticalSeekMaxTargetOffset,
+                VerticalSeekMaxTargetOffset);
+        }
+
+        private static async Task MoveSeekCameraAsync((int x, int y) offset, CancellationToken ct)
+        {
+            await MoveSeekCameraVerticallyAsync(offset.y, ct);
+
+            Simulation.SendInput.Mouse.MoveMouseBy(offset.x, 0);
+        }
+
+        private static async Task MoveSeekCameraVerticallyAsync(int offsetY, CancellationToken ct)
+        {
+            var remaining = offsetY;
+            while (remaining != 0)
+            {
+                var step = Math.Clamp(remaining, -MaxVerticalMouseStep, MaxVerticalMouseStep);
+                Simulation.SendInput.Mouse.MoveMouseBy(0, step);
+                remaining -= step;
+                await Task.Delay(45, ct);
+            }
+        }
+
+        private static async Task ReturnSeekCameraPitchToCenterAsync(ILogger logger, int currentVerticalTarget, CancellationToken ct)
+        {
+            if (currentVerticalTarget == 0)
+            {
+                return;
+            }
+
+            logger.LogDebug("寻敌结束回正视角俯仰: y={Y}", -currentVerticalTarget);
+            await MoveSeekCameraVerticallyAsync(-currentVerticalTarget, ct);
+        }
+
+        private static async Task ResetSeekCameraPitchAsync(ILogger logger, CancellationToken ct)
+        {
+            logger.LogDebug("寻敌重置视角俯仰");
+            Simulation.SendInput.Mouse.MiddleButtonClick();
+            await Task.Delay(500, ct);
+        }
+
+        internal static bool ShouldRecenterCameraBeforeSeek()
+        {
+            return true;
+        }
+
+        internal static bool ShouldResetCameraBeforeSeek(int rotationCount, int retryCount)
+        {
+            return retryCount == 0 && rotationCount > 0 && rotationCount % 3 == 0;
         }
         
         private static bool IsYellow(int r, int g, int b)

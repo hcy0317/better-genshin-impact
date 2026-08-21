@@ -54,7 +54,7 @@ public partial class TriggerSettingsPageViewModel : ViewModel
         _hangoutBranches = HangoutConfig.Instance.HangoutOptionsTitleList;
         UpdateAutoPickModeVisibility();
 
-        _pickButtonNames = new List<string> { "F", "E", "G" };
+        _pickButtonNames = new List<string> { "F", "E", "G", "YY" };
         if (!string.IsNullOrEmpty(Config.AutoPickConfig.PickKey)
             && Config.AutoPickConfig.PickKey.Length == 1
             && char.IsUpper(Config.AutoPickConfig.PickKey[0])

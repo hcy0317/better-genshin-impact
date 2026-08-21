@@ -758,7 +758,7 @@ public partial class RecognitionTemplateEditorViewModel : ViewModel, IDisposable
             return "";
         }
 
-        var pathParts = fullPath.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
+        var pathParts = fullPath.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
         var gameTaskIndex = Array.FindIndex(pathParts,
             part => string.Equals(part, "GameTask", StringComparison.OrdinalIgnoreCase));
         if (gameTaskIndex >= 0 && gameTaskIndex + 1 < pathParts.Length)

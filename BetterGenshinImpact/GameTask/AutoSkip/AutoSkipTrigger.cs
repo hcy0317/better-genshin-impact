@@ -549,10 +549,9 @@ public partial class AutoSkipTrigger : ITaskTrigger
                 return true;
             }
 
-            var fKey = AutoPickAssets.Get(region, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickVk;
             if (_config.IsClickFirstChatOption())
             {
-                _postMessageSimulator?.KeyPressBackground(fKey);
+                PressPickKeyForDialogue(region);
             }
             else if (_config.IsClickRandomChatOption())
             {
@@ -566,13 +565,13 @@ public partial class AutoSkipTrigger : ITaskTrigger
                 }
 
                 Thread.Sleep(50);
-                _postMessageSimulator?.KeyPressBackground(fKey);
+                PressPickKeyForDialogue(region);
             }
             else
             {
                 _postMessageSimulator?.KeyPressBackground(User32.VK.VK_W);
                 Thread.Sleep(100);
-                _postMessageSimulator?.KeyPressBackground(fKey);
+                PressPickKeyForDialogue(region);
             }
             
             AutoSkipLog("交互键点击(后台)");
@@ -581,6 +580,18 @@ public partial class AutoSkipTrigger : ITaskTrigger
         }
 
         return false;
+    }
+
+    private void PressPickKeyForDialogue(ImageRegion region)
+    {
+        var pickAssets = AutoPickAssets.Get(region, TaskContext.Instance().Config.AutoPickConfig.PickKey);
+        if (pickAssets.UseControllerY)
+        {
+            pickAssets.PressPickKey();
+            return;
+        }
+
+        _postMessageSimulator?.KeyPressBackground(pickAssets.PickVk);
     }
 
     /// <summary>
@@ -813,7 +824,7 @@ public partial class AutoSkipTrigger : ITaskTrigger
             using var pickRa = region.Find(pickAssets.ChatPickRo);
             if (pickRa.IsExist())
             {
-                _postMessageSimulator?.KeyPressBackground(pickAssets.PickVk);
+                PressPickKeyForDialogue(region);
                 AutoSkipLog("无气泡图标，但存在交互键，直接按下交互键");
             }
         }

@@ -4,6 +4,7 @@ using System.IO.Pipes;
 using BetterGenshinImpact.Core.Monitor;
 using BetterGenshinImpact.Helpers;
 using BetterGenshinImpact.Service.Instance;
+using BetterGenshinImpact.Service.Instance.MessageHandlers;
 
 namespace BetterGenshinImpact.UnitTest.ServiceTests.Instance;
 
@@ -74,6 +75,80 @@ public class InstanceIpcProtocolTests
         Assert.Equal(BetterGiInstanceType.Primary, options.InstanceType);
         Assert.False(options.HasExplicitInstanceType);
         Assert.Equal(CommandLineAction.None, options.Action);
+    }
+
+    [Theory]
+    [InlineData("bettergi://startOneDragon")]
+    [InlineData("--startGroups")]
+    [InlineData("--TaskProgress")]
+    [InlineData("--instance", "childSession", "bettergi://startOneDragon")]
+    public void ActivationForwarding_ShouldRejectManagedAutomation(params string[] arguments)
+    {
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            ActivationForwardingPolicy.ThrowIfManagedAutomation(
+                ["BetterGI.exe", .. arguments]));
+
+        Assert.Contains("已有 BetterGI 实例", exception.Message);
+        Assert.Contains("无法转发托管自动化任务", exception.Message);
+    }
+
+    [Theory]
+    [InlineData()]
+    [InlineData("bettergi://start")]
+    public void ActivationForwarding_ShouldAllowWindowActivation(params string[] arguments)
+    {
+        ActivationForwardingPolicy.ThrowIfManagedAutomation(
+            ["BetterGI.exe", .. arguments]);
+    }
+
+    [Fact]
+    public void CommandLineParser_ShouldRecognizeChildSessionOneDragonAutomation()
+    {
+        var options = CommandLineOptions.Parse(
+        [
+            "BetterGI.exe",
+            "--child-session-one-dragon",
+            "每日4点10-自动化总控",
+            "--automation-result",
+            @"C:\ProgramData\BetterGI\automation\run-1.json",
+            "--automation-run-id",
+            "run-1",
+            "--automation-timeout-seconds",
+            "7200"
+        ]);
+
+        Assert.Equal(CommandLineAction.ChildSessionOneDragon, options.Action);
+        Assert.Equal("每日4点10-自动化总控", options.OneDragonConfigName);
+        Assert.Equal(
+            @"C:\ProgramData\BetterGI\automation\run-1.json",
+            options.AutomationResultPath);
+        Assert.Equal("run-1", options.AutomationRunId);
+        Assert.Equal(7200, options.AutomationTimeoutSeconds);
+        Assert.True(options.ShouldDeferGameStart);
+    }
+
+    [Theory]
+    [InlineData("10", 60)]
+    [InlineData("999999", 86400)]
+    [InlineData("invalid", 14400)]
+    public void CommandLineParser_ShouldClampChildSessionAutomationTimeout(
+        string rawTimeout,
+        int expectedTimeout)
+    {
+        var options = CommandLineOptions.Parse(
+        [
+            "BetterGI.exe",
+            "--child-session-one-dragon",
+            "配置",
+            "--automation-result",
+            "result.json",
+            "--automation-run-id",
+            "run",
+            "--automation-timeout-seconds",
+            rawTimeout
+        ]);
+
+        Assert.Equal(expectedTimeout, options.AutomationTimeoutSeconds);
     }
 
     [Fact]

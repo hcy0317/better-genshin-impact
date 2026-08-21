@@ -46,6 +46,7 @@ public class TpTask
     private readonly TpConfig _tpConfig = TaskContext.Instance().Config.TpConfig;
     private readonly string _mapMatchingMethod = TaskContext.Instance().Config.PathingConditionConfig.MapMatchingMethod;
     private readonly BlessingOfTheWelkinMoonTask _blessingOfTheWelkinMoonTask = new();
+    private RouteMapContext _routeMapContext;
 
     private readonly CancellationToken ct;
     private readonly CultureInfo cultureInfo;
@@ -69,6 +70,10 @@ public class TpTask
     private const double MapDragPixelsPerStep = 48d;
     private const double MapDragFastStepRatio = 0.42d;
     private const double MapDragFastDistanceRatio = 0.85d;
+    private const double MaxMapDragDistance = 300d;
+    private const int MapDragSettlingDelayMs = 100;
+    private const double MapMoveFeedbackMinExpectedDistance = 24d;
+    private const double MapMoveFeedbackMinActualDistance = 8d;
     private const double MapClickSafeMargin = 35d;
     private const double NearbyMapIconPatternMinSearchRadius = 120d;
     private const double NearbyMapIconPatternMaxSearchRadius = 260d;
@@ -244,6 +249,7 @@ public class TpTask
     public TpTask(CancellationToken ct)
     {
         this.ct = ct;
+        _routeMapContext = RouteMapContext.Legacy(MapTypes.Teyvat.ToString(), _mapMatchingMethod);
         _assets = QuickTeleportAssets.Get(_captureRect.Width, _captureRect.Height);
         TpTaskParam param = new TpTaskParam();
         this.cultureInfo = param.GameCultureInfo;
@@ -258,6 +264,18 @@ public class TpTask
     private static RecognitionObject GetQuickTeleportRecognitionObject(string objectName, Region region)
     {
         return RecognitionAssets.Get("QuickTeleport", objectName, region);
+    }
+
+    public static bool ShouldForceGroundSwitch(RouteMapContext mapContext, bool bigMapIsUnderground)
+    {
+        return bigMapIsUnderground && mapContext.LayerSelector.IsEmpty;
+    }
+
+    private ISceneMap GetRouteMap(string mapName)
+    {
+        return string.Equals(_routeMapContext.MapName, mapName, StringComparison.Ordinal)
+            ? MapManager.GetMap(_routeMapContext)
+            : MapManager.GetMap(mapName, _mapMatchingMethod);
     }
 
     /// <summary>
@@ -396,17 +414,15 @@ public class TpTask
     /// <param name="tpY"></param>
     /// <param name="mapName">独立地图名称</param>
     /// <param name="force">强制以当前的tpX,tpY坐标进行自动传送</param>
-    private async Task<(double, double)> TpOnce(
-        double tpX,
-        double tpY,
-        string mapName = "Teyvat",
-        bool force = false)
+    private async Task<(double, double)> TpOnce(double tpX, double tpY, RouteMapContext mapContext, bool force = false)
     {
+        _routeMapContext = mapContext;
+        var mapName = mapContext.MapName;
         ClearRememberedAreaSwitchCenterPoint();
 
         // 1. 确认在地图界面，并在传送入口统一切回地表图层
         await OpenBigMapUi(1, mapName);
-        await SwitchToGroundMapLayerIfNeeded();
+        await SwitchToGroundMapLayerIfNeeded(mapContext);
 
         var target = ResolveTeleportTarget(tpX, tpY, mapName, force);
         LogTeleportTarget(target);
@@ -1129,7 +1145,7 @@ public class TpTask
     /// <returns></returns>
     private (double clickX, double clickY) ConvertToGameRegionPosition(string mapName, Rect bigMapInAllMapRect, double x, double y)
     {
-        var map = MapManager.GetMap(mapName, _mapMatchingMethod);
+        var map = GetRouteMap(mapName);
         var (picX, picY) = map.ConvertGenshinMapCoordinatesToImageCoordinates(new Point2f((float)x, (float)y));
         var picRect = map.ConvertGenshinMapCoordinatesToImageCoordinates(bigMapInAllMapRect);
         var clickX = (picX - picRect.X) / picRect.Width * _captureRect.Width;
@@ -1190,11 +1206,16 @@ public class TpTask
 
     public async Task<(double, double)> Tp(double tpX, double tpY, string mapName = "Teyvat", bool force = false)
     {
+        return await Tp(tpX, tpY, RouteMapContext.Legacy(mapName, _mapMatchingMethod), force);
+    }
+
+    public async Task<(double, double)> Tp(double tpX, double tpY, RouteMapContext mapContext, bool force = false)
+    {
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(TeleportTimeoutMs);
         try
         {
-            return await new TpTask(timeoutCts.Token).TpWithRetries(tpX, tpY, mapName, force);
+            return await new TpTask(timeoutCts.Token).TpWithRetries(tpX, tpY, mapContext, force);
         }
         catch (OperationCanceledException e) when (!ct.IsCancellationRequested && timeoutCts.IsCancellationRequested)
         {
@@ -1202,13 +1223,13 @@ public class TpTask
         }
     }
 
-    private async Task<(double, double)> TpWithRetries(double tpX, double tpY, string mapName, bool force)
+    private async Task<(double, double)> TpWithRetries(double tpX, double tpY, RouteMapContext mapContext, bool force)
     {
         for (var i = 0; i < 3; i++)
         {
             try
             {
-                return await TpOnce(tpX, tpY, mapName, force);
+                return await TpOnce(tpX, tpY, mapContext, force);
             }
             catch (TpPointNotActivate e)
             {
@@ -1304,6 +1325,7 @@ public class TpTask
             }
         }
 
+        var moveCompleted = false;
         // 开始移动并放大地图
         for (var iteration = 0; iteration < _tpConfig.MaxIterations; iteration++)
         {
@@ -1326,6 +1348,7 @@ public class TpTask
                     }
                 }
 
+                moveCompleted = true;
                 break;
             }
 
@@ -1360,12 +1383,14 @@ public class TpTask
                         out moveState) ||
                     moveState.MouseDistance < 3)
                 {
+                    moveCompleted = true;
                     break;
                 }
             }
 
             int moveMouseX = (int)Math.Round(moveState.MouseDeltaX) * Math.Sign(moveState.XOffset);
             int moveMouseY = (int)Math.Round(moveState.MouseDeltaY) * Math.Sign(moveState.YOffset);
+            (moveMouseX, moveMouseY) = LimitMapDragDelta(moveMouseX, moveMouseY);
             // DpiScale 是 Windows 显示缩放倍率，实际拖动和预测必须使用同一口径。
             int effectiveMoveMouseX = GetDisplayScaleAdjustedMouseDelta(moveMouseX);
             int effectiveMoveMouseY = GetDisplayScaleAdjustedMouseDelta(moveMouseY);
@@ -1391,10 +1416,20 @@ public class TpTask
                 double actualMoveLen = Math.Sqrt(actualDeltaX * actualDeltaX + actualDeltaY * actualDeltaY);
                 double moveRatio = expectedMoveLen > 0 ? actualMoveLen / expectedMoveLen : 0;
                 double moveDirectionCos = GetMoveDirectionCos(predictedDeltaX, predictedDeltaY, actualDeltaX, actualDeltaY);
-                // 如果识别结果和本次拖动的距离/方向明显不一致，则判定为低特征区域误识别，进入盲走推算。
+                // 如果识别结果和本次拖动的距离/方向明显不一致，则使用全图识别重新校准，
+                // 并缩小下一次拖动，避免错误反馈导致反向来回或持续过冲。
                 if (IsMapMoveRecognitionAnomaly(expectedMoveLen, actualMoveLen, moveRatio, moveDirectionCos, jumpDistance))
                 {
-                    throw new MapPositionNotRecognizedException("中心点识别坐标异常跳跃");
+                    exceptionTimes++;
+                    if (exceptionTimes > 5)
+                    {
+                        throw new Exception("多次中心点识别无进展或方向异常，停止拖动地图并重新传送");
+                    }
+
+                    moveState = TryGetRecognizedMoveMapState(mapName, x, y, currentZoomLevel, out var recoveredState)
+                        ? recoveredState.ScaleMouseDelta(0.5d)
+                        : moveState.ScaleMouseDelta(0.5d);
+                    continue;
                 }
 
                 moveState = GetMoveMapState(newCenterPoint, x, y, currentZoomLevel);
@@ -1411,6 +1446,35 @@ public class TpTask
                 moveState = GetMoveMapState(predictedPoint, x, y, currentZoomLevel);
             }
         }
+
+        if (!moveCompleted)
+        {
+            moveCompleted = TryGetClickableTargetPosition(
+                mapName,
+                x,
+                y,
+                requiredVisibleRadius,
+                out _,
+                out _,
+                out _);
+        }
+
+        if (!moveCompleted)
+        {
+            throw new Exception($"地图拖动在 {_tpConfig.MaxIterations} 次内未收敛，停止本轮并重新传送");
+        }
+    }
+
+    internal static (int X, int Y) LimitMapDragDelta(int deltaX, int deltaY)
+    {
+        double distance = Math.Sqrt((double)deltaX * deltaX + (double)deltaY * deltaY);
+        if (distance <= MaxMapDragDistance || distance <= 0)
+        {
+            return (deltaX, deltaY);
+        }
+
+        double scale = MaxMapDragDistance / distance;
+        return ((int)Math.Round(deltaX * scale), (int)Math.Round(deltaY * scale));
     }
 
     private MapMoveState GetMoveMapState(
@@ -1445,7 +1509,7 @@ public class TpTask
 
         try
         {
-            var map = MapManager.GetMap(mapName, _mapMatchingMethod);
+            var map = GetRouteMap(mapName);
             var (targetPicX, targetPicY) = map.ConvertGenshinMapCoordinatesToImageCoordinates(new Point2f((float)targetX, (float)targetY));
             var picRect = map.ConvertGenshinMapCoordinatesToImageCoordinates(bigMapInAllMapRect);
             if (picRect.Width <= 0 || picRect.Height <= 0)
@@ -1600,7 +1664,7 @@ public class TpTask
     /// </summary>
     /// <param name="x1">鼠标初始位置x</param>
     /// <param name="y1">鼠标初始位置y</param>
-    /// <param name="x2">鼠标移动后位置x</param> 
+    /// <param name="x2">鼠标移动后位置x</param>
     /// <param name="y2">鼠标移动后位置y</param>
     public async Task MouseClickAndMove(int x1, int y1, int x2, int y2)
     {
@@ -1928,26 +1992,33 @@ public class TpTask
         int[] stepX = GenerateSteps(sentDeltaX, steps);
         int[] stepY = GenerateSteps(sentDeltaY, steps);
         var startCursor = GetCursorPositionInCapture();
-        Simulation.SendInput.Mouse.LeftButtonDown();
         int movedX = 0;
         int movedY = 0;
-        for (var i = 0; i < steps; i++)
+        Simulation.SendInput.Mouse.LeftButtonDown();
+        try
         {
-            var i1 = i;
-            await Delay(GetTeleportOperationDelay(TpConfig.DefaultTeleportOperationDelayMilliseconds), ct);
-            movedX += stepX[i1];
-            movedY += stepY[i1];
-            if (_tpConfig.MapDragUseRelativeMove)
+            for (var i = 0; i < steps; i++)
             {
-                GameCaptureRegion.GameRegionMoveBy((_, scale) => (stepX[i1] * scale, stepY[i1] * scale));
-            }
-            else
-            {
-                GameCaptureRegion.GameRegionMove((_, scale) => (startX + movedX * scale, startY + movedY * scale));
+                var i1 = i;
+                await Delay(GetTeleportOperationDelay(TpConfig.DefaultTeleportOperationDelayMilliseconds), ct);
+                movedX += stepX[i1];
+                movedY += stepY[i1];
+                if (_tpConfig.MapDragUseRelativeMove)
+                {
+                    GameCaptureRegion.GameRegionMoveBy((_, scale) => (stepX[i1] * scale, stepY[i1] * scale));
+                }
+                else
+                {
+                    GameCaptureRegion.GameRegionMove((_, scale) => (startX + movedX * scale, startY + movedY * scale));
+                }
             }
         }
+        finally
+        {
+            Simulation.SendInput.Mouse.LeftButtonUp();
+        }
 
-        Simulation.SendInput.Mouse.LeftButtonUp();
+        await Delay(GetTeleportOperationDelay(MapDragSettlingDelayMs), ct);
         var endCursor = GetCursorPositionInCapture();
         return (sentDeltaX, sentDeltaY, steps, startX, startY, endX, endY, endCursor.X - startCursor.X, endCursor.Y - startCursor.Y);
     }
@@ -2041,7 +2112,7 @@ public class TpTask
         return (expectedDeltaX * actualDeltaX + expectedDeltaY * actualDeltaY) / (expectedLen * actualLen);
     }
 
-    private static bool IsMapMoveRecognitionAnomaly(
+    internal static bool IsMapMoveRecognitionAnomaly(
         double expectedMoveLen,
         double actualMoveLen,
         double moveRatio,
@@ -2051,6 +2122,25 @@ public class TpTask
         if (jumpDistance > Math.Max(200, expectedMoveLen * 2))
         {
             return true;
+        }
+
+        if (expectedMoveLen >= MapMoveFeedbackMinExpectedDistance)
+        {
+            double minimumProgress = Math.Max(MapMoveFeedbackMinActualDistance, expectedMoveLen * 0.08d);
+            if (actualMoveLen < minimumProgress)
+            {
+                return true;
+            }
+
+            if (actualMoveLen >= MapMoveFeedbackMinActualDistance && moveDirectionCos < 0.25d)
+            {
+                return true;
+            }
+
+            if (expectedMoveLen >= 60d && moveRatio > 2.25d)
+            {
+                return true;
+            }
         }
 
         if (expectedMoveLen > 1200 && (moveRatio < 0.55 || moveRatio > 1.85))
@@ -2064,6 +2154,12 @@ public class TpTask
     public Point2f GetPositionFromBigMap(string mapName)
     {
         return GetBigMapCenterPoint(mapName);
+    }
+
+    public Point2f GetPositionFromBigMap(RouteMapContext mapContext)
+    {
+        _routeMapContext = mapContext;
+        return GetBigMapCenterPoint(mapContext.MapName);
     }
 
     private Point2f GetPositionFromBigMap(string mapName, Point2f expectedCenterPoint)
@@ -2095,7 +2191,7 @@ public class TpTask
             {
                 try
                 {
-                    rect = MapManager.GetMap(mapName, _mapMatchingMethod).GetBigMapRect(ra.CacheGreyMat);
+                    rect = GetRouteMap(mapName).GetBigMapRect(ra.CacheGreyMat);
                 }
                 catch (Exception)
                 {
@@ -2125,7 +2221,7 @@ public class TpTask
             rect = new Rect(rect.X * s, rect.Y * s, rect.Width * s, rect.Height * s);
         }
 
-        return MapManager.GetMap(mapName, _mapMatchingMethod).ConvertImageCoordinatesToGenshinMapCoordinates(rect)!.Value;
+        return GetRouteMap(mapName).ConvertImageCoordinatesToGenshinMapCoordinates(rect)!.Value;
     }
 
     public Point2f GetBigMapCenterPoint(string mapName)
@@ -2160,7 +2256,7 @@ public class TpTask
         Point2f p;
         try
         {
-            var map = MapManager.GetMap(mapName, _mapMatchingMethod);
+            var map = GetRouteMap(mapName);
             p = expectedCenterPoint is Point2f expectedCenter
                 ? map.GetBigMapPosition(greyMat, map.ConvertGenshinMapCoordinatesToImageCoordinates(expectedCenter))
                 : map.GetBigMapPosition(greyMat);
@@ -2182,7 +2278,7 @@ public class TpTask
             (x, y) = (p.X * TeyvatMap.BigMap256ScaleTo2048, p.Y * TeyvatMap.BigMap256ScaleTo2048);
         }
 
-        return MapManager.GetMap(mapName, _mapMatchingMethod).ConvertImageCoordinatesToGenshinMapCoordinates(new Point2f(x, y))!.Value;
+        return GetRouteMap(mapName).ConvertImageCoordinatesToGenshinMapCoordinates(new Point2f(x, y))!.Value;
     }
 
     /// <summary>
@@ -2475,8 +2571,14 @@ public class TpTask
                 .Take(12));
     }
 
-    private async Task SwitchToGroundMapLayerIfNeeded()
+    private async Task SwitchToGroundMapLayerIfNeeded(RouteMapContext mapContext)
     {
+        if (!mapContext.LayerSelector.IsEmpty)
+        {
+            Logger.LogInformation("路线指定地图图层，保留当前大地图图层用于定位与传送");
+            return;
+        }
+
         var layerSwitchClicked = false;
         var groundLayerClicked = false;
         // 图层按钮的出现、展开和选中都有固定时长的界面动画，不能随传送操作速度缩短。

@@ -1,5 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
+using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Recognition;
+using BetterGenshinImpact.Core.Recognition.OpenCv;
+using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.Model.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Helpers;
@@ -15,9 +20,26 @@ public sealed class AutoPickAssets
         static key => new AutoPickAssets(key.CaptureSize, key.PickKey));
     private readonly ILogger<AutoPickAssets> _logger = App.GetLogger<AutoPickAssets>();
 
+    /// <summary>
+    /// 兼容仍按当前游戏分辨率访问拾取资产的旧调用方。
+    /// 新代码应优先使用 <see cref="Get(Region,string)"/>，避免截图尺寸变化时复用错误模板。
+    /// </summary>
+    public static AutoPickAssets Instance
+    {
+        get
+        {
+            var systemInfo = TaskContext.Instance().SystemInfo;
+            return Get(systemInfo.GameScreenSize.Width,
+                systemInfo.GameScreenSize.Height,
+                TaskContext.Instance().Config.AutoPickConfig.PickKey);
+        }
+    }
+
     public User32.VK PickVk { get; private set; } = User32.VK.VK_F;
+    public bool UseControllerY { get; private set; }
     public RecognitionObject PickRo { get; private set; }
     public RecognitionObject ChatPickRo { get; private set; }
+    public IReadOnlyList<RecognitionObject> ControllerIconBlacklistRos { get; private set; } = [];
 
     private int CaptureHeight { get; }
     private double AssetScale { get; }
@@ -33,8 +55,20 @@ public sealed class AutoPickAssets
             try
             {
                 PickRo = LoadCustomPickKey(pickKey, captureSize);
-                PickVk = User32Helper.ToVk(pickKey);
                 ChatPickRo = LoadCustomChatPickKey(pickKey, captureSize);
+                if (IsControllerYPromptKey(pickKey))
+                {
+                    UseControllerY = true;
+                    PickVk = User32.VK.VK_F;
+                    TaskContext.Instance().Config.KeyBindingsConfig.PickUpOrInteract = Core.Config.KeyId.F;
+                    ControllerIconBlacklistRos = LoadControllerIconBlacklistTemplates(captureSize);
+                    VirtualXbox360Controller.EnsureConnected(_logger);
+                }
+                else
+                {
+                    PickVk = User32Helper.ToVk(pickKey);
+                    TaskContext.Instance().Config.KeyBindingsConfig.PickUpOrInteract = (Core.Config.KeyId)(int)PickVk;
+                }
             }
             catch (Exception e)
             {
@@ -43,7 +77,14 @@ public sealed class AutoPickAssets
                 return;
             }
 
-            _logger.LogInformation("自定义拾取按键：{Key}", pickKey);
+            if (UseControllerY)
+            {
+                _logger.LogInformation("自定义拾取提示：手柄Y（YY模板，交互发送虚拟手柄Y键）");
+            }
+            else
+            {
+                _logger.LogInformation("自定义拾取按键：{Key}", pickKey);
+            }
         }
     }
 
@@ -61,6 +102,83 @@ public sealed class AutoPickAssets
     {
         var normalizedPickKey = string.IsNullOrWhiteSpace(pickKey) ? "F" : pickKey.Trim().ToUpperInvariant();
         return Cache.Get(new CacheKey(captureSize, normalizedPickKey));
+    }
+
+    public static bool IsControllerYPromptKey(string key)
+    {
+        return string.Equals(key, "YY", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void PressPickKey()
+    {
+        if (UseControllerY)
+        {
+            VirtualXbox360Controller.PressY(_logger);
+            return;
+        }
+
+        Simulation.SendInput.Keyboard.KeyPress(PickVk);
+    }
+
+    private static IReadOnlyList<RecognitionObject> LoadControllerIconBlacklistTemplates(CaptureSize captureSize)
+    {
+        var assetsFolder = Global.Absolute($@"GameTask\AutoPick\Assets\{captureSize.Width}x{captureSize.Height}\controller_icon_blacklist");
+        if (!Directory.Exists(assetsFolder))
+        {
+            assetsFolder = Global.Absolute(@"GameTask\AutoPick\Assets\1920x1080\controller_icon_blacklist");
+        }
+
+        return LoadControllerIconBlacklistTemplates(assetsFolder, captureSize.Width != 1920 ? captureSize.AssetScale : 1d);
+    }
+
+    internal static IReadOnlyList<RecognitionObject> LoadControllerIconBlacklistTemplates(string directoryPath, double assetScale = 1d)
+    {
+        if (!Directory.Exists(directoryPath))
+        {
+            return [];
+        }
+
+        var templates = new List<RecognitionObject>();
+        foreach (var filePath in Directory.EnumerateFiles(directoryPath, "*.png", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                using var stream = File.OpenRead(filePath);
+                var mat = Mat.FromStream(stream, ImreadModes.Color);
+                if (mat.Empty())
+                {
+                    mat.Dispose();
+                    continue;
+                }
+
+                if (Math.Abs(assetScale - 1d) > 0.001)
+                {
+                    var resized = ResizeHelper.Resize(mat, assetScale);
+                    mat.Dispose();
+                    mat = resized;
+                }
+
+                templates.Add(CreateControllerIconBlacklistTemplate(Path.GetFileNameWithoutExtension(filePath), mat));
+            }
+            catch (Exception)
+            {
+                // 损坏的可选模板不能阻断自动拾取初始化。
+            }
+        }
+
+        return templates;
+    }
+
+    internal static RecognitionObject CreateControllerIconBlacklistTemplate(string name, Mat templateMat)
+    {
+        return new RecognitionObject
+        {
+            Name = $"ControllerIconBlacklist:{name}",
+            RecognitionType = RecognitionTypes.TemplateMatch,
+            TemplateImageMat = templateMat,
+            Threshold = 0.9,
+            DrawOnWindow = false
+        }.InitTemplate();
     }
 
     private RecognitionObject LoadCustomPickKey(string key, CaptureSize captureSize)

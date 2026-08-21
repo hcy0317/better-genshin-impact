@@ -143,7 +143,14 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 if (!string.IsNullOrEmpty(_taskParam.DomainName))
                 {
                     var msg = e.Message;
-                    if (msg.Contains("复活"))
+                    if (IsDomainReviveRetry(e))
+                    {
+                        var recovered = await TryRecoverAfterDomainReviveRetry(_ct, TryExitDomainForRetry, Avatar.RecoverAtStatueOfTheSeven);
+                        msg = recovered
+                            ? "存在角色死亡，退出秘境并前往七天神像复苏后重试..."
+                            : "存在角色死亡，退出秘境失败，跳过七天神像复苏并重试...";
+                    }
+                    else if (msg.Contains("复活") || msg.Contains("复苏"))
                     {
                         msg = "存在角色死亡，复活后重试秘境...";
                     }
@@ -395,7 +402,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         await NewRetry.WaitForElementDisappear(
             pickAssets.PickRo,
-            () => Simulation.SendInput.Keyboard.KeyPress(pickAssets.PickVk),
+            () => pickAssets.PressPickKey(),
             _ct,
             20,
             500
@@ -649,7 +656,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                     else
                     {
                         Logger.LogInformation("检测到交互键");
-                        Simulation.SendInput.Keyboard.KeyPress(pickAssets.PickVk);
+                        pickAssets.PressPickKey();
                         break;
                     }
 
@@ -699,6 +706,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             }
             catch (Exception e)
             {
+                cts.Cancel();
                 Logger.LogWarning(e.Message);
                 throw;
             }
@@ -712,12 +720,70 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         // 对局结束检测
         var domainEndTask = DomainEndDetectionTask(cts);
+        // 秘境战斗不用自动战斗的结束检测，但可以复用其寻敌/靠近辅助。
+        var fightSeekAssistTask = StartFightSeekAssistTask(cts);
         // 自动吃药
         // var autoEatRecoveryHpTask = AutoEatRecoveryHpTask(cts.Token);
         combatTask.Start();
         domainEndTask.Start();
         // autoEatRecoveryHpTask.Start();
-        return Task.WhenAll(combatTask, domainEndTask);
+        return Task.WhenAll(combatTask, domainEndTask, fightSeekAssistTask);
+    }
+
+    private Task StartFightSeekAssistTask(CancellationTokenSource cts)
+    {
+        var options = AutoDomainFightSeekOptions.FromAutoFightConfig(TaskContext.Instance().Config.AutoFightConfig);
+        if (!options.Enabled)
+        {
+            return Task.CompletedTask;
+        }
+
+        Logger.LogInformation("自动秘境：启用战斗寻敌辅助，间隔 {Interval:0.##} 秒，旋转因子 {RotaryFactor}",
+            options.Interval.TotalSeconds,
+            options.RotaryFactor);
+
+        AutoFightSeek.RotationCount = 0;
+        return Task.Run(async () =>
+        {
+            try
+            {
+                if (options.InitialDelay > TimeSpan.Zero)
+                {
+                    await Delay((int)options.InitialDelay.TotalMilliseconds, cts.Token);
+                }
+
+                while (!cts.Token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        // isEndCheck=true keeps this as seek-only assist and avoids party-screen finish checks.
+                        var result = await AutoFightSeek.SeekAndFightAsync(
+                            Logger,
+                            0,
+                            0,
+                            cts.Token,
+                            true,
+                            options.RotaryFactor);
+                        AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
+                            AutoFightSeek.RotationCount,
+                            result);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogDebug(ex, "自动秘境战斗寻敌辅助异常");
+                    }
+
+                    await Delay((int)options.Interval.TotalMilliseconds, cts.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        });
     }
 
     /// <summary>
@@ -1396,14 +1462,68 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         return false;
     }
 
-    private async Task ExitDomain()
+    private async Task<bool> ExitDomain()
     {
         Simulation.SendInput.Keyboard.KeyPress(VK.VK_ESCAPE);
         await Delay(500, _ct);
         Simulation.SendInput.Keyboard.KeyPress(VK.VK_ESCAPE);
         await Delay(800, _ct);
-        using var capture = CaptureToRectArea();
-        Bv.ClickBlackConfirmButton(capture);
+        using var ra = CaptureToRectArea();
+        return Bv.ClickBlackConfirmButton(ra);
+    }
+
+    internal static bool IsDomainReviveRetry(RetryException e)
+    {
+        return e.Message.Contains("秘境内复苏界面");
+    }
+
+    internal static bool HasExitedDomainReviveState(bool isInDomainIncludingRevivePrompt)
+    {
+        return !isInDomainIncludingRevivePrompt;
+    }
+
+    internal static async Task<bool> TryRecoverAfterDomainReviveRetry(
+        CancellationToken ct,
+        Func<Task<bool>> tryExitDomainForRetryAsync,
+        Func<CancellationToken, Task> recoverAtStatueAsync)
+    {
+        ArgumentNullException.ThrowIfNull(tryExitDomainForRetryAsync);
+        ArgumentNullException.ThrowIfNull(recoverAtStatueAsync);
+
+        if (!await tryExitDomainForRetryAsync())
+        {
+            return false;
+        }
+
+        await recoverAtStatueAsync(ct);
+        return true;
+    }
+
+    private async Task<bool> TryExitDomainForRetry()
+    {
+        try
+        {
+            Logger.LogWarning("自动秘境：角色在秘境内被击败，先退出秘境再重试");
+            await ExitDomain();
+            await Delay(2000, _ct);
+            using var ra = CaptureToRectArea();
+            var exited = HasExitedDomainReviveState(Bv.IsInDomainIncludingRevivePrompt(ra));
+            if (!exited)
+            {
+                Logger.LogWarning("自动秘境：未能确认退出秘境，跳过七天神像复苏并继续按重试流程处理");
+            }
+
+            return exited;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "自动秘境：秘境内复苏后退出秘境失败，将继续按重试流程处理");
+            return false;
+        }
     }
 
     public static (bool, int) PressUseResin(ImageRegion ra, string resinName, string logPrefix = "自动秘境")

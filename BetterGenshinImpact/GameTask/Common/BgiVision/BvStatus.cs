@@ -76,8 +76,20 @@ public static partial class Bv
     /// <returns></returns>
     public static bool IsInMainUi(ImageRegion captureRa)
     {
-        using var ra = captureRa.Find(ElementRecognition.Get("PaimonMenu", captureRa));
-        return ra.IsExist() && !IsInRevivePrompt(captureRa);
+        using var paimonMenu = captureRa.Find(
+            ElementRecognition.Get("PaimonMenu", captureRa));
+        if (paimonMenu.IsExist())
+        {
+            return !IsInRevivePrompt(captureRa);
+        }
+
+        // Notification badges can cover enough of the Paimon icon to make its
+        // template miss. The friend-chat button is another stable main-HUD
+        // element and prevents an already-loaded game from being treated as
+        // the login door indefinitely.
+        using var friendChat = captureRa.Find(
+            ElementRecognition.Get("FriendChat", captureRa));
+        return friendChat.IsExist() && !IsInRevivePrompt(captureRa);
     }
 
     /// <summary>
@@ -108,6 +120,16 @@ public static partial class Bv
     /// <returns></returns>
     public static bool IsInDomain(ImageRegion captureRa)
     {
+        return IsInDomainIncludingRevivePrompt(captureRa) && !IsInRevivePrompt(captureRa);
+    }
+
+    /// <summary>
+    /// 是否在秘境中，复苏界面存在时也保持秘境判断。
+    /// </summary>
+    /// <param name="captureRa"></param>
+    /// <returns></returns>
+    public static bool IsInDomainIncludingRevivePrompt(ImageRegion captureRa)
+    {
         using var matchRegion = captureRa.Find(ElementRecognition.Get("InDomain", captureRa));
         if (matchRegion.IsEmpty())
         {
@@ -137,7 +159,7 @@ public static partial class Bv
             return IsWhite(v.Item2, v.Item1, v.Item0);
         });
 
-        return !allWhite && !IsInRevivePrompt(captureRa);
+        return !allWhite;
     }
 
     /// <summary>

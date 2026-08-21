@@ -59,7 +59,7 @@ public class ClaimMailRewardsTask
                     await Delay(200, ct);
                     // TODO 截图
 
-                    TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE); // ESC 
+                    TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE); // ESC
                 }
             }
             else

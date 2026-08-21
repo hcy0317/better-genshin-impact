@@ -3,6 +3,7 @@ using BetterGenshinImpact.GameTask.AutoPathing;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.Script.Utils;
 using BetterGenshinImpact.GameTask.Common;
 using Microsoft.Extensions.Logging;
 
@@ -13,19 +14,42 @@ public class AutoPathingScript
     private object? _config = null;
     private string _rootPath;
     private readonly LimitedFile _autoPathingFile;
+    private readonly Action<string, Exception> _logFailure;
 
     public AutoPathingScript(string rootPath, object? config)
+        : this(rootPath, config, new LimitedFile(Global.Absolute(@"User\AutoPathing")), LogFailure)
+    {
+    }
+
+    internal AutoPathingScript(
+        string rootPath,
+        object? config,
+        LimitedFile autoPathingFile,
+        Action<string, Exception> logFailure)
     {
         _config = config;
         _rootPath = rootPath;
-        _autoPathingFile = new LimitedFile(Global.Absolute(@"User\AutoPathing"));
+        _autoPathingFile = autoPathingFile;
+        _logFailure = logFailure;
     }
+
+    /// <summary>
+    /// 获取当前脚本任务是否已收到取消请求。
+    /// </summary>
+    public bool IsCancellationRequested => CancellationContext.Instance.IsCancellationRequested;
 
     public async Task Run(string json)
     {
+        await Run(json, null);
+    }
+
+    private async Task Run(string json, string? sourcePath)
+    {
         try
         {
-            var task = PathingTask.BuildFromJson(json);
+            var task = string.IsNullOrEmpty(sourcePath)
+                ? PathingTask.BuildFromJson(json)
+                : PathingTask.BuildFromJson(json, sourcePath);
             var pathExecutor = new PathExecutor(CancellationContext.Instance.Cts.Token);
             if (_config != null && _config is PathingPartyConfig patyConfig)
             {
@@ -36,23 +60,25 @@ public class AutoPathingScript
         }
         catch (Exception e)
         {
-            TaskControl.Logger.LogDebug(e,"执行地图追踪时候发生错误");
-            TaskControl.Logger.LogError("执行地图追踪时候发生错误: {Msg}",e.Message);
+            _logFailure("执行地图追踪时候发生错误", e);
+            throw;
         }
     }
 
     public async Task RunFile(string path)
     {
+        string json;
         try
         {
-            var json = await new LimitedFile(_rootPath).ReadText(path);
-            await Run(json);
+            json = await new LimitedFile(_rootPath).ReadTextOrThrow(path);
         }
         catch (Exception e)
         {
-            TaskControl.Logger.LogDebug(e,"读取文件时发生错误");
-            TaskControl.Logger.LogError("读取文件时发生错误: {Msg}",e.Message);
+            _logFailure("读取文件时发生错误", e);
+            throw;
         }
+
+        await Run(json, ScriptUtils.NormalizePath(_rootPath, path));
     }
 
     /// <summary>
@@ -61,8 +87,8 @@ public class AutoPathingScript
     /// <param name="path">在 `\User\AutoPathing` 目录下获取文件</param>
     public async Task RunFileFromUser(string path)
     {
-        var json = await AutoPathingFile.ReadText(path);
-        await Run(json);
+        var json = await AutoPathingFile.ReadTextOrThrow(path);
+        await Run(json, ScriptUtils.NormalizePath(Global.Absolute(@"User\AutoPathing"), path));
     }
 
     /// <summary>
@@ -102,7 +128,20 @@ public class AutoPathingScript
     public string ReadTextSync(string subPath) => AutoPathingFile.ReadTextSync(subPath);
 
     /// <summary>
+    /// 读取 AutoPathing 目录下指定文件的文本内容，读取失败时保留原始异常。
+    /// </summary>
+    /// <param name="subPath">相对于 User\AutoPathing 的文件路径</param>
+    /// <returns>文件文本内容</returns>
+    public string ReadTextSyncOrThrow(string subPath) => AutoPathingFile.ReadTextSyncOrThrow(subPath);
+
+    /// <summary>
     /// LimitedFile 实例，用于操作 AutoPathing 目录
     /// </summary>
     private LimitedFile AutoPathingFile => _autoPathingFile;
+
+    private static void LogFailure(string message, Exception exception)
+    {
+        TaskControl.Logger.LogDebug(exception, message);
+        TaskControl.Logger.LogError("{Message}: {ExceptionMessage}", message, exception.Message);
+    }
 }

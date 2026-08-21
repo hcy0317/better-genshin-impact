@@ -158,7 +158,7 @@ public partial class OneDragonFlowPage
     {
         var dockPanel = sender as DockPanel;
         if (dockPanel == null) return;
-        
+
         var hitTest = System.Windows.Media.VisualTreeHelper.HitTest(dockPanel, System.Windows.Input.Mouse.GetPosition(dockPanel));
         if (hitTest != null)
         {
@@ -169,7 +169,7 @@ public partial class OneDragonFlowPage
             }
         }
     }
-    
+
     private static T FindVisualParent<T>(DependencyObject child) where T : DependencyObject
     {
         var parent = System.Windows.Media.VisualTreeHelper.GetParent(child);
@@ -177,7 +177,7 @@ public partial class OneDragonFlowPage
         if (parent is T result) return result;
         return FindVisualParent<T>(parent);
     }
-    
+
     private async void SereniteaPotTpType_Clicked(object sender, RoutedEventArgs e)
     {
         if (ViewModel.SelectedConfig == null)

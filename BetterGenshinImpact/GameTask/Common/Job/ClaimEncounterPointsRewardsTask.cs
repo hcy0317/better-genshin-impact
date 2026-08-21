@@ -43,6 +43,7 @@ public class ClaimEncounterPointsRewardsTask
         {
             Logger.LogDebug(e, "领取长效历练点奖励异常");
             Logger.LogError("领取长效历练点奖励异常: {Msg}", e.Message);
+            throw;
         }
     }
 
@@ -102,8 +103,8 @@ public class ClaimEncounterPointsRewardsTask
         await Delay(1000, ct);
 
         // 领取
-        using var claimCapture = CaptureToRectArea();
-        if (ClickClaimBtn(claimCapture))
+        var claimed = CaptureScope.Use(CaptureToRectArea(), ClickClaimBtn);
+        if (claimed)
         {
             await Delay(1000, ct);
 

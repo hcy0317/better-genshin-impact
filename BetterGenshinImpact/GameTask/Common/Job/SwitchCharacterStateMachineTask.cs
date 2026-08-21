@@ -123,6 +123,16 @@ public sealed class SwitchCharacterStateMachineTask : StateMachineBase<SwitchCha
 
     private sealed record TeamSlotSnapshot(int Slot, string? Name);
 
+    private sealed record DebugTeamSlotSnapshot(int Slot, string? Name, bool IsSelected);
+
+    internal sealed record SwitchPlanDebugItem(int Slot, string Name, bool IsRefill);
+
+    internal sealed record SwitchPlanDebugResult(
+        bool Success,
+        int[] SlotsToClear,
+        SwitchPlanDebugItem[] SelectionPlan,
+        string? FailureReason);
+
     private AvatarGridIconRecognizer Recognizer =>
         _recognizer ?? throw new InvalidOperationException("切换角色：头像识别器未初始化");
 
@@ -208,7 +218,43 @@ public sealed class SwitchCharacterStateMachineTask : StateMachineBase<SwitchCha
     /// 3 人联机时 1P 可操作 1、2 号槽位，2P 可操作 3 号槽位，3P 可操作 4 号槽位；
     /// 4 人联机时各玩家可操作与玩家编号相同的槽位。当前玩家不可操作的槽位参数会被忽略。
     /// </remarks>
+    public Task<bool> Start(
+        string? slot1,
+        string? slot2,
+        string? slot3,
+        string? slot4,
+        CancellationToken ct)
+    {
+        return Start(slot1 ?? string.Empty, slot2 ?? string.Empty, slot3 ?? string.Empty, slot4 ?? string.Empty, true, ct);
+    }
+
     public async Task<bool> Start(
+        string slot1,
+        string slot2,
+        string slot3,
+        string slot4,
+        bool usePhysicalSlots,
+        CancellationToken ct)
+    {
+        try
+        {
+            return await StartCore(slot1, slot2, slot3, slot4, usePhysicalSlots, ct);
+        }
+        catch (PartySetupFailedException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw WrapSwitchCharacterException(exception);
+        }
+    }
+
+    private async Task<bool> StartCore(
         string slot1,
         string slot2,
         string slot3,
@@ -925,12 +971,12 @@ public sealed class SwitchCharacterStateMachineTask : StateMachineBase<SwitchCha
     /// </summary>
     /// <param name="slots">1-4 号槽位角色名。</param>
     /// <returns>目标槽位角色列表。</returns>
-    private static List<TargetRole> ParseRoles(IReadOnlyList<string> slots)
+    private static List<TargetRole> ParseRoles(IReadOnlyList<string?> slots)
     {
         List<TargetRole> roles = [];
         for (int i = 0; i < slots.Count; i++)
         {
-            var name = slots[i].Trim();
+            var name = NormalizeSlotName(slots[i]);
             if (string.IsNullOrEmpty(name))
             {
                 continue;
@@ -940,6 +986,114 @@ public sealed class SwitchCharacterStateMachineTask : StateMachineBase<SwitchCha
         }
 
         return roles;
+    }
+
+    internal static string NormalizeSlotName(string? value)
+    {
+        return value?.Trim() ?? string.Empty;
+    }
+
+    internal static PartySetupFailedException WrapSwitchCharacterException(Exception exception)
+    {
+        return new PartySetupFailedException($"切换角色：{exception.Message}", exception);
+    }
+
+    internal static SwitchPlanDebugResult BuildSelectionPlanForTesting(
+        IReadOnlyList<string?> targetSlots,
+        IReadOnlyList<string?> currentSlots)
+    {
+        var roles = ParseRoles(PadSlots(targetSlots));
+        var initialSlots = PadSlots(currentSlots)
+            .Select((name, index) =>
+            {
+                var normalizedName = NormalizeSlotName(name);
+                return new DebugTeamSlotSnapshot(
+                    index + 1,
+                    string.IsNullOrEmpty(normalizedName) ? null : normalizedName,
+                    !string.IsNullOrEmpty(normalizedName));
+            })
+            .ToList();
+
+        var currentNameBySlot = initialSlots.ToDictionary(slot => slot.Slot, slot => slot.Name);
+        var rolesToSelect = roles
+            .Where(role => !currentNameBySlot.TryGetValue(role.Slot, out var currentName) || !role.Matches(currentName))
+            .OrderBy(role => role.Slot)
+            .ToList();
+        if (rolesToSelect.Count == 0)
+        {
+            return new SwitchPlanDebugResult(true, [], [], null);
+        }
+
+        var affectedSlots = rolesToSelect.Select(role => role.Slot).ToHashSet();
+        foreach (var currentSlot in initialSlots.Where(slot => slot.Name != null))
+        {
+            foreach (var role in rolesToSelect)
+            {
+                if (role.Matches(currentSlot.Name) && role.Slot != currentSlot.Slot)
+                {
+                    affectedSlots.Add(currentSlot.Slot);
+                }
+            }
+        }
+
+        var firstAffectedSlot = affectedSlots.Min();
+        var fixedPrefixCount = initialSlots.Count(slot => slot.IsSelected && slot.Slot < firstAffectedSlot);
+        if (fixedPrefixCount < firstAffectedSlot - 1)
+        {
+            var emptySlot = fixedPrefixCount + 1;
+            return new SwitchPlanDebugResult(
+                false,
+                affectedSlots.OrderBy(slot => slot).ToArray(),
+                [],
+                $"目标槽位 {roles.Max(role => role.Slot)} 前存在无法补齐的空槽 {emptySlot}，请同时指定前置槽位");
+        }
+
+        var slotsToClear = Enumerable.Range(firstAffectedSlot, 5 - firstAffectedSlot).ToArray();
+        var excludedNames = roles.SelectMany(role => role.ConflictNames).ToHashSet(StringComparer.Ordinal);
+        var preservedCandidates = new Queue<string>();
+        foreach (var slot in initialSlots.OrderBy(slot => slot.Slot))
+        {
+            if (slot.Slot < firstAffectedSlot || string.IsNullOrEmpty(slot.Name) || excludedNames.Contains(slot.Name))
+            {
+                continue;
+            }
+
+            preservedCandidates.Enqueue(slot.Name);
+            excludedNames.Add(slot.Name);
+        }
+
+        var targetBySlot = roles.ToDictionary(role => role.Slot);
+        var selectionPlan = new List<SwitchPlanDebugItem>();
+        var maxTargetSlot = rolesToSelect.Max(role => role.Slot);
+        var desiredLength = Math.Min(4, Math.Max(initialSlots.Count(slot => slot.IsSelected), maxTargetSlot));
+        for (var slot = firstAffectedSlot; slot <= desiredLength; slot++)
+        {
+            if (targetBySlot.TryGetValue(slot, out var targetRole))
+            {
+                selectionPlan.Add(new SwitchPlanDebugItem(slot, targetRole.Name, false));
+                continue;
+            }
+
+            if (!preservedCandidates.TryDequeue(out var refillName))
+            {
+                return new SwitchPlanDebugResult(
+                    false,
+                    slotsToClear,
+                    selectionPlan.ToArray(),
+                    $"目标槽位 {maxTargetSlot} 前存在无法补齐的空槽 {slot}，请同时指定前置槽位");
+            }
+
+            selectionPlan.Add(new SwitchPlanDebugItem(slot, refillName, true));
+        }
+
+        return new SwitchPlanDebugResult(true, slotsToClear, selectionPlan.ToArray(), null);
+    }
+
+    private static string?[] PadSlots(IReadOnlyList<string?> slots)
+    {
+        return Enumerable.Range(0, 4)
+            .Select(index => index < slots.Count ? slots[index] : null)
+            .ToArray();
     }
 
     /// <summary>

@@ -9,6 +9,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Vanara.PInvoke;
 
 namespace BetterGenshinImpact.GameTask;
@@ -17,6 +18,8 @@ public class SystemControl
 {
     private const string ChildSessionGenshinStartArgs =
         "-popupwindow -screen-width 1920 -screen-height 1080";
+    private static readonly TimeSpan GenshinWindowWaitTimeout = TimeSpan.FromSeconds(75);
+    private static readonly ILogger<SystemControl> Logger = App.GetLogger<SystemControl>();
 
     private static readonly Regex ChildSessionOverriddenArgumentRegex = new(
         @"(?<!\S)(?:-popupwindow|-screen-(?:width|height)(?:\s*=\s*(?:""[^""]*""|\S+)|\s+(?:""[^""]*""|(?!-)\S+))?)(?=\s|$)",
@@ -42,42 +45,169 @@ public class SystemControl
             cfg.GenshinStartArgs,
             InstanceBootstrap.Current.Context.InstanceType == BetterGiInstanceType.ChildSession);
 
-        if (cfg.StartGameWithCmd)
+        StartLocalGame(path, workdir, arg, cfg.StartGameWithCmd);
+        var handle = await WaitForGenshinWindowAsync(GenshinWindowWaitTimeout);
+        if (handle != 0)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = $"/c start \"\" /d \"{workdir}\" \"{path}\" {arg}",
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            Process.Start(psi);
+            return handle;
+        }
+
+        if (!IsGenshinImpactRunningInCurrentSession())
+        {
+            Logger.LogWarning("关联启动后 75 秒内未发现原神进程，自动重试启动一次");
+            StartLocalGame(path, workdir, arg, cfg.StartGameWithCmd);
         }
         else
         {
-            Process.Start(new ProcessStartInfo(path)
+            Logger.LogWarning("原神进程已经出现但窗口尚未就绪，继续等待窗口");
+        }
+
+        handle = await WaitForGenshinWindowAsync(GenshinWindowWaitTimeout);
+        if (handle == 0)
+        {
+            Logger.LogError("关联启动原神失败：150 秒内未发现当前会话中的游戏窗口");
+        }
+
+        return handle;
+    }
+
+    internal static ProcessStartInfo BuildLocalGameStartInfo(
+        string path,
+        string workdir,
+        string arg,
+        bool startGameWithCmd)
+    {
+        if (!startGameWithCmd)
+        {
+            return new ProcessStartInfo(path)
             {
                 UseShellExecute = true,
                 Arguments = arg,
                 WorkingDirectory = workdir
-            });
+            };
         }
 
-        for (var i = 0; i < 5; i++)
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            WorkingDirectory = workdir
+        };
+
+        var extension = Path.GetExtension(path);
+        string command;
+        if (extension.Equals(".cmd", StringComparison.OrdinalIgnoreCase) ||
+            extension.Equals(".bat", StringComparison.OrdinalIgnoreCase))
+        {
+            command = string.IsNullOrWhiteSpace(arg)
+                ? $"\"{path}\""
+                : $"\"{path}\" {arg}";
+        }
+        else
+        {
+            command = $"start \"\" /d \"{workdir}\" \"{path}\" {arg}".TrimEnd();
+        }
+
+        // cmd.exe does not understand the backslash-escaped quotes generated when a
+        // complete command is placed in ProcessStartInfo.ArgumentList. Supplying the
+        // conventional /s /c "<command>" string keeps quoted paths with spaces intact.
+        startInfo.Arguments = $"/d /s /c \"{command}\"";
+        return startInfo;
+    }
+
+    private static void StartLocalGame(
+        string path,
+        string workdir,
+        string arg,
+        bool startGameWithCmd)
+    {
+        var startInfo = BuildLocalGameStartInfo(path, workdir, arg, startGameWithCmd);
+        Logger.LogInformation(
+            "启动原神关联命令：Path={Path}, WorkingDirectory={WorkingDirectory}, StartGameWithCmd={StartGameWithCmd}, Arguments={Arguments}, Session={SessionId}",
+            path,
+            workdir,
+            startGameWithCmd,
+            arg,
+            Process.GetCurrentProcess().SessionId);
+
+        var process = Process.Start(startInfo);
+        if (process is null)
+        {
+            throw new InvalidOperationException($"无法创建原神启动进程：{path}");
+        }
+
+        Logger.LogInformation(
+            "原神关联启动进程已创建：PID={ProcessId}, ProcessName={ProcessName}, Session={SessionId}",
+            process.Id,
+            process.ProcessName,
+            process.SessionId);
+
+        process.EnableRaisingEvents = true;
+        process.Exited += (_, _) =>
+        {
+            try
+            {
+                Logger.LogInformation(
+                    "原神关联启动进程已退出：PID={ProcessId}, ExitCode={ExitCode}",
+                    process.Id,
+                    process.ExitCode);
+            }
+            catch (InvalidOperationException)
+            {
+                // The process object may no longer expose its exit code during shutdown.
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        };
+    }
+
+    private static async Task<nint> WaitForGenshinWindowAsync(TimeSpan timeout)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
         {
             var handle = FindGenshinImpactHandle();
             if (handle != 0)
             {
-                await Task.Delay(2333);
-                handle = FindGenshinImpactHandle();
-                await Task.Delay(2577);
-                return handle;
+                await Task.Delay(2500);
+                return FindGenshinImpactHandle();
             }
 
-            await Task.Delay(5577);
+            await Task.Delay(2000);
         }
 
         return FindGenshinImpactHandle();
+    }
+
+    private static bool IsGenshinImpactRunningInCurrentSession()
+    {
+        var currentSessionId = Process.GetCurrentProcess().SessionId;
+        foreach (var processName in TaskContext.Instance().GetGenshinGameProcessNameList())
+        {
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        if (process.SessionId == currentSessionId && !process.HasExited)
+                        {
+                            return true;
+                        }
+                    }
+                    catch
+                    {
+                        // Process exited while it was being inspected.
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     internal static string BuildGenshinStartArguments(string? configuredArguments, bool isChildSession)

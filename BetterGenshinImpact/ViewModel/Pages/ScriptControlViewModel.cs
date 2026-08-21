@@ -49,6 +49,13 @@ namespace BetterGenshinImpact.ViewModel.Pages;
 
 public partial class ScriptControlViewModel : ViewModel
 {
+    private sealed class JsScriptNameEditItem(ScriptProject project, TextBox displayNameTextBox)
+    {
+        public ScriptProject Project { get; } = project;
+
+        public TextBox DisplayNameTextBox { get; } = displayNameTextBox;
+    }
+
     private readonly ISnackbarService _snackbarService;
 
     private readonly ILogger<ScriptControlViewModel> _logger = App.GetLogger<ScriptControlViewModel>();
@@ -736,7 +743,7 @@ public partial class ScriptControlViewModel : ViewModel
         var result = PromptDialog.Prompt("请选择需要添加的JS脚本", "请选择需要添加的JS脚本", stackPanel, new Size(500, 600));
         if (!string.IsNullOrEmpty(result))
         {
-            AddSelectedJsScripts((StackPanel)stackPanel.Content);
+            AddSelectedJsScriptsWithDisplayNames((StackPanel)stackPanel.Content);
         }
     }
 
@@ -827,15 +834,123 @@ public partial class ScriptControlViewModel : ViewModel
         }
     }
 
-    private void AddSelectedJsScripts(StackPanel stackPanel)
+    private void AddSelectedJsScriptsWithDisplayNames(StackPanel stackPanel)
     {
+        if (SelectedScriptGroup == null)
+        {
+            return;
+        }
+
+        var selectedProjects = CollectSelectedJsScriptProjects(stackPanel);
+        if (selectedProjects.Count == 0)
+        {
+            Toast.Warning("未选择JS脚本");
+            return;
+        }
+
+        var nameItems = new List<JsScriptNameEditItem>();
+        var nameEditorPanel = CreateJsScriptNameEditorPanel(selectedProjects, nameItems);
+        var height = Math.Min(620, 140 + selectedProjects.Count * 74);
+        var result = PromptDialog.Prompt("请设置JS脚本在脚本组中的显示名称", "设置JS脚本显示名称", nameEditorPanel, new Size(560, height));
+        if (string.IsNullOrEmpty(result))
+        {
+            return;
+        }
+
+        foreach (var item in nameItems)
+        {
+            SelectedScriptGroup.AddProject(new ScriptGroupProject(item.Project, item.DisplayNameTextBox.Text));
+        }
+    }
+
+    private static List<ScriptProject> CollectSelectedJsScriptProjects(StackPanel stackPanel)
+    {
+        var selectedProjects = new List<ScriptProject>();
         foreach (var child in stackPanel.Children)
         {
-            if (child is CheckBox { IsChecked: true } checkBox && checkBox.Tag is string folderName)
+            if (TryGetSelectedJsScript(child, out var folderName))
             {
-                SelectedScriptGroup?.AddProject(new ScriptGroupProject(new ScriptProject(folderName)));
+                selectedProjects.Add(new ScriptProject(folderName));
             }
         }
+
+        return selectedProjects;
+    }
+
+    private static ScrollViewer CreateJsScriptNameEditorPanel(List<ScriptProject> selectedProjects, List<JsScriptNameEditItem> nameItems)
+    {
+        var stackPanel = new StackPanel();
+
+        for (var i = 0; i < selectedProjects.Count; i++)
+        {
+            var script = selectedProjects[i];
+            var label = new TextBlock
+            {
+                Text = script.FolderName + " - " + script.Manifest.Name,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6, 0, 2)
+            };
+            var displayNameTextBox = new TextBox
+            {
+                Text = script.Manifest.Name,
+                ToolTip = "显示名称（留空使用脚本名）",
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            if (i == 0)
+            {
+                displayNameTextBox.Loaded += delegate
+                {
+                    displayNameTextBox.Focus();
+                    displayNameTextBox.SelectAll();
+                };
+            }
+
+            nameItems.Add(new JsScriptNameEditItem(script, displayNameTextBox));
+            stackPanel.Children.Add(label);
+            stackPanel.Children.Add(displayNameTextBox);
+        }
+
+        return new ScrollViewer
+        {
+            Content = stackPanel,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
+    }
+
+    private static bool TryGetSelectedJsScript(object child, out string folderName)
+    {
+        folderName = string.Empty;
+
+        if (child is CheckBox { IsChecked: true } directCheckBox)
+        {
+            return TryReadSelectedJsScript(directCheckBox, out folderName);
+        }
+
+        if (child is Panel panel)
+        {
+            foreach (var panelChild in panel.Children)
+            {
+                if (panelChild is CheckBox { IsChecked: true } checkBox)
+                {
+                    return TryReadSelectedJsScript(checkBox, out folderName);
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadSelectedJsScript(CheckBox checkBox, out string folderName)
+    {
+        folderName = string.Empty;
+
+        if (checkBox.Tag is string legacyFolderName)
+        {
+            folderName = legacyFolderName;
+            return true;
+        }
+
+        return false;
     }
 
     [RelayCommand]
@@ -1687,6 +1802,32 @@ public partial class ScriptControlViewModel : ViewModel
     }
 
     [RelayCommand]
+    public void OnRenameJsScript(ScriptGroupProject? item)
+    {
+        if (item == null)
+        {
+            return;
+        }
+
+        if (item.Type != "Javascript")
+        {
+            Toast.Warning("只有JS脚本才支持重命名显示名称");
+            return;
+        }
+
+        var newName = PromptDialog.Prompt("请输入JS脚本在脚本组中的显示名称", "重命名JS脚本", item.Name);
+        if (string.IsNullOrWhiteSpace(newName))
+        {
+            return;
+        }
+
+        if (item.RenameDisplayName(newName) && SelectedScriptGroup != null)
+        {
+            WriteScriptGroup(SelectedScriptGroup);
+        }
+    }
+
+    [RelayCommand]
     public async void OnDeleteScriptByFolder(ScriptGroupProject? item)
     {
         if (item == null)
@@ -2198,7 +2339,10 @@ public partial class ScriptControlViewModel : ViewModel
         }
     }
 
-    public async Task OnContinueTaskProgressAsync(string name, List<TaskProgress>? taskProgresses = null)
+    public async Task OnContinueTaskProgressAsync(
+        string name,
+        List<TaskProgress>? taskProgresses = null,
+        bool propagateExceptions = false)
     {
         if (taskProgresses == null)
         {
@@ -2227,17 +2371,21 @@ public partial class ScriptControlViewModel : ViewModel
             TaskProgressManager.GenerNextProjectInfo(taskProgress, sg);
             if (taskProgress.Next == null)
             {
-                _logger.LogWarning("无法定位到下一个要执行的项目：next为空（" + taskProgress.Name + ")");
+                var message = $"无法定位到下一个要执行的项目：next为空（{taskProgress.Name}）";
+                _logger.LogWarning("{Message}", message);
+                TaskProgressResumeFailurePolicy.ThrowIfManaged(message, propagateExceptions);
             }
             else
             {
-                await StartGroups(sg, taskProgress);
+                await StartGroups(sg, taskProgress, propagateExceptions: propagateExceptions);
             }
 
         }
         else
         {
-            _logger.LogWarning("无法定位到下一个要执行的项目:taskProgress为空");
+            var message = $"无法定位任务进度记录：taskProgress为空（{name}）";
+            _logger.LogWarning("{Message}", message);
+            TaskProgressResumeFailurePolicy.ThrowIfManaged(message, propagateExceptions);
         }
     }
 
@@ -2258,7 +2406,7 @@ public partial class ScriptControlViewModel : ViewModel
             taskProgressName = names[0];
         }
 
-        await OnContinueTaskProgressAsync(taskProgressName);
+        await OnContinueTaskProgressAsync(taskProgressName, propagateExceptions: true);
     }
 
     [RelayCommand]
@@ -2403,31 +2551,28 @@ public partial class ScriptControlViewModel : ViewModel
         {
             ReadScriptGroup();
         }
-        List<ScriptGroup> scriptGroups = new List<ScriptGroup>();
-        foreach (var name in names)
-        {
-            try
-            {
-                var group = ScriptGroups.First(x => x.Name == name);
-                scriptGroups.Add(group);
-            }
-            catch (InvalidOperationException)
-            {
-                _logger.LogWarning("传入的配置组名称不存在:{Name}", name);
-            }
-        }
 
-        if (scriptGroups.Count > 0)
+        var requestedNames = names.ToList();
+        var missingNames = ManagedScriptGroupSelectionPolicy.GetMissingNames(
+            requestedNames,
+            ScriptGroups.Select(group => group.Name));
+        foreach (var missingName in missingNames)
         {
-            await StartGroups(scriptGroups);
+            _logger.LogWarning("传入的配置组名称不存在:{Name}", missingName);
         }
-        else
-        {
-            _logger.LogWarning("需要执行的配置组为空");
-        }
+        ManagedScriptGroupSelectionPolicy.ThrowIfInvalid(requestedNames, missingNames);
+
+        var scriptGroups = requestedNames
+            .Select(name => ScriptGroups.First(group => group.Name == name))
+            .ToList();
+        await StartGroups(scriptGroups, propagateExceptions: true);
     }
 
-    public async Task StartGroups(List<ScriptGroup> scriptGroups, TaskProgress? taskProgress = null, bool loop = false)
+    public async Task StartGroups(
+        List<ScriptGroup> scriptGroups,
+        TaskProgress? taskProgress = null,
+        bool loop = false,
+        bool propagateExceptions = false)
     {
         _logger.LogInformation("开始连续执行选中配置组:{Names}", string.Join(",", scriptGroups.Select(x => x.Name)));
         try
@@ -2456,7 +2601,11 @@ public partial class ScriptControlViewModel : ViewModel
                 }
                 taskProgress.CurrentScriptGroupName = scriptGroup.Name;
                 TaskProgressManager.SaveTaskProgress(taskProgress);
-                await _scriptService.RunMulti(GetNextProjects(scriptGroup), scriptGroup.Name, taskProgress);
+                await _scriptService.RunMulti(
+                    GetNextProjects(scriptGroup),
+                    scriptGroup.Name,
+                    taskProgress,
+                    propagateExceptions);
                 await Task.Delay(2000);
             }
 
@@ -2466,7 +2615,7 @@ public partial class ScriptControlViewModel : ViewModel
                 taskProgress.LastScriptGroupName = null;
                 taskProgress.LastSuccessScriptGroupProjectInfo = null;
                 taskProgress.Next = null;
-                await StartGroups(scriptGroups, taskProgress);
+                await StartGroups(scriptGroups, taskProgress, propagateExceptions: propagateExceptions);
             }
             else
             {
@@ -2482,6 +2631,10 @@ public partial class ScriptControlViewModel : ViewModel
         catch (Exception e)
         {
             Debug.WriteLine(e.Message);
+            if (propagateExceptions)
+            {
+                throw;
+            }
         }
         finally
         {
@@ -2489,5 +2642,46 @@ public partial class ScriptControlViewModel : ViewModel
         }
 
 
+    }
+}
+
+internal static class TaskProgressResumeFailurePolicy
+{
+    internal static void ThrowIfManaged(string message, bool propagateExceptions)
+    {
+        if (propagateExceptions)
+        {
+            throw new InvalidOperationException(message);
+        }
+    }
+}
+
+internal static class ManagedScriptGroupSelectionPolicy
+{
+    internal static IReadOnlyList<string> GetMissingNames(
+        IEnumerable<string> requestedNames,
+        IEnumerable<string> availableNames)
+    {
+        var availableNameSet = availableNames.ToHashSet(StringComparer.Ordinal);
+        return requestedNames
+            .Where(name => !availableNameSet.Contains(name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    internal static void ThrowIfInvalid(
+        IReadOnlyCollection<string> requestedNames,
+        IReadOnlyCollection<string> missingNames)
+    {
+        if (requestedNames.Count == 0)
+        {
+            throw new InvalidOperationException("需要执行的配置组为空。");
+        }
+
+        if (missingNames.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"传入的配置组名称不存在：{string.Join("、", missingNames)}");
+        }
     }
 }
