@@ -324,6 +324,7 @@ public partial class ScriptControlViewModel : ViewModel
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
         uiMessageBox.SourceInitialized += (s, e) => WindowHelper.TryApplySystemBackdrop(uiMessageBox);
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
 
         void OnQuestionButtonOnClick(object sender, RoutedEventArgs args)
         {
@@ -1739,6 +1740,7 @@ public partial class ScriptControlViewModel : ViewModel
             Owner = Application.Current.MainWindow,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
         await uiMessageBox.ShowDialogAsync();
         editor.DataContext = null;
     }
@@ -1784,6 +1786,7 @@ public partial class ScriptControlViewModel : ViewModel
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
             };
             AutoTranslateInterceptor.SetEnableAutoTranslate(uiMessageBox, false);
+            WindowHelper.CenterOnVisibleOwner(uiMessageBox);
             uiMessageBox.ShowDialogAsync();
 
             // 由于 JsScriptSettingsObject 的存在，这里只能手动再次保存配置
@@ -1989,7 +1992,7 @@ public partial class ScriptControlViewModel : ViewModel
             }
 
             var file = Path.Combine(ScriptGroupPath, $"{scriptGroup.Name}.json");
-            File.WriteAllText(file, scriptGroup.ToJson());
+            scriptGroup.WriteToFileAtomically(file);
         }
         catch (Exception e)
         {
@@ -2316,6 +2319,7 @@ public partial class ScriptControlViewModel : ViewModel
             Owner = Application.Current.MainWindow,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
 
         var result = await uiMessageBox.ShowDialogAsync();
         if (result == MessageBoxResult.Primary)
@@ -2511,6 +2515,7 @@ public partial class ScriptControlViewModel : ViewModel
             Owner = Application.Current.MainWindow,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
         };
+        WindowHelper.CenterOnVisibleOwner(uiMessageBox);
 
         var result = await uiMessageBox.ShowDialogAsync();
         if (result == MessageBoxResult.Primary)
