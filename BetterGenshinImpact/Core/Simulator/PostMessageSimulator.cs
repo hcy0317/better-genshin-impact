@@ -17,6 +17,7 @@ public class PostMessageSimulator
 
     public static readonly uint WM_RBUTTONDOWN = 0x204;
     public static readonly uint WM_RBUTTONUP = 0x205;
+    public static readonly uint WM_MBUTTONUP = 0x208;
 
     private readonly IntPtr _hWnd;
 
@@ -108,6 +109,12 @@ public class PostMessageSimulator
     public PostMessageSimulator RightButtonUp()
     {
         User32.PostMessage(_hWnd, WM_RBUTTONUP, IntPtr.Zero);
+        return this;
+    }
+
+    public PostMessageSimulator MiddleButtonUp()
+    {
+        User32.PostMessage(_hWnd, WM_MBUTTONUP, IntPtr.Zero);
         return this;
     }
 

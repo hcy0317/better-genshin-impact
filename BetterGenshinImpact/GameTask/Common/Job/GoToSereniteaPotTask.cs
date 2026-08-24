@@ -605,49 +605,98 @@ internal class GoToSereniteaPotTask
     // 处理最后收尾操作
     private async Task Finished(CancellationToken ct)
     {
-        var isMainUi = false;
         Logger.LogInformation("领取尘歌壶奖励:{text}", "退出到主页");
-        // 识别page 关闭按钮。
-        using var ra6 = CaptureToRectArea();
-        if (ra6.Find(ElementRecognition.Get("PageCloseWhite", ra6), a => a.Click()).IsExist())
-        {
-            await Delay(1000, ct);
-        }
-
-        var quitOption = await _chooseTalkOptionTask.SingleSelectText(this.ayuanByeString, ct, skipTimes: 20);
-        if (quitOption != TalkOptionRes.FoundAndClick)
-        {
-            using var mainUiCapture = CaptureToRectArea();
-            isMainUi = Bv.IsInMainUi(mainUiCapture);
-            if (SereniteaPotExitPolicy.ShouldRecoverMainUi(quitOption, isMainUi))
+        var exited = await SereniteaPotExitController.ExitToMainUiAsync(
+            ObserveExitState,
+            async token =>
             {
-                Logger.LogWarning("领取尘歌壶奖励:{text}", "未找到“再见”选项，尝试强制退出阿圆对话。");
-                await new ReturnMainUiTask().Start(ct);
-                isMainUi = CaptureScope.Use(CaptureToRectArea(), Bv.IsInMainUi);
-            }
-        }
-
-        if (!isMainUi)
-        {
-            await Delay(300, ct);
-            isMainUi = await NewRetry.WaitForAction(() =>
+                var result = await _chooseTalkOptionTask.SingleSelectText(ayuanByeString, token, skipTimes: 4);
+                return result == TalkOptionRes.FoundAndClick;
+            },
+            async token =>
             {
-                using var ra = CaptureToRectArea();
-                if (!Bv.IsInMainUi(ra))
+                var selected = await _chooseTalkOptionTask.TrySelectLastOptionOnce(token);
+                if (selected)
                 {
-                    ra.Click();
-                    return false;
+                    Logger.LogInformation("领取尘歌壶奖励: 无法识别“再见”文字，已点击最下方对话选项。");
                 }
-                else
-                    return true;
-            }, ct);
+                return selected;
+            },
+            AdvanceAYuanDialogue,
+            CloseKnownAYuanInterface,
+            PressEscapeForAYuanExit,
+            Delay,
+            ct);
+        if (!exited)
+        {
+            throw new SereniteaPotExitException("多次尝试后仍未退出阿圆对话或相关界面。");
         }
-
-        SereniteaPotExitPolicy.EnsureRecovered(isMainUi);
+        Logger.LogInformation("领取尘歌壶奖励:{text}", "已确认退出阿圆对话和相关界面");
 
         // TP回主世界
         var tp = new TpTask(ct);
         await tp.Tp(4508.97509765625, 3630.557373046875); // TP到枫丹
+    }
+
+    private SereniteaPotExitState ObserveExitState()
+    {
+        using var capture = CaptureToRectArea();
+        if (Bv.IsInMainUi(capture))
+        {
+            return SereniteaPotExitState.MainUi;
+        }
+
+        using var sereniteaClose = capture.Find(ElementRecognition.Get("SereniteapotPageClose", capture));
+        if (sereniteaClose.IsExist())
+        {
+            return SereniteaPotExitState.ClosableUi;
+        }
+
+        using var pageClose = capture.Find(ElementRecognition.Get("PageCloseWhite", capture));
+        if (pageClose.IsExist())
+        {
+            return SereniteaPotExitState.ClosableUi;
+        }
+
+        if (!Bv.IsInTalkUi(capture))
+        {
+            return SereniteaPotExitState.OtherUi;
+        }
+
+        return _chooseTalkOptionTask.HasTalkOptions(capture)
+            ? SereniteaPotExitState.TalkOptionsUi
+            : SereniteaPotExitState.TalkUi;
+    }
+
+    private static void AdvanceAYuanDialogue()
+    {
+        Logger.LogDebug("领取尘歌壶奖励: 尚未出现阿圆对话选项，继续推进对话。");
+        TaskContext.Instance().PostMessageSimulator.KeyPressBackground(Vanara.PInvoke.User32.VK.VK_SPACE);
+    }
+
+    private static void CloseKnownAYuanInterface()
+    {
+        using var capture = CaptureToRectArea();
+        using var sereniteaClose = capture.Find(ElementRecognition.Get("SereniteapotPageClose", capture));
+        if (sereniteaClose.IsExist())
+        {
+            Logger.LogDebug("领取尘歌壶奖励: 关闭阿圆奖励或商店界面。");
+            sereniteaClose.Click();
+            return;
+        }
+
+        using var pageClose = capture.Find(ElementRecognition.Get("PageCloseWhite", capture));
+        if (pageClose.IsExist())
+        {
+            Logger.LogDebug("领取尘歌壶奖励: 关闭阿圆相关页面。");
+            pageClose.Click();
+        }
+    }
+
+    private static void PressEscapeForAYuanExit()
+    {
+        Logger.LogDebug("领取尘歌壶奖励: 当前仍不是主界面，发送 Esc 尝试退出。");
+        TaskContext.Instance().PostMessageSimulator.KeyPressBackground(Vanara.PInvoke.User32.VK.VK_ESCAPE);
     }
 
     public async Task DoOnce(CancellationToken ct)

@@ -27,16 +27,68 @@ public class Simulation
     {
         foreach (User32.VK key in Enum.GetValues(typeof(User32.VK)))
         {
+            if (key is User32.VK.VK_LBUTTON or User32.VK.VK_RBUTTON or User32.VK.VK_MBUTTON)
+            {
+                continue;
+            }
+
             // 检查键是否被按下
             if (IsKeyDown(key)) // 强制转换 VK 枚举为 int
             {
                 TaskControl.Logger.LogDebug($"解除{key}的按下状态.");
-                SendInput.Keyboard.KeyUp(key);
+                DispatchWithPostMessageFallback(
+                    () => SendInput.Keyboard.KeyUp(key),
+                    () => TaskContext.Instance().PostMessageSimulator.KeyUpBackground(key));
             }
         }
-		SendInput.Mouse.LeftButtonUp();
-        SendInput.Mouse.RightButtonUp();
-        SendInput.Mouse.MiddleButtonUp();
+
+        ReleaseMouseButtonIfDown(
+            User32.VK.VK_LBUTTON,
+            () => SendInput.Mouse.LeftButtonUp(),
+            () => TaskContext.Instance().PostMessageSimulator.LeftButtonUp());
+        ReleaseMouseButtonIfDown(
+            User32.VK.VK_RBUTTON,
+            () => SendInput.Mouse.RightButtonUp(),
+            () => TaskContext.Instance().PostMessageSimulator.RightButtonUp());
+        ReleaseMouseButtonIfDown(
+            User32.VK.VK_MBUTTON,
+            () => SendInput.Mouse.MiddleButtonUp(),
+            () => TaskContext.Instance().PostMessageSimulator.MiddleButtonUp());
+    }
+
+    private static void ReleaseMouseButtonIfDown(
+        User32.VK key,
+        Action sendInputAction,
+        Action postMessageAction)
+    {
+        if (IsKeyDown(key))
+        {
+            DispatchWithPostMessageFallback(sendInputAction, postMessageAction);
+        }
+    }
+
+    internal static bool DispatchWithPostMessageFallback(
+        Action sendInputAction,
+        Action postMessageAction)
+    {
+        ArgumentNullException.ThrowIfNull(sendInputAction);
+        ArgumentNullException.ThrowIfNull(postMessageAction);
+
+        try
+        {
+            sendInputAction();
+            return false;
+        }
+        catch (InputDispatchException)
+        {
+            postMessageAction();
+            return true;
+        }
+    }
+
+    internal static bool ShouldReleaseInput(short state)
+    {
+        return (state & 0x8000) != 0;
     }
 
     public static bool IsKeyDown(User32.VK key)
@@ -45,7 +97,7 @@ public class Simulation
         var state = User32.GetAsyncKeyState((int)key);
 
         // 检查高位是否为 1（表示按键被按下）
-        return (state & 0x8000) != 0;
+        return ShouldReleaseInput(state);
     }
 
     private static void PrepareGameWindowForInput()

@@ -279,7 +279,7 @@ public static partial class Bv
             CultureInfo cultureInfo = new CultureInfo(TaskContext.Instance().Config.OtherConfig.GameCultureInfoName);
             IStringLocalizer stringLocalizer = App.GetService<IStringLocalizer<BvResxHelper>>() ?? throw new Exception();
             string revival = stringLocalizer.WithCultureGet(cultureInfo, "复苏");
-            if (list.Any(r => r.Text.Contains(revival)))
+            if (list.Any(r => IsReviveText(r.Text, revival)))
             {
                 return true;
             }
@@ -295,19 +295,55 @@ public static partial class Bv
     /// <returns></returns>
     public static bool ClickIfInReviveModal(ImageRegion region)
     {
+        using var confirmRectArea = region.Find(RecognitionAssets.Get("AutoFight", "Confirm", region));
         var list = region.FindMulti(new RecognitionObject
         {
             RecognitionType = RecognitionTypes.Ocr,
-            RegionOfInterest = new Rect(0, region.Height / 4 * 3, region.Width, region.Height / 4)
+            RegionOfInterest = new Rect(0, 0, region.Width, region.Height)
         });
-        using var r = list.FirstOrDefault(r => r.Text.Contains("复苏"));
-        if (r != null)
+
+        CultureInfo cultureInfo = new CultureInfo(TaskContext.Instance().Config.OtherConfig.GameCultureInfoName);
+        IStringLocalizer stringLocalizer = App.GetService<IStringLocalizer<BvResxHelper>>() ?? throw new Exception();
+        string revival = stringLocalizer.WithCultureGet(cultureInfo, "复苏");
+        using var revivalText = list.FirstOrDefault(r => IsReviveText(r.Text, revival));
+        if (revivalText == null)
         {
-            r.Click();
+            return false;
+        }
+
+        if (!confirmRectArea.IsEmpty())
+        {
+            confirmRectArea.BackgroundClick();
             return true;
         }
 
-        return false;
+        if (revivalText.Y < region.Height * 2 / 3)
+        {
+            return false;
+        }
+
+        revivalText.BackgroundClick();
+        return true;
+    }
+
+    internal static bool IsReviveText(string? text, string? localizedRevive)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(localizedRevive))
+        {
+            return false;
+        }
+
+        static string Normalize(string value)
+        {
+            return string.Concat(value.Where(c => !char.IsWhiteSpace(c)));
+        }
+
+        return Normalize(text).Contains(Normalize(localizedRevive), StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool IsReviveRecoveryConfirmed(bool clicked, bool returnedToMainUi)
+    {
+        return clicked && returnedToMainUi;
     }
 
     /// <summary>

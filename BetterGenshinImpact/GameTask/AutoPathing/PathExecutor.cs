@@ -334,11 +334,17 @@ public partial class PathExecutor
         // 切换队伍前判断是否全队死亡 // 可能队伍切换失败导致的死亡
         if (Bv.ClickIfInReviveModal(ra))
         {
-            await Bv.WaitForMainUi(ct); // 等待主界面加载完成
-            Logger.LogInformation("复苏完成");
+            var returnedToMainUi = await Bv.WaitForMainUi(ct);
+            if (!Bv.IsReviveRecoveryConfirmed(clicked: true, returnedToMainUi))
+            {
+                throw new RetryException("已点击全队复苏，但未确认返回主界面");
+            }
+
+            Logger.LogInformation("已确认全队复苏并返回主界面");
             await Delay(4000, ct);
             // 血量肯定不满，直接去七天神像回血
             await TpStatueOfTheSeven();
+            throw new RetryException("全队复苏并回血后重试路线");
         }
 
         if (PartyConfig.SkipPartySwitch)
@@ -666,8 +672,13 @@ public partial class PathExecutor
         }
         else if (Bv.ClickIfInReviveModal(region))
         {
-            await Bv.WaitForMainUi(ct); // 等待主界面加载完成
-            Logger.LogInformation("复苏完成");
+            var returnedToMainUi = await Bv.WaitForMainUi(ct);
+            if (!Bv.IsReviveRecoveryConfirmed(clicked: true, returnedToMainUi))
+            {
+                throw new RetryException("已点击全队复苏，但未确认返回主界面");
+            }
+
+            Logger.LogInformation("已确认全队复苏并返回主界面");
             await Delay(4000, ct);
             // 血量肯定不满，直接去七天神像回血
             await TpStatueOfTheSeven();
