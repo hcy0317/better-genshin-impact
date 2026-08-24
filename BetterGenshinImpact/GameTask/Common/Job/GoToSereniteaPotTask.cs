@@ -40,6 +40,7 @@ internal class GoToSereniteaPotTask
     private readonly string ayuanHuoling2String;
     private readonly string ayuanBelieveString;
     private readonly string ayuanShopString;
+    private readonly string ayuanByeString;
     private string dongTianName;
     
     private  OneDragonFlowConfig? SelectedConfig;
@@ -56,6 +57,7 @@ internal class GoToSereniteaPotTask
         this.ayuanHuoling2String = stringLocalizer.WithCultureGet(cultureInfo, "<壶灵>");
         this.ayuanBelieveString = stringLocalizer.WithCultureGet(cultureInfo, "信任");
         this.ayuanShopString = stringLocalizer.WithCultureGet(cultureInfo, "洞天百宝");
+        this.ayuanByeString = stringLocalizer.WithCultureGet(cultureInfo, "再见");
     }
 
     public async Task Start(CancellationToken ct)
@@ -68,6 +70,7 @@ internal class GoToSereniteaPotTask
         {
             Logger.LogDebug(e, "领取尘歌壶奖励异常");
             Logger.LogError("领取尘歌壶奖励异常: {Msg}", e.Message);
+            throw;
         }
         finally
         {
@@ -602,6 +605,7 @@ internal class GoToSereniteaPotTask
     // 处理最后收尾操作
     private async Task Finished(CancellationToken ct)
     {
+        var isMainUi = false;
         Logger.LogInformation("领取尘歌壶奖励:{text}", "退出到主页");
         // 识别page 关闭按钮。
         using var ra6 = CaptureToRectArea();
@@ -610,14 +614,36 @@ internal class GoToSereniteaPotTask
             await Delay(1000, ct);
         }
 
-        var isMainUi = await _chooseTalkOptionTask.ClickChatExitUntilMainUi(ct);
-        if (!isMainUi)
+        var quitOption = await _chooseTalkOptionTask.SingleSelectText(this.ayuanByeString, ct, skipTimes: 20);
+        if (quitOption != TalkOptionRes.FoundAndClick)
         {
-            Logger.LogError("领取尘歌壶奖励:{text}", "阿圆对话框退出出错。");
-            return;
+            using var mainUiCapture = CaptureToRectArea();
+            isMainUi = Bv.IsInMainUi(mainUiCapture);
+            if (SereniteaPotExitPolicy.ShouldRecoverMainUi(quitOption, isMainUi))
+            {
+                Logger.LogWarning("领取尘歌壶奖励:{text}", "未找到“再见”选项，尝试强制退出阿圆对话。");
+                await new ReturnMainUiTask().Start(ct);
+                isMainUi = CaptureScope.Use(CaptureToRectArea(), Bv.IsInMainUi);
+            }
         }
 
-        await Delay(500, ct);
+        if (!isMainUi)
+        {
+            await Delay(300, ct);
+            isMainUi = await NewRetry.WaitForAction(() =>
+            {
+                using var ra = CaptureToRectArea();
+                if (!Bv.IsInMainUi(ra))
+                {
+                    ra.Click();
+                    return false;
+                }
+                else
+                    return true;
+            }, ct);
+        }
+
+        SereniteaPotExitPolicy.EnsureRecovered(isMainUi);
 
         // TP回主世界
         var tp = new TpTask(ct);

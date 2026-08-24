@@ -176,6 +176,67 @@ public class CombatScriptResourceTests
         Assert.True(AutoFightSeek.ShouldRecenterCameraBeforeSeek());
     }
 
+    [Fact]
+    public void SelectSeekDecision_TopHealthBarMustNotBecomeForwardDirection()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [new EnemySeekVisual(700, 90, 180, 5, 820)],
+            imageWidth: 1500,
+            imageHeight: 900);
+
+        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
+        Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
+    }
+
+    [Theory]
+    [InlineData(12, 430, 12, 9, (int)EnemyIndicatorDirection.Left)]
+    [InlineData(1460, 430, 12, 9, (int)EnemyIndicatorDirection.Right)]
+    [InlineData(744, 24, 12, 9, (int)EnemyIndicatorDirection.Forward)]
+    [InlineData(744, 860, 12, 9, (int)EnemyIndicatorDirection.Behind)]
+    public void SelectSeekDecision_RedDirectionIndicatorMustDriveApproachDirection(
+        int x,
+        int y,
+        int width,
+        int height,
+        int expectedDirection)
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [
+                new EnemySeekVisual(700, 90, 180, 5, 820),
+                new EnemySeekVisual(x, y, width, height, 55)
+            ],
+            imageWidth: 1500,
+            imageHeight: 900);
+
+        Assert.Equal(AutoFightSeekAction.Approach, decision.Action);
+        Assert.Equal((EnemyIndicatorDirection)expectedDirection, decision.Direction);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_CentralRedNoiseMustNotTriggerBlindForwardMovement()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [new EnemySeekVisual(800, 420, 2, 2, 4)],
+            imageWidth: 1500,
+            imageHeight: 900);
+
+        Assert.Equal(AutoFightSeekAction.Scan, decision.Action);
+        Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
+    }
+
+    [Theory]
+    [InlineData(0, null, 1)]
+    [InlineData(2, null, 3)]
+    [InlineData(2, false, 0)]
+    [InlineData(2, true, 0)]
+    public void GetNextRotationCount_ShouldAdvanceOnlyAfterMissingEnemy(
+        int currentRotationCount,
+        bool? seekResult,
+        int expected)
+    {
+        Assert.Equal(expected, AutoFightSeek.GetNextRotationCount(currentRotationCount, seekResult));
+    }
+
     [Theory]
     [InlineData("璃月路线.json", @"C:\path\锄地专区\精英400@汐\璃月路线.json", true)]
     [InlineData("400精英.json", @"C:\path\锄地专区\其他\400精英.json", true)]

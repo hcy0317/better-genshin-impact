@@ -9,6 +9,8 @@ public class GameCaptureFactory
 
     public static IGameCapture Create(CaptureModes mode)
     {
+        mode = RemoteSessionCaptureModePolicy.Resolve(mode, RemoteSessionDetector.IsRemoteSession());
+
         return mode switch
         {
             CaptureModes.BitBlt => new BitBlt.BitBltCapture(),

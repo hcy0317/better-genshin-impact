@@ -757,7 +757,16 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                     try
                     {
                         // isEndCheck=true keeps this as seek-only assist and avoids party-screen finish checks.
-                        await AutoFightSeek.SeekAndFightAsync(Logger, 0, 0, cts.Token, true, options.RotaryFactor);
+                        var result = await AutoFightSeek.SeekAndFightAsync(
+                            Logger,
+                            0,
+                            0,
+                            cts.Token,
+                            true,
+                            options.RotaryFactor);
+                        AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
+                            AutoFightSeek.RotationCount,
+                            result);
                     }
                     catch (OperationCanceledException)
                     {

@@ -20,7 +20,7 @@ public class TpTaskMapDragTests
     }
 
     [Fact]
-    public void IsMapMoveRecognitionAnomaly_ShouldRejectOrdinaryReverseMovement()
+    public void IsMapMoveRecognitionAnomaly_ShouldAllowCappedReverseFeedbackToRecoverByIteration()
     {
         var actual = TpTask.IsMapMoveRecognitionAnomaly(
             expectedMoveLen: 300,
@@ -29,11 +29,11 @@ public class TpTaskMapDragTests
             moveDirectionCos: -1,
             jumpDistance: 600);
 
-        Assert.True(actual);
+        Assert.False(actual);
     }
 
     [Fact]
-    public void IsMapMoveRecognitionAnomaly_ShouldRejectNoProgress()
+    public void IsMapMoveRecognitionAnomaly_ShouldAllowCappedNoProgressFeedbackToRecoverByIteration()
     {
         var actual = TpTask.IsMapMoveRecognitionAnomaly(
             expectedMoveLen: 300,
@@ -41,6 +41,19 @@ public class TpTaskMapDragTests
             moveRatio: 0,
             moveDirectionCos: 1,
             jumpDistance: 300);
+
+        Assert.False(actual);
+    }
+
+    [Fact]
+    public void IsMapMoveRecognitionAnomaly_ShouldStillRejectImpossibleCoordinateJump()
+    {
+        var actual = TpTask.IsMapMoveRecognitionAnomaly(
+            expectedMoveLen: 300,
+            actualMoveLen: 300,
+            moveRatio: 1,
+            moveDirectionCos: 1,
+            jumpDistance: 601);
 
         Assert.True(actual);
     }
@@ -56,5 +69,37 @@ public class TpTaskMapDragTests
             jumpDistance: 15);
 
         Assert.False(actual);
+    }
+
+    [Theory]
+    [InlineData("Teyvat", "枫丹", "Teyvat", "蒙德", true)]
+    [InlineData("Teyvat", "蒙德", "Teyvat", "蒙德", false)]
+    [InlineData("Enkanomiya", null, "Teyvat", "蒙德", true)]
+    [InlineData(null, null, "Teyvat", "蒙德", false)]
+    [InlineData("Teyvat", "枫丹", "Teyvat", null, false)]
+    public void ShouldForceSwitchToTargetCountry_UsesLastSuccessfulTeleport(
+        string? lastMapName,
+        string? lastCountry,
+        string targetMapName,
+        string? targetCountry,
+        bool expected)
+    {
+        var actual = TpTask.ShouldForceSwitchToTargetCountry(
+            lastMapName,
+            lastCountry,
+            targetMapName,
+            targetCountry);
+
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void ShouldCloseBigMapAfterTeleportFailure_OnlyClosesAnOpenMap(
+        bool isInBigMapUi,
+        bool expected)
+    {
+        Assert.Equal(expected, TpTask.ShouldCloseBigMapAfterTeleportFailure(isInBigMapUi));
     }
 }

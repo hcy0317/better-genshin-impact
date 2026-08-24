@@ -652,23 +652,32 @@ public partial class OneDragonFlowViewModel : ViewModel
         }
 
         Notify.Event(NotificationEvent.DragonStart).Success("一条龙启动");
+        var managedFailures = new ManagedTaskFailureCollector();
         foreach (var task in taskListCopy)
         {
             if (task is { IsEnabled: true, Action: not null })
             {
                 if (ScriptGroupsdefault.Any(defaultSg => defaultSg.Name == task.Name))
                 {
-                    _logger.LogInformation($"一条龙任务执行: {finishOneTaskcount++}/{enabledoneTaskCount}");
-                    CancellationToken taskCancellationToken = default;
-                    await new TaskRunner().RunThreadAsync(async () =>
+                    try
                     {
-                        taskCancellationToken = CancellationContext.Instance.Cts.Token;
-                        await task.Action();
-                        await Task.Delay(1000);
-                    }, propagateExceptions);
-                    TaskRunnerFailurePolicy.ThrowIfTaskCancelled(
-                        taskCancellationToken,
-                        propagateExceptions);
+                        _logger.LogInformation($"一条龙任务执行: {finishOneTaskcount++}/{enabledoneTaskCount}");
+                        CancellationToken taskCancellationToken = default;
+                        await new TaskRunner().RunThreadAsync(async () =>
+                        {
+                            taskCancellationToken = CancellationContext.Instance.Cts.Token;
+                            await task.Action();
+                            await Task.Delay(1000);
+                        }, propagateExceptions);
+                        TaskRunnerFailurePolicy.ThrowIfTaskCancelled(
+                            taskCancellationToken,
+                            propagateExceptions);
+                    }
+                    catch (Exception exception) when (propagateExceptions)
+                    {
+                        _logger.LogError(exception, "一条龙任务 {TaskName} 执行失败，将继续后续任务", task.Name);
+                        managedFailures.Add(exception);
+                    }
                 }
                 else
                 {
@@ -699,7 +708,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                         Toast.Error("执行配置组任务时失败");
                         if (propagateExceptions)
                         {
-                            throw;
+                            managedFailures.Add(e);
                         }
                     }
                 }
@@ -717,26 +726,35 @@ public partial class OneDragonFlowViewModel : ViewModel
         }
 
         // 检查和最终结束的任务
-        await new TaskRunner().RunThreadAsync(async () =>
+        try
         {
-            await OneDragonFinalizer.RunAsync(async () =>
+            await new TaskRunner().RunThreadAsync(async () =>
             {
-                await new CheckRewardsTask().Start(CancellationContext.Instance.Cts.Token);
-                await Task.Delay(500);
-                if (CancellationContext.Instance.IsManualStop is false)
+                await OneDragonFinalizer.RunAsync(async () =>
                 {
-                    Notify.Event(NotificationEvent.DragonEnd).Success("一条龙和配置组任务结束");
-                }
-                _logger.LogInformation("一条龙和配置组任务结束");
-            }, completionAction, exception =>
-            {
-                _logger.LogError(exception, "一条龙收尾检查失败，将按配置执行完成动作");
-                if (propagateExceptions)
+                    await new CheckRewardsTask().Start(CancellationContext.Instance.Cts.Token);
+                    await Task.Delay(500);
+                    if (CancellationContext.Instance.IsManualStop is false)
+                    {
+                        Notify.Event(NotificationEvent.DragonEnd).Success("一条龙和配置组任务结束");
+                    }
+                    _logger.LogInformation("一条龙和配置组任务结束");
+                }, completionAction, exception =>
                 {
-                    CommandLineTaskFailurePolicy.MarkFailed(exitCode => Environment.ExitCode = exitCode);
-                }
-            });
-        }, propagateExceptions);
+                    _logger.LogError(exception, "一条龙收尾检查失败，将按配置执行完成动作");
+                    if (propagateExceptions)
+                    {
+                        CommandLineTaskFailurePolicy.MarkFailed(exitCode => Environment.ExitCode = exitCode);
+                    }
+                });
+            }, propagateExceptions);
+        }
+        catch (Exception exception) when (propagateExceptions)
+        {
+            managedFailures.Add(exception);
+        }
+
+        managedFailures.ThrowIfAny("一条龙中有任务执行失败，后续任务已继续完成。");
     }
 
     private void ExecuteCompletionAction()
