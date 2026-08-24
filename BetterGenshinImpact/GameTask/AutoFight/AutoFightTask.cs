@@ -429,7 +429,9 @@ public class AutoFightTask : ISoloTask
                                 }
                             }
 
-                            AutoFightSeek.RotationCount = result == null ? AutoFightSeek.RotationCount + 1 : 0;
+                            AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
+                                AutoFightSeek.RotationCount,
+                                result);
                             fightEndFlag = result == true;
                             if (fightEndFlag)
                             {
@@ -1030,9 +1032,9 @@ public class AutoFightTask : ISoloTask
                     result = false;
                 }
 
-                AutoFightSeek.RotationCount = result == null
-                    ? AutoFightSeek.RotationCount + 1
-                    : 0;
+                AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
+                    AutoFightSeek.RotationCount,
+                    result);
 
                 if (result != null)
                 {
