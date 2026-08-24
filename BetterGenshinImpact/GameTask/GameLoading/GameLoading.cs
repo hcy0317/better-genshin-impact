@@ -326,7 +326,24 @@ public class GameLoadingTrigger : ITaskTrigger
 
         if (!ra.IsEmpty())
         {
-            TaskContext.Instance().PostMessageSimulator.LeftButtonClickBackground();
+            if (!GameLoadingInputPolicy.TryClick(
+                    hasRecognizedTarget: true,
+                    prepareInput: () =>
+                    {
+                        SystemControl.ActivateWindow();
+                        Thread.Sleep(100);
+                    },
+                    clickRecognizedTarget: () => ra.Click(),
+                    clickCenterFallback: () => GameCaptureRegion.GameRegion1080PPosClick(960, 540),
+                    out var inputDispatchFailure))
+            {
+                _logger.LogWarning(
+                    inputDispatchFailure,
+                    "RDP 会话暂时无法点击已识别的开门按钮；重新激活游戏并继续等待");
+                SystemControl.ActivateWindow();
+                return;
+            }
+
             biliLoginClicked = true;
             _logger.LogInformation("检测到开门按钮，已自动点击进入游戏");
             return;
@@ -359,7 +376,24 @@ public class GameLoadingTrigger : ITaskTrigger
             {
                 _prevDoorFallbackClickTime = DateTime.Now;
                 _doorFallbackClickCount++;
-                TaskContext.Instance().PostMessageSimulator.LeftButtonClickBackground();
+                if (!GameLoadingInputPolicy.TryClick(
+                        hasRecognizedTarget: false,
+                        prepareInput: () =>
+                        {
+                            SystemControl.ActivateWindow();
+                            Thread.Sleep(100);
+                        },
+                        clickRecognizedTarget: () => { },
+                        clickCenterFallback: () => GameCaptureRegion.GameRegion1080PPosClick(960, 540),
+                        out var inputDispatchFailure))
+                {
+                    _logger.LogWarning(
+                        inputDispatchFailure,
+                        "RDP 会话暂时无法执行开门兜底点击；重新激活游戏并继续等待");
+                    SystemControl.ActivateWindow();
+                    return;
+                }
+
                 _logger.LogInformation(
                     "自动开门兜底点击：方式={Mode}，次数={Count}",
                     hasDoorText ? "OCR" : "定时",

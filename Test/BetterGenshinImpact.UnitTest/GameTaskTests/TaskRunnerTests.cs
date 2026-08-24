@@ -11,6 +11,72 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests;
 public class TaskRunnerTests
 {
     [Fact]
+    public void ManagedFailuresAreCollectedWithoutStoppingLaterWork()
+    {
+        var attempted = new List<string>();
+        var first = new InvalidOperationException("commission failed");
+        var second = new IOException("cultivation failed");
+        var failures = new ManagedTaskFailureCollector();
+
+        foreach (var (_, action) in new (string Name, Action Action)[]
+                 {
+                     ("commission", () => throw first),
+                     ("rewards", () => attempted.Add("rewards")),
+                     ("cultivation", () => throw second),
+                     ("gathering", () => attempted.Add("gathering"))
+                 })
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception failure)
+            {
+                failures.Add(failure);
+            }
+        }
+
+        Assert.Equal(["rewards", "gathering"], attempted);
+        var report = Assert.Throws<AggregateException>(() =>
+        {
+            failures.ThrowIfAny("managed automation failed");
+        });
+        Assert.Equal(new Exception[] { first, second }, report.InnerExceptions);
+    }
+
+    [Fact]
+    public void NestedManagedFailuresAreFlattenedBeforeFinalReporting()
+    {
+        var first = new InvalidOperationException("first project failed");
+        var second = new IOException("second project failed");
+        var failures = new ManagedTaskFailureCollector();
+
+        failures.Add(new AggregateException("script group failed", first, second));
+
+        var report = Assert.Throws<AggregateException>(() =>
+        {
+            failures.ThrowIfAny("one dragon failed");
+        });
+        Assert.Equal(new Exception[] { first, second }, report.InnerExceptions);
+    }
+
+    [Theory]
+    [MemberData(nameof(NormalTerminationExceptions))]
+    public void ManagedFailureCollectionNeverConvertsTerminationIntoOrdinaryFailure(Exception termination)
+    {
+        var failures = new ManagedTaskFailureCollector();
+
+        var report = Assert.Throws(
+            termination.GetType(),
+            () =>
+            {
+                failures.Add(termination);
+            });
+
+        Assert.Same(termination, report);
+    }
+
+    [Fact]
     public void CleanupContinuesAfterAnEarlierStepFails()
     {
         var completed = new List<string>();

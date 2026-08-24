@@ -377,8 +377,46 @@ public class SystemControl
 
     public static void ActivateWindow(nint hWnd)
     {
-        User32.ShowWindow(hWnd, ShowWindowCommand.SW_RESTORE);
-        User32.SetForegroundWindow(hWnd);
+        if (!User32.IsWindow(hWnd))
+        {
+            return;
+        }
+
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is not null &&
+            !dispatcher.HasShutdownStarted &&
+            !dispatcher.CheckAccess())
+        {
+            dispatcher.Invoke(() => ActivateWindowCore(hWnd));
+            return;
+        }
+
+        ActivateWindowCore(hWnd);
+    }
+
+    private static void ActivateWindowCore(nint hWnd)
+    {
+        var currentThreadId = Kernel32.GetCurrentThreadId();
+        var foregroundWindow = User32.GetForegroundWindow();
+        var foregroundThreadId = (nint)foregroundWindow == IntPtr.Zero
+            ? 0
+            : User32.GetWindowThreadProcessId(foregroundWindow, out _);
+        var targetThreadId = User32.GetWindowThreadProcessId(hWnd, out _);
+
+        WindowActivationPolicy.Execute(
+            currentThreadId,
+            foregroundThreadId,
+            targetThreadId,
+            (source, target, attach) => User32.AttachThreadInput(source, target, attach),
+            () =>
+            {
+                _ = User32.ShowWindow(hWnd, ShowWindowCommand.SW_RESTORE);
+                _ = User32.BringWindowToTop(hWnd);
+                _ = User32.SetForegroundWindow(hWnd);
+                _ = User32.SetActiveWindow(hWnd);
+                _ = User32.SetFocus(hWnd);
+                User32.SwitchToThisWindow(hWnd, true);
+            });
     }
 
     public static void ActivateWindow()
@@ -431,15 +469,7 @@ public class SystemControl
         if (User32.IsWindow(hWnd))
         {
             _ = User32.SendMessage(hWnd, User32.WindowMessage.WM_SYSCOMMAND, User32.SysCommand.SC_RESTORE, 0);
-            _ = User32.SetForegroundWindow(hWnd);
-
-            while (User32.IsIconic(hWnd))
-            {
-                continue;
-            }
-
-            _ = User32.BringWindowToTop(hWnd);
-            _ = User32.SetActiveWindow(hWnd);
+            ActivateWindow(hWnd);
         }
     }
     public static void MinimizeAndActivateWindow(nint hWnd)

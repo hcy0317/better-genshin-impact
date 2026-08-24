@@ -5,6 +5,17 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.InputTests;
 public class WindowsInputMessageDispatcherTests
 {
     [Fact]
+    public void InvokeBeforeInputDispatch_RunsConfiguredGuard()
+    {
+        var invocationCount = 0;
+        var dispatcher = new WindowsInputMessageDispatcher(() => invocationCount++);
+
+        dispatcher.InvokeBeforeInputDispatch();
+
+        Assert.Equal(1, invocationCount);
+    }
+
+    [Fact]
     public void FailureMessageContainsNativeDiagnosticsAndUipiCaveat()
     {
         var message = WindowsInputMessageDispatcher.CreateFailureMessage(

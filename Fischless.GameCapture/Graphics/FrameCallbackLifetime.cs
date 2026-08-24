@@ -50,9 +50,22 @@ internal sealed class FrameCallbackLifetime
 
     public void BeginStopAndWait()
     {
+        BeginStop();
+        WaitForCallbacks();
+    }
+
+    public void BeginStop()
+    {
         lock (_sync)
         {
             _stopping = true;
+        }
+    }
+
+    public void WaitForCallbacks()
+    {
+        lock (_sync)
+        {
             while (_activeCallbacks > 0)
             {
                 Monitor.Wait(_sync);

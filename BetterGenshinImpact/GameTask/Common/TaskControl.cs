@@ -96,12 +96,20 @@ public class TaskControl
 
     private static void CheckAndActivateGameWindow()
     {
+        var activeProcessName = SystemControl.GetActiveByProcess();
+        if (RemoteSessionInputPolicy.ShouldActivateWithoutForegroundVerification(
+                System.Windows.Forms.SystemInformation.TerminalServerSession,
+                activeProcessName))
+        {
+            SystemControl.ActivateWindow();
+            return;
+        }
+
         if (!TaskContext.Instance().Config.OtherConfig.RestoreFocusOnLostEnabled)
         {
             if (!SystemControl.IsGenshinImpactActiveByProcess())
             {
-                var name = SystemControl.GetActiveByProcess();
-                Logger.LogWarning($"当前获取焦点的窗口为: {name}，不是原神，暂停");
+                Logger.LogWarning($"当前获取焦点的窗口为: {activeProcessName}，不是原神，暂停");
                 throw new RetryException("当前获取焦点的窗口不是原神");
             }
         }
