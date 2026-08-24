@@ -102,6 +102,16 @@ public partial class ChooseTalkOptionTask
 
     public async Task SelectLastOptionOnce(CancellationToken ct)
     {
+        await TrySelectLastOptionOnce(ct);
+    }
+
+    public bool HasTalkOptions(ImageRegion region)
+    {
+        return region.FindMulti(GetOptionIconRecognitionObject(region)).Count > 0;
+    }
+
+    public async Task<bool> TrySelectLastOptionOnce(CancellationToken ct)
+    {
         using var region = CaptureToRectArea();
         if (Bv.IsInTalkUi(region))
         {
@@ -111,8 +121,11 @@ public partial class ChooseTalkOptionTask
             {
                 ClickOcrRegion(chatOptionResultList[0]);
                 await Task.Delay(200, ct);
+                return true;
             }
         }
+
+        return false;
     }
 
     /// <summary>
