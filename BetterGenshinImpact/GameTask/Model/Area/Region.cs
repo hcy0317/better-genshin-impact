@@ -11,6 +11,20 @@ using Vanara.PInvoke;
 
 namespace BetterGenshinImpact.GameTask.Model.Area;
 
+internal readonly record struct RegionBackgroundClickTarget(int X, int Y)
+{
+    internal static RegionBackgroundClickTarget Resolve(int x, int y, int width, int height)
+    {
+        return new RegionBackgroundClickTarget(x + width / 2, y + height / 2);
+    }
+
+    internal void Dispatch(Action<int, int> backgroundClick)
+    {
+        ArgumentNullException.ThrowIfNull(backgroundClick);
+        backgroundClick(X, Y);
+    }
+}
+
 /// <summary>
 /// 区域基类
 /// 用于描述一个区域，可以是一个矩形，也可以是一个点
@@ -95,11 +109,15 @@ public class Region : IDisposable
     /// </summary>
     public void BackgroundClick()
     {
-        User32.GetCursorPos(out var p);
-        this.Move();  // 必须移动实际鼠标
-        TaskContext.Instance().PostMessageSimulator.LeftButtonClickBackground();
+        var converted = ConvertRes<GameCaptureRegion>.ConvertPositionToTargetRegion(0, 0, Width, Height, this);
+        var target = RegionBackgroundClickTarget.Resolve(
+            converted.X,
+            converted.Y,
+            converted.Width,
+            converted.Height);
+        target.Dispatch((x, y) =>
+            TaskContext.Instance().PostMessageSimulator.LeftButtonClickBackground(x, y));
         Thread.Sleep(10);
-        DesktopRegion.DesktopRegionMove(p.X, p.Y); // 鼠标移动回原来位置
     }
 
     /// <summary>
