@@ -30,4 +30,18 @@ public class GameStartupInputRecoveryTests
 
         Assert.Same(unrelatedFailure, observedFailure);
     }
+
+    [Fact]
+    public void StartupWaitHeartbeat_ShouldReportEveryThirtySecondsWithoutLogSpam()
+    {
+        var heartbeat = new GameStartupWaitHeartbeat(TimeSpan.FromSeconds(30));
+
+        Assert.False(heartbeat.ShouldReport(TimeSpan.FromSeconds(29)));
+        Assert.True(heartbeat.ShouldReport(TimeSpan.FromSeconds(30)));
+        Assert.False(heartbeat.ShouldReport(TimeSpan.FromSeconds(59)));
+        Assert.True(heartbeat.ShouldReport(TimeSpan.FromSeconds(60)));
+        Assert.True(heartbeat.ShouldReport(TimeSpan.FromSeconds(95)));
+        Assert.False(heartbeat.ShouldReport(TimeSpan.FromSeconds(119)));
+        Assert.True(heartbeat.ShouldReport(TimeSpan.FromSeconds(120)));
+    }
 }

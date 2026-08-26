@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.GameTask;
 using Microsoft.Extensions.Logging;
@@ -14,7 +15,7 @@ using Vanara;
 
 namespace BetterGenshinImpact.Core.Recognition.ONNX;
 
-public class BgiOnnxFactory
+public class BgiOnnxFactory : IDisposable
 {
     private readonly ILogger _logger;
 
@@ -24,6 +25,7 @@ public class BgiOnnxFactory
     ///     这样能避免并发加载模型问题。比如使用了未完全构建好的缓存文件，导致模型加载失败。
     /// </summary>
     private readonly ConcurrentDictionary<BgiOnnxModel, string?> _cachedModelPaths = new();
+    private readonly ConcurrentDictionary<BgiOnnxModel, Lazy<BgiYoloPredictor>> _sharedYoloPredictors = new();
 
 
     /// <summary>
@@ -303,12 +305,40 @@ public class BgiOnnxFactory
     public BgiYoloPredictor CreateYoloPredictor(BgiOnnxModel model)
     {
         // logger.LogDebug("[Yolo]创建yolo预测器，模型: {ModelName}", model.Name);
-        if (!EnableCache) return new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, false));
+        if (!EnableCache) return new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, false), _logger);
 
         var cached = GetCached(model);
         return cached == null
-            ? new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, true))
-            : new BgiYoloPredictor(model, cached, CreateSessionOptions(model, false));
+            ? new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, true), _logger)
+            : new BgiYoloPredictor(model, cached, CreateSessionOptions(model, false), _logger);
+    }
+
+    /// <summary>
+    /// 获取由工厂持有生命周期的共享 YOLO predictor。
+    /// 共享调用方应通过 BgiYoloPredictor.UsePredictor 或封装后的 Detect 串行执行推理。
+    /// </summary>
+    public BgiYoloPredictor GetOrCreateYoloPredictor(BgiOnnxModel model)
+    {
+        var predictor = _sharedYoloPredictors.GetOrAdd(
+            model,
+            key => new Lazy<BgiYoloPredictor>(
+                () => CreateYoloPredictor(key),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+        return predictor.Value;
+    }
+
+    public void Dispose()
+    {
+        foreach (var predictor in _sharedYoloPredictors.Values)
+        {
+            if (predictor.IsValueCreated)
+            {
+                predictor.Value.Dispose();
+            }
+        }
+
+        _sharedYoloPredictors.Clear();
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>

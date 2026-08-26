@@ -428,6 +428,7 @@ public partial class App : Application
         // 致命异常（IsTerminating）在日志末尾加 [FATAL] 标记，便于区分。
         var logMessage = isTerminating ? "UnHandle Exception [FATAL]" : "UnHandle Exception";
         GetLogger<App>().LogError(e, logMessage);
+        TaskFailureDiagnostics.CaptureScreenshotOnce(e, logMessage);
 
         // 可恢复异常（默认）：仅日志，不弹模态窗，避免阻塞 UI 线程。
         // 通过日志遮罩提示用户：非致命异常已记录。

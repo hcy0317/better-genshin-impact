@@ -42,3 +42,15 @@ public class ExecutionRecord
     [JsonProperty("is_successful")]
     public bool IsSuccessful { get; set; } = false;
 }
+
+internal static class ExecutionRecordFinalizer
+{
+    internal static void Complete(
+        ExecutionRecord record,
+        DateTimeOffset serverEndTime,
+        DateTime endTime)
+    {
+        record.ServerEndTime = serverEndTime;
+        record.EndTime = endTime;
+    }
+}

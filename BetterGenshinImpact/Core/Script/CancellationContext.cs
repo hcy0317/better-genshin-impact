@@ -21,6 +21,14 @@ public class CancellationContext : Singleton<CancellationContext>
         }
     }
 
+    public CancellationToken GetTokenOrNone()
+    {
+        lock (_sync)
+        {
+            return disposed ? CancellationToken.None : Cts.Token;
+        }
+    }
+
     private bool disposed;
 
     public void Set()

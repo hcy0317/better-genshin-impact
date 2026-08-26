@@ -8,6 +8,10 @@ using System.Text.Json;
 using BetterGenshinImpact.View.Drawable;
 using Compunet.YoloSharp;
 using Microsoft.ML.OnnxRuntime;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace BetterGenshinImpact.Core.Recognition.ONNX;
 
@@ -16,7 +20,9 @@ public class BgiYoloPredictor : IDisposable
     private readonly BgiOnnxModel _model;
 
 
-    private readonly Lazy<YoloPredictor> _lazyPredictor;
+    private readonly OnnxInitializationTask<YoloPredictor> _predictorInitialization;
+    private readonly object _predictionLock = new();
+    private int _disposed;
 
     /// <summary>
     /// 使用 BgiOnnxFactory 创建这个类的实例
@@ -24,17 +30,43 @@ public class BgiYoloPredictor : IDisposable
     /// <param name="onnxModel">模型</param>
     /// <param name="modelPath">实际要加载的模型文件的绝对路径，在使用模型缓存的场景下可能有差别</param>
     /// <param name="sessionOptions">sessionOptions</param>
-    protected internal BgiYoloPredictor(BgiOnnxModel onnxModel, string modelPath, SessionOptions sessionOptions)
+    protected internal BgiYoloPredictor(
+        BgiOnnxModel onnxModel,
+        string modelPath,
+        SessionOptions sessionOptions,
+        ILogger? logger = null)
     {
         _model = onnxModel;
-        _lazyPredictor = new Lazy<YoloPredictor>(() => new YoloPredictor(modelPath,
-            new YoloPredictorOptions
-            {
-                SessionOptions = sessionOptions
-            }));
+        _predictorInitialization = new OnnxInitializationTask<YoloPredictor>(
+            onnxModel.Name,
+            () => new YoloPredictor(modelPath,
+                new YoloPredictorOptions
+                {
+                    SessionOptions = sessionOptions
+                }),
+            logger ?? NullLogger.Instance);
     }
 
-    public YoloPredictor Predictor => _lazyPredictor.Value;
+    public YoloPredictor Predictor => _predictorInitialization.Value;
+
+    public TResult UsePredictor<TResult>(Func<YoloPredictor, TResult> action)
+    {
+        lock (_predictionLock)
+        {
+            return action(Predictor);
+        }
+    }
+
+    public async Task WarmUpAsync(ILogger logger, CancellationToken ct)
+    {
+        if (_predictorInitialization.IsValueCreated)
+        {
+            logger.LogDebug("[ONNX]模型 {Model} 预测器已初始化，复用现有会话。", _model.Name);
+            return;
+        }
+
+        await _predictorInitialization.GetValueAsync(ct);
+    }
 
     /// <summary>
     /// 检测
@@ -43,7 +75,7 @@ public class BgiYoloPredictor : IDisposable
     /// <returns>类别-矩形框</returns>
     public Dictionary<string, List<Rect>> Detect(ImageRegion region)
     {
-        var result = Predictor.Detect(region.CacheImage);
+        var result = UsePredictor(predictor => predictor.Detect(region.CacheImage));
 
 
         var dict = new Dictionary<string, List<Rect>>();
@@ -72,10 +104,17 @@ public class BgiYoloPredictor : IDisposable
 
     public void Dispose()
     {
-        if (_lazyPredictor.IsValueCreated)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
-            Predictor.Dispose();
+            return;
         }
+
+        if (_predictorInitialization.TryGetValue(out var predictor))
+        {
+            predictor.Dispose();
+        }
+
+        GC.SuppressFinalize(this);
     }
 
     ~BgiYoloPredictor()

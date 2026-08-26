@@ -40,7 +40,7 @@ public class TaskRunner
     // {
     //     _timerOperation = timerOperation;
     // }
-    
+
     /// <summary>
     /// 加锁并独立运行任务
     /// </summary>
@@ -98,12 +98,13 @@ public class TaskRunner
         }
         catch (Exception e)
         {
+            TaskFailureDiagnostics.CaptureScreenshotOnce(e, _name + "任务执行异常");
             Notify.Event(NotificationEvent.TaskError).Error("任务执行异常", e);
             _logger.LogError(e, "任务执行异常: {Message}", e.Message);
-            if (propagateExceptions)
-            {
-                executionException = e;
-            }
+            executionException = TaskRunnerFailurePolicy.GetTerminationException(
+                e,
+                RunnerContext.Instance.IsContinuousRunGroup,
+                propagateExceptions);
         }
         finally
         {
@@ -160,7 +161,7 @@ public class TaskRunner
             CancellationContext.Instance.Clear();
             return;
         }
-        
+
         await Task.Run(() => RunCurrentAsync(
             async () => await soloTask.Start(CancellationContext.Instance.Cts.Token),
             resetCancellationContext: false,
@@ -177,7 +178,7 @@ public class TaskRunner
 
         // 清空实时任务触发器
         TaskTriggerDispatcher.Instance().ClearTriggers();
-        
+
         // 隐藏地图遮罩
         UIDispatcherHelper.Invoke(() =>
         {
@@ -189,8 +190,8 @@ public class TaskRunner
                 }
             }
         });
-        VisionContext.Instance().DrawContent.ClearAll(); 
-        
+        VisionContext.Instance().DrawContent.ClearAll();
+
         // 激活原神窗口
         var maskWindow = MaskWindow.Instance();
         SystemControl.ActivateWindow();
@@ -211,7 +212,8 @@ public class TaskRunner
             {
                 TaskTriggerDispatcher.Instance().ClearTriggers();
                 TaskTriggerDispatcher.Instance().SetTriggers(GameTaskManager.LoadInitialTriggers());
-            }),
+            }
+            ),
             ("清理绘制内容", VisionContext.Instance().DrawContent.ClearAll),
             ("关闭 HTML 遮罩", HtmlMaskWindow.CloseAll)
         ],
@@ -286,6 +288,10 @@ internal static class TaskRunnerFailurePolicy
         bool isContinuousRunGroup,
         bool propagateExceptions)
     {
+        if (exception is TaskFailureRecoveryException)
+        {
+            return exception;
+        }
         return isContinuousRunGroup || propagateExceptions ? exception : null;
     }
 
