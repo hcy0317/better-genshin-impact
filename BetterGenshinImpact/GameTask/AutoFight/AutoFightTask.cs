@@ -353,7 +353,7 @@ public class AutoFightTask : ISoloTask
         //盾奶优先功能角色预处理
         var guardianAvatar = string.IsNullOrWhiteSpace(_taskParam.GuardianAvatar) ? null : combatScenes.SelectAvatar(int.Parse(_taskParam.GuardianAvatar));
         
-        AutoFightSeek.RotationCount= 0; // 重置旋转次数
+        AutoFightSeek.ResetSeekState(); // 重置旋转次数与目标路线锁定
         
         // 基于经验值的战后拾取检测：在战斗过程中异步检测精英怪经验值图标
         // 仅在万叶拾取总开关开启时才启动经验值检测
@@ -394,6 +394,7 @@ public class AutoFightTask : ISoloTask
                     }
 
                     var skipFightName = "";
+                    var guardianSkillHandledForCurrentBlock = false;
 
                     #endregion
                     
@@ -405,9 +406,27 @@ public class AutoFightTask : ISoloTask
                         #region 盾奶位技能优先功能
                         
                         var skipModel = guardianAvatar != null && lastFightName != command.Name;
-                        if (skipModel) await AutoFightSkill.EnsureGuardianSkill(guardianAvatar,lastCommand,lastFightName,
-                            _taskParam.GuardianAvatar,_taskParam.GuardianAvatarHold,5,ct,_taskParam.GuardianCombatSkip,_taskParam.BurstEnabled);
+                        if (GuardianSkillSwitchPolicy.ShouldEnsureGuardianSkill(
+                                guardianSkillHandledForCurrentBlock, skipModel))
+                        {
+                            guardianSkillHandledForCurrentBlock = await AutoFightSkill.EnsureGuardianSkill(
+                                guardianAvatar,lastCommand,lastFightName,
+                                _taskParam.GuardianAvatar,_taskParam.GuardianAvatarHold,5,ct,
+                                _taskParam.GuardianCombatSkip,_taskParam.BurstEnabled);
+                        }
                         var avatar = combatScenes.SelectAvatar(command.Name);
+
+                        if (GuardianSkillSwitchPolicy.ShouldSkipDuplicateSkill(
+                                guardianSkillHandledForCurrentBlock,
+                                avatar?.Name == guardianAvatar?.Name,
+                                command.Method == Method.Skill))
+                        {
+                            Logger.LogInformation(
+                                "盾奶位 {GuardianAvatar} 本轮已优先释放战技，跳过同轮重复 E 命令并继续后续动作",
+                                guardianAvatar!.Name);
+                            lastFightName = command.Name;
+                            continue;
+                        }
                         
                         #endregion
                         
@@ -996,21 +1015,17 @@ public class AutoFightTask : ISoloTask
         LastFightFinishCheckTime = DateTime.Now;
         using (AvatarRecognition.BeginExclusiveOperation())
         {
-            // 敌人可见时跳过战斗结束检查
-            if (finishDetectConfig.SkipFightEndCheckWhenEnemyVisible)
+            // 所有即时敌人判断统一走 AutoFightSeek：红色方位三角和血条共用同一套
+            // 转向、接近、重截图状态机，避免“检测到敌人”与“尝试靠近”分裂成两条逻辑。
+            if (finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || finishDetectConfig.RotateFindEnemyEnabled)
             {
-                if (_skipCheckCounter < 5)
+                if (await AutoFightSeek.DetectAndApproachEnemyAsync(Logger, ct))
                 {
-                    using var quickCapture = CaptureToRectArea();
-                    var bars = AvatarRecognition.FindBloodBars(quickCapture);
-                    // 不进行伤害数字识别。传奇血条（y<96或纵坐标连续出现5帧的y96-200血条）也会被 FindBloodBars 正常返回
-                    // 过滤左侧 UI 区域 (x <= 200)，避免队伍头像等红色元素被误判为敌人血条
-                    if (bars.Any(b => b.x > (int)(200 * TaskContext.Instance().SystemInfo.AssetScale)))
-                    {
-                        _skipCheckCounter++;
-                        Logger.LogInformation("敌人可见，跳过战斗结束检查（已连续跳过{Count}次）", _skipCheckCounter);
-                        return false;
-                    }
+                    _skipCheckCounter++;
+                    Logger.LogInformation(
+                        "统一寻敌链路检测到敌人并完成本轮转向/接近，跳过战斗结束检查（连续{Count}次）",
+                        _skipCheckCounter);
+                    return false;
                 }
                 _skipCheckCounter = 0;
             }
@@ -1099,8 +1114,7 @@ public class AutoFightTask : ISoloTask
 
             if (finishDetectConfig.RotateFindEnemyEnabled)
             {
-                var bloodLower = new Scalar(255, 90, 90);
-                await MoveForwardTask.MoveForwardAsync(bloodLower, bloodLower, Logger, ct);
+                await AutoFightSeek.DetectAndApproachEnemyAsync(Logger, ct);
             }
 
             _lastFightFlagTime = DateTime.Now;

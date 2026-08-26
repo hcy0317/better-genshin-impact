@@ -8,6 +8,7 @@ using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.Service;
+using OpenCvSharp;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
@@ -177,10 +178,10 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void SelectSeekDecision_TopHealthBarMustNotBecomeForwardDirection()
+    public void SelectSeekDecision_CloseHealthBarMustKeepFightingWithoutDirection()
     {
         var decision = AutoFightSeek.SelectSeekDecision(
-            [new EnemySeekVisual(700, 90, 180, 5, 820)],
+            [new EnemySeekVisual(590, 300, 320, 5, 1600)],
             imageWidth: 1500,
             imageHeight: 900);
 
@@ -189,10 +190,10 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
-    [InlineData(12, 430, 12, 9, (int)EnemyIndicatorDirection.Left)]
-    [InlineData(1460, 430, 12, 9, (int)EnemyIndicatorDirection.Right)]
-    [InlineData(744, 24, 12, 9, (int)EnemyIndicatorDirection.Forward)]
-    [InlineData(744, 860, 12, 9, (int)EnemyIndicatorDirection.Behind)]
+    [InlineData(12, 430, 24, 20, (int)EnemyIndicatorDirection.Left)]
+    [InlineData(1460, 430, 24, 20, (int)EnemyIndicatorDirection.Right)]
+    [InlineData(744, 24, 24, 20, (int)EnemyIndicatorDirection.Forward)]
+    [InlineData(744, 860, 24, 20, (int)EnemyIndicatorDirection.Behind)]
     public void SelectSeekDecision_RedDirectionIndicatorMustDriveApproachDirection(
         int x,
         int y,
@@ -202,14 +203,96 @@ public class CombatScriptResourceTests
     {
         var decision = AutoFightSeek.SelectSeekDecision(
             [
-                new EnemySeekVisual(700, 90, 180, 5, 820),
-                new EnemySeekVisual(x, y, width, height, 55)
+                new EnemySeekVisual(x, y, width, height, 260)
             ],
             imageWidth: 1500,
             imageHeight: 900);
 
         Assert.Equal(AutoFightSeekAction.Approach, decision.Action);
         Assert.Equal((EnemyIndicatorDirection)expectedDirection, decision.Direction);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_VisibleHealthBarMustTakePriorityOverOtherEnemyArrows()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [
+                new EnemySeekVisual(590, 300, 320, 5, 1600),
+                new EnemySeekVisual(12, 430, 24, 20, 260, -90)
+            ],
+            imageWidth: 1500,
+            imageHeight: 900);
+
+        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_MultipleArrowsMustChooseTheSmallestTurnAndBoundOneStep()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [
+                new EnemySeekVisual(12, 430, 24, 20, 260, -145),
+                new EnemySeekVisual(744, 24, 24, 20, 260, 24),
+                new EnemySeekVisual(1460, 430, 24, 20, 260, 92)
+            ],
+            imageWidth: 1500,
+            imageHeight: 900);
+
+        Assert.Equal(AutoFightSeekAction.Approach, decision.Action);
+        Assert.Equal(24, decision.Visual!.Value.IndicatorBearingDegrees);
+        Assert.Equal(3, decision.SignalCount);
+        Assert.InRange(Math.Abs(AutoFightSeek.GetIndicatorCameraOffset(
+            decision.Direction,
+            decision.Visual.Value,
+            1500,
+            900)), 1, 640);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_LockedRouteMustIgnoreEveryOtherArrow()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [
+                new EnemySeekVisual(12, 430, 24, 20, 260, -145),
+                new EnemySeekVisual(744, 24, 24, 20, 260, 24),
+                new EnemySeekVisual(1460, 430, 24, 20, 260, 92)
+            ],
+            imageWidth: 1500,
+            imageHeight: 900,
+            indicatorRouteLocked: true);
+
+        Assert.Equal(AutoFightSeekAction.ContinueLockedRoute, decision.Action);
+        Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
+        Assert.Null(decision.Visual);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_LockedRouteMustStillYieldToAVisibleHealthBar()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [
+                new EnemySeekVisual(720, 300, 60, 5, 300),
+                new EnemySeekVisual(12, 430, 24, 20, 260, -145),
+                new EnemySeekVisual(1460, 430, 24, 20, 260, 92)
+            ],
+            imageWidth: 1500,
+            imageHeight: 900,
+            indicatorRouteLocked: true);
+
+        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, decision.Action);
+        Assert.NotNull(decision.Visual);
+        Assert.Equal(60, decision.Visual!.Value.Width);
+    }
+
+    [Fact]
+    public void IndicatorCameraSteps_MustCoverTheWholeBearingWithoutAnUnboundedMouseJump()
+    {
+        var visual = new EnemySeekVisual(12, 430, 24, 20, 260, -145);
+
+        var steps = AutoFightSeek.GetIndicatorCameraSteps(visual, 1500, 900);
+
+        Assert.Equal((int)Math.Round(-145d / 180d * 1920), steps.Sum());
+        Assert.All(steps, step => Assert.InRange(Math.Abs(step), 1, 640));
     }
 
     [Fact]
@@ -222,6 +305,465 @@ public class CombatScriptResourceTests
 
         Assert.Equal(AutoFightSeekAction.Scan, decision.Action);
         Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_FixedTopEliteHealthBarMustAdvanceOnceThenKeepFighting()
+    {
+        var fixedTopHealthBar = new EnemySeekVisual(969, 125, 251, 11, 2600);
+
+        var approaching = AutoFightSeek.SelectSeekDecision(
+            [fixedTopHealthBar],
+            imageWidth: 1920,
+            imageHeight: 1080,
+            indicatorRouteLocked: true,
+            fixedTopHealthTracked: true,
+            fixedTopHealthAdvanceCompleted: false);
+        var outputPointReady = AutoFightSeek.SelectSeekDecision(
+            [fixedTopHealthBar],
+            imageWidth: 1920,
+            imageHeight: 1080,
+            indicatorRouteLocked: true,
+            fixedTopHealthTracked: true,
+            fixedTopHealthAdvanceCompleted: true);
+        var exhausted = AutoFightSeek.SelectSeekDecision(
+            [fixedTopHealthBar],
+            imageWidth: 1920,
+            imageHeight: 1080,
+            indicatorRouteLocked: true,
+            fixedTopHealthTracked: true,
+            fixedTopHealthAdvanceCompleted: true,
+            fixedTopHealthExhausted: true);
+
+        Assert.Equal(AutoFightSeekAction.ApproachFixedTopHealthTarget, approaching.Action);
+        Assert.Equal(EnemyIndicatorDirection.None, approaching.Direction);
+        Assert.Equal(AutoFightSeekAction.KeepFighting, outputPointReady.Action);
+        Assert.Equal(AutoFightSeekAction.Scan, exhausted.Action);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_FixedTopEliteHealthBarMustBeatHudLikeShortBarsAndArrows()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [
+                new EnemySeekVisual(969, 125, 251, 11, 2600),
+                new EnemySeekVisual(928, 386, 25, 8, 170),
+                new EnemySeekVisual(1750, 591, 24, 20, 260, -2)
+            ],
+            imageWidth: 1920,
+            imageHeight: 1080,
+            indicatorRouteLocked: true,
+            fixedTopHealthTracked: true,
+            fixedTopHealthAdvanceCompleted: false);
+
+        Assert.Equal(AutoFightSeekAction.ApproachFixedTopHealthTarget, decision.Action);
+        Assert.Equal(251, decision.Visual!.Value.Width);
+    }
+
+    [Fact]
+    public void FixedTopEliteHealthBar_PhaseLockMustResetAfterThreeMissingFrames()
+    {
+        AutoFightSeek.ResetSeekState();
+        try
+        {
+            var healthBar = new EnemySeekVisual(969, 125, 251, 11, 2600);
+            var now = new DateTime(2026, 8, 26, 12, 0, 0, DateTimeKind.Utc);
+            Assert.Equal((true, false, false), AutoFightSeek.ObserveFixedTopHealthPresence(healthBar, now));
+            AutoFightSeek.MarkFixedTopHealthAdvanceCompleted(now);
+            Assert.Equal((true, true, false), AutoFightSeek.ObserveFixedTopHealthPresence(null, now));
+            Assert.Equal((true, true, false), AutoFightSeek.ObserveFixedTopHealthPresence(null, now));
+            Assert.Equal((false, false, false), AutoFightSeek.ObserveFixedTopHealthPresence(null, now));
+        }
+        finally
+        {
+            AutoFightSeek.ResetSeekState();
+        }
+    }
+
+    [Fact]
+    public void FixedTopEliteHealthBar_NoProgressMustAllowOneSecondNudgesButRemainBounded()
+    {
+        AutoFightSeek.ResetSeekState();
+        try
+        {
+            var healthBar = new EnemySeekVisual(969, 125, 251, 11, 2600);
+            var started = new DateTime(2026, 8, 26, 12, 0, 0, DateTimeKind.Utc);
+            Assert.Equal((true, false, false), AutoFightSeek.ObserveFixedTopHealthPresence(healthBar, started));
+            for (var i = 0; i < 6; i++)
+            {
+                var nudgeCompleted = started.AddSeconds(i * 11);
+                AutoFightSeek.MarkFixedTopHealthAdvanceCompleted(nudgeCompleted);
+                var state = AutoFightSeek.ObserveFixedTopHealthPresence(
+                    healthBar,
+                    nudgeCompleted.AddSeconds(11));
+                if (i < 5)
+                {
+                    Assert.Equal((true, false, false), state);
+                }
+                else
+                {
+                    Assert.Equal((true, true, true), state);
+                }
+            }
+            Assert.Equal(6, AutoFightSeek.GetFixedTopHealthAdvanceCount());
+        }
+        finally
+        {
+            AutoFightSeek.ResetSeekState();
+        }
+    }
+
+    [Fact]
+    public void ClassifySeekVisual_MustPreserveHealthBarsButRejectSmallHudNoise()
+    {
+        using var mask = Mat.Zeros(1, 1, MatType.CV_8UC1).ToMat();
+        var fixedTopHealthBar = new EnemySeekVisual(969, 125, 251, 11, 2600);
+
+        Assert.Equal(
+            fixedTopHealthBar,
+            AutoFightSeek.ClassifySeekVisual(mask, fixedTopHealthBar, 1920, 1080));
+        Assert.Null(AutoFightSeek.ClassifySeekVisual(
+            mask,
+            new EnemySeekVisual(1820, 795, 9, 14, 80),
+            1920,
+            1080));
+    }
+
+    [Fact]
+    public void SelectSeekDecision_WideTopHealthBarMustUseTheOneSecondOutputPointPolicy()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [new EnemySeekVisual(757, 82, 406, 9, 3654)],
+            imageWidth: 1920,
+            imageHeight: 1080);
+
+        Assert.Equal(AutoFightSeekAction.ApproachFixedTopHealthTarget, decision.Action);
+        Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
+    }
+
+    [Fact]
+    public void FightFinishCheck_MustUseTheUnifiedArrowAndHealthBarApproachPipeline()
+    {
+        var source = File.ReadAllText(SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "AutoFightTask.cs"));
+        var section = SourceSection(
+            source,
+            "public static async Task<bool> CheckFightFinish",
+            "private static Dictionary<string, double> ParseStringToDictionary");
+
+        Assert.Contains("AutoFightSeek.DetectAndApproachEnemyAsync", section, StringComparison.Ordinal);
+        Assert.DoesNotContain("AvatarRecognition.FindBloodBars", section, StringComparison.Ordinal);
+        Assert.DoesNotContain("MoveForwardTask.MoveForwardAsync", section, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(744, 10, 0)]
+    [InlineData(1480, 440, 90)]
+    [InlineData(744, 880, 180)]
+    [InlineData(10, 440, -90)]
+    public void IndicatorBearing_MustMapTheFullScreenPositionToAContinuousAngle(
+        int x,
+        int y,
+        double expectedDegrees)
+    {
+        var bearing = AutoFightSeek.GetIndicatorBearingDegrees(
+            new EnemySeekVisual(x, y, 12, 12, 80),
+            imageWidth: 1500,
+            imageHeight: 900);
+
+        Assert.InRange(bearing, expectedDegrees - 2, expectedDegrees + 2);
+    }
+
+    [Fact]
+    public void DirectionIndicatorFeature_MustRemainStableAfterArbitraryRotation()
+    {
+        var path = SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "Assets", "1920x1080",
+            "enemy_direction_indicator_variant_03.png");
+        using var template = Cv2.ImRead(path, ImreadModes.Unchanged);
+        using var alpha = new Mat();
+        Cv2.ExtractChannel(template, alpha, 3);
+        var templateContour = AutoFightSeek.GetLargestExternalContour(alpha);
+        Assert.NotNull(templateContour);
+
+        using var canvas = Mat.Zeros(64, 64, MatType.CV_8UC1).ToMat();
+        var targetRect = new Rect(
+            (canvas.Width - alpha.Width) / 2,
+            (canvas.Height - alpha.Height) / 2,
+            alpha.Width,
+            alpha.Height);
+        using (var target = new Mat(canvas, targetRect))
+        {
+            alpha.CopyTo(target);
+        }
+
+        using var transform = Cv2.GetRotationMatrix2D(new Point2f(32, 32), 47, 1);
+        using var rotated = new Mat();
+        Cv2.WarpAffine(canvas, rotated, transform, canvas.Size(), InterpolationFlags.Nearest);
+
+        Assert.True(AutoFightSeek.MatchesDirectionIndicatorFeature(
+            rotated,
+            [templateContour!],
+            threshold: 0.27));
+
+        var rotatedContour = AutoFightSeek.GetLargestExternalContour(rotated);
+        Assert.NotNull(rotatedContour);
+        var bounds = Cv2.BoundingRect(rotatedContour!);
+        using var rotatedCrop = new Mat(rotated, bounds);
+        Assert.True(AutoFightSeek.IsDirectionIndicatorGeometry(
+            new EnemySeekVisual(
+                1820,
+                795,
+                bounds.Width,
+                bounds.Height,
+                Cv2.CountNonZero(rotatedCrop)),
+            imageWidth: 1920,
+            imageHeight: 1080));
+    }
+
+    [Theory]
+    [InlineData(9, 14, 80)]
+    [InlineData(15, 15, 180)]
+    [InlineData(17, 17, 210)]
+    [InlineData(18, 21, 250)]
+    public void DirectionIndicatorGeometry_MustRejectSmallHudGhostsFromLiveCombat(
+        int width,
+        int height,
+        int area)
+    {
+        Assert.False(AutoFightSeek.IsDirectionIndicatorGeometry(
+            new EnemySeekVisual(1820, 795, width, height, area),
+            imageWidth: 1920,
+            imageHeight: 1080));
+    }
+
+    [Fact]
+    public void DirectionIndicatorFeature_MustRequireTheInternalLightHollow()
+    {
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        var templateContour = AutoFightSeek.GetLargestExternalContour(template);
+        Assert.NotNull(templateContour);
+        Assert.InRange(AutoFightSeek.GetDirectionIndicatorHollowRatio(template)!.Value, 0.002, 0.25);
+
+        using var solidGhost = template.Clone();
+        using var working = template.Clone();
+        Cv2.FindContours(
+            working,
+            out Point[][] contours,
+            out HierarchyIndex[] hierarchy,
+            RetrievalModes.Tree,
+            ContourApproximationModes.ApproxSimple);
+        for (var i = 0; i < contours.Length; i++)
+        {
+            if (hierarchy[i].Parent >= 0)
+            {
+                Cv2.DrawContours(solidGhost, contours, i, Scalar.White, -1);
+            }
+        }
+
+        Assert.Null(AutoFightSeek.GetDirectionIndicatorHollowRatio(solidGhost));
+        Assert.False(AutoFightSeek.MatchesDirectionIndicatorFeature(
+            solidGhost,
+            [templateContour!],
+            threshold: 0.27));
+    }
+
+    [Fact]
+    public void DirectionIndicatorConfirmation_MustRejectAJumpingGhostAcrossTwoFrames()
+    {
+        var first = new EnemySeekVisual(120, 420, 30, 24, 360, -60);
+        var stable = new EnemySeekVisual(128, 425, 31, 24, 370, -56);
+        var jumpingGhost = new EnemySeekVisual(310, 180, 30, 24, 360, 35);
+
+        Assert.True(AutoFightSeek.AreDirectionIndicatorsStable(first, stable, 1920, 1080));
+        Assert.False(AutoFightSeek.AreDirectionIndicatorsStable(first, jumpingGhost, 1920, 1080));
+    }
+
+    [Fact]
+    public void DirectionIndicatorFeature_ConvexHudNotificationDotMustBeRejected()
+    {
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        var templateContour = AutoFightSeek.GetLargestExternalContour(template);
+        Assert.NotNull(templateContour);
+
+        using var notificationDot = Mat.Zeros(32, 32, MatType.CV_8UC1).ToMat();
+        Cv2.Circle(notificationDot, new Point(16, 16), 10, Scalar.White, -1);
+
+        Assert.False(AutoFightSeek.MatchesDirectionIndicatorFeature(
+            notificationDot,
+            [templateContour!],
+            threshold: 0.30));
+    }
+
+    [Fact]
+    public void DirectionIndicatorFeature_ConvexTriangleMustBeRejectedWithoutTheArrowNotch()
+    {
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        var templateContour = AutoFightSeek.GetLargestExternalContour(template);
+        Assert.NotNull(templateContour);
+
+        using var convexTriangle = Mat.Zeros(32, 32, MatType.CV_8UC1).ToMat();
+        Cv2.FillConvexPoly(
+            convexTriangle,
+            [new Point(16, 3), new Point(29, 27), new Point(3, 27)],
+            Scalar.White);
+
+        Assert.False(AutoFightSeek.MatchesDirectionIndicatorFeature(
+            convexTriangle,
+            [templateContour!],
+            threshold: 0.30));
+    }
+
+    [Fact]
+    public void DirectionIndicatorConcavity_UserArrowMustPassButConvexHudShapeMustFail()
+    {
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        var arrowContour = AutoFightSeek.GetLargestExternalContour(template);
+        Assert.NotNull(arrowContour);
+
+        using var notificationDot = Mat.Zeros(32, 32, MatType.CV_8UC1).ToMat();
+        Cv2.Circle(notificationDot, new Point(16, 16), 10, Scalar.White, -1);
+        var dotContour = AutoFightSeek.GetLargestExternalContour(notificationDot);
+        Assert.NotNull(dotContour);
+
+        Assert.True(AutoFightSeek.HasDirectionIndicatorConcavity(arrowContour!));
+        Assert.False(AutoFightSeek.HasDirectionIndicatorConcavity(dotContour!));
+    }
+
+    [Fact]
+    public void DirectionIndicatorOrientation_MustUseTheArrowTipInsteadOfItsScreenPosition()
+    {
+        using var left = LoadDirectionIndicatorAlpha("enemy_direction_indicator_left.png");
+        using var right = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_06.png");
+
+        var leftBearing = AutoFightSeek.GetDirectionIndicatorOrientationDegrees(left);
+        var rightBearing = AutoFightSeek.GetDirectionIndicatorOrientationDegrees(right);
+
+        Assert.NotNull(leftBearing);
+        Assert.NotNull(rightBearing);
+        Assert.InRange(leftBearing!.Value, -135, -45);
+        Assert.InRange(rightBearing!.Value, 45, 135);
+    }
+
+    [Theory]
+    [InlineData(720, 300, 60, 5, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
+    [InlineData(80, 300, 180, 5, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
+    [InlineData(720, 40, 180, 5, (int)AutoFightSeekAction.ApproachFixedTopHealthTarget)]
+    public void SelectSeekDecision_DistantOrOffCenterHealthBarMustDriveApproach(
+        int x,
+        int y,
+        int width,
+        int height,
+        int expectedAction)
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [new EnemySeekVisual(x, y, width, height, width * height)],
+            imageWidth: 1500,
+            imageHeight: 900);
+
+        Assert.Equal((AutoFightSeekAction)expectedAction, decision.Action);
+    }
+
+    [Fact]
+    public void VisibleEnemyCameraOffsets_MustTurnTowardTheHealthBar()
+    {
+        var healthBar = new EnemySeekVisual(100, 40, 60, 5, 240);
+
+        Assert.True(AutoFightSeek.GetVisibleEnemyCameraOffset(healthBar, 1920) < 0);
+        Assert.True(AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(healthBar, 1080) < 0);
+    }
+
+    [Fact]
+    public void SeekDetectionRegion_ShouldUseTheWholeCaptureInsteadOfA1500By900TopLeftCrop()
+    {
+        var region = AutoFightSeek.GetSeekDetectionRegion(imageWidth: 1920, imageHeight: 1080);
+
+        Assert.Equal(0, region.X);
+        Assert.Equal(0, region.Y);
+        Assert.Equal(1920, region.Width);
+        Assert.Equal(1080, region.Height);
+    }
+
+    [Theory]
+    [InlineData((int)AutoFightSeekAction.Approach, 0, false)]
+    [InlineData((int)AutoFightSeekAction.ApproachVisibleEnemy, 5, false)]
+    [InlineData((int)AutoFightSeekAction.ContinueLockedRoute, 5, true)]
+    [InlineData((int)AutoFightSeekAction.ContinueLockedRoute, 6, false)]
+    [InlineData((int)AutoFightSeekAction.KeepFighting, 0, false)]
+    [InlineData((int)AutoFightSeekAction.Scan, 0, false)]
+    public void ShouldContinueLockedRouteSegment_MustRunForSixSecondsAtATime(
+        int action,
+        int completedSteps,
+        bool expected)
+    {
+        var decision = new EnemySeekDecision((AutoFightSeekAction)action, EnemyIndicatorDirection.Forward);
+
+        Assert.Equal(expected, AutoFightSeek.ShouldContinueLockedRouteSegment(decision, completedSteps));
+    }
+
+    [Fact]
+    public void SelectSeekDecision_Recent1920CaptureArrowMustUseFullFrameCenter()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [new EnemySeekVisual(722, 83, 24, 20, 260)],
+            imageWidth: 1920,
+            imageHeight: 1080);
+
+        Assert.Equal(AutoFightSeekAction.Approach, decision.Action);
+        Assert.Equal(EnemyIndicatorDirection.Left, decision.Direction);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_UserArrowBoundsMustBeRecognizedAsAnIndicator()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [new EnemySeekVisual(7, 430, 34, 31, 518)],
+            imageWidth: 1920,
+            imageHeight: 1080);
+
+        Assert.Equal(AutoFightSeekAction.Approach, decision.Action);
+        Assert.Equal(EnemyIndicatorDirection.Left, decision.Direction);
+    }
+
+    [Fact]
+    public void CreateSeekColorMask_MustIncludeTheObservedPinkRedArrowColor()
+    {
+        using var source = new Mat(1, 1, MatType.CV_8UC3, new Scalar(94, 74, 247));
+        using var mask = AutoFightSeek.CreateSeekColorMask(source, new Scalar(255, 90, 90), null);
+
+        Assert.Equal(255, mask.At<byte>(0, 0));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(5, true)]
+    [InlineData(6, false)]
+    public void LockedRouteApproach_MustRemainBoundedToSixSecondsBeforeReselection(
+        int completedSteps,
+        bool expected)
+    {
+        var decision = new EnemySeekDecision(AutoFightSeekAction.ContinueLockedRoute, EnemyIndicatorDirection.None);
+
+        Assert.Equal(expected, AutoFightSeek.ShouldContinueLockedRouteSegment(decision, completedSteps));
+    }
+
+    [Fact]
+    public void LockedRouteVerticalSweep_MustReturnToTheOriginalPitchAfterSixSeconds()
+    {
+        var total = Enumerable.Range(0, 6).Sum(AutoFightSeek.GetLockedRouteVerticalStep);
+
+        Assert.Equal(0, total);
+    }
+
+    [Theory]
+    [InlineData(10, -240)]
+    [InlineData(450, 0)]
+    [InlineData(850, 240)]
+    public void IndicatorVerticalOffset_MustFollowTopAndBottomArrowPositions(int y, int expected)
+    {
+        var visual = new EnemySeekVisual(20, y, 20, 20, 200);
+
+        Assert.Equal(expected, AutoFightSeek.GetIndicatorCameraVerticalOffset(visual, 900));
     }
 
     [Theory]
@@ -448,6 +990,16 @@ public class CombatScriptResourceTests
             .Select(line => line.Trim())
             .Where(line => line.Length > 0 && !line.StartsWith("//", StringComparison.Ordinal) && !line.StartsWith("#", StringComparison.Ordinal))
             .ToList();
+    }
+
+    private static Mat LoadDirectionIndicatorAlpha(string fileName)
+    {
+        var path = SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "Assets", "1920x1080", fileName);
+        using var image = Cv2.ImRead(path, ImreadModes.Unchanged);
+        var alpha = new Mat();
+        Cv2.ExtractChannel(image, alpha, 3);
+        return alpha;
     }
 
     private static string SourceSection(string source, string startToken, string endToken)

@@ -195,7 +195,7 @@ public class AutoFightJsonTask : ISoloTask
                 TimeSpan.FromSeconds(_finishDetectConfig.CheckTime),
                 _finishDetectConfig.RotateFindEnemyEnabled);
 
-            AutoFightSeek.RotationCount = 0;
+            AutoFightSeek.ResetSeekState();
             AutoFightTask.FightStatusFlag = true;
             _fightEndFlag = false;
             _finishCheckRequested = false;

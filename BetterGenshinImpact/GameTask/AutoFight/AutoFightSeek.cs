@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
+using BetterGenshinImpact.GameTask;
 
 namespace BetterGenshinImpact.GameTask.AutoFight
 {
@@ -28,22 +29,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
         public static async Task<bool?> MoveForwardAsync(Scalar scalarLower, Scalar scalarHigher, ILogger logger, CancellationToken ct)
         {
-            var decision = AutoFightSeek.CaptureSeekDecision(
-                scalarLower,
-                scalarHigher,
-                out var imageWidth,
-                out _);
-            if (decision.Action == AutoFightSeekAction.Approach)
-            {
-                await ApproachIndicatorAsync(decision, imageWidth, logger, ct);
-            }
-            
-            return null;
+            _ = scalarLower;
+            _ = scalarHigher;
+            return await AutoFightSeek.DetectAndApproachEnemyAsync(logger, ct);
         }
 
-        internal static async Task ApproachIndicatorAsync(
+        internal static async Task TurnTowardIndicatorAsync(
             EnemySeekDecision decision,
             int imageWidth,
+            int imageHeight,
             ILogger logger,
             CancellationToken ct)
         {
@@ -52,19 +46,97 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 return;
             }
 
-            var cameraOffset = AutoFightSeek.GetIndicatorCameraOffset(decision.Direction, visual, imageWidth);
+            var bearing = AutoFightSeek.GetIndicatorBearingDegrees(visual, imageWidth, imageHeight);
+            var cameraSteps = AutoFightSeek.GetIndicatorCameraSteps(visual, imageWidth, imageHeight);
+            var verticalCameraOffset = AutoFightSeek.GetIndicatorCameraVerticalOffset(visual, imageHeight);
             logger.LogInformation(
-                "红色敌人方位小三角: 位置=({X},{Y})，尺寸={Width}x{Height}，方向={Direction}，转向={CameraOffset}",
+                "红色敌人方位小三角: 候选={SignalCount}，首次只选当前目标；位置=({X},{Y})，尺寸={Width}x{Height}，轮廓朝向角={Bearing:F1}°，方向={Direction}，分成 {CameraStepCount} 段完成总转向=({CameraOffset},{VerticalCameraOffset})",
+                decision.SignalCount,
                 visual.X,
                 visual.Y,
                 visual.Width,
                 visual.Height,
+                bearing,
                 decision.Direction,
-                cameraOffset);
+                cameraSteps.Count,
+                cameraSteps.Sum(),
+                verticalCameraOffset);
 
-            if (cameraOffset != 0)
+            if (cameraSteps.Count == 0 && verticalCameraOffset != 0)
             {
-                Simulation.SendInput.Mouse.MoveMouseBy(cameraOffset, 0);
+                Simulation.SendInput.Mouse.MoveMouseBy(0, verticalCameraOffset);
+                await Task.Delay(180, ct);
+            }
+
+            for (var i = 0; i < cameraSteps.Count; i++)
+            {
+                Simulation.SendInput.Mouse.MoveMouseBy(
+                    cameraSteps[i],
+                    i == 0 ? verticalCameraOffset : 0);
+                await Task.Delay(180, ct);
+            }
+        }
+
+        internal static async Task AdvanceLockedRouteAsync(
+            int verticalCameraOffset,
+            int completedSteps,
+            int signalCount,
+            ILogger logger,
+            CancellationToken ct)
+        {
+            if (verticalCameraOffset != 0)
+            {
+                Simulation.SendInput.Mouse.MoveMouseBy(0, verticalCameraOffset);
+                await Task.Delay(80, ct);
+            }
+
+            logger.LogInformation(
+                "锁定路线前进第 {Step}/6 秒：本帧记录到其他箭头 {SignalCount} 个但不改目标，血条仍为唯一抢占条件，俯仰修正={VerticalOffset}",
+                completedSteps + 1,
+                signalCount,
+                verticalCameraOffset);
+            await MoveWithKeysAsync(ct, GIActions.MoveForward);
+        }
+
+        internal static async Task AdvanceFixedTopHealthOnceAsync(
+            ILogger logger,
+            CancellationToken ct)
+        {
+            var nextAdvance = AutoFightSeek.GetFixedTopHealthAdvanceCount() + 1;
+            logger.LogInformation(
+                nextAdvance == 1
+                    ? "顶部固定精英血条首次出现：沿当前已确定方向前进 1 秒，确定输出点后停止本阶段接近"
+                    : "顶部固定精英血条连续 10 秒未掉血：执行第 {Advance}/6 次 1 秒位置微调，然后重新观察输出进展",
+                nextAdvance);
+            await MoveWithKeysAsync(ct, GIActions.MoveForward);
+        }
+
+        internal static async Task ApproachVisibleEnemyAsync(
+            EnemySeekDecision decision,
+            int imageWidth,
+            int imageHeight,
+            ILogger logger,
+            CancellationToken ct)
+        {
+            if (decision.Action != AutoFightSeekAction.ApproachVisibleEnemy || decision.Visual is not { } visual)
+            {
+                return;
+            }
+
+            var cameraOffset = AutoFightSeek.GetVisibleEnemyCameraOffset(visual, imageWidth);
+            var verticalCameraOffset = AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual, imageHeight);
+            logger.LogInformation(
+                "检测到远距离敌人血条: 位置=({X},{Y})，尺寸={Width}x{Height}，转向=({CameraOffset},{VerticalCameraOffset})，短距接近",
+                visual.X,
+                visual.Y,
+                visual.Width,
+                visual.Height,
+                cameraOffset,
+                verticalCameraOffset);
+
+            if (cameraOffset != 0 || verticalCameraOffset != 0)
+            {
+                Simulation.SendInput.Mouse.MoveMouseBy(cameraOffset, verticalCameraOffset);
                 await Task.Delay(180, ct);
             }
 
@@ -98,6 +170,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
     {
         Scan,
         Approach,
+        ContinueLockedRoute,
+        ApproachVisibleEnemy,
+        ApproachFixedTopHealthTarget,
         KeepFighting
     }
 
@@ -110,7 +185,13 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         Behind
     }
 
-    internal readonly record struct EnemySeekVisual(int X, int Y, int Width, int Height, int Area)
+    internal readonly record struct EnemySeekVisual(
+        int X,
+        int Y,
+        int Width,
+        int Height,
+        int Area,
+        double? IndicatorBearingDegrees = null)
     {
         internal int CenterX => X + Width / 2;
         internal int CenterY => Y + Height / 2;
@@ -119,20 +200,85 @@ namespace BetterGenshinImpact.GameTask.AutoFight
     internal readonly record struct EnemySeekDecision(
         AutoFightSeekAction Action,
         EnemyIndicatorDirection Direction,
-        EnemySeekVisual? Visual = null);
+        EnemySeekVisual? Visual = null,
+        int SignalCount = 0);
 
     public class AutoFightSeek
     {
         public static int RotationCount = 0;
+
+        private static int _indicatorRouteLocked;
+        private static int _fixedTopHealthTracked;
+        private static int _fixedTopHealthAdvanceCompleted;
+        private static int _fixedTopHealthMissingFrames;
+        private static int _fixedTopHealthBaselineWidth;
+        private static int _fixedTopHealthLowestWidth;
+        private static long _fixedTopHealthLastProgressTicks;
+        private static int _fixedTopHealthAdvanceCount;
+
+        private static bool IsIndicatorRouteLocked => Volatile.Read(ref _indicatorRouteLocked) == 1;
+
+        internal static void ResetSeekState()
+        {
+            RotationCount = 0;
+            Interlocked.Exchange(ref _indicatorRouteLocked, 0);
+            Interlocked.Exchange(ref _fixedTopHealthTracked, 0);
+            Interlocked.Exchange(ref _fixedTopHealthAdvanceCompleted, 0);
+            Interlocked.Exchange(ref _fixedTopHealthMissingFrames, 0);
+            Interlocked.Exchange(ref _fixedTopHealthBaselineWidth, 0);
+            Interlocked.Exchange(ref _fixedTopHealthLowestWidth, 0);
+            Interlocked.Exchange(ref _fixedTopHealthLastProgressTicks, 0);
+            Interlocked.Exchange(ref _fixedTopHealthAdvanceCount, 0);
+        }
+
+        private static void LockIndicatorRoute()
+        {
+            Interlocked.Exchange(ref _indicatorRouteLocked, 1);
+        }
+
+        private static void UnlockIndicatorRoute()
+        {
+            Interlocked.Exchange(ref _indicatorRouteLocked, 0);
+        }
 
         private const int VerticalSeekScaleNumerator = 4;
         private const int VerticalSeekScaleDenominator = 10;
         private const int VerticalSeekMaxTargetOffset = 3200;
         private const int MaxVerticalMouseStep = 240;
         private const int SeekViewportHeight = 900;
+        private const int LockedRouteForwardSeconds = 6;
+        private const int MaxVisibleEnemyApproachSteps = 4;
+        private const int FixedTopHealthResetMissingFrames = 3;
+        private const int FixedTopHealthProgressMinPixels = 8;
+        private const int FixedTopHealthNoProgressSeconds = 10;
+        private const int FixedTopHealthMaxAdvanceCount = 6;
+        private const int IndicatorReacquireDelayMilliseconds = 120;
+        // 6 个实拍轮廓在任意旋转后的 I1 距离保留少量抗锯齿余量；
+        // 尺寸门另按 1920x1080 的真实 UI 尺寸过滤小型 HUD 鬼影。
+        private const double DirectionIndicatorFeatureThreshold = 0.27;
+        private const double DirectionIndicatorMinSolidity = 0.60;
+        private const double DirectionIndicatorMaxSolidity = 0.90;
+        private const double DirectionIndicatorMinHollowRatio = 0.002;
+        private const double DirectionIndicatorMaxHollowRatio = 0.25;
+        private const int HalfTurnMouseOffset = 1920;
+        private const int MaxIndicatorCameraStep = 640;
+
+        private static readonly string[] DirectionIndicatorTemplateNames =
+        {
+            "enemy_direction_indicator_left.png",
+            "enemy_direction_indicator_variant_02.png",
+            "enemy_direction_indicator_variant_03.png",
+            "enemy_direction_indicator_variant_04.png",
+            "enemy_direction_indicator_variant_05.png",
+            "enemy_direction_indicator_variant_06.png"
+        };
+
+        private static readonly Lazy<IReadOnlyList<Point[]>> DirectionIndicatorTemplateContours =
+            new(LoadDirectionIndicatorTemplateContours);
 
         private static readonly int[] VerticalSeekWave = { 0, -1, 0, 1 };
         private static readonly int[] VerticalSeekTrackCenters = { -2, 0, 2 };
+        private static readonly int[] LockedRouteVerticalSteps = { 0, -120, 240, -240, 120, 0 };
         
         private static readonly Dictionary<int, int> RotaryFactorMapping = new Dictionary<int, int> //旋转因子映射表
         {
@@ -152,8 +298,19 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int retryCount = isEndCheck? 1 : 0;
             var currentVerticalTarget = 0;
 
-            var initialDecision = CaptureSeekDecision(bloodLower, null, out var initialImageWidth, out _);
-            if (await HandleDetectedEnemyAsync(initialDecision, initialImageWidth, logger, ct))
+            var initialDecision = CaptureSeekDecision(
+                bloodLower,
+                null,
+                out var initialImageWidth,
+                out var initialImageHeight);
+            if (await HandleDetectedEnemyAsync(
+                    initialDecision,
+                    initialImageWidth,
+                    initialImageHeight,
+                    bloodLower,
+                    null,
+                    logger,
+                    ct))
             {
                 return false;
             }
@@ -171,7 +328,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             while (retryCount < 25+(int)(adjustedX / 5))
             {
                 var decision = CaptureSeekDecision(bloodLower, null, out var imageWidth, out var imageHeight);
-                if (await HandleDetectedEnemyAsync(decision, imageWidth, logger, ct))
+                if (await HandleDetectedEnemyAsync(
+                        decision,
+                        imageWidth,
+                        imageHeight,
+                        bloodLower,
+                        null,
+                        logger,
+                        ct))
                 {
                     return false;
                 }
@@ -205,8 +369,19 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
                 await Task.Delay(50+(int)(adjustedX/adjustedDivisor),ct);
 
-                var decisionAfterMove = CaptureSeekDecision(bloodLower, null, out var movedImageWidth, out _);
-                if (await HandleDetectedEnemyAsync(decisionAfterMove, movedImageWidth, logger, ct))
+                var decisionAfterMove = CaptureSeekDecision(
+                    bloodLower,
+                    null,
+                    out var movedImageWidth,
+                    out var movedImageHeight);
+                if (await HandleDetectedEnemyAsync(
+                        decisionAfterMove,
+                        movedImageWidth,
+                        movedImageHeight,
+                        bloodLower,
+                        null,
+                        logger,
+                        ct))
                 {
                     return false;
                 }
@@ -219,42 +394,162 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return null;
         }
 
+        internal static async Task<bool> DetectAndApproachEnemyAsync(
+            ILogger logger,
+            CancellationToken ct)
+        {
+            var bloodLower = new Scalar(255, 90, 90);
+            var decision = CaptureSeekDecision(
+                bloodLower,
+                null,
+                out var imageWidth,
+                out var imageHeight);
+            return await HandleDetectedEnemyAsync(
+                decision,
+                imageWidth,
+                imageHeight,
+                bloodLower,
+                null,
+                logger,
+                ct);
+        }
+
         internal static EnemySeekDecision SelectSeekDecision(
             IReadOnlyCollection<EnemySeekVisual> visuals,
             int imageWidth,
-            int imageHeight)
+            int imageHeight,
+            bool indicatorRouteLocked = false,
+            bool fixedTopHealthTracked = false,
+            bool fixedTopHealthAdvanceCompleted = false,
+            bool fixedTopHealthExhausted = false)
         {
-            var indicator = visuals
-                .Where(visual => IsDirectionIndicator(visual, imageWidth, imageHeight))
-                .OrderByDescending(visual => visual.Area)
+            // 顶部固定精英血条是整场唯一可靠的目标状态；同一帧可能混有技能栏、伤害特效等
+            // 短红条，必须先于普通悬浮血条选择，否则专用接近路线永远拿不到控制权。
+            var fixedTopHealthBar = visuals
+                .Where(IsHealthBar)
+                .Where(visual => IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight))
+                .OrderBy(visual => Math.Abs(visual.CenterX - imageWidth / 2))
+                .ThenByDescending(visual => visual.Width)
                 .FirstOrDefault();
-            if (indicator != default)
+            if (fixedTopHealthBar != default || fixedTopHealthTracked)
             {
+                if (fixedTopHealthExhausted)
+                {
+                    return new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None);
+                }
                 return new EnemySeekDecision(
-                    AutoFightSeekAction.Approach,
-                    GetIndicatorDirection(indicator, imageWidth, imageHeight),
-                    indicator);
+                    fixedTopHealthAdvanceCompleted
+                        ? AutoFightSeekAction.KeepFighting
+                        : AutoFightSeekAction.ApproachFixedTopHealthTarget,
+                    EnemyIndicatorDirection.None,
+                    fixedTopHealthBar == default ? null : fixedTopHealthBar,
+                    1);
             }
 
-            var healthBar = visuals.FirstOrDefault(IsHealthBar);
-            return healthBar == default
-                ? new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None)
-                : new EnemySeekDecision(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, healthBar);
+            var floatingHealthBar = visuals
+                .Where(IsHealthBar)
+                .Where(visual => !IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight))
+                .OrderBy(visual => Math.Abs(visual.CenterX - imageWidth / 2))
+                .ThenByDescending(visual => visual.Width)
+                .FirstOrDefault();
+            if (floatingHealthBar != default)
+            {
+                return ShouldApproachVisibleEnemy(floatingHealthBar, imageWidth, imageHeight)
+                    ? new EnemySeekDecision(
+                        AutoFightSeekAction.ApproachVisibleEnemy,
+                        GetVisibleEnemyDirection(floatingHealthBar, imageWidth),
+                        floatingHealthBar,
+                        1)
+                    : new EnemySeekDecision(
+                        AutoFightSeekAction.KeepFighting,
+                        EnemyIndicatorDirection.None,
+                        floatingHealthBar,
+                        1);
+            }
+
+            return SelectDirectionIndicatorDecision(
+                visuals,
+                imageWidth,
+                imageHeight,
+                indicatorRouteLocked);
+        }
+
+        private static EnemySeekDecision SelectDirectionIndicatorDecision(
+            IReadOnlyCollection<EnemySeekVisual> visuals,
+            int imageWidth,
+            int imageHeight,
+            bool indicatorRouteLocked)
+        {
+            var indicators = visuals
+                .Where(visual => IsDirectionIndicatorGeometry(visual, imageWidth, imageHeight))
+                .OrderBy(visual => Math.Abs(GetIndicatorBearingDegrees(
+                    visual,
+                    imageWidth,
+                    imageHeight)))
+                .ThenByDescending(visual => visual.Area)
+                .ToList();
+
+            if (indicatorRouteLocked)
+            {
+                return new EnemySeekDecision(
+                    AutoFightSeekAction.ContinueLockedRoute,
+                    EnemyIndicatorDirection.None,
+                    null,
+                    indicators.Count);
+            }
+
+            if (indicators.Count == 0)
+            {
+                return new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None);
+            }
+
+            var indicator = indicators[0];
+            return new EnemySeekDecision(
+                AutoFightSeekAction.Approach,
+                GetIndicatorDirection(indicator, imageWidth, imageHeight),
+                indicator,
+                indicators.Count);
         }
 
         internal static int GetIndicatorCameraOffset(
             EnemyIndicatorDirection direction,
             EnemySeekVisual visual,
-            int imageWidth)
+            int imageWidth,
+            int imageHeight = SeekViewportHeight)
         {
-            var center = imageWidth / 2;
-            return direction switch
+            var bearing = GetIndicatorBearingDegrees(visual, imageWidth, imageHeight);
+            if (Math.Abs(bearing) < 8)
             {
-                EnemyIndicatorDirection.Left => -Math.Clamp((center - visual.CenterX) * 2, 320, 960),
-                EnemyIndicatorDirection.Right => Math.Clamp((visual.CenterX - center) * 2, 320, 960),
-                EnemyIndicatorDirection.Behind => 960,
-                _ => 0
-            };
+                return 0;
+            }
+
+            return Math.Clamp(
+                (int)Math.Round(bearing / 180d * HalfTurnMouseOffset),
+                -MaxIndicatorCameraStep,
+                MaxIndicatorCameraStep);
+        }
+
+        internal static IReadOnlyList<int> GetIndicatorCameraSteps(
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
+            var bearing = GetIndicatorBearingDegrees(visual, imageWidth, imageHeight);
+            if (Math.Abs(bearing) < 8)
+            {
+                return Array.Empty<int>();
+            }
+
+            var remaining = (int)Math.Round(bearing / 180d * HalfTurnMouseOffset);
+            var steps = new List<int>();
+            while (remaining != 0)
+            {
+                var step = Math.Clamp(remaining, -MaxIndicatorCameraStep, MaxIndicatorCameraStep);
+                steps.Add(step);
+                remaining -= step;
+            }
+
+            return steps;
         }
 
         private static bool IsHealthBar(EnemySeekVisual visual)
@@ -263,16 +558,21 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                    visual.Width >= Math.Max(18, visual.Height * 3);
         }
 
-        private static bool IsDirectionIndicator(EnemySeekVisual visual, int imageWidth, int imageHeight)
+        internal static bool IsDirectionIndicatorGeometry(EnemySeekVisual visual, int imageWidth, int imageHeight)
         {
-            if (visual.Width is < 5 or > 30 || visual.Height is < 4 or > 24 || visual.Area < 12)
+            // 实拍箭头的红色轮廓约 30x24~36x31。现场误报集中在 15x15、17x17、
+            // 18x21 等小红块；短边、长边和面积必须同时达到真实箭头尺度。
+            if (visual.Width is > 56 || visual.Height is > 56
+                || Math.Min(visual.Width, visual.Height) < 18
+                || Math.Max(visual.Width, visual.Height) < 22
+                || visual.Area < 160)
             {
                 return false;
             }
 
             var fillRatio = visual.Area / (double)(visual.Width * visual.Height);
             var aspectRatio = visual.Width / (double)visual.Height;
-            if (fillRatio is < 0.18 or > 0.82 || aspectRatio is < 0.45 or > 2.4)
+            if (fillRatio is < 0.30 or > 0.78 || aspectRatio is < 0.65 or > 1.55)
             {
                 return false;
             }
@@ -287,21 +587,144 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight)
         {
-            var horizontalDeadZone = imageWidth * 0.16;
-            var deltaX = visual.CenterX - imageWidth / 2d;
-            if (deltaX < -horizontalDeadZone)
+            var bearing = GetIndicatorBearingDegrees(visual, imageWidth, imageHeight);
+            if (bearing is <= -20 and >= -160)
             {
                 return EnemyIndicatorDirection.Left;
             }
 
-            if (deltaX > horizontalDeadZone)
+            if (bearing is >= 20 and <= 160)
             {
                 return EnemyIndicatorDirection.Right;
             }
 
-            return visual.CenterY >= imageHeight * 0.75
+            return Math.Abs(bearing) > 160
                 ? EnemyIndicatorDirection.Behind
                 : EnemyIndicatorDirection.Forward;
+        }
+
+        internal static bool IsFixedTopEliteHealthBar(
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
+            return IsHealthBar(visual)
+                   && visual.Width >= 60
+                   && visual.CenterY <= imageHeight * 0.18
+                   && Math.Abs(visual.CenterX - imageWidth / 2d) <= imageWidth * 0.25;
+        }
+
+        internal static (bool tracked, bool advanceCompleted, bool exhausted)
+            ObserveFixedTopHealthPresence(EnemySeekVisual? healthBar, DateTime? now = null)
+        {
+            var nowTicks = (now ?? DateTime.UtcNow).Ticks;
+            if (healthBar is { } visibleHealthBar)
+            {
+                Interlocked.Exchange(ref _fixedTopHealthMissingFrames, 0);
+                if (Interlocked.Exchange(ref _fixedTopHealthTracked, 1) == 0)
+                {
+                    Interlocked.Exchange(ref _fixedTopHealthBaselineWidth, visibleHealthBar.Width);
+                    Interlocked.Exchange(ref _fixedTopHealthLowestWidth, visibleHealthBar.Width);
+                    Interlocked.Exchange(ref _fixedTopHealthLastProgressTicks, nowTicks);
+                }
+                else
+                {
+                    var lowestWidth = Volatile.Read(ref _fixedTopHealthLowestWidth);
+                    if (visibleHealthBar.Width <= lowestWidth - FixedTopHealthProgressMinPixels)
+                    {
+                        Interlocked.Exchange(ref _fixedTopHealthLowestWidth, visibleHealthBar.Width);
+                        Interlocked.Exchange(ref _fixedTopHealthLastProgressTicks, nowTicks);
+                    }
+                }
+
+                var lastProgressTicks = Volatile.Read(ref _fixedTopHealthLastProgressTicks);
+                var noProgress = lastProgressTicks > 0
+                                 && nowTicks - lastProgressTicks
+                                 >= TimeSpan.FromSeconds(FixedTopHealthNoProgressSeconds).Ticks;
+                if (noProgress
+                    && Volatile.Read(ref _fixedTopHealthAdvanceCompleted) == 1
+                    && Volatile.Read(ref _fixedTopHealthAdvanceCount) < FixedTopHealthMaxAdvanceCount)
+                {
+                    Interlocked.Exchange(ref _fixedTopHealthAdvanceCompleted, 0);
+                }
+            }
+            else if (Volatile.Read(ref _fixedTopHealthTracked) == 1)
+            {
+                var missingFrames = Interlocked.Increment(ref _fixedTopHealthMissingFrames);
+                if (missingFrames >= FixedTopHealthResetMissingFrames)
+                {
+                    Interlocked.Exchange(ref _fixedTopHealthTracked, 0);
+                    Interlocked.Exchange(ref _fixedTopHealthAdvanceCompleted, 0);
+                    Interlocked.Exchange(ref _fixedTopHealthMissingFrames, 0);
+                    Interlocked.Exchange(ref _fixedTopHealthBaselineWidth, 0);
+                    Interlocked.Exchange(ref _fixedTopHealthLowestWidth, 0);
+                    Interlocked.Exchange(ref _fixedTopHealthLastProgressTicks, 0);
+                    Interlocked.Exchange(ref _fixedTopHealthAdvanceCount, 0);
+                }
+            }
+
+            var tracked = Volatile.Read(ref _fixedTopHealthTracked) == 1;
+            var advanceCompleted = Volatile.Read(ref _fixedTopHealthAdvanceCompleted) == 1;
+            var lastProgress = Volatile.Read(ref _fixedTopHealthLastProgressTicks);
+            var exhausted = tracked
+                            && advanceCompleted
+                            && Volatile.Read(ref _fixedTopHealthAdvanceCount) >= FixedTopHealthMaxAdvanceCount
+                            && lastProgress > 0
+                            && nowTicks - lastProgress
+                            >= TimeSpan.FromSeconds(FixedTopHealthNoProgressSeconds).Ticks;
+            return (
+                tracked,
+                advanceCompleted,
+                exhausted);
+        }
+
+        internal static void MarkFixedTopHealthAdvanceCompleted(DateTime? now = null)
+        {
+            Interlocked.Exchange(ref _fixedTopHealthAdvanceCompleted, 1);
+            Interlocked.Increment(ref _fixedTopHealthAdvanceCount);
+            Interlocked.Exchange(
+                ref _fixedTopHealthLastProgressTicks,
+                (now ?? DateTime.UtcNow).Ticks);
+        }
+
+        internal static int GetFixedTopHealthAdvanceCount()
+        {
+            return Volatile.Read(ref _fixedTopHealthAdvanceCount);
+        }
+
+        internal static double GetIndicatorBearingDegrees(
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
+            if (visual.IndicatorBearingDegrees.HasValue)
+            {
+                return visual.IndicatorBearingDegrees.Value;
+            }
+
+            var deltaX = visual.CenterX - imageWidth / 2d;
+            var deltaY = visual.CenterY - imageHeight / 2d;
+            return Math.Atan2(deltaX, -deltaY) * 180d / Math.PI;
+        }
+
+        internal static bool AreDirectionIndicatorsStable(
+            EnemySeekVisual first,
+            EnemySeekVisual second,
+            int imageWidth,
+            int imageHeight)
+        {
+            var centerDistance = Math.Sqrt(
+                Math.Pow(first.CenterX - second.CenterX, 2)
+                + Math.Pow(first.CenterY - second.CenterY, 2));
+            var firstBearing = GetIndicatorBearingDegrees(first, imageWidth, imageHeight);
+            var secondBearing = GetIndicatorBearingDegrees(second, imageWidth, imageHeight);
+            var bearingDelta = Math.Abs((firstBearing - secondBearing + 540d) % 360d - 180d);
+            var widthRatio = Math.Abs(first.Width - second.Width) / (double)Math.Max(first.Width, second.Width);
+            var heightRatio = Math.Abs(first.Height - second.Height) / (double)Math.Max(first.Height, second.Height);
+            return centerDistance <= 48
+                   && bearingDelta <= 25
+                   && widthRatio <= 0.35
+                   && heightRatio <= 0.35;
         }
 
         internal static int GetNextRotationCount(int currentRotationCount, bool? seekResult)
@@ -309,23 +732,129 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return seekResult == null ? currentRotationCount + 1 : 0;
         }
 
+        internal static int GetIndicatorCameraVerticalOffset(EnemySeekVisual visual, int imageHeight)
+        {
+            if (visual.IndicatorBearingDegrees.HasValue)
+            {
+                return 0;
+            }
+
+            var center = imageHeight / 2;
+            var deadZone = Math.Max(60, imageHeight / 6);
+            var delta = visual.CenterY - center;
+            return Math.Abs(delta) <= deadZone
+                ? 0
+                : Math.Clamp(delta * 2, -MaxVerticalMouseStep, MaxVerticalMouseStep);
+        }
+
+        internal static bool ShouldApproachVisibleEnemy(
+            EnemySeekVisual healthBar,
+            int imageWidth,
+            int imageHeight)
+        {
+            // 血条红色连通域的宽度会随剩余血量缩短，不能把 100~200px 的血条直接视为近身。
+            // 但顶部中央超过约五分之一屏宽的大血条已经明确表示敌人在有效战斗视野内；
+            // 此时不能仅因 Y 坐标偏上而持续前压，否则会在大型敌人面前走到超时。
+            var clearlyCloseByWidth = healthBar.Width >= Math.Max(320, imageWidth / 5);
+            return !clearlyCloseByWidth;
+        }
+
+        internal static int GetVisibleEnemyCameraOffset(EnemySeekVisual healthBar, int imageWidth)
+        {
+            var delta = healthBar.CenterX - imageWidth / 2;
+            var deadZone = Math.Max(80, imageWidth / 12);
+            return Math.Abs(delta) <= deadZone
+                ? 0
+                : Math.Clamp(delta * 2, -960, 960);
+        }
+
+        internal static int GetVisibleEnemyCameraVerticalOffset(EnemySeekVisual healthBar, int imageHeight)
+        {
+            var targetY = imageHeight * 0.35;
+            var delta = (int)Math.Round(healthBar.CenterY - targetY);
+            return Math.Abs(delta) <= 80
+                ? 0
+                : Math.Clamp(delta, -160, 160);
+        }
+
+        private static EnemyIndicatorDirection GetVisibleEnemyDirection(
+            EnemySeekVisual healthBar,
+            int imageWidth)
+        {
+            var delta = healthBar.CenterX - imageWidth / 2d;
+            var deadZone = imageWidth * 0.1;
+            if (delta < -deadZone)
+            {
+                return EnemyIndicatorDirection.Left;
+            }
+
+            return delta > deadZone
+                ? EnemyIndicatorDirection.Right
+                : EnemyIndicatorDirection.Forward;
+        }
+
+        internal static Rect GetSeekDetectionRegion(int imageWidth, int imageHeight)
+        {
+            return new Rect(0, 0, imageWidth, imageHeight);
+        }
+
+        internal static bool ShouldContinueLockedRouteSegment(EnemySeekDecision decision, int completedSteps)
+        {
+            return decision.Action == AutoFightSeekAction.ContinueLockedRoute
+                   && completedSteps < LockedRouteForwardSeconds;
+        }
+
+        internal static bool ShouldContinueVisibleEnemyApproach(EnemySeekDecision decision, int completedSteps)
+        {
+            return decision.Action == AutoFightSeekAction.ApproachVisibleEnemy
+                   && completedSteps < MaxVisibleEnemyApproachSteps;
+        }
+
+        internal static int GetLockedRouteVerticalStep(int completedSteps)
+        {
+            return LockedRouteVerticalSteps[Math.Max(0, completedSteps) % LockedRouteVerticalSteps.Length];
+        }
+
+        internal static Mat CreateSeekColorMask(Mat source, Scalar bloodLower, Scalar? bloodHigher)
+        {
+            using var legacyMask = bloodHigher.HasValue
+                ? OpenCvCommonHelper.Threshold(source, bloodLower, bloodHigher.Value)
+                : OpenCvCommonHelper.Threshold(source, bloodLower);
+            using var hsv = new Mat();
+            using var lowHueRed = new Mat();
+            using var highHueRed = new Mat();
+            Cv2.CvtColor(source, hsv, ColorConversionCodes.BGR2HSV);
+            Cv2.InRange(hsv, new Scalar(0, 100, 140), new Scalar(12, 255, 255), lowHueRed);
+            Cv2.InRange(hsv, new Scalar(165, 100, 140), new Scalar(180, 255, 255), highHueRed);
+
+            using var redIndicatorMask = new Mat();
+            Cv2.BitwiseOr(lowHueRed, highHueRed, redIndicatorMask);
+            var combined = new Mat();
+            Cv2.BitwiseOr(legacyMask, redIndicatorMask, combined);
+            return combined;
+        }
+
         internal static EnemySeekDecision CaptureSeekDecision(
             Scalar bloodLower,
             Scalar? bloodHigher,
             out int imageWidth,
-            out int imageHeight)
+            out int imageHeight,
+            bool indicatorOnly = false)
         {
             using var image = CaptureToRectArea();
-            using var imageCrop = image.DeriveCrop(0, 0, 1500, 900);
-            using var mask = bloodHigher.HasValue
-                ? OpenCvCommonHelper.Threshold(imageCrop.SrcMat, bloodLower, bloodHigher.Value)
-                : OpenCvCommonHelper.Threshold(imageCrop.SrcMat, bloodLower);
+            var detectionRegion = GetSeekDetectionRegion(image.Width, image.Height);
+            using var imageCrop = image.DeriveCrop(
+                detectionRegion.X,
+                detectionRegion.Y,
+                detectionRegion.Width,
+                detectionRegion.Height);
+            using var mask = CreateSeekColorMask(imageCrop.SrcMat, bloodLower, bloodHigher);
             using var labels = new Mat();
             using var stats = new Mat();
             using var centroids = new Mat();
 
-            imageWidth = image.Width;
-            imageHeight = image.Height;
+            imageWidth = imageCrop.Width;
+            imageHeight = imageCrop.Height;
             var numLabels = Cv2.ConnectedComponentsWithStats(
                 mask,
                 labels,
@@ -336,7 +865,23 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
             if (numLabels <= 1)
             {
-                return new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None);
+                if (indicatorOnly)
+                {
+                    return SelectDirectionIndicatorDecision(
+                        Array.Empty<EnemySeekVisual>(),
+                        imageCrop.Width,
+                        imageCrop.Height,
+                        indicatorRouteLocked: false);
+                }
+                var fixedTopStateWithoutRedMask = ObserveFixedTopHealthPresence(null);
+                return SelectSeekDecision(
+                    Array.Empty<EnemySeekVisual>(),
+                    imageCrop.Width,
+                    imageCrop.Height,
+                    IsIndicatorRouteLocked,
+                    fixedTopStateWithoutRedMask.tracked,
+                    fixedTopStateWithoutRedMask.advanceCompleted,
+                    fixedTopStateWithoutRedMask.exhausted);
             }
 
             var visuals = new List<EnemySeekVisual>(numLabels - 1);
@@ -354,12 +899,255 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
             }
 
-            return SelectSeekDecision(visuals, imageCrop.Width, imageCrop.Height);
+            visuals = visuals
+                .Select(visual => ClassifySeekVisual(
+                    mask,
+                    visual,
+                    imageCrop.Width,
+                    imageCrop.Height))
+                .Where(visual => visual.HasValue)
+                .Select(visual => visual!.Value)
+                .ToList();
+
+            if (indicatorOnly)
+            {
+                return SelectDirectionIndicatorDecision(
+                    visuals,
+                    imageCrop.Width,
+                    imageCrop.Height,
+                    indicatorRouteLocked: false);
+            }
+
+            var fixedTopHealthBar = visuals
+                .Where(IsHealthBar)
+                .Where(visual => IsFixedTopEliteHealthBar(
+                    visual,
+                    imageCrop.Width,
+                    imageCrop.Height))
+                .OrderBy(visual => Math.Abs(visual.CenterX - imageCrop.Width / 2))
+                .ThenByDescending(visual => visual.Width)
+                .Select(visual => (EnemySeekVisual?)visual)
+                .FirstOrDefault();
+            var fixedTopState = ObserveFixedTopHealthPresence(fixedTopHealthBar);
+
+            return SelectSeekDecision(
+                visuals,
+                imageCrop.Width,
+                imageCrop.Height,
+                IsIndicatorRouteLocked,
+                fixedTopState.tracked,
+                fixedTopState.advanceCompleted,
+                fixedTopState.exhausted);
+        }
+
+        internal static EnemySeekVisual? ClassifySeekVisual(
+            Mat mask,
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
+            if (IsHealthBar(visual))
+            {
+                return visual;
+            }
+
+            if (!IsDirectionIndicatorGeometry(visual, imageWidth, imageHeight))
+            {
+                return null;
+            }
+
+            var templates = DirectionIndicatorTemplateContours.Value;
+            if (templates.Count == 0)
+            {
+                return null;
+            }
+
+            using var candidate = new Mat(mask, new Rect(
+                visual.X,
+                visual.Y,
+                visual.Width,
+                visual.Height)).Clone();
+            if (!MatchesDirectionIndicatorFeature(
+                    candidate,
+                    templates,
+                    DirectionIndicatorFeatureThreshold))
+            {
+                return null;
+            }
+
+            var bearing = GetDirectionIndicatorOrientationDegrees(candidate);
+            return bearing.HasValue
+                ? visual with { IndicatorBearingDegrees = bearing.Value }
+                : null;
+        }
+
+        internal static bool MatchesDirectionIndicatorFeature(
+            Mat candidateMask,
+            IReadOnlyCollection<Point[]> templateContours,
+            double threshold)
+        {
+            var candidateContour = GetLargestExternalContour(candidateMask);
+            var hollowRatio = GetDirectionIndicatorHollowRatio(candidateMask);
+            if (candidateContour == null
+                || candidateContour.Length < 3
+                || !HasDirectionIndicatorConcavity(candidateContour)
+                || hollowRatio is not (>= DirectionIndicatorMinHollowRatio and <= DirectionIndicatorMaxHollowRatio))
+            {
+                return false;
+            }
+
+            return templateContours.Any(template =>
+                template.Length >= 3
+                && Cv2.MatchShapes(
+                    candidateContour,
+                    template,
+                    ShapeMatchModes.I1,
+                    0) <= threshold);
+        }
+
+        internal static bool HasDirectionIndicatorConcavity(Point[] contour)
+        {
+            if (contour.Length < 3)
+            {
+                return false;
+            }
+
+            var contourArea = Math.Abs(Cv2.ContourArea(contour));
+            var hull = Cv2.ConvexHull(contour);
+            var hullArea = Math.Abs(Cv2.ContourArea(hull));
+            if (contourArea <= 0 || hullArea <= 0)
+            {
+                return false;
+            }
+
+            var solidity = contourArea / hullArea;
+            return solidity is >= DirectionIndicatorMinSolidity and <= DirectionIndicatorMaxSolidity;
+        }
+
+        internal static double? GetDirectionIndicatorHollowRatio(Mat binaryMask)
+        {
+            using var working = binaryMask.Clone();
+            Cv2.FindContours(
+                working,
+                out Point[][] contours,
+                out HierarchyIndex[] hierarchy,
+                RetrievalModes.Tree,
+                ContourApproximationModes.ApproxSimple);
+            if (contours.Length == 0 || hierarchy.Length != contours.Length)
+            {
+                return null;
+            }
+
+            var externalIndex = Enumerable.Range(0, contours.Length)
+                .Where(index => hierarchy[index].Parent < 0)
+                .OrderByDescending(index => Math.Abs(Cv2.ContourArea(contours[index])))
+                .FirstOrDefault(-1);
+            if (externalIndex < 0)
+            {
+                return null;
+            }
+
+            var outerArea = Math.Abs(Cv2.ContourArea(contours[externalIndex]));
+            if (outerArea <= 0)
+            {
+                return null;
+            }
+
+            var hollowArea = Enumerable.Range(0, contours.Length)
+                .Where(index => hierarchy[index].Parent == externalIndex)
+                .Sum(index => Math.Abs(Cv2.ContourArea(contours[index])));
+            return hollowArea >= 1.5 ? hollowArea / outerArea : null;
+        }
+
+        internal static Point[]? GetLargestExternalContour(Mat binaryMask)
+        {
+            using var working = binaryMask.Clone();
+            Cv2.FindContours(
+                working,
+                out Point[][] contours,
+                out _,
+                RetrievalModes.External,
+                ContourApproximationModes.ApproxSimple);
+            return contours
+                .OrderByDescending(contour => Cv2.ContourArea(contour))
+                .FirstOrDefault();
+        }
+
+        internal static double? GetDirectionIndicatorOrientationDegrees(Mat binaryMask)
+        {
+            var moments = Cv2.Moments(binaryMask, true);
+            if (Math.Abs(moments.M00) < double.Epsilon)
+            {
+                return null;
+            }
+
+            // 主轴给出箭头的连续朝向，但只确定到 180°；沿主轴的三阶偏度用于区分
+            // “箭头尖端”和“尾翼”，因此不需要穷举 360° 模板。
+            var axisRadians = 0.5 * Math.Atan2(
+                2 * moments.Mu11,
+                moments.Mu20 - moments.Mu02);
+            var axisX = Math.Cos(axisRadians);
+            var axisY = Math.Sin(axisRadians);
+            var skewAlongAxis =
+                moments.Mu30 * axisX * axisX * axisX
+                + 3 * moments.Mu21 * axisX * axisX * axisY
+                + 3 * moments.Mu12 * axisX * axisY * axisY
+                + moments.Mu03 * axisY * axisY * axisY;
+            if (skewAlongAxis < 0)
+            {
+                axisX = -axisX;
+                axisY = -axisY;
+            }
+
+            return Math.Atan2(axisX, -axisY) * 180d / Math.PI;
+        }
+
+        private static IReadOnlyList<Point[]> LoadDirectionIndicatorTemplateContours()
+        {
+            var result = new List<Point[]>();
+            foreach (var fileName in DirectionIndicatorTemplateNames)
+            {
+                try
+                {
+                    using var template = GameTaskManager.LoadAssetImage(
+                        "AutoFight",
+                        fileName,
+                        ImreadModes.Unchanged);
+                    using var mask = new Mat();
+                    if (template.Channels() == 4)
+                    {
+                        Cv2.ExtractChannel(template, mask, 3);
+                    }
+                    else
+                    {
+                        using var colorMask = CreateSeekColorMask(
+                            template,
+                            new Scalar(255, 90, 90),
+                            null);
+                        colorMask.CopyTo(mask);
+                    }
+
+                    var contour = GetLargestExternalContour(mask);
+                    if (contour is { Length: >= 3 })
+                    {
+                        result.Add(contour);
+                    }
+                }
+                catch
+                {
+                    // 单个样本损坏不应让整套寻敌失效；其余实拍样本继续提供旋转不变特征。
+                }
+            }
+
+            return result.AsReadOnly();
         }
 
         private static async Task<bool> HandleDetectedEnemyAsync(
             EnemySeekDecision decision,
             int imageWidth,
+            int imageHeight,
+            Scalar bloodLower,
+            Scalar? bloodHigher,
             ILogger logger,
             CancellationToken ct)
         {
@@ -370,9 +1158,282 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
             if (decision.Action == AutoFightSeekAction.Approach)
             {
-                await MoveForwardTask.ApproachIndicatorAsync(decision, imageWidth, logger, ct);
+                var confirmation = await ConfirmDirectionIndicatorAsync(
+                    decision,
+                    imageWidth,
+                    imageHeight,
+                    bloodLower,
+                    bloodHigher,
+                    logger,
+                    ct);
+                if (!confirmation.HasValue)
+                {
+                    return false;
+                }
+                decision = confirmation.Value.decision;
+                imageWidth = confirmation.Value.imageWidth;
+                imageHeight = confirmation.Value.imageHeight;
             }
 
+            if (decision.Action == AutoFightSeekAction.KeepFighting)
+            {
+                UnlockIndicatorRoute();
+                return true;
+            }
+
+            if (decision.Action == AutoFightSeekAction.ApproachFixedTopHealthTarget)
+            {
+                LockIndicatorRoute();
+                return await HandleFixedTopHealthApproachAsync(
+                    decision,
+                    imageWidth,
+                    imageHeight,
+                    bloodLower,
+                    bloodHigher,
+                    logger,
+                    ct);
+            }
+
+            if (decision.Action == AutoFightSeekAction.ApproachVisibleEnemy)
+            {
+                UnlockIndicatorRoute();
+                return await HandleVisibleEnemyApproachAsync(
+                    decision,
+                    imageWidth,
+                    imageHeight,
+                    bloodLower,
+                    bloodHigher,
+                    logger,
+                    ct);
+            }
+
+            var currentDecision = decision;
+            var currentImageWidth = imageWidth;
+            var currentImageHeight = imageHeight;
+            if (decision.Action == AutoFightSeekAction.Approach)
+            {
+                LockIndicatorRoute();
+                logger.LogInformation(
+                    "首次箭头目标已锁定：候选 {SignalCount} 个，选取绝对转角最小的 {Bearing:F1}°；完成分段转身后执行固定 6 秒前进计划",
+                    decision.SignalCount,
+                    decision.Visual is { } visual
+                        ? GetIndicatorBearingDegrees(visual, imageWidth, imageHeight)
+                        : 0d);
+                await MoveForwardTask.TurnTowardIndicatorAsync(
+                    decision,
+                    imageWidth,
+                    imageHeight,
+                    logger,
+                    ct);
+                currentDecision = CaptureSeekDecision(
+                    bloodLower,
+                    bloodHigher,
+                    out currentImageWidth,
+                    out currentImageHeight);
+            }
+
+            if (currentDecision.Action == AutoFightSeekAction.KeepFighting)
+            {
+                UnlockIndicatorRoute();
+                logger.LogInformation("完成分段转身后血条已进入近距离战斗视野，取消 6 秒前进计划");
+                return true;
+            }
+
+            if (currentDecision.Action == AutoFightSeekAction.ApproachFixedTopHealthTarget)
+            {
+                logger.LogInformation(
+                    "完成箭头分段转身后检测到顶部固定精英血条；沿当前方向再前进 1 秒确定输出点");
+                return await HandleFixedTopHealthApproachAsync(
+                    currentDecision,
+                    currentImageWidth,
+                    currentImageHeight,
+                    bloodLower,
+                    bloodHigher,
+                    logger,
+                    ct);
+            }
+
+            if (currentDecision.Action == AutoFightSeekAction.ApproachVisibleEnemy)
+            {
+                UnlockIndicatorRoute();
+                logger.LogInformation("完成分段转身后立即检测到血条，血条优先并取消 6 秒前进计划");
+                return await HandleVisibleEnemyApproachAsync(
+                    currentDecision,
+                    currentImageWidth,
+                    currentImageHeight,
+                    bloodLower,
+                    bloodHigher,
+                    logger,
+                    ct);
+            }
+
+            var completedLockedSteps = 0;
+            while (ShouldContinueLockedRouteSegment(currentDecision, completedLockedSteps))
+            {
+                await MoveForwardTask.AdvanceLockedRouteAsync(
+                    GetLockedRouteVerticalStep(completedLockedSteps),
+                    completedLockedSteps,
+                    currentDecision.SignalCount,
+                    logger,
+                    ct);
+                completedLockedSteps++;
+
+                await Task.Delay(IndicatorReacquireDelayMilliseconds, ct);
+                currentDecision = CaptureSeekDecision(
+                    bloodLower,
+                    bloodHigher,
+                    out currentImageWidth,
+                    out currentImageHeight);
+
+                if (currentDecision.Action == AutoFightSeekAction.KeepFighting)
+                {
+                    UnlockIndicatorRoute();
+                    logger.LogInformation(
+                        "锁定路线前进 {Steps} 秒后血条进入近距离战斗视野，提前结束路线计划",
+                        completedLockedSteps);
+                    return true;
+                }
+
+                if (currentDecision.Action == AutoFightSeekAction.ApproachVisibleEnemy)
+                {
+                    UnlockIndicatorRoute();
+                    logger.LogInformation(
+                        "锁定路线前进 {Steps} 秒后检测到血条，血条优先并提前切换到接近逻辑",
+                        completedLockedSteps);
+                    return await HandleVisibleEnemyApproachAsync(
+                        currentDecision,
+                        currentImageWidth,
+                        currentImageHeight,
+                        bloodLower,
+                        bloodHigher,
+                        logger,
+                        ct);
+                }
+
+                if (currentDecision.Action == AutoFightSeekAction.ApproachFixedTopHealthTarget)
+                {
+                    logger.LogInformation(
+                        "锁定路线前进 {Steps} 秒后检测到顶部固定精英血条；沿当前方向再前进 1 秒确定输出点",
+                        completedLockedSteps);
+                    return await HandleFixedTopHealthApproachAsync(
+                        currentDecision,
+                        currentImageWidth,
+                        currentImageHeight,
+                        bloodLower,
+                        bloodHigher,
+                        logger,
+                        ct);
+                }
+            }
+
+            UnlockIndicatorRoute();
+            logger.LogInformation(
+                "锁定路线已完成 6 秒前进且仍无血条；解除目标锁定，下一轮将重新选择绝对转角最小的箭头（本帧记录 {SignalCount} 个）",
+                currentDecision.SignalCount);
+            return true;
+        }
+
+        private static async Task<(EnemySeekDecision decision, int imageWidth, int imageHeight)?>
+            ConfirmDirectionIndicatorAsync(
+                EnemySeekDecision initialDecision,
+                int imageWidth,
+                int imageHeight,
+                Scalar bloodLower,
+                Scalar? bloodHigher,
+                ILogger logger,
+                CancellationToken ct)
+        {
+            if (initialDecision.Visual is not { } initialVisual)
+            {
+                return null;
+            }
+
+            await Task.Delay(120, ct);
+            var confirmedDecision = CaptureSeekDecision(
+                bloodLower,
+                bloodHigher,
+                out var confirmedImageWidth,
+                out var confirmedImageHeight,
+                indicatorOnly: true);
+            if (confirmedDecision.Action != AutoFightSeekAction.Approach
+                || confirmedDecision.Visual is not { } confirmedVisual
+                || !AreDirectionIndicatorsStable(
+                    initialVisual,
+                    confirmedVisual,
+                    imageWidth,
+                    imageHeight))
+            {
+                logger.LogDebug(
+                    "箭头候选未通过 120ms 静止复核，按 HUD 鬼影丢弃：位置=({X},{Y})，尺寸={Width}x{Height}",
+                    initialVisual.X,
+                    initialVisual.Y,
+                    initialVisual.Width,
+                    initialVisual.Height);
+                return null;
+            }
+
+            return (confirmedDecision, confirmedImageWidth, confirmedImageHeight);
+        }
+
+        private static async Task<bool> HandleVisibleEnemyApproachAsync(
+            EnemySeekDecision decision,
+            int imageWidth,
+            int imageHeight,
+            Scalar bloodLower,
+            Scalar? bloodHigher,
+            ILogger logger,
+            CancellationToken ct)
+        {
+            var currentDecision = decision;
+            var currentImageWidth = imageWidth;
+            var currentImageHeight = imageHeight;
+            var completedSteps = 0;
+            while (ShouldContinueVisibleEnemyApproach(currentDecision, completedSteps))
+            {
+                await MoveForwardTask.ApproachVisibleEnemyAsync(
+                    currentDecision,
+                    currentImageWidth,
+                    currentImageHeight,
+                    logger,
+                    ct);
+                completedSteps++;
+                await Task.Delay(IndicatorReacquireDelayMilliseconds, ct);
+                currentDecision = CaptureSeekDecision(
+                    bloodLower,
+                    bloodHigher,
+                    out currentImageWidth,
+                    out currentImageHeight);
+
+                if (currentDecision.Action == AutoFightSeekAction.KeepFighting)
+                {
+                    logger.LogInformation("血条接近 {Steps} 秒后敌人已进入近距离战斗视野", completedSteps);
+                    return true;
+                }
+            }
+
+            logger.LogInformation(
+                "血条优先接近已执行 {Steps} 秒；下一轮继续从共享寻敌管线复查",
+                completedSteps);
+            return true;
+        }
+
+        private static async Task<bool> HandleFixedTopHealthApproachAsync(
+            EnemySeekDecision decision,
+            int imageWidth,
+            int imageHeight,
+            Scalar bloodLower,
+            Scalar? bloodHigher,
+            ILogger logger,
+            CancellationToken ct)
+        {
+            _ = decision;
+            _ = imageWidth;
+            _ = imageHeight;
+            _ = bloodLower;
+            _ = bloodHigher;
+            await MoveForwardTask.AdvanceFixedTopHealthOnceAsync(logger, ct);
+            MarkFixedTopHealthAdvanceCompleted();
+            UnlockIndicatorRoute();
             return true;
         }
 
@@ -465,20 +1526,21 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
     public class AutoFightSkill
     {
-        public static async Task EnsureGuardianSkill(Avatar guardianAvatar, CombatCommand command, string lastFightName,
+        public static async Task<bool> EnsureGuardianSkill(Avatar guardianAvatar, CombatCommand command, string lastFightName,
             string guardianAvatarName, bool guardianAvatarHold, int retryCount, CancellationToken ct,bool guardianCombatSkip = false,
             bool burstEnabled = false)
         {
             int attempt = 0;
+            var maxAttempts = GuardianSkillSwitchPolicy.NormalizeAttemptCount(retryCount);
 
             if (guardianAvatar.IsSkillReady())
             {
-                while (attempt < retryCount)
+                while (attempt < maxAttempts)
                 {
                     if (guardianAvatar.TrySwitch(10))
                     {
                         guardianAvatar.ManualSkillCd = -1;
-                        if (await AvatarSkillAsync(Logger, guardianAvatar, false, 1, ct))
+                        if (await AvatarSkillAsync(Logger, guardianAvatar, false, 1, ct, assumeActive: true))
                         {
                             var cd1 = guardianAvatar.AfterUseSkill();
                             if (cd1 > 0)
@@ -486,7 +1548,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                                 Logger.LogInformation("优先第 {text} 盾奶位 {GuardianAvatar} 战技Cd检测：{cd} 秒", guardianAvatarName,
                                     guardianAvatar.Name, cd1);
                                 guardianAvatar.ManualSkillCd = -1;
-                                return;
+                                return true;
                             }
                         }
             
@@ -495,7 +1557,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         var retry = 50;
                         try
                         {
-                            while (!(await AvatarSkillAsync(Logger, guardianAvatar, false, 1, ct,imageAfterUseSkill)) && retry > 0)
+                            while (!(await AvatarSkillAsync(Logger, guardianAvatar, false, 1, ct, imageAfterUseSkill, assumeActive: true)) && retry > 0)
                             {
                                 Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
                                 //防止在纳塔飞天或爬墙
@@ -524,7 +1586,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                                 guardianAvatarName, guardianAvatar.Name,"成功");
                             guardianAvatar.LastSkillTime = DateTime.UtcNow;
                             guardianAvatar.ManualSkillCd = -1;
-                            return;
+                            return true;
                         }
                         
                         Logger.LogInformation("优先第 {text} 盾奶位 {GuardianAvatar} 释放战技：失败重试 {attempt} 次",
@@ -581,7 +1643,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                             Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
                             using (var imageAfterBurst = CaptureToRectArea())
                             {
-                                if (AvatarSkillAsync(Logger, guardianAvatar, true, 1, ct).Result 
+                                if (AvatarSkillAsync(Logger, guardianAvatar, true, 1, ct, assumeActive: true).Result
                                     || !Bv.IsInMainUi(imageAfterBurst)) //Q技能CD（冷却检测）或者不在主界面（大招动画播放中）
                                 {
                                     guardianAvatar.IsBurstReady = false;
@@ -600,6 +1662,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     }
                 }
             }
+
+            return false;
         }
         
         //新方法，备用，非OCR识别，判断色块进行，速度更快
@@ -617,9 +1681,10 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         /// <param name="isResetCd">是否重置技能冷却状态</param>
         /// <returns>技能是否就绪</returns>
         public static async Task<bool> AvatarSkillAsync(ILogger logger, Avatar guardianAvatar, bool skills , int retryCount, 
-            CancellationToken ct,ImageRegion? image = null,bool needLog = false, bool isResetCd = false)
+            CancellationToken ct,ImageRegion? image = null,bool needLog = false, bool isResetCd = false,
+            bool assumeActive = false)
         {
-            if (guardianAvatar.TrySwitch())
+            if (assumeActive || guardianAvatar.TrySwitch())
             {
                 Scalar bloodLower = new Scalar(255, 255, 255);
                 int attempt = 0;
