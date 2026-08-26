@@ -45,7 +45,7 @@ public class ResinStatus
             TemplateImageMat = GameTaskManager.LoadAssetImage("AutoFight", "original_resin_top_icon.png", systemInfo),
             DrawOnWindow = false
         }.InitTemplate();
-        using ImageRegion crop1 = region.DeriveCrop(new Rect((int)(1300 * assetScale), (int)(25 * assetScale), (int)(160 * assetScale), (int)(50 * assetScale)));   // 数字位数的不同导致了水平方向上宽泛的区域
+        using ImageRegion crop1 = region.DeriveCrop(GetOriginalResinSearchRect(assetScale));
         //Cv2.ImShow("test", crop1.SrcMat);
         //Cv2.WaitKey();
         var originalResinRes = crop1.Find(originalResinTopIconRa);
@@ -90,6 +90,15 @@ public class ResinStatus
         }
 
         return status;
+    }
+
+    internal static Rect GetOriginalResinSearchRect(double assetScale)
+    {
+        return new Rect(
+            (int)(1200 * assetScale),
+            (int)(25 * assetScale),
+            (int)(580 * assetScale),
+            (int)(50 * assetScale));
     }
 
     public void Print(ILogger logger)

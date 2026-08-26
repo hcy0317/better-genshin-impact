@@ -90,6 +90,17 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 return;
             }
 
+            // 同一物品格的边框偶尔会被识别成多个近似轮廓，聚簇后它们具有相同的行列坐标。
+            // 后续间距计算要求每个坐标至多一个格子；优先保留真实识别且面积最大的代表，
+            // 避免 SingleOrDefault 抛出异常，也避免同一物品被后续枚举两次。
+            cells = cells
+                .GroupBy(cell => (cell.ColNum, cell.RowNum))
+                .Select(group => group
+                    .OrderBy(cell => cell.IsPhantom)
+                    .ThenByDescending(cell => cell.Rect.Width * cell.Rect.Height)
+                    .First())
+                .ToList();
+
             double avgWidth = cells.Average(c => c.Rect.Width);
             double avgHeight = cells.Average(c => c.Rect.Height);
             double avgColSpacing;
