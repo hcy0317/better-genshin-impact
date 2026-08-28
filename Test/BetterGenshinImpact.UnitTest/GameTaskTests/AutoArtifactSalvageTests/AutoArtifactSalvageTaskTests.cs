@@ -119,6 +119,30 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoArtifactSalvageTests
             }
         }
 
+        [Theory]
+        [InlineData("主命值", "生命值")]
+        [InlineData("击率", "暴击率")]
+        [InlineData("暴击伤害", "暴击伤害")]
+        public void ResolveKnownAffixLine_ShouldAcceptOneCharacterOcrError(
+            string ocrText,
+            string expected)
+        {
+            var actual = ResolveKnownAffixLine(
+                [ocrText, "4,780"],
+                ["生命值", "攻击力", "防御力", "暴击率", "暴击伤害"]);
+
+            Assert.Equal(expected, actual);
+        }
+
+        [Fact]
+        public void ClampRectToBounds_ShouldContainOcrRectInsideImage()
+        {
+            var actual = ClampRectToBounds(new Rect(-3, 2, 20, 10), 10, 8);
+
+            Assert.Equal(new Rect(0, 2, 10, 6), actual);
+            Assert.Null(ClampRectToBounds(new Rect(12, 1, 3, 3), 10, 8));
+        }
+
         public static IEnumerable<object[]> GetArtifactStatTestData
         {
             get

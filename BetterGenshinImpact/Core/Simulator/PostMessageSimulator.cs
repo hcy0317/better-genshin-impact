@@ -18,6 +18,7 @@ public class PostMessageSimulator
     public static readonly uint WM_RBUTTONDOWN = 0x204;
     public static readonly uint WM_RBUTTONUP = 0x205;
     public static readonly uint WM_MBUTTONUP = 0x208;
+    public static readonly uint WM_MOUSEWHEEL = 0x20A;
 
     private readonly IntPtr _hWnd;
 
@@ -56,6 +57,22 @@ public class PostMessageSimulator
     }
 
     public static int MakeLParam(int x, int y) => (y << 16) | (x & 0xFFFF);
+
+    internal static nint MakeMouseWheelWParam(int scrollAmountInClicks)
+    {
+        var delta = scrollAmountInClicks * 120;
+        return unchecked((nint)((long)delta << 16));
+    }
+
+    public PostMessageSimulator VerticalScroll(int scrollAmountInClicks, int x, int y)
+    {
+        User32.PostMessage(
+            _hWnd,
+            WM_MOUSEWHEEL,
+            MakeMouseWheelWParam(scrollAmountInClicks),
+            MakeLParam(x, y));
+        return this;
+    }
 
     public PostMessageSimulator LeftButtonClick()
     {

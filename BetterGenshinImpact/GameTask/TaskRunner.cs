@@ -161,7 +161,7 @@ public class TaskRunner
         await Task.Run(() => RunCurrentAsync(action, propagateExceptions: propagateExceptions));
     }
 
-    public async Task RunSoloTaskAsync(ISoloTask soloTask)
+    public async Task RunSoloTaskAsync(ISoloTask soloTask, bool propagateExceptions = false)
     {
         var ownsTaskSemaphore = await TaskRunnerStartupGate.TryAcquireAsync(
             TaskSemaphore,
@@ -169,6 +169,7 @@ public class TaskRunner
         if (!ownsTaskSemaphore)
         {
             _logger.LogError("任务启动失败：当前存在正在运行中的独立任务，请不要重复执行任务！");
+            TaskRunnerFailurePolicy.ThrowIfLockUnavailable(propagateExceptions);
             return;
         }
 
@@ -184,15 +185,24 @@ public class TaskRunner
             if (taskCancellationToken.IsCancellationRequested)
             {
                 _logger.LogInformation("独立任务在启动阶段被取消: {Name}", soloTask.Name);
+                TaskRunnerFailurePolicy.ThrowIfStartupCancelled(
+                    taskCancellationToken,
+                    propagateExceptions);
                 return;
             }
 
             ownershipTransferred = true;
             await Task.Run(() => RunCurrentOwnedAsync(
-                async () => await soloTask.Start(taskCancellationToken),
+                async () =>
+                {
+                    await soloTask.Start(taskCancellationToken);
+                    TaskRunnerFailurePolicy.ThrowIfTaskCancelled(
+                        taskCancellationToken,
+                        propagateExceptions);
+                },
                 resetCancellationContext: false,
                 clearCancellationContextOnLockFailure: false,
-                propagateExceptions: false,
+                propagateExceptions: propagateExceptions,
                 taskSemaphoreAlreadyOwned: true));
         }
         finally
