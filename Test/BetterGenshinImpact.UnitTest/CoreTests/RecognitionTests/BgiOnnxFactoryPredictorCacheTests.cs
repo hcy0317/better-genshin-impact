@@ -123,6 +123,28 @@ public class BgiOnnxFactoryPredictorCacheTests
         Assert.Equal(42, await initialization.GetValueAsync(CancellationToken.None));
     }
 
+    [Fact]
+    public void DisposeBeforeInitializationReleasesCapturedFactoryResources()
+    {
+        var factoryCalls = 0;
+        var released = false;
+        var initialization = new OnnxInitializationTask<int>(
+            "NeverStarted",
+            () =>
+            {
+                factoryCalls++;
+                return 42;
+            },
+            new CollectingLogger(),
+            disposeUnstarted: () => released = true);
+
+        initialization.Dispose();
+
+        Assert.True(released);
+        Assert.Equal(0, factoryCalls);
+        Assert.Throws<ObjectDisposedException>(() => _ = initialization.Value);
+    }
+
     private sealed class CollectingLogger : ILogger
     {
         public ConcurrentQueue<string> Messages { get; } = new();

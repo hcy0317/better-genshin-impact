@@ -232,6 +232,7 @@ public partial class ScriptGroupProject : ObservableObject
             Type = Type
         };
         ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
+        Exception? executionFailure = null;
         try
         {
             if (Type == "Javascript")
@@ -343,14 +344,33 @@ public partial class ScriptGroupProject : ObservableObject
                 executionRecord.IsSuccessful = true;
             }
         }
+        catch (Exception exception)
+        {
+            executionFailure = exception;
+            throw;
+        }
         finally
         {
-            var serverEndTime =
-                GroupInfo?.Config.PathingConfig.TaskCompletionSkipRuleConfig.IsBoundaryTimeBasedOnServerTime ?? false
-                    ? ServerTimeHelper.GetServerTimeNow()
-                    : DateTimeOffset.Now;
-            ExecutionRecordFinalizer.Complete(executionRecord, serverEndTime, DateTime.Now);
-            ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
+            try
+            {
+                var serverEndTime =
+                    GroupInfo?.Config.PathingConfig.TaskCompletionSkipRuleConfig.IsBoundaryTimeBasedOnServerTime ?? false
+                        ? ServerTimeHelper.GetServerTimeNow()
+                        : DateTimeOffset.Now;
+                ExecutionRecordFinalizer.Complete(executionRecord, serverEndTime, DateTime.Now);
+                ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
+            }
+            catch (Exception recordFailure)
+            {
+                if (executionFailure is not null)
+                {
+                    throw new AggregateException(
+                        "任务执行失败且执行记录保存失败。",
+                        executionFailure,
+                        recordFailure);
+                }
+                throw;
+            }
         }
     }
 

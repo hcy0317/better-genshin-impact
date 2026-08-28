@@ -1152,8 +1152,7 @@ public partial class PathExecutor
             stepsTaken++;
             if (stepsTaken > 25)
             {
-                Logger.LogWarning("精确接近超时");
-                break;
+                throw new RetryException("精确接近目标点超时，重试当前路线分段");
             }
 
             using var screen = CaptureToRectArea();
@@ -1174,7 +1173,7 @@ public partial class PathExecutor
                 Logger.LogWarning(
                     "精确接近连续 {Failures} 次无法完成视角转向，停止小碎步接近，避免在错误方向空转",
                     rotationPolicy.ConsecutiveFailures);
-                break;
+                throw new RetryException("精确接近连续转向失败，重试当前路线分段");
             }
             if (!rotated)
             {

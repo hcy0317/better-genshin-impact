@@ -881,6 +881,16 @@ public partial class OneDragonFlowViewModel : ViewModel
                 status = "succeeded";
             }
         }
+        catch (Exception exception) when (
+            exception is OperationCanceledException or NormalEndException)
+        {
+            status = "cancelled";
+            message = "一条龙任务被取消。";
+            _logger.LogInformation(
+                exception,
+                "Child Session 一条龙已取消：{RunId}",
+                runId);
+        }
         catch (Exception exception)
         {
             _logger.LogError(exception, "Child Session 一条龙执行失败：{RunId}", runId);

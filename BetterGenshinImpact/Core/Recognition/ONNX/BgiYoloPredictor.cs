@@ -43,13 +43,25 @@ public class BgiYoloPredictor : IDisposable
         _initializationFailed = initializationFailed;
         _predictorInitialization = new OnnxInitializationTask<YoloPredictor>(
             onnxModel.Name,
-            () => new YoloPredictor(modelPath,
-                new YoloPredictorOptions
+            () =>
+            {
+                try
                 {
-                    SessionOptions = sessionOptions
-                }),
+                    return new YoloPredictor(modelPath,
+                        new YoloPredictorOptions
+                        {
+                            SessionOptions = sessionOptions
+                        });
+                }
+                catch
+                {
+                    sessionOptions.Dispose();
+                    throw;
+                }
+            },
             logger ?? NullLogger.Instance,
-            disposeValue: predictor => predictor.Dispose());
+            disposeValue: predictor => predictor.Dispose(),
+            disposeUnstarted: sessionOptions.Dispose);
     }
 
     public YoloPredictor Predictor

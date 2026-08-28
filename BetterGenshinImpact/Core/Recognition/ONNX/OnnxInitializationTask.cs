@@ -14,7 +14,9 @@ internal sealed class OnnxInitializationTask<T> : IDisposable
     private readonly TimeSpan _heartbeatInterval;
     private readonly TimeSpan _pollInterval;
     private readonly Action<T>? _disposeValue;
+    private readonly Action? _disposeUnstarted;
     private readonly Lazy<Task<T>> _initialization;
+    private readonly object _lifecycleLock = new();
     private int _disposed;
     private int _valueDisposed;
 
@@ -23,12 +25,14 @@ internal sealed class OnnxInitializationTask<T> : IDisposable
         Func<T> factory,
         ILogger logger,
         TimeSpan? heartbeatInterval = null,
-        Action<T>? disposeValue = null)
+        Action<T>? disposeValue = null,
+        Action? disposeUnstarted = null)
     {
         _modelName = modelName;
         _factory = factory;
         _logger = logger;
         _disposeValue = disposeValue;
+        _disposeUnstarted = disposeUnstarted;
         _heartbeatInterval = heartbeatInterval ?? TimeSpan.FromSeconds(15);
         if (_heartbeatInterval <= TimeSpan.Zero)
         {
@@ -51,7 +55,7 @@ internal sealed class OnnxInitializationTask<T> : IDisposable
         get
         {
             ThrowIfDisposed();
-            var value = _initialization.Value.GetAwaiter().GetResult();
+            var value = GetInitializationTask().GetAwaiter().GetResult();
             ThrowIfDisposed();
             return value;
         }
@@ -63,7 +67,7 @@ internal sealed class OnnxInitializationTask<T> : IDisposable
     internal async Task<T> GetValueAsync(CancellationToken ct)
     {
         ThrowIfDisposed();
-        var value = await _initialization.Value.WaitAsync(ct).ConfigureAwait(false);
+        var value = await GetInitializationTask().WaitAsync(ct).ConfigureAwait(false);
         ThrowIfDisposed();
         return value;
     }
@@ -82,18 +86,36 @@ internal sealed class OnnxInitializationTask<T> : IDisposable
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0
-            || !_initialization.IsValueCreated)
+        Task<T>? initialization = null;
+        lock (_lifecycleLock)
         {
-            return;
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            if (_initialization.IsValueCreated)
+            {
+                initialization = _initialization.Value;
+            }
+            else
+            {
+                _disposeUnstarted?.Invoke();
+            }
         }
+        if (initialization is null) return;
 
-        _ = _initialization.Value.ContinueWith(
+        _ = initialization.ContinueWith(
             static (task, state) => ((OnnxInitializationTask<T>)state!).DisposeValue(task.Result),
             this,
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnRanToCompletion,
             TaskScheduler.Default);
+    }
+
+    private Task<T> GetInitializationTask()
+    {
+        lock (_lifecycleLock)
+        {
+            ThrowIfDisposed();
+            return _initialization.Value;
+        }
     }
 
     private void DisposeValue(T value)

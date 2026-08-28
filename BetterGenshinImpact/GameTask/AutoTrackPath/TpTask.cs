@@ -2527,12 +2527,32 @@ public class TpTask
                 .FirstOrDefault(r => IsSwitchAreaCandidateMatch(r.Text, minCountryLocalized, areaName));
             if (matchRect != null)
             {
-                var clickedCandidateRect = new Rect(matchRect.X, matchRect.Y, matchRect.Width, matchRect.Height);
                 var applied = await AreaSelectionClickController.TryApplyAsync(
                     SwitchAreaSelectionMaxClickAttempts,
                     async attempt =>
                     {
-                        matchRect.Click();
+                        using var retryCapture = CaptureToRectArea();
+                        var retryMatch = FindSwitchAreaCandidates(retryCapture)
+                            .OrderByDescending(candidate => candidate.Y)
+                            .FirstOrDefault(candidate => IsSwitchAreaCandidateMatch(
+                                candidate.Text,
+                                minCountryLocalized,
+                                areaName));
+                        if (retryMatch is null)
+                        {
+                            Logger.LogWarning(
+                                "区域选择器或候选已消失，不再复用旧坐标：{Country}，重试 {Attempt}/{MaxAttempts}",
+                                areaName,
+                                attempt,
+                                SwitchAreaSelectionMaxClickAttempts);
+                            return false;
+                        }
+                        var clickedCandidateRect = new Rect(
+                            retryMatch.X,
+                            retryMatch.Y,
+                            retryMatch.Width,
+                            retryMatch.Height);
+                        retryMatch.Click();
                         var confirmed = await WaitForAreaSelectionApplied(
                             areaName,
                             minCountryLocalized,
