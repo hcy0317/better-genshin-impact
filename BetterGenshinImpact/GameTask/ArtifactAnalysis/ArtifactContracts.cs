@@ -109,6 +109,7 @@ public sealed record ArtifactExecutionActionDto(
 
 public enum ArtifactPreflightStatus
 {
+    Unknown,
     Ready,
     NotApproved,
     RescanRequired,

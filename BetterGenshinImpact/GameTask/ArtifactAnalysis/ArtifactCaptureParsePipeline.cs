@@ -39,7 +39,7 @@ internal static class ArtifactCaptureParsePipeline
                 while (channel.Reader.TryRead(out var remaining)) remaining.Dispose();
             }
             return (IReadOnlyList<TResult>)results;
-        }, cancellationToken);
+        });
 
         try
         {

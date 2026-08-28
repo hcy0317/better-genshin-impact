@@ -5,6 +5,13 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactHostCoordinatorTests
 {
     [Fact]
+    public void PreflightReadyIsNotTheMissingValueDefault()
+    {
+        Assert.Equal(0, (int)ArtifactPreflightStatus.Unknown);
+        Assert.NotEqual(0, (int)ArtifactPreflightStatus.Ready);
+    }
+
+    [Fact]
     public async Task ScanCharacterRoster_ScansAndSubmitsCompleteRoster()
     {
         var roster = new ArtifactCharacterRosterDto(

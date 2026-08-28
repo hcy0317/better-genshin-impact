@@ -152,6 +152,27 @@ public class ArtifactHostRequestReaderTests : IDisposable
             new ArtifactHostRequestReader(_root).ReadAsync(path, CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Reader_RejectsRequestWithoutExplicitOperation()
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, Guid.NewGuid() + ".json");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
+        {
+            version = 1,
+            kind = "artifact-analysis",
+            uid = "102550550",
+            jobId = "job-missing-operation",
+            createdAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+            expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(4)
+        }));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new ArtifactHostRequestReader(_root).ReadAsync(path, CancellationToken.None));
+
+        Assert.Contains("operation", exception.Message);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root)) Directory.Delete(_root, true);

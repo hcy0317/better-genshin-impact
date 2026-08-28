@@ -242,15 +242,25 @@ internal sealed class ArtifactInventoryUi : IDisposable
         int scanIndex,
         CancellationToken cancellationToken)
     {
+        using var frame = CaptureInitiallySelectedItem(
+            page, itemRect, scanIndex, cancellationToken);
+        return await ParseItemAsync(frame, cancellationToken);
+    }
+
+    internal ArtifactCapturedItem CaptureInitiallySelectedItem(
+        ImageRegion page,
+        Rect itemRect,
+        int scanIndex,
+        CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
         using var capture = CaptureToRectArea();
         using var item = page.DeriveCrop(itemRect);
-        using var frame = ArtifactCapturedItem.Create(
+        return ArtifactCapturedItem.Create(
             scanIndex,
             ArtifactGridLockDetector.IsLocked(item.SrcMat),
             capture.SrcMat,
             ReadRarity(capture.SrcMat));
-        return await ParseItemAsync(frame, cancellationToken);
     }
 
     internal Task<ArtifactItemDto> ParseItemAsync(
@@ -776,7 +786,9 @@ internal static class ArtifactInventoryScanSession
 
                 if (targetIndices is null || targetIndices.Contains(index))
                 {
-                    var frame = await reader.CaptureItemAsync(page, rect, index, ct);
+                    var frame = index == 0
+                        ? reader.CaptureInitiallySelectedItem(page, rect, index, ct)
+                        : await reader.CaptureItemAsync(page, rect, index, ct);
                     capturedTargets++;
                     yield return frame;
                 }

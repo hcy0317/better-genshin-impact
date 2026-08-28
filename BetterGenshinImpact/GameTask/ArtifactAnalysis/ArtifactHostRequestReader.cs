@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -50,8 +51,19 @@ public sealed class ArtifactHostRequestReader
         }
 
         await using var stream = File.OpenRead(fullPath);
-        var request = await JsonSerializer.DeserializeAsync<ArtifactHostRequest>(
-            stream, _jsonOptions, cancellationToken)
+        using var document = await JsonDocument.ParseAsync(
+            stream,
+            cancellationToken: cancellationToken);
+        if (!document.RootElement.EnumerateObject().Any(property =>
+                string.Equals(
+                    property.Name,
+                    "operation",
+                    StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidOperationException(
+                "Artifact host request is missing its explicit operation.");
+        }
+        var request = document.RootElement.Deserialize<ArtifactHostRequest>(_jsonOptions)
             ?? throw new InvalidOperationException("Artifact host request is empty.");
         var claimedDirectory = Path.GetFullPath(Path.Combine(
             _requestRoot, "consumed"));
