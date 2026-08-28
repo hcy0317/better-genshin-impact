@@ -79,9 +79,9 @@ public sealed class ArtifactHostService(
 
     public async Task RunAsync(string requestPath, CancellationToken cancellationToken = default)
     {
+        var launch = await ReadStableRequestAsync(requestPath, cancellationToken);
         for (var attempt = 1; attempt <= 3; attempt++)
         {
-            var launch = await ReadStableRequestAsync(requestPath, cancellationToken);
             logger.LogInformation(
                 "开始网页圣遗物任务 {Operation}，Job={JobId}，尝试 {Attempt}/3",
                 launch.Request.Operation,

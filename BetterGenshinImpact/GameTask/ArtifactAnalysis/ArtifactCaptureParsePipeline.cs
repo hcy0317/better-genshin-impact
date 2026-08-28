@@ -46,15 +46,33 @@ internal static class ArtifactCaptureParsePipeline
             await foreach (var frame in frames.WithCancellation(cancellationToken))
             {
                 var ownershipTransferred = false;
+                Task? write = null;
                 try
                 {
-                    var write = channel.Writer.WriteAsync(frame, cancellationToken).AsTask();
+                    write = channel.Writer.WriteAsync(frame, cancellationToken).AsTask();
                     if (await Task.WhenAny(write, consumer) == consumer)
                     {
                         await consumer;
                     }
                     await write;
                     ownershipTransferred = true;
+                }
+                catch
+                {
+                    channel.Writer.TryComplete();
+                    if (write is not null)
+                    {
+                        try
+                        {
+                            await write;
+                            ownershipTransferred = true;
+                        }
+                        catch
+                        {
+                            // Producer still owns a frame rejected by the channel.
+                        }
+                    }
+                    throw;
                 }
                 finally
                 {
@@ -76,6 +94,7 @@ internal static class ArtifactCaptureParsePipeline
             {
                 // Preserve the producer or consumer exception that ended the pipeline.
             }
+            while (channel.Reader.TryRead(out var remaining)) remaining.Dispose();
             throw;
         }
     }

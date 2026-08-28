@@ -43,10 +43,58 @@ public class ArtifactCaptureParsePipelineTests
         Assert.All(frames, frame => Assert.True(frame.Disposed));
     }
 
+    [Fact]
+    public async Task ConsumerFailureDisposesQueuedAndPendingFramesExactlyOnce()
+    {
+        var parsingStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFailure = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdFrameCreated = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var frames = new List<TestFrame>();
+
+        async IAsyncEnumerable<TestFrame> CaptureFrames(
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            for (var id = 1; id <= 3; id++)
+            {
+                var frame = new TestFrame(id);
+                frames.Add(frame);
+                if (id == 3) thirdFrameCreated.TrySetResult();
+                yield return frame;
+                await Task.Yield();
+            }
+        }
+
+        var pipeline = ArtifactCaptureParsePipeline.RunAsync(
+            CaptureFrames(),
+            async (frame, cancellationToken) =>
+            {
+                if (frame.Id == 1)
+                {
+                    parsingStarted.TrySetResult();
+                    await releaseFailure.Task.WaitAsync(cancellationToken);
+                    throw new InvalidOperationException("parse failed");
+                }
+                return frame.Id;
+            },
+            capacity: 1,
+            CancellationToken.None);
+
+        await parsingStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await thirdFrameCreated.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        releaseFailure.TrySetResult();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => pipeline);
+        Assert.All(frames, frame => Assert.Equal(1, frame.DisposeCount));
+    }
+
     private sealed class TestFrame(int id) : IDisposable
     {
         public int Id { get; } = id;
-        public bool Disposed { get; private set; }
-        public void Dispose() => Disposed = true;
+        public int DisposeCount { get; private set; }
+        public bool Disposed => DisposeCount > 0;
+        public void Dispose() => DisposeCount++;
     }
 }

@@ -272,9 +272,11 @@ public sealed class ArtifactHostCoordinator(
 
         // A failed success acknowledgement must never be rewritten as a
         // business failure after game-side mutations have completed.
+        using var completionTimeout = new CancellationTokenSource(
+            TimeSpan.FromSeconds(15));
         await client.ReportCompletionAsync(
             request.JobId, requestToken, request.Operation,
-            true, null, cancellationToken);
+            true, null, completionTimeout.Token);
     }
 
     private static void Validate(

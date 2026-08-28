@@ -53,6 +53,25 @@ public class ArtifactHostCoordinatorTests
     }
 
     [Fact]
+    public async Task SuccessfulGameOperationUsesIndependentCompletionToken()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var client = new FakeClient();
+        var coordinator = new ArtifactHostCoordinator(
+            new FakeScanner(Snapshot()), client,
+            new FakeLockExecutor(), new FakeNativeExecutor());
+
+        await coordinator.RunAsync(
+            Request(ArtifactHostOperation.Analyze),
+            "token",
+            cancelled.Token);
+
+        Assert.True(client.CompletionSuccess);
+        Assert.False(client.CompletionTokenWasCancelledAtCall);
+    }
+
+    [Fact]
     public async Task Analyze_ManualCancellationReportsStoppedStateAndPropagates()
     {
         var cancellation = new OperationCanceledException("The operation was canceled.");
@@ -249,6 +268,7 @@ public class ArtifactHostCoordinatorTests
         public string? CompletionMessage { get; private set; }
         public ArtifactExecutionObservationDto? PreflightObservation { get; private set; }
         public ArtifactCharacterRosterDto? SubmittedCharacterRoster { get; private set; }
+        public bool CompletionTokenWasCancelledAtCall { get; private set; }
 
         public Task ClaimAsync(string jobId, string uid, ArtifactHostOperation operation, string requestToken, CancellationToken cancellationToken) => Task.CompletedTask;
 
@@ -280,6 +300,7 @@ public class ArtifactHostCoordinatorTests
         {
             CompletionSuccess = success;
             CompletionMessage = message;
+            CompletionTokenWasCancelledAtCall = cancellationToken.IsCancellationRequested;
             return Task.CompletedTask;
         }
     }
