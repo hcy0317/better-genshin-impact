@@ -7,6 +7,37 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.RecognitionTests;
 public class BgiOnnxFactoryPredictorCacheTests
 {
     [Fact]
+    public void Constructor_ShouldAllowAWorkflowToForceCpuOcr()
+    {
+        using var factory = new BgiOnnxFactory(
+            new FakeLogger<BgiOnnxFactory>(), forceCpuOcr: true);
+
+        Assert.True(factory.CpuOcr);
+    }
+
+    [Fact]
+    public void OcrProviderPolicy_ShouldExcludeTensorRtForDynamicArtifactText()
+    {
+        var providers = BgiOnnxFactory.ResolveOcrProviderTypes(
+            cpuOcr: false,
+            excludeTensorRt: true,
+            [ProviderType.TensorRt, ProviderType.Cuda, ProviderType.Cpu]);
+
+        Assert.Equal([ProviderType.Cuda, ProviderType.Cpu], providers);
+    }
+
+    [Fact]
+    public void OcrProviderPolicy_ShouldKeepCpuOnlyWhenCpuOcrIsEnabled()
+    {
+        var providers = BgiOnnxFactory.ResolveOcrProviderTypes(
+            cpuOcr: true,
+            excludeTensorRt: true,
+            [ProviderType.TensorRt, ProviderType.Cuda, ProviderType.Cpu]);
+
+        Assert.Equal([ProviderType.Cpu], providers);
+    }
+
+    [Fact]
     public void GetOrCreateYoloPredictor_ShouldReuseOnlyTheSameModel()
     {
         using var factory = new BgiOnnxFactory(new FakeLogger<BgiOnnxFactory>());
