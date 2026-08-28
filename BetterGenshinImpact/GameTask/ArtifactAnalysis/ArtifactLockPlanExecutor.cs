@@ -18,10 +18,13 @@ public sealed class ArtifactLockPlanExecutor : IArtifactLockPlanExecutor
 {
     public async Task ExecuteAsync(
         IReadOnlyList<ArtifactExecutionActionDto> actions,
+        int expectedArtifactCount,
         bool reusePreparedInventory,
         CancellationToken cancellationToken)
     {
-        var task = new ArtifactLockExecutionTask(actions, reusePreparedInventory);
+        var task = new ArtifactLockExecutionTask(
+            actions, expectedArtifactCount,
+            reusePreparedInventory, cancellationToken);
         await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
         if (!task.Completed)
         {
@@ -32,14 +35,20 @@ public sealed class ArtifactLockPlanExecutor : IArtifactLockPlanExecutor
 
 internal sealed class ArtifactLockExecutionTask(
     IReadOnlyList<ArtifactExecutionActionDto> actions,
-    bool reusePreparedInventory) : ISoloTask
+    int expectedArtifactCount,
+    bool reusePreparedInventory,
+    CancellationToken externalCancellationToken) : ISoloTask
 {
     private readonly ILogger _logger = App.GetLogger<ArtifactLockExecutionTask>();
     public string Name => "圣遗物锁定方案";
     public bool Completed { get; private set; }
 
-    public async Task Start(CancellationToken ct)
+    public async Task Start(CancellationToken taskCancellationToken)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            taskCancellationToken,
+            externalCancellationToken);
+        var ct = linked.Token;
         Exception? executionFailure = null;
         try
         {
@@ -62,8 +71,13 @@ internal sealed class ArtifactLockExecutionTask(
                 return;
             }
             using var reader = new ArtifactInventoryUi(_logger);
-            var expectedCount = reader.ReadArtifactCount();
-            if (pending.Keys.Any(index => index < 0 || index >= expectedCount))
+            var liveCount = reader.ReadArtifactCount();
+            if (liveCount != expectedArtifactCount)
+            {
+                throw new InvalidDataException(
+                    $"Artifact inventory changed after preflight: expected {expectedArtifactCount}, live {liveCount}.");
+            }
+            if (pending.Keys.Any(index => index < 0 || index >= liveCount))
             {
                 throw new InvalidDataException("Artifact lock action index exceeds the current inventory.");
             }
@@ -71,7 +85,7 @@ internal sealed class ArtifactLockExecutionTask(
             using var gridCapture = CaptureToRectArea();
             var gridParams = ArtifactLockExecutionPolicy.CreateGridParams(
                 gridCapture.SrcMat.Size(),
-                expectedCount);
+                liveCount);
             var grid = new GridScreen(gridParams, _logger, ct);
             var index = 0;
             var processed = 0;
@@ -79,10 +93,27 @@ internal sealed class ArtifactLockExecutionTask(
             var alreadyDesired = 0;
             await foreach ((ImageRegion page, Rect rect) in grid.WithCancellation(ct))
             {
-                if (index >= expectedCount || processed == pending.Count) break;
+                if (index >= liveCount || processed == pending.Count) break;
                 if (!pending.TryGetValue(index, out var action)) { index++; continue; }
 
-                var currentLocked = await reader.SelectItemAsync(page, rect, index, ct);
+                var current = index == 0
+                    ? await reader.ReadInitiallySelectedItemAsync(page, rect, index, ct)
+                    : await reader.ReadItemAsync(page, rect, index, ct);
+                if (!string.Equals(
+                        current.ContentFingerprint,
+                        action.ExpectedFingerprint,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"Artifact fingerprint changed after preflight at index {index}.");
+                }
+                var currentLocked = current.Locked;
+                if (currentLocked != action.ExpectedLocked
+                    && currentLocked != action.DesiredLocked)
+                {
+                    throw new InvalidDataException(
+                        $"Artifact lock state changed after preflight at index {index}.");
+                }
                 if (ArtifactLockExecutionPolicy.FromDetail(currentLocked, action.DesiredLocked)
                     == ArtifactLockDecision.Skip)
                 {

@@ -161,3 +161,26 @@ internal sealed class ArtifactCharacterPageTracker
             .All(pair => BitOperations.PopCount(pair.First ^ pair.Second) <= 10);
     }
 }
+
+internal enum ArtifactCharacterScrollObservation
+{
+    NoProgress,
+    AdvancedOneRow,
+    Overshot
+}
+
+internal static class ArtifactCharacterScrollPlanner
+{
+    internal static ArtifactCharacterScrollObservation Observe(
+        IReadOnlyList<ArtifactCharacterPageRow> previousRows,
+        IReadOnlyList<ArtifactCharacterPageRow> currentRows)
+    {
+        var overlap = ArtifactCharacterPageTracker.FindOverlap(
+            previousRows, currentRows);
+        var newRows = currentRows.Count - overlap;
+        if (newRows <= 0) return ArtifactCharacterScrollObservation.NoProgress;
+        return previousRows.Count - overlap == 1 && newRows == 1
+            ? ArtifactCharacterScrollObservation.AdvancedOneRow
+            : ArtifactCharacterScrollObservation.Overshot;
+    }
+}

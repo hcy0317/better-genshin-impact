@@ -4,6 +4,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Config;
 using BetterGenshinImpact.GameTask.Model.GameUI;
 using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 
@@ -25,7 +26,6 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
     private static readonly Rect2d NameRoi = new(1221.6667, 105, 216.6667, 40);
     private static readonly Rect2d LevelRoi = new(1215, 161.6667, 183.3333, 48.3333);
     private static readonly Rect2d FavoriteRoi = new(1156.6667, 813.3333, 55, 55);
-    private static readonly Rect2d DetailSignatureRoi = new(1206.6667, 98.3333, 266.6667, 125);
     private readonly BgiOnnxFactory _ocrFactory;
     private readonly Rec _ocrRecognizer;
 
@@ -83,23 +83,40 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             throw new InvalidOperationException("右侧角色名称 OCR 结果为空。");
         }
 
+        var normalizedNickname = Normalize(gameNickname);
+        var normalizedMiliastraNickname = Normalize(miliastraNickname);
         var exactMatches = DefaultAutoFightConfig.CombatAvatarNames
             .Where(name => string.Equals(
                 normalized, Normalize(name), StringComparison.Ordinal))
             .ToArray();
+        if ((normalizedNickname.Length > 0
+                && string.Equals(normalized, normalizedNickname, StringComparison.Ordinal))
+            || (normalizedMiliastraNickname.Length > 0
+                && string.Equals(normalized, normalizedMiliastraNickname, StringComparison.Ordinal)))
+        {
+            if (exactMatches.Length > 0
+                || (normalizedNickname.Length > 0
+                    && normalizedMiliastraNickname.Length > 0
+                    && string.Equals(
+                        normalizedNickname,
+                        normalizedMiliastraNickname,
+                        StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException(
+                    $"配置的昵称与标准角色名或另一昵称冲突：{rawText}");
+            }
+        }
         if (exactMatches.Length > 0)
         {
             return exactMatches[0];
         }
 
-        var normalizedNickname = Normalize(gameNickname);
         if (normalizedNickname.Length > 0
             && string.Equals(normalized, normalizedNickname, StringComparison.Ordinal))
         {
             return "旅行者";
         }
 
-        var normalizedMiliastraNickname = Normalize(miliastraNickname);
         if (normalizedMiliastraNickname.Length > 0
             && string.Equals(normalized, normalizedMiliastraNickname, StringComparison.Ordinal))
         {
@@ -115,14 +132,28 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
         throw new InvalidOperationException($"无法把右侧角色名称 OCR 结果映射到标准角色：{rawText}");
     }
 
-    internal static double DetailSignature(Mat capture)
+    internal static ulong DetailSignature(Mat capture)
     {
         using var detail = ArtifactUiCoordinateMapper.CropNormalized(
             capture,
-            DetailSignatureRoi.X, DetailSignatureRoi.Y,
-            DetailSignatureRoi.Width, DetailSignatureRoi.Height);
-        var sum = Cv2.Sum(detail);
-        return sum.Val0 + sum.Val1 + sum.Val2;
+            NameRoi.X, NameRoi.Y,
+            NameRoi.Width, NameRoi.Height);
+        using var gray = detail.Channels() == 4
+            ? detail.CvtColor(ColorConversionCodes.BGRA2GRAY)
+            : detail.CvtColor(ColorConversionCodes.BGR2GRAY);
+        using var textMask = gray.Threshold(170, 255, ThresholdTypes.Binary);
+        using var reduced = textMask.Resize(
+            new Size(9, 8), 0, 0, InterpolationFlags.Area);
+        ulong signature = 0;
+        var bit = 0;
+        for (var y = 0; y < 8; y++)
+        for (var x = 0; x < 8; x++)
+        {
+            if (reduced.At<byte>(y, x) > reduced.At<byte>(y, x + 1))
+                signature |= 1UL << bit;
+            bit++;
+        }
+        return signature;
     }
 
     internal static bool IsFavorite(Mat capture)
@@ -149,45 +180,55 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
     internal static bool TryParseLevel(string? rawText, out int level)
     {
         level = 0;
-        var digits = string.Concat((rawText ?? string.Empty).Where(char.IsDigit));
-        if (digits.Length is 0 or > 5) return false;
+        var normalized = string.Concat((rawText ?? string.Empty).Where(character =>
+            !char.IsWhiteSpace(character)));
+        if (normalized.StartsWith("等级", StringComparison.Ordinal))
+            normalized = normalized[2..];
+        if (normalized.Length == 0) return false;
+
+        int[] validLimits = [20, 40, 50, 60, 70, 80, 90];
+        var slash = normalized.IndexOf('/');
+        if (slash >= 0)
+        {
+            if (slash == 0
+                || slash != normalized.LastIndexOf('/')
+                || !int.TryParse(normalized[..slash], out var current)
+                || !int.TryParse(normalized[(slash + 1)..], out var limit)
+                || current is < 1 or > 90
+                || current > limit
+                || !validLimits.Contains(limit))
+            {
+                return false;
+            }
+            level = current;
+            return true;
+        }
+
+        if (normalized.Any(character => !char.IsDigit(character))) return false;
+        var digits = normalized;
+        if (digits.Length is 0 or > 4) return false;
         if (int.TryParse(digits, out var single) && single is >= 1 and <= 90)
         {
             level = single;
             return true;
         }
 
-        int[] validLimits = [20, 40, 50, 60, 70, 80, 90];
+        var candidates = new List<int>();
         foreach (var validLimit in validLimits)
         {
             var limitText = validLimit.ToString();
             if (!digits.EndsWith(limitText, StringComparison.Ordinal)) continue;
             var currentText = digits[..^limitText.Length];
-            if (currentText.Length == 3) currentText = currentText[..2];
             if (int.TryParse(currentText, out var current)
                 && current is >= 1 and <= 90
                 && current <= validLimit)
             {
-                level = current;
-                return true;
+                candidates.Add(current);
             }
         }
-
-        for (var split = 1; split < digits.Length; split++)
-        {
-            if (digits[split] == '0'
-                || !int.TryParse(digits[..split], out var current)
-                || !int.TryParse(digits[split..], out var limit)
-                || current is < 1 or > 90
-                || current > limit
-                || !validLimits.Contains(limit))
-            {
-                continue;
-            }
-            level = current;
-            return true;
-        }
-        return false;
+        if (candidates.Distinct().Count() != 1) return false;
+        level = candidates[0];
+        return true;
     }
 
     private static string Normalize(string? value) =>

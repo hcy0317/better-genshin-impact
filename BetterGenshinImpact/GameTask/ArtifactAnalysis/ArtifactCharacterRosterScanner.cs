@@ -57,19 +57,19 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         var assets = CharacterDevelopmentAssets.Get(captureRect.Width, captureRect.Height);
 
         await new ReturnMainUiTask().Start(cancellationToken);
+        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
+            uid, cancellationToken);
         try
         {
             Simulation.SendInput.SimulateAction(GIActions.OpenCharacterScreen);
             await OpenCharacterListAsync(assets, cancellationToken);
             var gridParams = GridParams.CharacterDevelopmentForCapture(
                 new Size(captureRect.Width, captureRect.Height));
-            var scroller = new GridScroller(
-                gridParams, _logger, Simulation.SendInput, cancellationToken);
             using var detailsReader = new ArtifactCharacterDetailsReader();
             var characters = new Dictionary<string, ArtifactCharacterRosterEntryDto>(StringComparer.Ordinal);
             var pageTracker = new ArtifactCharacterPageTracker();
             var identityGuard = new ArtifactCharacterScanIdentityGuard();
-            double? detailSignature = null;
+            ulong? detailSignature = null;
             var clicked = 0;
             while (true)
             {
@@ -104,14 +104,14 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                             "角色配装检测：点击后右侧角色仍为 {CharacterKey}，补点同一头像并只重试一次 OCR",
                             characterKey);
                         ClickCharacterCard(gridParams.Roi, rect);
-                        await Delay(160, cancellationToken);
-                        using var retryCapture = CaptureToRectArea();
-                        detail = detailsReader.Read(
-                            retryCapture.SrcMat,
+                        using var retryCapture = await CaptureSelectedDetailAsync(
+                            detailSignature, cancellationToken);
+                        detail = await ParseDetailWithOneRetryAsync(
+                            detailsReader, retryCapture,
                             gameNickname, miliastraNickname,
-                            miliastraCharacterKey);
-                        detailSignature = ArtifactCharacterDetailsReader.DetailSignature(
-                            retryCapture.SrcMat);
+                            miliastraCharacterKey,
+                            cancellationToken);
+                        detailSignature = retryCapture.DetailSignature;
                         characterKey = ArtifactCharacterCardReader.ToCharacterKey(
                             detail.CharacterName);
                     }
@@ -123,10 +123,11 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                 }
                 pageTracker.Commit(pageRows);
 
-                var moved = await scroller.TryVerticalScollDown((src, columns) =>
-                    CharacterSelectionHelper.DetectCharacterCards(
-                            src, assetScale, out _, out _)
-                        .Select(card => card.CardRect));
+                var moved = await ScrollExactlySixRowsAsync(
+                    pageRows,
+                    gridParams.Roi,
+                    assetScale,
+                    cancellationToken);
                 if (!moved) break;
             }
 
@@ -189,15 +190,68 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         throw new InvalidOperationException("当前角色页没有检测到可点击卡片。");
     }
 
+    private async Task<bool> ScrollExactlySixRowsAsync(
+        IReadOnlyList<ArtifactCharacterPageRow> initialRows,
+        Rect gridRoi,
+        double assetScale,
+        CancellationToken cancellationToken)
+    {
+        const int targetRows = 6;
+        const int maximumInputsPerRow = 24;
+        var currentRows = initialRows;
+        var advancedRows = 0;
+        var inputsSinceAdvance = 0;
+        for (var input = 1; input <= targetRows * maximumInputsPerRow; input++)
+        {
+            inputsSinceAdvance++;
+            Simulation.SendInput.Mouse.VerticalScroll(-1);
+            await Delay(35, cancellationToken);
+            var nextRows = await DetectPageRowsAsync(
+                gridRoi, assetScale, cancellationToken);
+            var observation = ArtifactCharacterScrollPlanner.Observe(
+                currentRows, nextRows);
+            if (observation == ArtifactCharacterScrollObservation.NoProgress)
+            {
+                if (inputsSinceAdvance >= maximumInputsPerRow)
+                {
+                    _logger.LogInformation(
+                        "角色配装检测：滚动没有继续前进，实际推进 {AdvancedRows}/{TargetRows} 行，按末页处理",
+                        advancedRows,
+                        targetRows);
+                    return advancedRows > 0;
+                }
+                continue;
+            }
+            if (observation == ArtifactCharacterScrollObservation.Overshot)
+            {
+                throw new InvalidDataException(
+                    "角色列表单次滚动跨过超过一行，无法证明分页连续性，已停止以避免漏扫。");
+            }
+
+            advancedRows++;
+            inputsSinceAdvance = 0;
+            currentRows = nextRows;
+            if (advancedRows == targetRows)
+            {
+                _logger.LogInformation("角色配装检测：已逐行验证并精确推进 6 行");
+                return true;
+            }
+        }
+
+        throw new TimeoutException(
+            $"角色列表只推进 {advancedRows}/{targetRows} 行，未在有界输入内完成分页。");
+    }
+
     private static async Task<ArtifactCharacterCapturedDetail> CaptureSelectedDetailAsync(
-        double? previousDetailSignature,
+        ulong? previousDetailSignature,
         CancellationToken cancellationToken)
     {
         if (previousDetailSignature.HasValue)
         {
             var timer = Stopwatch.StartNew();
-            var detector = new ArtifactScanDetailChangeDetector(
-                previousDetailSignature.Value, 0.5);
+            var detector = new ArtifactCharacterDetailChangeDetector(
+                previousDetailSignature.Value, 6);
+            var changed = false;
             while (timer.ElapsedMilliseconds < 450)
             {
                 using var capture = CaptureToRectArea();
@@ -205,9 +259,14 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                 if (detector.Observe(signature))
                 {
                     await Delay(40, cancellationToken);
+                    changed = true;
                     break;
                 }
                 await Delay(12, cancellationToken);
+            }
+            if (!changed)
+            {
+                throw new TimeoutException("点击角色卡片后右侧角色名称没有稳定切换。");
             }
         }
         else
@@ -229,32 +288,54 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         string? miliastraCharacterKey,
         CancellationToken cancellationToken)
     {
+        ArtifactCharacterDetailSample? first = null;
+        InvalidOperationException? firstFailure = null;
         try
         {
-            return reader.Read(
+            first = reader.Read(
                 frame.Capture,
                 gameNickname, miliastraNickname,
                 miliastraCharacterKey);
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException exception)
         {
-            await Delay(160, cancellationToken);
-            using var retryCapture = CaptureToRectArea();
-            try
+            firstFailure = exception;
+        }
+
+        await Delay(first is null ? 160 : 50, cancellationToken);
+        using var retryCapture = CaptureToRectArea();
+        try
+        {
+            var second = reader.Read(
+                retryCapture.SrcMat,
+                gameNickname, miliastraNickname,
+                miliastraCharacterKey);
+            if (first is not null
+                && (!string.Equals(
+                        first.CharacterName,
+                        second.CharacterName,
+                        StringComparison.Ordinal)
+                    || first.Level != second.Level))
             {
-                return reader.Read(
-                    retryCapture.SrcMat,
-                    gameNickname, miliastraNickname,
-                    miliastraCharacterKey);
+                throw new InvalidOperationException(
+                    $"角色详情连续两帧不一致：{first.CharacterName} Lv.{first.Level} / "
+                    + $"{second.CharacterName} Lv.{second.Level}");
             }
-            catch (Exception retryFailure)
+            return second with { Favorite = second.Favorite || first?.Favorite == true };
+        }
+        catch (Exception retryFailure)
+        {
+            TaskFailureDiagnostics.CaptureScreenshotOnce(
+                retryFailure,
+                "角色配装检测-右侧OCR重试帧",
+                _ => SaveFailureFrame(retryCapture.SrcMat));
+            if (firstFailure is not null)
             {
-                TaskFailureDiagnostics.CaptureScreenshotOnce(
-                    retryFailure,
-                    "角色配装检测-右侧OCR重试帧",
-                    _ => SaveFailureFrame(retryCapture.SrcMat));
-                throw;
+                throw new InvalidOperationException(
+                    "角色详情 OCR 首帧与唯一重试帧均失败。",
+                    new AggregateException(firstFailure, retryFailure));
             }
+            throw;
         }
     }
 
@@ -310,10 +391,10 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
 
     private sealed class ArtifactCharacterCapturedDetail(
         Mat capture,
-        double detailSignature) : IDisposable
+        ulong detailSignature) : IDisposable
     {
         internal Mat Capture { get; } = capture;
-        internal double DetailSignature { get; } = detailSignature;
+        internal ulong DetailSignature { get; } = detailSignature;
         public void Dispose() => Capture.Dispose();
     }
 

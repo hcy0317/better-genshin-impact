@@ -48,6 +48,31 @@ public class ArtifactCharacterRosterPaginationTests
         Assert.Equal([7UL, 8UL, 9UL], selected.Select(RowId));
     }
 
+    [Fact]
+    public void ScrollPlannerAcceptsOnlyOneIdentityProvenRowAtATime()
+    {
+        Assert.Equal(
+            ArtifactCharacterScrollObservation.NoProgress,
+            ArtifactCharacterScrollPlanner.Observe(Rows(1, 6), Rows(1, 6)));
+        Assert.Equal(
+            ArtifactCharacterScrollObservation.AdvancedOneRow,
+            ArtifactCharacterScrollPlanner.Observe(Rows(1, 6), Rows(2, 6)));
+        Assert.Equal(
+            ArtifactCharacterScrollObservation.Overshot,
+            ArtifactCharacterScrollPlanner.Observe(Rows(1, 6), Rows(3, 6)));
+        Assert.Equal(
+            ArtifactCharacterScrollObservation.Overshot,
+            ArtifactCharacterScrollPlanner.Observe(Rows(1, 6), Rows(7, 6)));
+    }
+
+    [Fact]
+    public void ScrollPlannerTreatsBottomAlignmentWithoutANewRowAsNoProgress()
+    {
+        Assert.Equal(
+            ArtifactCharacterScrollObservation.NoProgress,
+            ArtifactCharacterScrollPlanner.Observe(Rows(1, 6), Rows(2, 5)));
+    }
+
     private static ArtifactCharacterPageRow[] Rows(ulong first, int count) =>
         Enumerable.Range(0, count)
             .Select(offset => first + (ulong)offset)

@@ -119,13 +119,17 @@ public interface IArtifactLockPlanExecutor
 {
     Task ExecuteAsync(
         IReadOnlyList<ArtifactExecutionActionDto> actions,
+        int expectedArtifactCount,
         bool reusePreparedInventory,
         CancellationToken cancellationToken);
 }
 
 public interface IArtifactNativePlanExecutor
 {
-    Task ReplaceAllAsync(ArtifactNativeSyncPlanDto plan, CancellationToken cancellationToken);
+    Task ReplaceAllAsync(
+        ArtifactNativeSyncPlanDto plan,
+        string expectedUid,
+        CancellationToken cancellationToken);
 }
 
 public sealed class ArtifactHostCoordinator(
@@ -138,9 +142,10 @@ public sealed class ArtifactHostCoordinator(
     public async Task RunAsync(
         ArtifactHostRequest request,
         string requestToken,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowExpiredClaimed = false)
     {
-        Validate(request, requestToken);
+        Validate(request, requestToken, allowExpiredClaimed);
         try
         {
             await client.ClaimAsync(
@@ -209,6 +214,7 @@ public sealed class ArtifactHostCoordinator(
                     }
                     await lockExecutor.ExecuteAsync(
                         preflight.Actions,
+                        request.SourceArtifactCount.Value,
                         observation.CountOnly,
                         cancellationToken);
                     break;
@@ -232,7 +238,8 @@ public sealed class ArtifactHostCoordinator(
                         throw new InvalidOperationException(
                             $"Native artifact plan preflight rejected replacement: {plan.Status}");
                     }
-                    await nativePlanExecutor.ReplaceAllAsync(plan, cancellationToken);
+                    await nativePlanExecutor.ReplaceAllAsync(
+                        plan, request.Uid, cancellationToken);
                     break;
                 }
                 default:
@@ -261,7 +268,10 @@ public sealed class ArtifactHostCoordinator(
         }
     }
 
-    private static void Validate(ArtifactHostRequest request, string requestToken)
+    private static void Validate(
+        ArtifactHostRequest request,
+        string requestToken,
+        bool allowExpiredClaimed)
     {
         if (request.Version != 1 || !string.Equals(request.Kind, "artifact-analysis", StringComparison.Ordinal))
         {
@@ -271,7 +281,7 @@ public sealed class ArtifactHostCoordinator(
         {
             throw new InvalidOperationException("Artifact host request token is required.");
         }
-        if (request.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+        if (!allowExpiredClaimed && request.ExpiresAtUtc <= DateTimeOffset.UtcNow)
         {
             throw new InvalidOperationException("Artifact host request has expired.");
         }

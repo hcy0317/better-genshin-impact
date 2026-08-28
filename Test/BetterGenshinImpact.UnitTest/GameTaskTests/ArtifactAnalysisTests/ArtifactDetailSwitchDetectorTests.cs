@@ -7,10 +7,10 @@ public class ArtifactDetailSwitchDetectorTests
     [Fact]
     public void ScanDetectorCompletesOnTheFirstChangedDetailFrame()
     {
-        var detector = new ArtifactScanDetailChangeDetector(100, 0.5);
+        var detector = new ArtifactCharacterDetailChangeDetector(0b1010UL, 1);
 
-        Assert.False(detector.Observe(100.2));
-        Assert.True(detector.Observe(132));
+        Assert.False(detector.Observe(0b1011UL));
+        Assert.True(detector.Observe(0b0101UL));
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 
 namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
 
@@ -8,6 +9,15 @@ internal sealed class ArtifactScanDetailChangeDetector(
 {
     internal bool Observe(double detailSignature) =>
         Math.Abs(detailSignature - initialSignature) > tolerance;
+}
+
+internal sealed class ArtifactCharacterDetailChangeDetector(
+    ulong initialSignature,
+    int maximumStableDistance)
+{
+    internal bool Observe(ulong detailSignature) =>
+        BitOperations.PopCount(detailSignature ^ initialSignature)
+        > maximumStableDistance;
 }
 
 internal sealed class ArtifactDetailSwitchDetector(double initialSignature, double tolerance)

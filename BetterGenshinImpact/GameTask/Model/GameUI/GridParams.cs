@@ -100,6 +100,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             { GridScreenName.PreciousItems, weapons },
             { GridScreenName.Furnishings, weapons },
             { GridScreenName.ArtifactSalvage, new GridParams(new Rect(48, 106, 1267, 768), 9, 3, 40, 28, 0.018) },
+            { GridScreenName.ArtifactSetFilter, new GridParams(new Rect(40, 100, 1300, 852), 2, 3, 40, 40, 0.024) },
             { GridScreenName.Crafting, new GridParams(new Rect(45, 170, 705, 790), 5, 3, 40, 32, 0.024)},
             { GridScreenName.PartySetupCharacters, new GridParams(new Rect(24, 86, 766, 743), 5, 3, 40, 28, 0.018)}
         }.ToFrozenDictionary();

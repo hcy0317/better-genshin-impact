@@ -639,8 +639,8 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
             {
                 if (!string.IsNullOrWhiteSpace(commandLineOptions.ArtifactHostRequestPath))
                 {
-                    _ = App.GetService<ArtifactHostService>()
-                        ?.RunObservedAsync(commandLineOptions.ArtifactHostRequestPath);
+                    App.GetService<ArtifactHostService>()
+                        ?.QueueRequest(commandLineOptions.ArtifactHostRequestPath);
                 }
                 return;
             }

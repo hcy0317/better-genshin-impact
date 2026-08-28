@@ -24,9 +24,11 @@ public sealed class ArtifactNativePlanExecutor : IArtifactNativePlanExecutor
 {
     public async Task ReplaceAllAsync(
         ArtifactNativeSyncPlanDto plan,
+        string expectedUid,
         CancellationToken cancellationToken)
     {
-        var task = new ArtifactNativePlanTask(plan);
+        var task = new ArtifactNativePlanTask(
+            plan, expectedUid, cancellationToken);
         await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
         if (!task.Completed)
         {
@@ -35,7 +37,10 @@ public sealed class ArtifactNativePlanExecutor : IArtifactNativePlanExecutor
     }
 }
 
-internal sealed class ArtifactNativePlanTask(ArtifactNativeSyncPlanDto plan) : ISoloTask
+internal sealed class ArtifactNativePlanTask(
+    ArtifactNativeSyncPlanDto plan,
+    string expectedUid,
+    CancellationToken externalCancellationToken) : ISoloTask
 {
     private readonly ILogger _logger = App.GetLogger<ArtifactNativePlanTask>();
     private readonly ArtifactSetCatalog _catalog = new(Path.Combine(
@@ -52,8 +57,15 @@ internal sealed class ArtifactNativePlanTask(ArtifactNativeSyncPlanDto plan) : I
     public string Name => "重建原神圣遗物锁定方案";
     public bool Completed { get; private set; }
 
-    public async Task Start(CancellationToken ct)
+    public async Task Start(CancellationToken taskCancellationToken)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            taskCancellationToken,
+            externalCancellationToken);
+        var ct = linked.Token;
+        await new ReturnMainUiTask().Start(ct);
+        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
+            expectedUid, ct);
         if (!plan.ReplaceAll || !plan.RequiresPreMutationEvidence || plan.Plans.Count == 0)
         {
             throw new InvalidDataException("Native artifact plan is not a complete replacement plan.");
@@ -71,7 +83,8 @@ internal sealed class ArtifactNativePlanTask(ArtifactNativeSyncPlanDto plan) : I
         {
             throw new InvalidDataException("Lock Assistance does not expose quick plan deletion.");
         }
-        WritePreMutationEvidence(plan);
+        var recoveryRoot = WritePreMutationEvidence(plan);
+        WriteRecoveryState(recoveryRoot, "PREPARED", []);
 
         await ClickTextAsync("快速删除方案", ct);
         await Delay(250, ct);
@@ -82,22 +95,31 @@ internal sealed class ArtifactNativePlanTask(ArtifactNativeSyncPlanDto plan) : I
                 throw new InvalidDataException("Unable to confirm native plan deletion.");
             }
         }
-        await Delay(450, ct);
+        // Confirmation is the destructive commit point. From here the reviewed
+        // target plan, not a caller cancellation, owns forward recovery.
+        var commitToken = CancellationToken.None;
+        WriteRecoveryState(recoveryRoot, "OLD_PLANS_DELETED", []);
+        await Delay(450, commitToken);
 
+        var configuredSets = new List<string>();
         foreach (var group in grouped)
         {
-            await OpenLockAssistanceAsync(ct);
-            await SelectSetAsync(_catalog.LocalizedName(group.Key), ct);
-            await ConfigureSetAsync(group.ToArray(), ct);
+            await OpenLockAssistanceAsync(commitToken);
+            await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
+            await ConfigureSetAsync(group.ToArray(), commitToken);
+            configuredSets.Add(group.Key);
+            WriteRecoveryState(
+                recoveryRoot, "CONFIGURING_TARGET", configuredSets);
         }
         foreach (var group in grouped)
         {
-            await OpenLockAssistanceAsync(ct);
-            await SelectSetAsync(_catalog.LocalizedName(group.Key), ct);
-            await VerifySetAsync(group.ToArray(), ct);
+            await OpenLockAssistanceAsync(commitToken);
+            await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
+            await VerifySetAsync(group.ToArray(), commitToken);
         }
+        WriteRecoveryState(recoveryRoot, "VERIFIED", configuredSets);
         Completed = true;
-        await new ReturnMainUiTask().Start(ct);
+        await new ReturnMainUiTask().Start(commitToken);
     }
 
     private async Task OpenLockAssistanceAsync(CancellationToken ct)
@@ -214,7 +236,7 @@ internal sealed class ArtifactNativePlanTask(ArtifactNativeSyncPlanDto plan) : I
         await ClickTextAsync("取消", ct);
     }
 
-    private void WritePreMutationEvidence(ArtifactNativeSyncPlanDto targetPlan)
+    private string WritePreMutationEvidence(ArtifactNativeSyncPlanDto targetPlan)
     {
         var root = Path.Combine(
             AppContext.BaseDirectory, "log", "artifact-native-plan-backup",
@@ -227,7 +249,33 @@ internal sealed class ArtifactNativePlanTask(ArtifactNativeSyncPlanDto plan) : I
             JsonSerializer.Serialize(targetPlan, new JsonSerializerOptions { WriteIndented = true }));
         File.WriteAllText(
             Path.Combine(root, "README.txt"),
-            "This captures pre-mutation evidence only. Genshin does not expose a restorable export for prior custom plans.");
+            "target-plan.json is the machine-readable forward-recovery source. "
+            + "If execution is interrupted after deletion, rerun the same reviewed plan; "
+            + "recovery-state.json records the last completed phase and set keys. "
+            + "Genshin does not expose an export capable of restoring the prior custom plans.");
+        return root;
+    }
+
+    private static void WriteRecoveryState(
+        string root,
+        string phase,
+        IReadOnlyCollection<string> configuredSets)
+    {
+        var temporary = Path.Combine(root, "recovery-state.json.tmp");
+        var target = Path.Combine(root, "recovery-state.json");
+        File.WriteAllText(
+            temporary,
+            JsonSerializer.Serialize(
+                new
+                {
+                    phase,
+                    configuredSets = configuredSets
+                        .OrderBy(value => value, StringComparer.Ordinal)
+                        .ToArray(),
+                    updatedAtUtc = DateTimeOffset.UtcNow
+                },
+                new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(temporary, target, overwrite: true);
     }
 
     private static bool HasText(string expected)

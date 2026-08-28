@@ -10,7 +10,8 @@ namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
 public sealed record ArtifactHostLaunchRequest(
     string RequestToken,
     string RequestPath,
-    ArtifactHostRequest Request);
+    ArtifactHostRequest Request,
+    bool Recovery);
 
 public sealed class ArtifactHostRequestReader
 {
@@ -30,7 +31,8 @@ public sealed class ArtifactHostRequestReader
 
     public async Task<ArtifactHostLaunchRequest> ReadAsync(
         string requestPath,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowExpiredClaimed = false)
     {
         var fullPath = Path.GetFullPath(requestPath);
         if (!fullPath.StartsWith(_requestRoot, StringComparison.OrdinalIgnoreCase))
@@ -51,9 +53,16 @@ public sealed class ArtifactHostRequestReader
         var request = await JsonSerializer.DeserializeAsync<ArtifactHostRequest>(
             stream, _jsonOptions, cancellationToken)
             ?? throw new InvalidOperationException("Artifact host request is empty.");
+        var claimedDirectory = Path.GetFullPath(Path.Combine(
+            _requestRoot, "consumed"));
+        var recovery = allowExpiredClaimed
+            && string.Equals(
+                Path.GetDirectoryName(fullPath),
+                claimedDirectory,
+                StringComparison.OrdinalIgnoreCase);
         if (request.Version != 1
             || !string.Equals(request.Kind, "artifact-analysis", StringComparison.Ordinal)
-            || request.ExpiresAtUtc <= DateTimeOffset.UtcNow
+            || !recovery && request.ExpiresAtUtc <= DateTimeOffset.UtcNow
             || string.IsNullOrWhiteSpace(request.Uid)
             || string.IsNullOrWhiteSpace(request.JobId))
         {
@@ -81,6 +90,7 @@ public sealed class ArtifactHostRequestReader
             throw new InvalidOperationException(
                 "Character roster request is missing its activation settings.");
         }
-        return new ArtifactHostLaunchRequest(requestToken.ToString(), fullPath, request);
+        return new ArtifactHostLaunchRequest(
+            requestToken.ToString(), fullPath, request, recovery);
     }
 }

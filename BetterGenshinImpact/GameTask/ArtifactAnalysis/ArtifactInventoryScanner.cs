@@ -26,7 +26,7 @@ public sealed class ArtifactInventoryScanner : IArtifactInventoryScanner
 {
     public async Task<ArtifactSnapshotDto> ScanAsync(string uid, CancellationToken cancellationToken)
     {
-        var task = new ArtifactInventoryScanTask(uid);
+        var task = new ArtifactInventoryScanTask(uid, cancellationToken);
         await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
         return task.Result ?? throw new InvalidOperationException(
             "Artifact inventory scan ended without a complete snapshot.");
@@ -39,7 +39,7 @@ public sealed class ArtifactInventoryScanner : IArtifactInventoryScanner
         CancellationToken cancellationToken)
     {
         var task = new ArtifactInventoryExecutionInspectionTask(
-            uid, expectedArtifactCount, targets);
+            uid, expectedArtifactCount, targets, cancellationToken);
         await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
         return task.Result ?? throw new InvalidOperationException(
             "Artifact execution inspection ended without a complete observation.");
@@ -49,14 +49,21 @@ public sealed class ArtifactInventoryScanner : IArtifactInventoryScanner
 internal sealed class ArtifactInventoryExecutionInspectionTask(
     string uid,
     int expectedArtifactCount,
-    IReadOnlyList<ArtifactLaunchTargetDto> targets) : ISoloTask
+    IReadOnlyList<ArtifactLaunchTargetDto> targets,
+    CancellationToken externalCancellationToken) : ISoloTask
 {
     private readonly ILogger _logger = App.GetLogger<ArtifactInventoryExecutionInspectionTask>();
     public string Name => "圣遗物执行前核验";
     public ArtifactExecutionObservationDto? Result { get; private set; }
 
-    public async Task Start(CancellationToken ct)
+    public async Task Start(CancellationToken taskCancellationToken)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            taskCancellationToken,
+            externalCancellationToken);
+        var ct = linked.Token;
+        await new ReturnMainUiTask().Start(ct);
+        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(uid, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
         using var reader = new ArtifactInventoryUi(_logger);
         var observedCount = reader.ReadArtifactCount();
@@ -101,14 +108,22 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
 
 }
 
-internal sealed class ArtifactInventoryScanTask(string uid) : ISoloTask
+internal sealed class ArtifactInventoryScanTask(
+    string uid,
+    CancellationToken externalCancellationToken) : ISoloTask
 {
     private readonly ILogger _logger = App.GetLogger<ArtifactInventoryScanTask>();
     public string Name => "圣遗物扫描分析";
     public ArtifactSnapshotDto? Result { get; private set; }
 
-    public async Task Start(CancellationToken ct)
+    public async Task Start(CancellationToken taskCancellationToken)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            taskCancellationToken,
+            externalCancellationToken);
+        var ct = linked.Token;
+        await new ReturnMainUiTask().Start(ct);
+        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(uid, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
         using var reader = new ArtifactInventoryUi(_logger);
         var expectedCount = reader.ReadArtifactCount();
@@ -218,6 +233,23 @@ internal sealed class ArtifactInventoryUi : IDisposable
     {
         using var frame = await CaptureItemAsync(
             page, itemRect, scanIndex, cancellationToken);
+        return await ParseItemAsync(frame, cancellationToken);
+    }
+
+    internal async Task<ArtifactItemDto> ReadInitiallySelectedItemAsync(
+        ImageRegion page,
+        Rect itemRect,
+        int scanIndex,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var capture = CaptureToRectArea();
+        using var item = page.DeriveCrop(itemRect);
+        using var frame = ArtifactCapturedItem.Create(
+            scanIndex,
+            ArtifactGridLockDetector.IsLocked(item.SrcMat),
+            capture.SrcMat,
+            ReadRarity(capture.SrcMat));
         return await ParseItemAsync(frame, cancellationToken);
     }
 
@@ -473,11 +505,8 @@ internal sealed class ArtifactInventoryUi : IDisposable
             await Delay(8, cancellationToken);
         }
 
-        _logger.LogWarning(
-            "圣遗物 {ScanIndex} 扫描详情切换在 450ms 内未变化，使用最后一帧",
-            scanIndex);
-        using var latest = CaptureToRectArea();
-        return latest.SrcMat.Clone();
+        throw new InvalidDataException(
+            $"圣遗物 {scanIndex} 扫描详情切换在 450ms 内未发生，拒绝解析旧详情帧。");
     }
 
     private async Task<Mat> CaptureAfterLockDetailStableAsync(
@@ -504,11 +533,8 @@ internal sealed class ArtifactInventoryUi : IDisposable
             await Delay(16, cancellationToken);
         }
 
-        _logger.LogWarning(
-            "圣遗物 {ScanIndex} 详情切换在 450ms 内未稳定，使用最后一帧",
-            scanIndex);
-        using var latest = CaptureToRectArea();
-        return latest.SrcMat.Clone();
+        throw new InvalidDataException(
+            $"圣遗物 {scanIndex} 详情切换在 450ms 内未稳定，拒绝解析旧详情帧。");
     }
 
     private static double DetailSignature(Mat capture)
@@ -727,7 +753,7 @@ internal static class ArtifactInventoryScanSession
         HashSet<int>? targetIndices,
         CancellationToken cancellationToken)
     {
-        if (targetIndices is { Count: 0 }) return [];
+        if (artifactCount == 0 || targetIndices is { Count: 0 }) return [];
 
         var logger = App.GetLogger<ArtifactInventoryScanTask>();
         var timer = Stopwatch.StartNew();

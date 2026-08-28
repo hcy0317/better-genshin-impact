@@ -16,13 +16,23 @@ public class ArtifactCharacterDetailsReaderTests
     [InlineData("等级90/90", 90)]
     [InlineData("等级9090", 90)]
     [InlineData("等级8090", 80)]
-    [InlineData("等级90790", 90)]
     [InlineData("等级190", 1)]
     [InlineData("等级40", 40)]
     public void DetailLevel_ParsesSeparatedAndConcatenatedPairs(string text, int expected)
     {
         Assert.True(ArtifactCharacterDetailsReader.TryParseLevel(text, out var level));
         Assert.Equal(expected, level);
+    }
+
+    [Theory]
+    [InlineData("等级90790")]
+    [InlineData("等级8O/90")]
+    [InlineData("等级90/9O")]
+    [InlineData("等级809090")]
+    [InlineData("等级80/80/90")]
+    public void DetailLevel_RejectsDamagedOrAmbiguousText(string text)
+    {
+        Assert.False(ArtifactCharacterDetailsReader.TryParseLevel(text, out _));
     }
 
     [Theory]
@@ -66,6 +76,21 @@ public class ArtifactCharacterDetailsReaderTests
             "奇偶·男性",
             ArtifactCharacterDetailsReader.ResolveCharacterName(
                 "遥·", "眇", "遥", "MannequinBoy"));
+    }
+
+    [Theory]
+    [InlineData("雷电将军", "雷电将军", "遥")]
+    [InlineData("遥", "遥", "遥")]
+    public void ConfiguredNicknames_CannotCollideWithStandardOrEachOther(
+        string rawText,
+        string gameNickname,
+        string miliastraNickname)
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            ArtifactCharacterDetailsReader.ResolveCharacterName(
+                rawText,
+                gameNickname,
+                miliastraNickname));
     }
 
     [Fact]

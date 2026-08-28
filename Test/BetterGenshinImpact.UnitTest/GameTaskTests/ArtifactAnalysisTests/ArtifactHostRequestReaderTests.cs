@@ -75,6 +75,33 @@ public class ArtifactHostRequestReaderTests : IDisposable
     }
 
     [Fact]
+    public async Task Reader_AllowsExpiredRequestOnlyFromClaimedRecoveryDirectory()
+    {
+        var consumed = Path.Combine(_root, "consumed");
+        Directory.CreateDirectory(consumed);
+        var path = Path.Combine(consumed, Guid.NewGuid() + ".json");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
+        {
+            version = 1,
+            kind = "artifact-analysis",
+            uid = "102550550",
+            jobId = "job-recovery",
+            operation = "ANALYZE",
+            createdAtUtc = DateTimeOffset.UtcNow.AddMinutes(-10),
+            expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-5)
+        }));
+        var reader = new ArtifactHostRequestReader(_root);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            reader.ReadAsync(path, CancellationToken.None));
+        var recovered = await reader.ReadAsync(
+            path, CancellationToken.None, allowExpiredClaimed: true);
+
+        Assert.True(recovered.Recovery);
+        Assert.Equal("job-recovery", recovered.Request.JobId);
+    }
+
+    [Fact]
     public async Task Reader_RequiresCharacterActivationSettingsForRosterScan()
     {
         Directory.CreateDirectory(_root);

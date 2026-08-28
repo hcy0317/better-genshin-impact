@@ -284,6 +284,7 @@ public class ArtifactHostCoordinatorTests
         public bool ReusedPreparedInventory { get; private set; }
         public Task ExecuteAsync(
             IReadOnlyList<ArtifactExecutionActionDto> actions,
+            int expectedArtifactCount,
             bool reusePreparedInventory,
             CancellationToken cancellationToken)
         {
@@ -297,7 +298,10 @@ public class ArtifactHostCoordinatorTests
     private sealed class FakeNativeExecutor : IArtifactNativePlanExecutor
     {
         public int Calls { get; private set; }
-        public Task ReplaceAllAsync(ArtifactNativeSyncPlanDto plan, CancellationToken cancellationToken)
+        public Task ReplaceAllAsync(
+            ArtifactNativeSyncPlanDto plan,
+            string expectedUid,
+            CancellationToken cancellationToken)
         {
             Calls++;
             return Task.CompletedTask;
