@@ -53,10 +53,9 @@ public class BgiYoloPredictor : IDisposable
                             SessionOptions = sessionOptions
                         });
                 }
-                catch
+                finally
                 {
                     sessionOptions.Dispose();
-                    throw;
                 }
             },
             logger ?? NullLogger.Instance,
