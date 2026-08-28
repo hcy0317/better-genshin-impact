@@ -43,5 +43,25 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoDomainTests
             Assert.Equal(originalResinCount, result.OriginalResinCount);
             Assert.Equal(condensedResinCount, result.CondensedResinCount);
         }
+
+        [Theory]
+        [InlineData("160/200", 160)]
+        [InlineData("20/200", 20)]
+        public void OriginalResinParser_RequiresARecognizedCount(string text, int expected)
+        {
+            Assert.Equal(expected, ResinStatus.ParseOriginalResinCount(text));
+            Assert.Throws<InvalidOperationException>(() =>
+                ResinStatus.ParseOriginalResinCount("树脂"));
+        }
+
+        [Theory]
+        [InlineData("0", 0)]
+        [InlineData("5", 5)]
+        public void CondensedResinParser_DistinguishesZeroFromOcrFailure(string text, int expected)
+        {
+            Assert.Equal(expected, ResinStatus.ParseCondensedResinCount(text));
+            Assert.Throws<InvalidOperationException>(() =>
+                ResinStatus.ParseCondensedResinCount(string.Empty));
+        }
     }
 }

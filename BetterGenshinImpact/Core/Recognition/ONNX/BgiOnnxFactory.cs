@@ -304,13 +304,24 @@ public class BgiOnnxFactory : IDisposable
     /// <returns>BgiYoloPredictor</returns>
     public BgiYoloPredictor CreateYoloPredictor(BgiOnnxModel model)
     {
+        return CreateYoloPredictor(model, null);
+    }
+
+    private BgiYoloPredictor CreateYoloPredictor(
+        BgiOnnxModel model,
+        Action<BgiYoloPredictor>? initializationFailed)
+    {
         // logger.LogDebug("[Yolo]创建yolo预测器，模型: {ModelName}", model.Name);
-        if (!EnableCache) return new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, false), _logger);
+        if (!EnableCache) return new BgiYoloPredictor(
+            model, model.ModalPath, CreateSessionOptions(model, false), _logger,
+            initializationFailed);
 
         var cached = GetCached(model);
         return cached == null
-            ? new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, true), _logger)
-            : new BgiYoloPredictor(model, cached, CreateSessionOptions(model, false), _logger);
+            ? new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, true), _logger,
+                initializationFailed)
+            : new BgiYoloPredictor(model, cached, CreateSessionOptions(model, false), _logger,
+                initializationFailed);
     }
 
     /// <summary>
@@ -322,9 +333,27 @@ public class BgiOnnxFactory : IDisposable
         var predictor = _sharedYoloPredictors.GetOrAdd(
             model,
             key => new Lazy<BgiYoloPredictor>(
-                () => CreateYoloPredictor(key),
+                () => CreateYoloPredictor(
+                    key,
+                    failed => EvictFailedSharedPredictor(key, failed)),
                 LazyThreadSafetyMode.ExecutionAndPublication));
         return predictor.Value;
+    }
+
+    internal void EvictFailedSharedPredictor(
+        BgiOnnxModel model,
+        BgiYoloPredictor failed)
+    {
+        if (_sharedYoloPredictors.TryGetValue(model, out var current)
+            && current.IsValueCreated
+            && ReferenceEquals(current.Value, failed)
+            && _sharedYoloPredictors.TryRemove(model, out _))
+        {
+            failed.Dispose();
+            _logger.LogWarning(
+                "[ONNX]共享模型 {Model} 初始化失败，已清除缓存以允许下次重试。",
+                model.Name);
+        }
     }
 
     public void Dispose()

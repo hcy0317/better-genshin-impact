@@ -794,7 +794,9 @@ public partial class PathExecutor
         await WaitUntilRotatedTo(targetOrientation, 5);
         moveToStartTime = DateTime.UtcNow;
         var progressHeartbeat = new PathProgressHeartbeat(moveToStartTime, TimeSpan.FromSeconds(15));
-        var movementWatchdog = new PathMovementWatchdog(moveToStartTime, TimeSpan.FromSeconds(60));
+        var movementWatchdog = new PathMovementWatchdog(
+            () => moveToStartTime,
+            TimeSpan.FromSeconds(60));
         var lastPositionRecord = DateTime.UtcNow;
         var fastMode = false;
         var prevPositions = new List<Point2f>();

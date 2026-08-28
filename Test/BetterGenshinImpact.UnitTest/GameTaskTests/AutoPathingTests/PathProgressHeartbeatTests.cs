@@ -35,4 +35,18 @@ public class PathProgressHeartbeatTests
         Assert.True(watchdog.ShouldAbort(isClimbing: true, startedAt.AddSeconds(60)));
         Assert.False(watchdog.ShouldAbort(isClimbing: false, startedAt.AddMinutes(4)));
     }
+
+    [Fact]
+    public void ClimbWatchdog_ShouldUseTheResumeResetStartTime()
+    {
+        var startedAt = new DateTime(2026, 8, 24, 20, 58, 38, DateTimeKind.Utc);
+        var currentStart = startedAt;
+        var watchdog = new PathMovementWatchdog(
+            () => currentStart,
+            TimeSpan.FromSeconds(60));
+
+        Assert.True(watchdog.ShouldAbort(true, startedAt.AddSeconds(70)));
+        currentStart = startedAt.AddSeconds(70);
+        Assert.False(watchdog.ShouldAbort(true, startedAt.AddSeconds(71)));
+    }
 }

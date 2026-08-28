@@ -38,6 +38,7 @@ using System.Collections.ObjectModel;
 using BetterGenshinImpact.Core.Script.Dependence;
 using BetterGenshinImpact.GameTask.AutoDomain.Model;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Reward;
 using Compunet.YoloSharp;
 using Microsoft.Extensions.DependencyInjection;
@@ -1066,6 +1067,9 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             await allTasks;
         }
         catch (OperationCanceledException)
+        {
+        }
+        catch (NormalEndException)
         {
         }
     }

@@ -21,7 +21,9 @@ public class BgiYoloPredictor : IDisposable
 
 
     private readonly OnnxInitializationTask<YoloPredictor> _predictorInitialization;
+    private readonly Action<BgiYoloPredictor>? _initializationFailed;
     private readonly object _predictionLock = new();
+    private int _failureReported;
     private int _disposed;
 
     /// <summary>
@@ -34,9 +36,11 @@ public class BgiYoloPredictor : IDisposable
         BgiOnnxModel onnxModel,
         string modelPath,
         SessionOptions sessionOptions,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        Action<BgiYoloPredictor>? initializationFailed = null)
     {
         _model = onnxModel;
+        _initializationFailed = initializationFailed;
         _predictorInitialization = new OnnxInitializationTask<YoloPredictor>(
             onnxModel.Name,
             () => new YoloPredictor(modelPath,
@@ -47,7 +51,21 @@ public class BgiYoloPredictor : IDisposable
             logger ?? NullLogger.Instance);
     }
 
-    public YoloPredictor Predictor => _predictorInitialization.Value;
+    public YoloPredictor Predictor
+    {
+        get
+        {
+            try
+            {
+                return _predictorInitialization.Value;
+            }
+            catch
+            {
+                ReportInitializationFailure();
+                throw;
+            }
+        }
+    }
 
     public TResult UsePredictor<TResult>(Func<YoloPredictor, TResult> action)
     {
@@ -65,7 +83,23 @@ public class BgiYoloPredictor : IDisposable
             return;
         }
 
-        await _predictorInitialization.GetValueAsync(ct);
+        try
+        {
+            await _predictorInitialization.GetValueAsync(ct);
+        }
+        catch
+        {
+            ReportInitializationFailure();
+            throw;
+        }
+    }
+
+    private void ReportInitializationFailure()
+    {
+        if (Interlocked.Exchange(ref _failureReported, 1) == 0)
+        {
+            _initializationFailed?.Invoke(this);
+        }
     }
 
     /// <summary>

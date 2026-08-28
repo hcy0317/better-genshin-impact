@@ -20,6 +20,18 @@ public class BgiOnnxFactoryPredictorCacheTests
     }
 
     [Fact]
+    public void FailedSharedPredictor_ShouldBeEvictedSoTheNextCallCanRetry()
+    {
+        using var factory = new BgiOnnxFactory(new FakeLogger<BgiOnnxFactory>());
+        var failed = factory.GetOrCreateYoloPredictor(BgiOnnxModel.BgiTree);
+
+        factory.EvictFailedSharedPredictor(BgiOnnxModel.BgiTree, failed);
+        var retried = factory.GetOrCreateYoloPredictor(BgiOnnxModel.BgiTree);
+
+        Assert.NotSame(failed, retried);
+    }
+
+    [Fact]
     public void InitializationProgress_ShouldReportEveryFifteenSeconds()
     {
         var progress = new OnnxInitializationProgress();

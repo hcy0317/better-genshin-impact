@@ -36,11 +36,17 @@ internal sealed class PathProgressHeartbeat
 
 internal sealed class PathMovementWatchdog
 {
-    private readonly DateTime _startedAt;
+    private readonly Func<DateTime> _startedAt;
     private readonly TimeSpan _climbTimeout;
 
     public PathMovementWatchdog(DateTime startedAt, TimeSpan climbTimeout)
+        : this(() => startedAt, climbTimeout)
     {
+    }
+
+    public PathMovementWatchdog(Func<DateTime> startedAt, TimeSpan climbTimeout)
+    {
+        ArgumentNullException.ThrowIfNull(startedAt);
         if (climbTimeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(climbTimeout), climbTimeout, "Climb timeout must be positive.");
@@ -52,6 +58,6 @@ internal sealed class PathMovementWatchdog
 
     public bool ShouldAbort(bool isClimbing, DateTime now)
     {
-        return isClimbing && now - _startedAt >= _climbTimeout;
+        return isClimbing && now - _startedAt() >= _climbTimeout;
     }
 }
