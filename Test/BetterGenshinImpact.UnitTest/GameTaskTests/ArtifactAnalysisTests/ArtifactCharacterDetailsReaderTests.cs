@@ -60,6 +60,15 @@ public class ArtifactCharacterDetailsReaderTests
     }
 
     [Fact]
+    public void ConfiguredMiliastraGender_MapsNicknameToTheMaleAvatar()
+    {
+        Assert.Equal(
+            "奇偶·男性",
+            ArtifactCharacterDetailsReader.ResolveCharacterName(
+                "遥·", "眇", "遥", "MannequinBoy"));
+    }
+
+    [Fact]
     public void Favorite_ReadsOnlyTheFixedRightPanelStar()
     {
         using var plain = new Mat(new Size(1920, 1080), MatType.CV_8UC3, Scalar.Black);

@@ -26,6 +26,7 @@ public class ArtifactHostCoordinatorTests
         Assert.Equal(1, rosterScanner.Calls);
         Assert.Equal("眇", rosterScanner.GameNickname);
         Assert.Equal("遥", rosterScanner.MiliastraNickname);
+        Assert.Equal("MannequinGirl", rosterScanner.MiliastraCharacterKey);
         Assert.Same(roster, client.SubmittedCharacterRoster);
         Assert.True(client.CompletionSuccess);
     }
@@ -181,7 +182,8 @@ public class ArtifactHostCoordinatorTests
             operation == ArtifactHostOperation.ScanCharacterRoster ? 80 : null,
             operation == ArtifactHostOperation.ScanCharacterRoster ? true : null,
             operation == ArtifactHostOperation.ScanCharacterRoster ? "眇" : null,
-            operation == ArtifactHostOperation.ScanCharacterRoster ? "遥" : null);
+            operation == ArtifactHostOperation.ScanCharacterRoster ? "遥" : null,
+            operation == ArtifactHostOperation.ScanCharacterRoster ? "MannequinGirl" : null);
     }
 
     private static ArtifactSnapshotDto Snapshot() => ArtifactSnapshotDto.Create(
@@ -308,16 +310,19 @@ public class ArtifactHostCoordinatorTests
         public int Calls { get; private set; }
         public string? GameNickname { get; private set; }
         public string? MiliastraNickname { get; private set; }
+        public string? MiliastraCharacterKey { get; private set; }
 
         public Task<ArtifactCharacterRosterDto> ScanAsync(
             string uid,
             string? gameNickname,
             string? miliastraNickname,
+            string? miliastraCharacterKey,
             CancellationToken cancellationToken)
         {
             Calls++;
             GameNickname = gameNickname;
             MiliastraNickname = miliastraNickname;
+            MiliastraCharacterKey = miliastraCharacterKey;
             return Task.FromResult(roster);
         }
     }
@@ -329,6 +334,7 @@ public class ArtifactHostCoordinatorTests
             string uid,
             string? gameNickname,
             string? miliastraNickname,
+            string? miliastraCharacterKey,
             CancellationToken cancellationToken) =>
             Task.FromException<ArtifactCharacterRosterDto>(failure);
     }

@@ -74,7 +74,9 @@ public sealed class ArtifactHostRequestReader
         }
         if (request.Operation == ArtifactHostOperation.ScanCharacterRoster
             && (request.CharacterLevelThreshold is null or < 0 or > 90
-                || request.FavoriteOverride is null))
+                || request.FavoriteOverride is null
+                || request.MiliastraCharacterKey is not null
+                && request.MiliastraCharacterKey is not "MannequinBoy" and not "MannequinGirl"))
         {
             throw new InvalidOperationException(
                 "Character roster request is missing its activation settings.");

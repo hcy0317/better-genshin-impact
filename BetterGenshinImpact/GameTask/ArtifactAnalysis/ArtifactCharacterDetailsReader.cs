@@ -52,11 +52,13 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
     internal ArtifactCharacterDetailSample Read(
         Mat capture,
         string? gameNickname,
-        string? miliastraNickname)
+        string? miliastraNickname,
+        string? miliastraCharacterKey = null)
     {
         var rawName = ReadText(capture, NameRoi);
         var characterName = ResolveCharacterName(
-            rawName, gameNickname, miliastraNickname);
+            rawName, gameNickname, miliastraNickname,
+            miliastraCharacterKey);
         var rawLevel = ReadText(capture, LevelRoi);
         if (!TryParseLevel(rawLevel, out var level))
         {
@@ -72,7 +74,8 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
     internal static string ResolveCharacterName(
         string? rawText,
         string? gameNickname = null,
-        string? miliastraNickname = null)
+        string? miliastraNickname = null,
+        string? miliastraCharacterKey = null)
     {
         var normalized = Normalize(rawText);
         if (normalized.Length == 0)
@@ -100,7 +103,13 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
         if (normalizedMiliastraNickname.Length > 0
             && string.Equals(normalized, normalizedMiliastraNickname, StringComparison.Ordinal))
         {
-            return "奇偶·女性";
+            return miliastraCharacterKey switch
+            {
+                null or "" or "MannequinGirl" => "奇偶·女性",
+                "MannequinBoy" => "奇偶·男性",
+                _ => throw new InvalidOperationException(
+                    $"千星奇域角色键无效：{miliastraCharacterKey}")
+            };
         }
 
         throw new InvalidOperationException($"无法把右侧角色名称 OCR 结果映射到标准角色：{rawText}");

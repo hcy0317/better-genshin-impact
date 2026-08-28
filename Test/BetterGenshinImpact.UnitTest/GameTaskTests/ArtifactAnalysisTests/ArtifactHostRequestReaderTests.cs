@@ -89,7 +89,8 @@ public class ArtifactHostRequestReaderTests : IDisposable
             createdAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
             expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(4),
             characterLevelThreshold = 80,
-            favoriteOverride = true
+            favoriteOverride = true,
+            miliastraCharacterKey = "MannequinBoy"
         }));
 
         var launch = await new ArtifactHostRequestReader(_root)
@@ -98,6 +99,30 @@ public class ArtifactHostRequestReaderTests : IDisposable
         Assert.Equal(ArtifactHostOperation.ScanCharacterRoster, launch.Request.Operation);
         Assert.Equal(80, launch.Request.CharacterLevelThreshold);
         Assert.True(launch.Request.FavoriteOverride);
+        Assert.Equal("MannequinBoy", launch.Request.MiliastraCharacterKey);
+    }
+
+    [Fact]
+    public async Task Reader_RejectsUnknownMiliastraCharacterKey()
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, Guid.NewGuid() + ".json");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
+        {
+            version = 1,
+            kind = "artifact-analysis",
+            uid = "102550550",
+            jobId = "job-roster",
+            operation = "SCAN_CHARACTER_ROSTER",
+            createdAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1),
+            expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(4),
+            characterLevelThreshold = 80,
+            favoriteOverride = true,
+            miliastraCharacterKey = "unknown"
+        }));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new ArtifactHostRequestReader(_root).ReadAsync(path, CancellationToken.None));
     }
 
     public void Dispose()

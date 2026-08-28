@@ -36,11 +36,11 @@ public class ApplicationHostService(
     /// <param name="cancellationToken">Indicates that the start process has been aborted.</param>
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        await HandleActivationAsync();
         if (instanceService.Context.InstanceType == BetterGiInstanceType.Primary)
         {
             artifactHostService.StartWatching();
         }
+        await HandleActivationAsync();
         instanceService.MarkApplicationReady();
     }
 
@@ -128,9 +128,7 @@ public class ApplicationHostService(
                         {
                             throw new InvalidOperationException("圣遗物宿主请求路径缺失");
                         }
-                        _ = ObserveCommandLineTaskAsync(
-                            artifactHostService.RunAsync(cmdOptions.ArtifactHostRequestPath),
-                            "圣遗物分析");
+                        artifactHostService.QueueRequest(cmdOptions.ArtifactHostRequestPath);
                         break;
 
                     case CommandLineAction.Start:

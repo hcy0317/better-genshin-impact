@@ -28,6 +28,24 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         string uid,
         string? gameNickname,
         string? miliastraNickname,
+        string? miliastraCharacterKey,
+        CancellationToken cancellationToken)
+    {
+        var task = new ArtifactCharacterRosterScanTask(
+            ct => ScanCoreAsync(
+                uid, gameNickname, miliastraNickname,
+                miliastraCharacterKey, ct),
+            cancellationToken);
+        await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+        return task.Result ?? throw new InvalidOperationException(
+            "角色配装检测结束但没有生成完整名单。");
+    }
+
+    private async Task<ArtifactCharacterRosterDto> ScanCoreAsync(
+        string uid,
+        string? gameNickname,
+        string? miliastraNickname,
+        string? miliastraCharacterKey,
         CancellationToken cancellationToken)
     {
         await ArtifactHostGameContext.EnsureReadyAsync(
@@ -76,6 +94,7 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                     var detail = await ParseDetailWithOneRetryAsync(
                         detailsReader, captured,
                         gameNickname, miliastraNickname,
+                        miliastraCharacterKey,
                         cancellationToken);
                     var characterKey = ArtifactCharacterCardReader.ToCharacterKey(
                         detail.CharacterName);
@@ -89,7 +108,8 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                         using var retryCapture = CaptureToRectArea();
                         detail = detailsReader.Read(
                             retryCapture.SrcMat,
-                            gameNickname, miliastraNickname);
+                            gameNickname, miliastraNickname,
+                            miliastraCharacterKey);
                         detailSignature = ArtifactCharacterDetailsReader.DetailSignature(
                             retryCapture.SrcMat);
                         characterKey = ArtifactCharacterCardReader.ToCharacterKey(
@@ -206,13 +226,15 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         ArtifactCharacterCapturedDetail frame,
         string? gameNickname,
         string? miliastraNickname,
+        string? miliastraCharacterKey,
         CancellationToken cancellationToken)
     {
         try
         {
             return reader.Read(
                 frame.Capture,
-                gameNickname, miliastraNickname);
+                gameNickname, miliastraNickname,
+                miliastraCharacterKey);
         }
         catch (InvalidOperationException)
         {
@@ -222,7 +244,8 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
             {
                 return reader.Read(
                     retryCapture.SrcMat,
-                    gameNickname, miliastraNickname);
+                    gameNickname, miliastraNickname,
+                    miliastraCharacterKey);
             }
             catch (Exception retryFailure)
             {
@@ -292,5 +315,21 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         internal Mat Capture { get; } = capture;
         internal double DetailSignature { get; } = detailSignature;
         public void Dispose() => Capture.Dispose();
+    }
+
+    private sealed class ArtifactCharacterRosterScanTask(
+        Func<CancellationToken, Task<ArtifactCharacterRosterDto>> scan,
+        CancellationToken externalCancellationToken) : ISoloTask
+    {
+        internal ArtifactCharacterRosterDto? Result { get; private set; }
+        public string Name => "角色配装检测";
+
+        public async Task Start(CancellationToken cancellationToken)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                externalCancellationToken);
+            Result = await scan(linked.Token);
+        }
     }
 }

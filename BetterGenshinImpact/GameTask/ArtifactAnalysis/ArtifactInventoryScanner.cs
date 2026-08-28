@@ -78,11 +78,15 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
                 throw new InvalidDataException(
                     "Artifact execution target index exceeds the current inventory.");
             }
+            var targetIndices = targets.Select(target => target.ScanIndex).ToHashSet();
+            var artifacts = await ArtifactInventoryScanSession.ReadItemsAsync(
+                reader, observedCount, targetIndices, ct);
             _logger.LogInformation(
-                "圣遗物数量未变化（{ArtifactCount} 件），按规则跳过目标 OCR 预检，直接进入加解锁阶段",
-                observedCount);
+                "圣遗物数量未变化（{ArtifactCount} 件），已逐项核验 {TargetCount} 个执行目标的指纹与锁状态",
+                observedCount,
+                artifacts.Count);
             Result = new ArtifactExecutionObservationDto(
-                uid, observedCount, [], null, CountOnly: true);
+                uid, observedCount, artifacts, null, CountOnly: false);
         }
         if (Result.CountOnly)
         {

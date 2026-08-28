@@ -28,7 +28,8 @@ public sealed record ArtifactHostRequest(
     int? CharacterLevelThreshold,
     bool? FavoriteOverride,
     string? GameNickname,
-    string? MiliastraNickname);
+    string? MiliastraNickname,
+    string? MiliastraCharacterKey);
 
 public sealed record ArtifactLaunchTargetDto(
     int ScanIndex,
@@ -69,6 +70,7 @@ public interface IArtifactCharacterRosterScanner
         string uid,
         string? gameNickname,
         string? miliastraNickname,
+        string? miliastraCharacterKey,
         CancellationToken cancellationToken);
 }
 
@@ -168,7 +170,9 @@ public sealed class ArtifactHostCoordinator(
                     }
                     var roster = await characterRosterScanner.ScanAsync(
                         request.Uid, request.GameNickname,
-                        request.MiliastraNickname, cancellationToken);
+                        request.MiliastraNickname,
+                        request.MiliastraCharacterKey,
+                        cancellationToken);
                     if (!string.Equals(request.Uid, roster.Uid, StringComparison.Ordinal))
                     {
                         throw new InvalidOperationException(
