@@ -685,6 +685,24 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
+    [InlineData(1700, 260, 120, 6, true)]
+    [InlineData(800, 1000, 320, 8, true)]
+    [InlineData(900, 320, 180, 6, false)]
+    public void PlayerHudHealthBars_AreExcludedWithoutCroppingEdgeIndicators(
+        int x,
+        int y,
+        int width,
+        int height,
+        bool expected)
+    {
+        var visual = new EnemySeekVisual(x, y, width, height, width * height);
+
+        Assert.Equal(
+            expected,
+            AutoFightSeek.IsPlayerHudHealthBar(visual, 1920, 1080));
+    }
+
+    [Theory]
     [InlineData((int)AutoFightSeekAction.Approach, 0, false)]
     [InlineData((int)AutoFightSeekAction.ApproachVisibleEnemy, 5, false)]
     [InlineData((int)AutoFightSeekAction.ContinueLockedRoute, 5, true)]

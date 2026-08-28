@@ -798,6 +798,17 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return new Rect(0, 0, imageWidth, imageHeight);
         }
 
+        internal static bool IsPlayerHudHealthBar(
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
+            var inRightPartyHud = visual.CenterX >= imageWidth * 0.82
+                                  && visual.CenterY >= imageHeight * 0.12;
+            var inBottomPlayerHud = visual.CenterY >= imageHeight * 0.90;
+            return inRightPartyHud || inBottomPlayerHud;
+        }
+
         internal static bool ShouldContinueLockedRouteSegment(EnemySeekDecision decision, int completedSteps)
         {
             return decision.Action == AutoFightSeekAction.ContinueLockedRoute
@@ -948,7 +959,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         {
             if (IsHealthBar(visual))
             {
-                return visual;
+                return IsPlayerHudHealthBar(visual, imageWidth, imageHeight)
+                    ? null
+                    : visual;
             }
 
             if (!IsDirectionIndicatorGeometry(visual, imageWidth, imageHeight))

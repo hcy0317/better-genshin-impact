@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition.ONNX;
+using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoPick.Assets;
@@ -33,12 +34,12 @@ public class ScanPickTask
 
     public async Task Start(CancellationToken ct, int? seconds = null)
     {
-        await _predictor.WarmUpAsync(Logger, ct);
         try
         {
+            await _predictor.WarmUpAsync(Logger, ct);
             await DoOnce(ct, seconds);
         }
-        catch (Exception e)
+        catch (Exception e) when (e is not OperationCanceledException and not NormalEndException)
         {
             Logger.LogDebug(e, "拾取周边物品异常");
             Logger.LogError("拾取周边物品异常: {Msg}", e.Message);

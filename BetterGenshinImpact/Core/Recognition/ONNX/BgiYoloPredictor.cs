@@ -92,6 +92,10 @@ public class BgiYoloPredictor : IDisposable
         {
             await _predictorInitialization.GetValueAsync(ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch
         {
             ReportInitializationFailure();

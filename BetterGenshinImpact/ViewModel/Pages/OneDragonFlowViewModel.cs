@@ -665,29 +665,50 @@ public partial class OneDragonFlowViewModel : ViewModel
                     {
                         _logger.LogInformation($"一条龙任务执行: {finishOneTaskcount++}/{enabledoneTaskCount}");
                         CancellationToken taskCancellationToken = default;
+                        Exception? recoveredFailure = null;
                         await new TaskRunner().RunThreadAsync(async () =>
                         {
                             taskCancellationToken = CancellationContext.Instance.GetTokenOrNone();
-                            await task.Action();
-                            await Task.Delay(1000);
+                            try
+                            {
+                                await task.Action();
+                                await Task.Delay(1000, taskCancellationToken);
+                            }
+                            catch (Exception exception) when (propagateExceptions)
+                            {
+                                TaskFailureDiagnostics.CaptureScreenshotOnce(
+                                    exception, $"一条龙任务 {task.Name}");
+                                _logger.LogError(
+                                    exception,
+                                    "一条龙任务 {TaskName} 执行失败，保持任务锁并恢复主界面",
+                                    task.Name);
+                                var recoveryStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                                await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+                                    exception,
+                                    () => new ReturnMainUiTask().Start(taskCancellationToken));
+                                _logger.LogInformation(
+                                    "一条龙任务 {TaskName} 失败后的主界面恢复成功，耗时 {ElapsedSeconds:0.000} 秒，将继续后续任务",
+                                    task.Name,
+                                    recoveryStopwatch.Elapsed.TotalSeconds);
+                                recoveredFailure = exception;
+                            }
                         }, propagateExceptions);
                         TaskRunnerFailurePolicy.ThrowIfTaskCancelled(
                             taskCancellationToken,
                             propagateExceptions);
+                        if (recoveredFailure is not null)
+                        {
+                            managedFailures.Add(recoveredFailure);
+                        }
                     }
                     catch (Exception exception) when (propagateExceptions)
                     {
                         TaskFailureDiagnostics.CaptureScreenshotOnce(exception, $"一条龙任务 {task.Name}");
-                        _logger.LogError(exception, "一条龙任务 {TaskName} 执行失败，开始恢复主界面", task.Name);
-                        var recoveryStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                        await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+                        _logger.LogError(
                             exception,
-                            () => new ReturnMainUiTask().Start(CancellationContext.Instance.GetTokenOrNone()));
-                        _logger.LogInformation(
-                            "一条龙任务 {TaskName} 失败后的主界面恢复成功，耗时 {ElapsedSeconds:0.000} 秒，将继续后续任务",
-                            task.Name,
-                            recoveryStopwatch.Elapsed.TotalSeconds);
-                        managedFailures.Add(exception);
+                            "一条龙任务 {TaskName} 在受锁恢复后仍失败",
+                            task.Name);
+                        throw;
                     }
                 }
                 else

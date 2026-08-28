@@ -375,7 +375,6 @@ public class GameLoadingTrigger : ITaskTrigger
                     _doorFallbackClickCount))
             {
                 _prevDoorFallbackClickTime = DateTime.Now;
-                _doorFallbackClickCount++;
                 if (!GameLoadingInputPolicy.TryClick(
                         hasRecognizedTarget: false,
                         prepareInput: () =>
@@ -394,6 +393,7 @@ public class GameLoadingTrigger : ITaskTrigger
                     return;
                 }
 
+                _doorFallbackClickCount++;
                 _logger.LogInformation(
                     "自动开门兜底点击：方式={Mode}，次数={Count}",
                     hasDoorText ? "OCR" : "定时",

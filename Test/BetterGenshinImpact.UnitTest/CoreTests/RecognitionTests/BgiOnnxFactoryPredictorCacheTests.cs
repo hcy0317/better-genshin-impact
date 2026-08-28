@@ -96,6 +96,33 @@ public class BgiOnnxFactoryPredictorCacheTests
         Assert.True(SpinWait.SpinUntil(() => resource.IsDisposed, TimeSpan.FromSeconds(2)));
     }
 
+    [Fact]
+    public async Task CancelledWaiterDoesNotPoisonTheSharedInitialization()
+    {
+        using var factoryEntered = new ManualResetEventSlim();
+        using var releaseFactory = new ManualResetEventSlim();
+        using var cancellation = new CancellationTokenSource();
+        using var initialization = new OnnxInitializationTask<int>(
+            "SharedModel",
+            () =>
+            {
+                factoryEntered.Set();
+                releaseFactory.Wait();
+                return 42;
+            },
+            new CollectingLogger(),
+            TimeSpan.FromMilliseconds(10));
+        var cancelledWait = initialization.GetValueAsync(cancellation.Token);
+        Assert.True(factoryEntered.Wait(TimeSpan.FromSeconds(2)));
+
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await cancelledWait);
+        releaseFactory.Set();
+
+        Assert.Equal(42, await initialization.GetValueAsync(CancellationToken.None));
+    }
+
     private sealed class CollectingLogger : ILogger
     {
         public ConcurrentQueue<string> Messages { get; } = new();
