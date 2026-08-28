@@ -964,9 +964,18 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         // 左右移动直到石化古树位于屏幕中心任务
         var moveAvatarTask = MoveAvatarHorizontallyTask(treeCts);
+        var movementStarted = 0;
+        void EnsureMovementStarted()
+        {
+            if (Interlocked.Exchange(ref movementStarted, 1) == 0)
+            {
+                moveAvatarTask.Start();
+            }
+        }
 
         // 锁定东方向视角线程
-        var lockCameraToEastTask = LockCameraToEastTask(treeCts, moveAvatarTask);
+        var lockCameraToEastTask = LockCameraToEastTask(
+            treeCts, EnsureMovementStarted);
         lockCameraToEastTask.Start();
         var allTasks = Task.WhenAll(moveAvatarTask, lockCameraToEastTask);
         var progress = new PetrifiedTreeSearchProgress(_config.PetrifiedTreeSearchTimeoutSeconds);
@@ -983,7 +992,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             if (_ct.IsCancellationRequested)
             {
                 treeCts.Cancel();
-                StartTreeMovementIfNeeded(moveAvatarTask);
+                EnsureMovementStarted();
                 await SuppressTreeSearchCancellation(allTasks);
                 _ct.ThrowIfCancellationRequested();
             }
@@ -1000,7 +1009,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             if (observation.TimedOut)
             {
                 treeCts.Cancel();
-                StartTreeMovementIfNeeded(moveAvatarTask);
+                EnsureMovementStarted();
                 await SuppressTreeSearchCancellation(allTasks);
                 throw new TimeoutException(
                     $"寻找石化古树超过 {progress.TimeoutSeconds} 秒，已停止本轮以避免无限等待");
@@ -1008,14 +1017,6 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }
 
         await allTasks;
-    }
-
-    private static void StartTreeMovementIfNeeded(Task moveAvatarTask)
-    {
-        if (moveAvatarTask.Status == TaskStatus.Created)
-        {
-            moveAvatarTask.Start();
-        }
     }
 
     private async Task<bool> HasClaimableResinBeforeDomain()
@@ -1274,12 +1275,13 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         return default;
     }
 
-    private Task LockCameraToEastTask(CancellationTokenSource cts, Task moveAvatarTask)
+    private Task LockCameraToEastTask(
+        CancellationTokenSource cts,
+        Action ensureMovementStarted)
     {
         return new Task(() =>
         {
             var continuousCount = 0; // 连续东方向次数
-            var started = false;
             while (!cts.Token.IsCancellationRequested)
             {
                 using var captureRegion = CaptureToRectArea();
@@ -1292,11 +1294,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                     // 360 度 东方向视角
                     if (continuousCount > 5)
                     {
-                        if (!started && moveAvatarTask.Status != TaskStatus.Running)
-                        {
-                            started = true;
-                            moveAvatarTask.Start();
-                        }
+                        ensureMovementStarted();
                     }
                 }
                 else

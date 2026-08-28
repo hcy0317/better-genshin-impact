@@ -154,6 +154,18 @@ public class TaskControl
             return;
         }
 
+        var foregroundProcessName = SystemControl.GetProcessByHandle(
+            foregroundWindow.DangerousGetHandle())?.ProcessName;
+        if (!RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
+                System.Windows.Forms.SystemInformation.TerminalServerSession,
+                foregroundProcessName))
+        {
+            Logger.LogInformation(
+                "SearchHost 关闭前焦点已变化为 {ProcessName}，跳过 Escape 投递",
+                foregroundProcessName ?? "Unknown");
+            return;
+        }
+
         User32.PostMessage(foregroundWindow, User32.WindowMessage.WM_KEYUP, (nint)User32.VK.VK_LWIN, 0);
         User32.PostMessage(foregroundWindow, User32.WindowMessage.WM_KEYUP, (nint)User32.VK.VK_RWIN, 0);
         User32.PostMessage(foregroundWindow, User32.WindowMessage.WM_KEYDOWN, (nint)User32.VK.VK_ESCAPE, 0);

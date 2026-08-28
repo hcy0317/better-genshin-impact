@@ -140,7 +140,10 @@ internal class GoToSereniteaPotTask
         }
 
         var teleportRequested = false;
-        for (int attempt = 1; attempt <= 3; attempt++)
+        var confirmationFailures = 0;
+        var teleportDiscovery = Stopwatch.StartNew();
+        while (confirmationFailures < 3
+               && teleportDiscovery.Elapsed < TimeSpan.FromSeconds(30))
         {
             using var ra = CaptureToRectArea();
             var teleportBtn = ra.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", ra));
@@ -148,7 +151,9 @@ internal class GoToSereniteaPotTask
             {
                 // TeleportButton 匹配的是左侧 F 键提示图标，点击图标不会触发右侧“传送”按钮。
                 // 与 TpTask 的传送确认保持一致，直接发送 F，并要求地图连续两帧关闭后才确认生效。
-                Logger.LogDebug("领取尘歌壶奖励: 发送 F 确认传送，尝试 {Attempt}/3。", attempt);
+                Logger.LogDebug(
+                    "领取尘歌壶奖励: 发送 F 确认传送，尝试 {Attempt}/3。",
+                    confirmationFailures + 1);
                 Simulation.SendInput.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_F);
                 var progress = new SereniteaPotTeleportProgress();
                 teleportRequested = await NewRetry.WaitForAction(() =>
@@ -161,7 +166,10 @@ internal class GoToSereniteaPotTask
                     break;
                 }
 
-                Logger.LogWarning("领取尘歌壶奖励: F 确认传送未生效，地图仍然打开，重试 {Attempt}/3。", attempt);
+                confirmationFailures++;
+                Logger.LogWarning(
+                    "领取尘歌壶奖励: F 确认传送未生效，地图仍然打开，重试 {Attempt}/3。",
+                    confirmationFailures);
                 continue;
             }
         

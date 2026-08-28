@@ -337,7 +337,18 @@ public class BgiOnnxFactory : IDisposable
                     key,
                     failed => EvictFailedSharedPredictor(key, failed)),
                 LazyThreadSafetyMode.ExecutionAndPublication));
-        return predictor.Value;
+        try
+        {
+            return predictor.Value;
+        }
+        catch
+        {
+            ((ICollection<KeyValuePair<BgiOnnxModel, Lazy<BgiYoloPredictor>>>)
+                    _sharedYoloPredictors)
+                .Remove(new KeyValuePair<BgiOnnxModel, Lazy<BgiYoloPredictor>>(
+                    model, predictor));
+            throw;
+        }
     }
 
     internal void EvictFailedSharedPredictor(
@@ -362,7 +373,16 @@ public class BgiOnnxFactory : IDisposable
         {
             if (predictor.IsValueCreated)
             {
-                predictor.Value.Dispose();
+                try
+                {
+                    predictor.Value.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogWarning(
+                        exception,
+                        "[ONNX]释放共享预测器时跳过构造失败的缓存项。");
+                }
             }
         }
 
