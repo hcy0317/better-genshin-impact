@@ -45,13 +45,21 @@ internal static class ArtifactCaptureParsePipeline
         {
             await foreach (var frame in frames.WithCancellation(cancellationToken))
             {
-                var write = channel.Writer.WriteAsync(frame, cancellationToken).AsTask();
-                if (await Task.WhenAny(write, consumer) == consumer)
+                var ownershipTransferred = false;
+                try
                 {
-                    frame.Dispose();
-                    await consumer;
+                    var write = channel.Writer.WriteAsync(frame, cancellationToken).AsTask();
+                    if (await Task.WhenAny(write, consumer) == consumer)
+                    {
+                        await consumer;
+                    }
+                    await write;
+                    ownershipTransferred = true;
                 }
-                await write;
+                finally
+                {
+                    if (!ownershipTransferred) frame.Dispose();
+                }
             }
 
             channel.Writer.TryComplete();

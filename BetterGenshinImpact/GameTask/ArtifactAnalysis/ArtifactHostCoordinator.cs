@@ -245,9 +245,12 @@ public sealed class ArtifactHostCoordinator(
                 default:
                     throw new ArgumentOutOfRangeException(nameof(request.Operation), request.Operation, null);
             }
-            await client.ReportCompletionAsync(
-                request.JobId, requestToken, request.Operation,
-                true, null, cancellationToken);
+        }
+        catch (ArtifactForwardRecoveryRequiredException)
+        {
+            // Keep the claimed request in consumed/ so the host can converge
+            // the reviewed target plan instead of recording a partial rebuild.
+            throw;
         }
         catch (Exception exception)
         {
@@ -266,6 +269,12 @@ public sealed class ArtifactHostCoordinator(
             }
             throw;
         }
+
+        // A failed success acknowledgement must never be rewritten as a
+        // business failure after game-side mutations have completed.
+        await client.ReportCompletionAsync(
+            request.JobId, requestToken, request.Operation,
+            true, null, cancellationToken);
     }
 
     private static void Validate(

@@ -29,7 +29,15 @@ public sealed class ArtifactNativePlanExecutor : IArtifactNativePlanExecutor
     {
         var task = new ArtifactNativePlanTask(
             plan, expectedUid, cancellationToken);
-        await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+        try
+        {
+            await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+        }
+        catch (OperationCanceledException) when (task.Completed)
+        {
+            // Cancellation that arrived after the destructive commit point is
+            // deliberately ignored because the reviewed target is verified.
+        }
         if (!task.Completed)
         {
             throw new InvalidOperationException("Native artifact plan replacement did not complete.");
@@ -86,40 +94,52 @@ internal sealed class ArtifactNativePlanTask(
         var recoveryRoot = WritePreMutationEvidence(plan);
         WriteRecoveryState(recoveryRoot, "PREPARED", []);
 
-        await ClickTextAsync("快速删除方案", ct);
-        await Delay(250, ct);
-        using (var confirm = CaptureToRectArea())
+        var destructiveCommitStarted = false;
+        try
         {
-            if (!Bv.ClickBlackConfirmButton(confirm) && !TryClickText("确认"))
+            await ClickTextAsync("快速删除方案", ct);
+            await Delay(250, ct);
+            using (var confirm = CaptureToRectArea())
             {
-                throw new InvalidDataException("Unable to confirm native plan deletion.");
+                if (!Bv.ClickBlackConfirmButton(confirm) && !TryClickText("确认"))
+                {
+                    throw new InvalidDataException("Unable to confirm native plan deletion.");
+                }
             }
-        }
-        // Confirmation is the destructive commit point. From here the reviewed
-        // target plan, not a caller cancellation, owns forward recovery.
-        var commitToken = CancellationToken.None;
-        WriteRecoveryState(recoveryRoot, "OLD_PLANS_DELETED", []);
-        await Delay(450, commitToken);
+            destructiveCommitStarted = true;
+            // Confirmation is the destructive commit point. From here the reviewed
+            // target plan, not a caller cancellation, owns forward recovery.
+            var commitToken = CancellationToken.None;
+            WriteRecoveryState(recoveryRoot, "OLD_PLANS_DELETED", []);
+            await Delay(450, commitToken);
 
-        var configuredSets = new List<string>();
-        foreach (var group in grouped)
-        {
-            await OpenLockAssistanceAsync(commitToken);
-            await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
-            await ConfigureSetAsync(group.ToArray(), commitToken);
-            configuredSets.Add(group.Key);
-            WriteRecoveryState(
-                recoveryRoot, "CONFIGURING_TARGET", configuredSets);
+            var configuredSets = new List<string>();
+            foreach (var group in grouped)
+            {
+                await OpenLockAssistanceAsync(commitToken);
+                await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
+                await ConfigureSetAsync(group.ToArray(), commitToken);
+                configuredSets.Add(group.Key);
+                WriteRecoveryState(
+                    recoveryRoot, "CONFIGURING_TARGET", configuredSets);
+            }
+            foreach (var group in grouped)
+            {
+                await OpenLockAssistanceAsync(commitToken);
+                await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
+                await VerifySetAsync(group.ToArray(), commitToken);
+            }
+            WriteRecoveryState(recoveryRoot, "VERIFIED", configuredSets);
+            Completed = true;
+            await new ReturnMainUiTask().Start(commitToken);
         }
-        foreach (var group in grouped)
+        catch (Exception exception) when (destructiveCommitStarted)
         {
-            await OpenLockAssistanceAsync(commitToken);
-            await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
-            await VerifySetAsync(group.ToArray(), commitToken);
+            WriteRecoveryState(recoveryRoot, "FORWARD_RECOVERY_REQUIRED", []);
+            throw new ArtifactForwardRecoveryRequiredException(
+                recoveryRoot,
+                exception);
         }
-        WriteRecoveryState(recoveryRoot, "VERIFIED", configuredSets);
-        Completed = true;
-        await new ReturnMainUiTask().Start(commitToken);
     }
 
     private async Task OpenLockAssistanceAsync(CancellationToken ct)
@@ -479,4 +499,14 @@ internal sealed class ArtifactNativePlanTask(
         "physical_dmg_" => "物理伤害加成", "pyro_dmg_" => "火元素伤害加成",
         _ => throw new InvalidDataException($"Unknown artifact stat '{statKey}'.")
     };
+}
+
+internal sealed class ArtifactForwardRecoveryRequiredException(
+    string recoveryRoot,
+    Exception innerException)
+    : InvalidOperationException(
+        $"原神方案已进入破坏性提交阶段，需要按目标方案继续前向恢复：{recoveryRoot}",
+        innerException)
+{
+    internal string RecoveryRoot { get; } = recoveryRoot;
 }

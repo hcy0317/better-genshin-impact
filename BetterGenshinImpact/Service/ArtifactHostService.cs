@@ -8,6 +8,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Threading.Channels;
 using System.Text.Json;
 
 namespace BetterGenshinImpact.Service;
@@ -19,12 +20,18 @@ public sealed class ArtifactHostService(
     private readonly string _requestRoot = Path.Combine(
         AppContext.BaseDirectory, "User", "launch-requests", "artifact-analysis");
     private readonly ConcurrentDictionary<string, byte> _activeRequests = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<Task, byte> _backgroundTasks = new();
     private readonly SemaphoreSlim _executionGate = new(1, 1);
     private readonly CancellationTokenSource _shutdownCancellation = new();
+    private readonly Channel<string> _requestQueue = Channel.CreateUnbounded<string>(
+        new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false
+        });
     private ArtifactHostRequestReader? _requestReader;
     private FileSystemWatcher? _watcher;
     private SynchronizationContext? _executionContext;
+    private Task? _queueWorker;
     private int _watching;
     private int _disposed;
 
@@ -39,16 +46,12 @@ public sealed class ArtifactHostService(
         {
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.CreationTime | NotifyFilters.LastWrite,
             IncludeSubdirectories = false,
-            EnableRaisingEvents = true
+            EnableRaisingEvents = false
         };
         _watcher.Created += (_, args) => QueueRequest(args.FullPath);
         _watcher.Renamed += (_, args) => QueueRequest(args.FullPath);
         _watcher.Changed += (_, args) => QueueRequest(args.FullPath);
-        foreach (var requestPath in Directory.EnumerateFiles(_requestRoot, "*.json")
-                     .OrderBy(File.GetCreationTimeUtc))
-        {
-            QueueRequest(requestPath);
-        }
+        _queueWorker = Task.Run(ProcessQueueAsync);
         var consumedRoot = Path.Combine(_requestRoot, "consumed");
         if (Directory.Exists(consumedRoot))
         {
@@ -58,25 +61,53 @@ public sealed class ArtifactHostService(
                 QueueRequest(requestPath);
             }
         }
+        foreach (var requestPath in Directory.EnumerateFiles(_requestRoot, "*.json")
+                     .OrderBy(File.GetCreationTimeUtc))
+        {
+            QueueRequest(requestPath);
+        }
+        _watcher.EnableRaisingEvents = true;
+        // Close the enumeration-to-watcher gap; active-path deduplication keeps
+        // files already queued above from running twice.
+        foreach (var requestPath in Directory.EnumerateFiles(_requestRoot, "*.json")
+                     .OrderBy(File.GetCreationTimeUtc))
+        {
+            QueueRequest(requestPath);
+        }
         logger.LogInformation("已监控网页圣遗物任务目录：{RequestRoot}", _requestRoot);
     }
 
     public async Task RunAsync(string requestPath, CancellationToken cancellationToken = default)
     {
-        var launch = await ReadStableRequestAsync(requestPath, cancellationToken);
-        logger.LogInformation(
-            "开始网页圣遗物任务 {Operation}，Job={JobId}",
-            launch.Request.Operation,
-            launch.Request.JobId);
-        await coordinator.RunAsync(
-            launch.Request,
-            launch.RequestToken,
-            cancellationToken,
-            launch.Recovery);
-        logger.LogInformation(
-            "网页圣遗物任务 {Operation} 完成，Job={JobId}",
-            launch.Request.Operation,
-            launch.Request.JobId);
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            var launch = await ReadStableRequestAsync(requestPath, cancellationToken);
+            logger.LogInformation(
+                "开始网页圣遗物任务 {Operation}，Job={JobId}，尝试 {Attempt}/3",
+                launch.Request.Operation,
+                launch.Request.JobId,
+                attempt);
+            try
+            {
+                await coordinator.RunAsync(
+                    launch.Request,
+                    launch.RequestToken,
+                    cancellationToken,
+                    launch.Recovery);
+                logger.LogInformation(
+                    "网页圣遗物任务 {Operation} 完成，Job={JobId}",
+                    launch.Request.Operation,
+                    launch.Request.JobId);
+                return;
+            }
+            catch (ArtifactForwardRecoveryRequiredException exception) when (attempt < 3)
+            {
+                logger.LogWarning(
+                    exception,
+                    "原神方案前向恢复尚未收敛，将重试同一目标方案");
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+            }
+        }
     }
 
     public async Task RunObservedAsync(
@@ -112,29 +143,42 @@ public sealed class ArtifactHostService(
     {
         if (Volatile.Read(ref _disposed) != 0) return;
         if (!_activeRequests.TryAdd(requestPath, 0)) return;
-        Task? worker = null;
-        worker = Task.Run(async () =>
+        if (!_requestQueue.Writer.TryWrite(requestPath))
         {
-            try
+            _activeRequests.TryRemove(requestPath, out _);
+        }
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        try
+        {
+            await foreach (var requestPath in _requestQueue.Reader.ReadAllAsync(
+                               _shutdownCancellation.Token))
             {
-                await Task.Delay(100, _shutdownCancellation.Token);
-                var executionContext = _executionContext
-                    ?? throw new InvalidOperationException("圣遗物宿主执行上下文尚未初始化");
-                await ArtifactHostExecutionContext.RunAsync(
-                    executionContext,
-                    () => RunObservedAsync(requestPath, _shutdownCancellation.Token));
+                try
+                {
+                    await Task.Delay(100, _shutdownCancellation.Token);
+                    var executionContext = _executionContext
+                        ?? throw new InvalidOperationException("圣遗物宿主执行上下文尚未初始化");
+                    await ArtifactHostExecutionContext.RunAsync(
+                        executionContext,
+                        () => RunObservedAsync(requestPath, _shutdownCancellation.Token));
+                }
+                catch (OperationCanceledException) when (_shutdownCancellation.IsCancellationRequested)
+                {
+                    logger.LogInformation("圣遗物宿主关闭，已取消排队请求：{RequestPath}", requestPath);
+                }
+                finally
+                {
+                    _activeRequests.TryRemove(requestPath, out _);
+                }
             }
-            catch (OperationCanceledException) when (_shutdownCancellation.IsCancellationRequested)
-            {
-                logger.LogInformation("圣遗物宿主关闭，已取消排队请求：{RequestPath}", requestPath);
-            }
-            finally
-            {
-                _activeRequests.TryRemove(requestPath, out _);
-                if (worker is not null) _backgroundTasks.TryRemove(worker, out _);
-            }
-        });
-        _backgroundTasks.TryAdd(worker, 0);
+        }
+        catch (OperationCanceledException) when (_shutdownCancellation.IsCancellationRequested)
+        {
+            // Normal host shutdown.
+        }
     }
 
     private async Task<ArtifactHostLaunchRequest> ReadStableRequestAsync(
@@ -176,6 +220,7 @@ public sealed class ArtifactHostService(
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _requestQueue.Writer.TryComplete();
         _shutdownCancellation.Cancel();
         if (!_activeRequests.IsEmpty)
         {
@@ -184,8 +229,8 @@ public sealed class ArtifactHostService(
         _watcher?.Dispose();
         _watcher = null;
         _executionContext = null;
-        var workers = _backgroundTasks.Keys.ToArray();
-        _ = Task.WhenAll(workers).ContinueWith(
+        var queueWorker = _queueWorker ?? Task.CompletedTask;
+        _ = queueWorker.ContinueWith(
             _ =>
             {
                 _executionGate.Dispose();
