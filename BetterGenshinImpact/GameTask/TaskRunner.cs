@@ -51,8 +51,23 @@ public class TaskRunner
     /// <returns></returns>
     public async Task RunCurrentAsync(Func<Task> action, bool resetCancellationContext = true, bool clearCancellationContextOnLockFailure = false, bool propagateExceptions = false)
     {
+        await RunCurrentOwnedAsync(
+            action,
+            resetCancellationContext,
+            clearCancellationContextOnLockFailure,
+            propagateExceptions,
+            taskSemaphoreAlreadyOwned: false);
+    }
+
+    private async Task RunCurrentOwnedAsync(
+        Func<Task> action,
+        bool resetCancellationContext,
+        bool clearCancellationContextOnLockFailure,
+        bool propagateExceptions,
+        bool taskSemaphoreAlreadyOwned)
+    {
         // 加锁
-        var hasLock = await TaskSemaphore.WaitAsync(0);
+        var hasLock = taskSemaphoreAlreadyOwned || await TaskSemaphore.WaitAsync(0);
         if (!hasLock)
         {
             _logger.LogError("任务启动失败：当前存在正在运行中的独立任务，请不要重复执行任务！");
@@ -148,24 +163,46 @@ public class TaskRunner
 
     public async Task RunSoloTaskAsync(ISoloTask soloTask)
     {
-        // 启动等待之前先进行取消操作的初始化，便于在任务开始前终止任务.
-        CancellationContext.Instance.Set();
-
-        // 没启动的时候先启动
-        bool waitForMainUi = soloTask.Name != "自动七圣召唤" && !soloTask.Name.Contains("自动音游") &&
-                             !soloTask.Name.Contains("幽境危战");
-        await ScriptService.StartGameTask(waitForMainUi);
-        if (CancellationContext.Instance.IsCancellationRequested)
+        var ownsTaskSemaphore = await TaskRunnerStartupGate.TryAcquireAsync(
+            TaskSemaphore,
+            CancellationContext.Instance.Set);
+        if (!ownsTaskSemaphore)
         {
-            _logger.LogInformation("独立任务在启动阶段被取消: {Name}", soloTask.Name);
-            CancellationContext.Instance.Clear();
+            _logger.LogError("任务启动失败：当前存在正在运行中的独立任务，请不要重复执行任务！");
             return;
         }
 
-        await Task.Run(() => RunCurrentAsync(
-            async () => await soloTask.Start(CancellationContext.Instance.Cts.Token),
-            resetCancellationContext: false,
-            clearCancellationContextOnLockFailure: true));
+        var ownershipTransferred = false;
+        try
+        {
+            var taskCancellationToken = CancellationContext.Instance.GetTokenOrNone();
+
+            // 没启动的时候先启动
+            bool waitForMainUi = soloTask.Name != "自动七圣召唤" && !soloTask.Name.Contains("自动音游") &&
+                                 !soloTask.Name.Contains("幽境危战");
+            await ScriptService.StartGameTask(waitForMainUi);
+            if (taskCancellationToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("独立任务在启动阶段被取消: {Name}", soloTask.Name);
+                return;
+            }
+
+            ownershipTransferred = true;
+            await Task.Run(() => RunCurrentOwnedAsync(
+                async () => await soloTask.Start(taskCancellationToken),
+                resetCancellationContext: false,
+                clearCancellationContextOnLockFailure: false,
+                propagateExceptions: false,
+                taskSemaphoreAlreadyOwned: true));
+        }
+        finally
+        {
+            if (!ownershipTransferred)
+            {
+                CancellationContext.Instance.Clear();
+                TaskSemaphore.Release();
+            }
+        }
     }
 
     public void Init()
@@ -226,6 +263,30 @@ public class TaskRunner
         _logger.LogError(exception, "任务结束清理失败，步骤: {Step}", step);
     }
 
+}
+
+internal static class TaskRunnerStartupGate
+{
+    internal static async Task<bool> TryAcquireAsync(
+        SemaphoreSlim semaphore,
+        Action initializeCancellation)
+    {
+        if (!await semaphore.WaitAsync(0))
+        {
+            return false;
+        }
+
+        try
+        {
+            initializeCancellation();
+            return true;
+        }
+        catch
+        {
+            semaphore.Release();
+            throw;
+        }
+    }
 }
 
 internal static class TaskRunnerCleanup

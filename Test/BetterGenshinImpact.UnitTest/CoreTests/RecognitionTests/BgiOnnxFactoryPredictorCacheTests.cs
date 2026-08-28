@@ -69,6 +69,33 @@ public class BgiOnnxFactoryPredictorCacheTests
         Assert.Contains(logger.Messages, message => message.Contains("初始化完成"));
     }
 
+    [Fact]
+    public async Task DisposeDuringInitializationDisposesTheLatePredictor()
+    {
+        using var factoryEntered = new ManualResetEventSlim();
+        using var releaseFactory = new ManualResetEventSlim();
+        var resource = new TrackingDisposable();
+        using var initialization = new OnnxInitializationTask<TrackingDisposable>(
+            "LateModel",
+            () =>
+            {
+                factoryEntered.Set();
+                releaseFactory.Wait();
+                return resource;
+            },
+            new CollectingLogger(),
+            TimeSpan.FromMilliseconds(10),
+            value => value.Dispose());
+        var valueTask = initialization.GetValueAsync(CancellationToken.None);
+        Assert.True(factoryEntered.Wait(TimeSpan.FromSeconds(2)));
+
+        initialization.Dispose();
+        releaseFactory.Set();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await valueTask);
+        Assert.True(SpinWait.SpinUntil(() => resource.IsDisposed, TimeSpan.FromSeconds(2)));
+    }
+
     private sealed class CollectingLogger : ILogger
     {
         public ConcurrentQueue<string> Messages { get; } = new();
@@ -85,6 +112,18 @@ public class BgiOnnxFactoryPredictorCacheTests
             Func<TState, Exception?, string> formatter)
         {
             Messages.Enqueue(formatter(state, exception));
+        }
+    }
+
+    private sealed class TrackingDisposable : IDisposable
+    {
+        private int _disposed;
+
+        internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref _disposed, 1);
         }
     }
 }

@@ -1643,7 +1643,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                             Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
                             using (var imageAfterBurst = CaptureToRectArea())
                             {
-                                if (AvatarSkillAsync(Logger, guardianAvatar, true, 1, ct, assumeActive: true).Result
+                                if (await AvatarSkillAsync(Logger, guardianAvatar, true, 1, ct, assumeActive: true)
                                     || !Bv.IsInMainUi(imageAfterBurst)) //Q技能CD（冷却检测）或者不在主界面（大招动画播放中）
                                 {
                                     guardianAvatar.IsBurstReady = false;

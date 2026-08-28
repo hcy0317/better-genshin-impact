@@ -48,16 +48,20 @@ public class BgiYoloPredictor : IDisposable
                 {
                     SessionOptions = sessionOptions
                 }),
-            logger ?? NullLogger.Instance);
+            logger ?? NullLogger.Instance,
+            disposeValue: predictor => predictor.Dispose());
     }
 
     public YoloPredictor Predictor
     {
         get
         {
+            ThrowIfDisposed();
             try
             {
-                return _predictorInitialization.Value;
+                var predictor = _predictorInitialization.Value;
+                ThrowIfDisposed();
+                return predictor;
             }
             catch
             {
@@ -71,6 +75,7 @@ public class BgiYoloPredictor : IDisposable
     {
         lock (_predictionLock)
         {
+            ThrowIfDisposed();
             return action(Predictor);
         }
     }
@@ -143,9 +148,9 @@ public class BgiYoloPredictor : IDisposable
             return;
         }
 
-        if (_predictorInitialization.TryGetValue(out var predictor))
+        lock (_predictionLock)
         {
-            predictor.Dispose();
+            _predictorInitialization.Dispose();
         }
 
         GC.SuppressFinalize(this);
@@ -154,5 +159,13 @@ public class BgiYoloPredictor : IDisposable
     ~BgiYoloPredictor()
     {
         Dispose();
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(BgiYoloPredictor));
+        }
     }
 }

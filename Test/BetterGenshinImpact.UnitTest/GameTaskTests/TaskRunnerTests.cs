@@ -283,6 +283,34 @@ public class TaskRunnerTests
         TaskRunnerFailurePolicy.ThrowIfLockUnavailable(propagateExceptions: false);
     }
 
+    [Fact]
+    public async Task StartupContentionDoesNotReplaceTheRunningTaskCancellationOwner()
+    {
+        using var semaphore = new SemaphoreSlim(0, 1);
+        var cancellationInitializationCount = 0;
+
+        var acquired = await TaskRunnerStartupGate.TryAcquireAsync(
+            semaphore,
+            () => Interlocked.Increment(ref cancellationInitializationCount));
+
+        Assert.False(acquired);
+        Assert.Equal(0, cancellationInitializationCount);
+    }
+
+    [Fact]
+    public async Task StartupGateReleasesOwnershipWhenCancellationInitializationFails()
+    {
+        using var semaphore = new SemaphoreSlim(1, 1);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            TaskRunnerStartupGate.TryAcquireAsync(
+                semaphore,
+                () => throw new InvalidOperationException("initialization failed")));
+
+        Assert.True(await semaphore.WaitAsync(0));
+        semaphore.Release();
+    }
+
     [Theory]
     [MemberData(nameof(NormalTerminationPropagationModes))]
     public void NormalTerminationPropagationHonorsManagedAndContinuousModes(
