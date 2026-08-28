@@ -93,7 +93,7 @@ public sealed class ArtifactHostService(
                     launch.Request,
                     launch.RequestToken,
                     cancellationToken,
-                    launch.Recovery);
+                    IsRecoveryAttempt(launch.Recovery, attempt));
                 logger.LogInformation(
                     "网页圣遗物任务 {Operation} 完成，Job={JobId}",
                     launch.Request.Operation,
@@ -109,6 +109,9 @@ public sealed class ArtifactHostService(
             }
         }
     }
+
+    internal static bool IsRecoveryAttempt(bool launchRecovery, int attempt) =>
+        launchRecovery || attempt > 1;
 
     public async Task RunObservedAsync(
         string requestPath,

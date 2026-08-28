@@ -4,6 +4,20 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 
 public class ArtifactHostExecutionContextTests
 {
+    [Theory]
+    [InlineData(false, 1, false)]
+    [InlineData(false, 2, true)]
+    [InlineData(true, 1, true)]
+    public void ForwardRetryBecomesRecoveryAfterTheFirstClaim(
+        bool launchRecovery,
+        int attempt,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            ArtifactHostService.IsRecoveryAttempt(launchRecovery, attempt));
+    }
+
     [Fact]
     public async Task RunAsync_PostsWatcherWorkToCapturedUiContext()
     {
