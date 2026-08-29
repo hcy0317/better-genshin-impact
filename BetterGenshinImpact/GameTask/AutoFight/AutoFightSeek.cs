@@ -307,8 +307,13 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 {
                     return;
                 }
+                if (horizontalCameraOffset == 0 && verticalCameraOffset == 0)
+                {
+                    return;
+                }
                 _pendingHorizontalCameraOffset += horizontalCameraOffset;
                 _pendingVerticalCameraOffset += verticalCameraOffset;
+                _missingFrames = 0;
             }
         }
 

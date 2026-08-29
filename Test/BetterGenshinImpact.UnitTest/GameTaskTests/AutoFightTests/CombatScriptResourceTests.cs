@@ -596,17 +596,21 @@ public class CombatScriptResourceTests
             policy.RecordApproachStep(0, 0);
         }
 
-        policy.Evaluate(
-            new EnemySeekDecision(
-                AutoFightSeekAction.Approach,
-                EnemyIndicatorDirection.Right,
-                new EnemySeekVisual(1800, 500, 30, 24, 500)),
-            1920,
-            1080);
+        var indicator = new EnemySeekDecision(
+            AutoFightSeekAction.Approach,
+            EnemyIndicatorDirection.Right,
+            new EnemySeekVisual(1800, 500, 30, 24, 500));
+        policy.Evaluate(indicator, 1920, 1080);
+        policy.Evaluate(indicator, 1920, 1080);
         policy.RecordCameraMovement(960, 0);
+        policy.Evaluate(indicator, 1920, 1080);
+        policy.RecordCameraMovement(0, 0);
+        policy.Evaluate(indicator, 1920, 1080);
+        policy.RecordCameraMovement(0, -120);
+        policy.Evaluate(indicator, 1920, 1080);
         var afterIndicatorTurn = target with
         {
-            Visual = new EnemySeekVisual(750, 300, 145, 11, 1595)
+            Visual = new EnemySeekVisual(750, 420, 145, 11, 1595)
         };
 
         Assert.Equal(
