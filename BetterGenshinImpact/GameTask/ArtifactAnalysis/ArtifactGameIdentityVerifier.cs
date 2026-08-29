@@ -14,6 +14,7 @@ internal static class ArtifactGameIdentityVerifier
         string expectedUid,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         using var ocrSession = new ArtifactPaddleOcrSession();
         await EnsureExpectedUidAsync(
             expectedUid,
@@ -26,6 +27,7 @@ internal static class ArtifactGameIdentityVerifier
         IOcrService ocrService,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         string lastText = string.Empty;
         for (var attempt = 1; attempt <= 2; attempt++)
         {

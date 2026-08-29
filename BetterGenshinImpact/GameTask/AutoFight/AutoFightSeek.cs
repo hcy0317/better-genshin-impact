@@ -309,7 +309,6 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
                 _pendingHorizontalCameraOffset += horizontalCameraOffset;
                 _pendingVerticalCameraOffset += verticalCameraOffset;
-                _preserveBudgetAcrossUnknownCameraMovement = false;
             }
         }
 

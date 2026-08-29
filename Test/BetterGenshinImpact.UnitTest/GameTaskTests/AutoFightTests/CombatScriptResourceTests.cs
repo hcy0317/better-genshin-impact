@@ -566,6 +566,7 @@ public class CombatScriptResourceTests
         }
 
         policy.PreserveBudgetAcrossUnknownCameraMovement();
+        policy.RecordCameraMovement(0, 120);
         var afterCameraReset = target with
         {
             Visual = new EnemySeekVisual(720, 460, 145, 11, 1595)

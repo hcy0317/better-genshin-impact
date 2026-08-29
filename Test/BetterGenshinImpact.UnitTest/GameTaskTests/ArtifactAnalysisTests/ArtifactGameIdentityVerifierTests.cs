@@ -4,6 +4,18 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 
 public class ArtifactGameIdentityVerifierTests
 {
+    [Fact]
+    public async Task EnsureExpectedUid_CancellationPreventsOcrSessionCreation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
+                "102550550",
+                cancellation.Token));
+    }
+
     [Theory]
     [InlineData("UID: 102550550", "102550550")]
     [InlineData("UID  123456789012", "123456789012")]
