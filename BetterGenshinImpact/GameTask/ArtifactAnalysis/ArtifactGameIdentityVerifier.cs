@@ -14,8 +14,19 @@ internal static class ArtifactGameIdentityVerifier
         string expectedUid,
         CancellationToken cancellationToken)
     {
+        await EnsureExpectedUidAsync(
+            expectedUid,
+            cancellationToken,
+            static () => new ArtifactPaddleOcrSession());
+    }
+
+    internal static async Task EnsureExpectedUidAsync(
+        string expectedUid,
+        CancellationToken cancellationToken,
+        Func<ArtifactPaddleOcrSession> ocrSessionFactory)
+    {
         cancellationToken.ThrowIfCancellationRequested();
-        using var ocrSession = new ArtifactPaddleOcrSession();
+        using var ocrSession = ocrSessionFactory();
         await EnsureExpectedUidAsync(
             expectedUid,
             ocrSession.Service,

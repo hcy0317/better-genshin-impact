@@ -1,4 +1,6 @@
+using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.GameTask.ArtifactAnalysis;
+using OpenCvSharp;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 
@@ -9,11 +11,35 @@ public class ArtifactGameIdentityVerifierTests
     {
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
+        var factoryCalls = 0;
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
                 "102550550",
+                cancellation.Token,
+                () =>
+                {
+                    factoryCalls++;
+                    throw new InvalidOperationException("OCR session factory must not run after cancellation.");
+                }));
+
+        Assert.Equal(0, factoryCalls);
+    }
+
+    [Fact]
+    public async Task EnsureExpectedUid_InjectedServiceCancellationPreventsOcrCall()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var ocrService = new CountingOcrService();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
+                "102550550",
+                ocrService,
                 cancellation.Token));
+
+        Assert.Equal(0, ocrService.CallCount);
     }
 
     [Theory]
@@ -32,5 +58,28 @@ public class ArtifactGameIdentityVerifierTests
     public void TryParseUid_RejectsMissingOrImplausibleValues(string text)
     {
         Assert.False(ArtifactGameIdentityVerifier.TryParseUid(text, out _));
+    }
+
+    private sealed class CountingOcrService : IOcrService
+    {
+        public int CallCount { get; private set; }
+
+        public string Ocr(Mat mat)
+        {
+            CallCount++;
+            return string.Empty;
+        }
+
+        public string OcrWithoutDetector(Mat mat)
+        {
+            CallCount++;
+            return string.Empty;
+        }
+
+        public OcrResult OcrResult(Mat mat)
+        {
+            CallCount++;
+            return new OcrResult([]);
+        }
     }
 }
