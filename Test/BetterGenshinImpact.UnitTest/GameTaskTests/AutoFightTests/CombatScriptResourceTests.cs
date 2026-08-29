@@ -495,17 +495,54 @@ public class CombatScriptResourceTests
 
         for (var step = 0; step < 4; step++)
         {
-            Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, policy.Evaluate(approach).Action);
+            Assert.Equal(
+                AutoFightSeekAction.ApproachVisibleEnemy,
+                policy.Evaluate(approach, 1920, 1080).Action);
             policy.RecordApproachStep();
         }
 
-        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(approach).Action);
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(approach, 1920, 1080).Action);
 
         var missing = new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None);
-        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing).Action);
-        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing).Action);
-        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing).Action);
-        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, policy.Evaluate(approach).Action);
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing, 1920, 1080).Action);
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing, 1920, 1080).Action);
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing, 1920, 1080).Action);
+        Assert.Equal(
+            AutoFightSeekAction.ApproachVisibleEnemy,
+            policy.Evaluate(approach, 1920, 1080).Action);
+    }
+
+    [Fact]
+    public void VisibleHealthApproachPolicy_NewTargetResetsAnExhaustedBudgetWithoutMissingFrames()
+    {
+        var policy = new VisibleHealthApproachPolicy(
+            maxApproachSteps: 4,
+            missingFramesBeforeReset: 3);
+        var firstTarget = new EnemySeekDecision(
+            AutoFightSeekAction.ApproachVisibleEnemy,
+            EnemyIndicatorDirection.Left,
+            new EnemySeekVisual(700, 300, 145, 11, 1595),
+            1);
+        var nextTarget = new EnemySeekDecision(
+            AutoFightSeekAction.ApproachVisibleEnemy,
+            EnemyIndicatorDirection.Right,
+            new EnemySeekVisual(1500, 300, 145, 11, 1595),
+            1);
+
+        for (var step = 0; step < 4; step++)
+        {
+            Assert.Equal(
+                AutoFightSeekAction.ApproachVisibleEnemy,
+                policy.Evaluate(firstTarget, 1920, 1080).Action);
+            policy.RecordApproachStep();
+        }
+
+        Assert.Equal(
+            AutoFightSeekAction.Scan,
+            policy.Evaluate(firstTarget, 1920, 1080).Action);
+        Assert.Equal(
+            AutoFightSeekAction.ApproachVisibleEnemy,
+            policy.Evaluate(nextTarget, 1920, 1080).Action);
     }
 
     [Fact]
@@ -521,6 +558,12 @@ public class CombatScriptResourceTests
             nearCenter, jumpsFartherRight, 1920, 1080));
         Assert.False(AutoFightSeek.IsVisibleHealthTargetConsistent(
             farRight, crossesTheScreen, 1920, 1080));
+        Assert.True(AutoFightSeek.IsVisibleHealthTargetConsistent(
+            farRight,
+            crossesTheScreen,
+            1920,
+            1080,
+            cameraMovementExpected: true));
         Assert.True(AutoFightSeek.IsVisibleHealthTargetConsistent(
             farRight, turnsTowardCenter, 1920, 1080));
     }

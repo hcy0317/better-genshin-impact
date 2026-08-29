@@ -70,11 +70,16 @@ internal sealed class ArtifactNativePlanTask(
 
     public async Task Start(CancellationToken taskCancellationToken)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            taskCancellationToken,
+            externalCancellationToken);
+        var ct = linked.Token;
+        ct.ThrowIfCancellationRequested();
         using var ocrSession = new ArtifactPaddleOcrSession();
         _ocrService = ocrSession.Service;
         try
         {
-            await StartCoreAsync(taskCancellationToken);
+            await StartCoreAsync(ct);
         }
         finally
         {
@@ -82,12 +87,8 @@ internal sealed class ArtifactNativePlanTask(
         }
     }
 
-    private async Task StartCoreAsync(CancellationToken taskCancellationToken)
+    private async Task StartCoreAsync(CancellationToken ct)
     {
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-            taskCancellationToken,
-            externalCancellationToken);
-        var ct = linked.Token;
         await new ReturnMainUiTask().Start(ct);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
             expectedUid, OcrService, ct);
