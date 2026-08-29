@@ -546,6 +546,36 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
+    public void VisibleHealthApproachPolicy_UnknownCameraResetCannotRefillAnExhaustedBudget()
+    {
+        var policy = new VisibleHealthApproachPolicy(
+            maxApproachSteps: 4,
+            missingFramesBeforeReset: 3);
+        var target = new EnemySeekDecision(
+            AutoFightSeekAction.ApproachVisibleEnemy,
+            EnemyIndicatorDirection.Right,
+            new EnemySeekVisual(1450, 300, 145, 11, 1595),
+            1);
+
+        for (var step = 0; step < 4; step++)
+        {
+            Assert.Equal(
+                AutoFightSeekAction.ApproachVisibleEnemy,
+                policy.Evaluate(target, 1920, 1080).Action);
+            policy.RecordApproachStep(0, 0);
+        }
+
+        policy.PreserveBudgetAcrossUnknownCameraMovement();
+        var afterCameraReset = target with
+        {
+            Visual = new EnemySeekVisual(720, 460, 145, 11, 1595)
+        };
+        Assert.Equal(
+            AutoFightSeekAction.Scan,
+            policy.Evaluate(afterCameraReset, 1920, 1080).Action);
+    }
+
+    [Fact]
     public void VisibleHealthTargetConsistency_RuntimeJumpsMustNotSwitchTargets()
     {
         var nearCenter = new EnemySeekVisual(1088, 502, 18, 6, 108);
@@ -579,6 +609,17 @@ public class CombatScriptResourceTests
 
         Assert.Equal(AutoFightSeekAction.ApproachFixedTopHealthTarget, decision.Action);
         Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
+    }
+
+    [Fact]
+    public void SelectSeekDecision_720pThreePixelHealthBarRemainsDetectable()
+    {
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [new EnemySeekVisual(490, 250, 120, 3, 360)],
+            imageWidth: 1280,
+            imageHeight: 720);
+
+        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, decision.Action);
     }
 
     [Fact]
