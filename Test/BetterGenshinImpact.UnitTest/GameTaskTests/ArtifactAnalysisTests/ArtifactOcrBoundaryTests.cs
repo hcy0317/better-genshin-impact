@@ -8,6 +8,8 @@ public class ArtifactOcrBoundaryTests
     [Fact]
     public void ProviderPolicy_AlwaysExcludesTensorRt()
     {
+        Assert.True(ArtifactOcrProviderPolicy.ExcludeTensorRt);
+
         var source = File.ReadAllText(Path.Combine(
             FindRepoRoot(),
             "BetterGenshinImpact",
