@@ -178,15 +178,32 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void SelectSeekDecision_CloseHealthBarMustKeepFightingWithoutDirection()
+    public void SelectSeekDecision_ThinHealthBarMustApproachEvenWhenRedFillIsWide()
     {
         var decision = AutoFightSeek.SelectSeekDecision(
             [new EnemySeekVisual(590, 300, 320, 5, 1600)],
             imageWidth: 1500,
             imageHeight: 900);
 
-        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
-        Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
+        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, decision.Action);
+    }
+
+    [Theory]
+    [InlineData(30, 12, false)]
+    [InlineData(320, 12, false)]
+    [InlineData(30, 5, true)]
+    [InlineData(320, 5, true)]
+    public void ShouldApproachVisibleEnemy_MustUseHeightInsteadOfRemainingRedWidth(
+        int width,
+        int height,
+        bool expected)
+    {
+        var healthBar = new EnemySeekVisual(800, 400, width, height, width * height);
+
+        Assert.Equal(expected, AutoFightSeek.ShouldApproachVisibleEnemy(
+            healthBar,
+            imageWidth: 1920,
+            imageHeight: 1080));
     }
 
     [Theory]
@@ -223,7 +240,7 @@ public class CombatScriptResourceTests
             imageWidth: 1500,
             imageHeight: 900);
 
-        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
+        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, decision.Action);
     }
 
     [Fact]
@@ -427,6 +444,85 @@ public class CombatScriptResourceTests
             new EnemySeekVisual(1820, 795, 9, 14, 80),
             1920,
             1080));
+    }
+
+    [Theory]
+    [InlineData(971, 448, 18, 2)]
+    [InlineData(731, 523, 30, 2)]
+    [InlineData(1084, 943, 18, 2)]
+    public void ClassifySeekVisual_RuntimeTwoPixelRedFragmentsMustBeRejected(
+        int x,
+        int y,
+        int width,
+        int height)
+    {
+        using var mask = Mat.Zeros(1, 1, MatType.CV_8UC1).ToMat();
+
+        Assert.Null(AutoFightSeek.ClassifySeekVisual(
+            mask,
+            new EnemySeekVisual(x, y, width, height, width * height),
+            1920,
+            1080));
+    }
+
+    [Fact]
+    public void SelectSeekDecision_LargerRuntimeHealthBarMustBeatTinyCentralFragment()
+    {
+        var tinyCentralFragment = new EnemySeekVisual(951, 500, 18, 6, 108);
+        var visibleEnemyHealthBar = new EnemySeekVisual(729, 300, 145, 11, 1595);
+
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [tinyCentralFragment, visibleEnemyHealthBar],
+            imageWidth: 1920,
+            imageHeight: 1080);
+
+        Assert.Equal(visibleEnemyHealthBar, decision.Visual);
+        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
+    }
+
+    [Fact]
+    public void VisibleHealthApproachPolicy_MustBoundContinuousMovementUntilThreeMissingFrames()
+    {
+        var policy = new VisibleHealthApproachPolicy(
+            maxApproachSteps: 4,
+            missingFramesBeforeReset: 3);
+        var healthBar = new EnemySeekVisual(729, 300, 145, 11, 1595);
+        var approach = new EnemySeekDecision(
+            AutoFightSeekAction.ApproachVisibleEnemy,
+            EnemyIndicatorDirection.Left,
+            healthBar,
+            1);
+
+        for (var step = 0; step < 4; step++)
+        {
+            Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, policy.Evaluate(approach).Action);
+            policy.RecordApproachStep();
+        }
+
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(approach).Action);
+
+        var missing = new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None);
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing).Action);
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing).Action);
+        Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(missing).Action);
+        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, policy.Evaluate(approach).Action);
+    }
+
+    [Fact]
+    public void VisibleHealthTargetConsistency_RuntimeJumpsMustNotSwitchTargets()
+    {
+        var nearCenter = new EnemySeekVisual(1088, 502, 18, 6, 108);
+        var jumpsFartherRight = new EnemySeekVisual(1434, 385, 39, 11, 429);
+        var farRight = new EnemySeekVisual(1434, 385, 39, 11, 429);
+        var crossesTheScreen = new EnemySeekVisual(731, 523, 30, 6, 180);
+        var turnsTowardCenter = new EnemySeekVisual(1100, 430, 50, 11, 550);
+
+        Assert.False(AutoFightSeek.IsVisibleHealthTargetConsistent(
+            nearCenter, jumpsFartherRight, 1920, 1080));
+        Assert.False(AutoFightSeek.IsVisibleHealthTargetConsistent(
+            farRight, crossesTheScreen, 1920, 1080));
+        Assert.True(AutoFightSeek.IsVisibleHealthTargetConsistent(
+            farRight, turnsTowardCenter, 1920, 1080));
     }
 
     [Fact]
