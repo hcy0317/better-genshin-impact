@@ -577,6 +577,44 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
+    public void VisibleHealthApproachPolicy_IndicatorTurnCannotRefillAnExhaustedBudget()
+    {
+        var policy = new VisibleHealthApproachPolicy(
+            maxApproachSteps: 4,
+            missingFramesBeforeReset: 3);
+        var target = new EnemySeekDecision(
+            AutoFightSeekAction.ApproachVisibleEnemy,
+            EnemyIndicatorDirection.Right,
+            new EnemySeekVisual(1450, 300, 145, 11, 1595),
+            1);
+
+        for (var step = 0; step < 4; step++)
+        {
+            Assert.Equal(
+                AutoFightSeekAction.ApproachVisibleEnemy,
+                policy.Evaluate(target, 1920, 1080).Action);
+            policy.RecordApproachStep(0, 0);
+        }
+
+        policy.Evaluate(
+            new EnemySeekDecision(
+                AutoFightSeekAction.Approach,
+                EnemyIndicatorDirection.Right,
+                new EnemySeekVisual(1800, 500, 30, 24, 500)),
+            1920,
+            1080);
+        policy.RecordCameraMovement(960, 0);
+        var afterIndicatorTurn = target with
+        {
+            Visual = new EnemySeekVisual(750, 300, 145, 11, 1595)
+        };
+
+        Assert.Equal(
+            AutoFightSeekAction.Scan,
+            policy.Evaluate(afterIndicatorTurn, 1920, 1080).Action);
+    }
+
+    [Fact]
     public void VisibleHealthTargetConsistency_RuntimeJumpsMustNotSwitchTargets()
     {
         var nearCenter = new EnemySeekVisual(1088, 502, 18, 6, 108);

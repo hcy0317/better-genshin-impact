@@ -1456,6 +1456,13 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     decision.Visual is { } visual
                         ? GetIndicatorBearingDegrees(visual, imageWidth, imageHeight)
                         : 0d);
+                if (decision.Visual is { } indicatorVisual)
+                {
+                    VisibleHealthApproach.RecordCameraMovement(
+                        GetIndicatorCameraSteps(
+                            indicatorVisual, imageWidth, imageHeight).Sum(),
+                        GetIndicatorCameraVerticalOffset(indicatorVisual, imageHeight));
+                }
                 await MoveForwardTask.TurnTowardIndicatorAsync(
                     decision,
                     imageWidth,
@@ -1507,8 +1514,10 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var completedLockedSteps = 0;
             while (ShouldContinueLockedRouteSegment(currentDecision, completedLockedSteps))
             {
+                var lockedRouteVerticalOffset = GetLockedRouteVerticalStep(completedLockedSteps);
+                VisibleHealthApproach.RecordCameraMovement(0, lockedRouteVerticalOffset);
                 await MoveForwardTask.AdvanceLockedRouteAsync(
-                    GetLockedRouteVerticalStep(completedLockedSteps),
+                    lockedRouteVerticalOffset,
                     completedLockedSteps,
                     currentDecision.SignalCount,
                     logger,
