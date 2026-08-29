@@ -62,9 +62,13 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
             externalCancellationToken);
         var ct = linked.Token;
         await new ReturnMainUiTask().Start(ct);
-        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(uid, ct);
+        ct.ThrowIfCancellationRequested();
+        using var ocrSession = new ArtifactPaddleOcrSession(
+            forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr);
+        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
+            uid, ocrSession.Service, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
-        using var reader = new ArtifactInventoryUi(_logger);
+        using var reader = new ArtifactInventoryUi(_logger, ocrSession.Service);
         var observedCount = reader.ReadArtifactCount();
 
         if (observedCount != expectedArtifactCount)
@@ -122,9 +126,13 @@ internal sealed class ArtifactInventoryScanTask(
             externalCancellationToken);
         var ct = linked.Token;
         await new ReturnMainUiTask().Start(ct);
-        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(uid, ct);
+        ct.ThrowIfCancellationRequested();
+        using var ocrSession = new ArtifactPaddleOcrSession(
+            forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr);
+        await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
+            uid, ocrSession.Service, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
-        using var reader = new ArtifactInventoryUi(_logger);
+        using var reader = new ArtifactInventoryUi(_logger, ocrSession.Service);
         var expectedCount = reader.ReadArtifactCount();
         var artifacts = await ArtifactInventoryScanSession.ReadItemsAsync(
             reader, expectedCount, null, ct);
@@ -141,12 +149,12 @@ internal sealed class ArtifactInventoryUi : IDisposable
     private static readonly Regex CountPattern = new(@"(?<count>\d{1,5})\s*/", RegexOptions.Compiled);
     private readonly AutoArtifactSalvageTask _artifactParser;
     private readonly ArtifactSetCatalog _setCatalog;
-    private readonly ArtifactPaddleOcrSession _ocrSession;
-    private readonly PaddleOcrService _ocrService;
+    private readonly ArtifactPaddleOcrSession? _ownedOcrSession;
+    private readonly IOcrService _ocrService;
     private readonly ILogger _logger;
     private double? _lastDetailSignature;
 
-    internal ArtifactInventoryUi(ILogger logger)
+    internal ArtifactInventoryUi(ILogger logger, IOcrService? ocrService = null)
     {
         _logger = logger;
         var cultureName = TaskContext.Instance().Config.OtherConfig.GameCultureInfoName;
@@ -158,9 +166,16 @@ internal sealed class ArtifactInventoryUi : IDisposable
             AppContext.BaseDirectory, "GameTask", "ArtifactAnalysis", "Assets", "artifact-sets.zh.json"));
         _artifactParser = new AutoArtifactSalvageTask(
             new AutoArtifactSalvageTaskParam(5, null, null, null, null, new CultureInfo(cultureName)), logger);
-        _ocrSession = new ArtifactPaddleOcrSession(
-            forceCpuOcr: ForceCpuOcr);
-        _ocrService = _ocrSession.Service;
+        if (ocrService is null)
+        {
+            _ownedOcrSession = new ArtifactPaddleOcrSession(
+                forceCpuOcr: ForceCpuOcr);
+            _ocrService = _ownedOcrSession.Service;
+        }
+        else
+        {
+            _ocrService = ocrService;
+        }
     }
 
     internal static PaddleOcrService.PaddleOcrModelType SelectOcrModel(
@@ -556,7 +571,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
 
     public void Dispose()
     {
-        _ocrSession.Dispose();
+        _ownedOcrSession?.Dispose();
     }
 
     private static string ResolveSlot(string typeName) => typeName switch

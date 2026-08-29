@@ -55,6 +55,37 @@ public class ArtifactOcrBoundaryTests
         }
     }
 
+    [Fact]
+    public void ScanTasks_ReuseTheirUidOcrSessionForSubsequentReading()
+    {
+        var sourceDirectory = Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis");
+        var inventorySource = File.ReadAllText(Path.Combine(
+            sourceDirectory, "ArtifactInventoryScanner.cs"));
+        var characterSource = File.ReadAllText(Path.Combine(
+            sourceDirectory, "ArtifactCharacterRosterScanner.cs"));
+
+        Assert.DoesNotContain(
+            "EnsureExpectedUidAsync(uid, ct);",
+            inventorySource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "new ArtifactInventoryUi(_logger, ocrSession.Service)",
+            inventorySource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "uid, ocrSession.Service, cancellationToken",
+            characterSource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "new ArtifactCharacterDetailsReader(ocrSession.Service)",
+            characterSource,
+            StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

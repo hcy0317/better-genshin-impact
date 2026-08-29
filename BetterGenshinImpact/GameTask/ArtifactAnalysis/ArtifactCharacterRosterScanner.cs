@@ -57,15 +57,18 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         var assets = CharacterDevelopmentAssets.Get(captureRect.Width, captureRect.Height);
 
         await new ReturnMainUiTask().Start(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var ocrSession = new ArtifactPaddleOcrSession(
+            forceCpuOcr: ArtifactCharacterDetailsReader.ForceCpuOcr);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
-            uid, cancellationToken);
+            uid, ocrSession.Service, cancellationToken);
         try
         {
             Simulation.SendInput.SimulateAction(GIActions.OpenCharacterScreen);
             await OpenCharacterListAsync(assets, cancellationToken);
             var gridParams = GridParams.CharacterDevelopmentForCapture(
                 new Size(captureRect.Width, captureRect.Height));
-            using var detailsReader = new ArtifactCharacterDetailsReader();
+            using var detailsReader = new ArtifactCharacterDetailsReader(ocrSession.Service);
             var characters = new Dictionary<string, ArtifactCharacterRosterEntryDto>(StringComparer.Ordinal);
             var pageTracker = new ArtifactCharacterPageTracker();
             var identityGuard = new ArtifactCharacterScanIdentityGuard();

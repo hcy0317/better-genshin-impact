@@ -1,3 +1,4 @@
+using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
 using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
@@ -26,15 +27,22 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
     private static readonly Rect2d NameRoi = new(1221.6667, 105, 216.6667, 40);
     private static readonly Rect2d LevelRoi = new(1215, 161.6667, 183.3333, 48.3333);
     private static readonly Rect2d FavoriteRoi = new(1156.6667, 813.3333, 55, 55);
-    private readonly BgiOnnxFactory _ocrFactory;
-    private readonly Rec _ocrRecognizer;
+    private readonly IOcrService? _ocrService;
+    private readonly BgiOnnxFactory? _ownedOcrFactory;
+    private readonly Rec? _ownedOcrRecognizer;
 
-    internal ArtifactCharacterDetailsReader()
+    internal ArtifactCharacterDetailsReader(IOcrService? ocrService = null)
     {
         var cultureName = TaskContext.Instance().Config.OtherConfig.GameCultureInfoName;
         if (!string.Equals(cultureName, "zh-Hans", StringComparison.OrdinalIgnoreCase))
         {
             throw new NotSupportedException("角色配装检测当前仅支持简体中文游戏界面。");
+        }
+
+        if (ocrService is not null)
+        {
+            _ocrService = ocrService;
+            return;
         }
 
         var model = ArtifactInventoryUi.SelectOcrModel(new CultureInfo(cultureName));
@@ -48,8 +56,8 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
                 labels,
                 model.RecognitionVersion,
                 factory);
-            _ocrFactory = factory;
-            _ocrRecognizer = recognizer;
+            _ownedOcrFactory = factory;
+            _ownedOcrRecognizer = recognizer;
         }
         catch
         {
@@ -183,7 +191,9 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             capture,
             logicalRoi.X, logicalRoi.Y,
             logicalRoi.Width, logicalRoi.Height);
-        return _ocrRecognizer.Run(region).Text.Trim();
+        return (_ocrService?.OcrWithoutDetector(region)
+                ?? _ownedOcrRecognizer!.Run(region).Text)
+            .Trim();
     }
 
     internal static bool TryParseLevel(string? rawText, out int level)
@@ -248,7 +258,7 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
 
     public void Dispose()
     {
-        _ocrRecognizer.Dispose();
-        _ocrFactory.Dispose();
+        _ownedOcrRecognizer?.Dispose();
+        _ownedOcrFactory?.Dispose();
     }
 }
