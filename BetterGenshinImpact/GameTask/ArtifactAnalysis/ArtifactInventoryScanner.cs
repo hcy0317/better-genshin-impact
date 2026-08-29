@@ -152,7 +152,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
     private readonly ArtifactPaddleOcrSession? _ownedOcrSession;
     private readonly IOcrService _ocrService;
     private readonly ILogger _logger;
-    private double? _lastDetailSignature;
+    private ArtifactPanelSignature? _lastDetailSignature;
 
     internal ArtifactInventoryUi(ILogger logger, IOcrService? ocrService = null)
     {
@@ -415,10 +415,36 @@ internal sealed class ArtifactInventoryUi : IDisposable
     {
         using var item = page.DeriveCrop(itemRect);
         var gridLocked = ArtifactGridLockDetector.IsLocked(item.SrcMat);
+        var baselineSelectionScore = ArtifactGridSelectionDetector.Score(item.SrcMat);
+        var liveItemRect = ToLiveItemRect(page, itemRect);
         EnsureInitialDetailSignature();
         item.Click();
-        var capture = await CaptureAfterScanDetailChangeAsync(
-            _lastDetailSignature.Value, scanIndex, cancellationToken);
+        Mat capture;
+        try
+        {
+            capture = await CaptureAfterDetailConfirmedAsync(
+                _lastDetailSignature.Value,
+                baselineSelectionScore,
+                liveItemRect,
+                scanIndex,
+                "扫描",
+                cancellationToken);
+        }
+        catch (InvalidDataException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "圣遗物 {ScanIndex} 首次点击后详情未切换，补点一次",
+                scanIndex);
+            item.Click();
+            capture = await CaptureAfterDetailConfirmedAsync(
+                _lastDetailSignature.Value,
+                baselineSelectionScore,
+                liveItemRect,
+                scanIndex,
+                "扫描补点",
+                cancellationToken);
+        }
         _lastDetailSignature = DetailSignature(capture);
         var detailLocked = ArtifactDetailLockDetector.IsLocked(capture);
         LogLockSignalMismatch(scanIndex, gridLocked, detailLocked);
@@ -432,10 +458,36 @@ internal sealed class ArtifactInventoryUi : IDisposable
         CancellationToken cancellationToken)
     {
         using var item = page.DeriveCrop(itemRect);
+        var baselineSelectionScore = ArtifactGridSelectionDetector.Score(item.SrcMat);
+        var liveItemRect = ToLiveItemRect(page, itemRect);
         EnsureInitialDetailSignature();
         item.Click();
-        var capture = await CaptureAfterLockDetailStableAsync(
-            _lastDetailSignature.Value, scanIndex, cancellationToken);
+        Mat capture;
+        try
+        {
+            capture = await CaptureAfterDetailConfirmedAsync(
+                _lastDetailSignature.Value,
+                baselineSelectionScore,
+                liveItemRect,
+                scanIndex,
+                "锁定核验",
+                cancellationToken);
+        }
+        catch (InvalidDataException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "圣遗物 {ScanIndex} 锁定核验首次点击后详情未切换，补点一次",
+                scanIndex);
+            item.Click();
+            capture = await CaptureAfterDetailConfirmedAsync(
+                _lastDetailSignature.Value,
+                baselineSelectionScore,
+                liveItemRect,
+                scanIndex,
+                "锁定核验补点",
+                cancellationToken);
+        }
         _lastDetailSignature = DetailSignature(capture);
         var detailLocked = ArtifactDetailLockDetector.IsLocked(capture);
         var gridLocked = ReadSelectedGridLockState(page, itemRect);
@@ -479,6 +531,13 @@ internal sealed class ArtifactInventoryUi : IDisposable
         return ArtifactGridLockDetector.IsLocked(cell.SrcMat);
     }
 
+    private static Rect ToLiveItemRect(ImageRegion page, Rect itemRect) =>
+        new(
+            page.X + itemRect.X,
+            page.Y + itemRect.Y,
+            itemRect.Width,
+            itemRect.Height);
+
     private string InferFixed(
         ArtifactCapturedItem frame,
         double left,
@@ -503,71 +562,60 @@ internal sealed class ArtifactInventoryUi : IDisposable
     internal static (double Top, double Height) LegacySetNameRegion(int substatCount) =>
         (SetNameTop(substatCount) - 5, 37);
 
-    private async Task<Mat> CaptureAfterScanDetailChangeAsync(
-        double initialSignature,
+    private async Task<Mat> CaptureAfterDetailConfirmedAsync(
+        ArtifactPanelSignature initialSignature,
+        double baselineSelectionScore,
+        Rect liveItemRect,
         int scanIndex,
+        string operation,
         CancellationToken cancellationToken)
     {
         var timer = Stopwatch.StartNew();
-        var detector = new ArtifactScanDetailChangeDetector(initialSignature, 0.5);
-        while (timer.ElapsedMilliseconds < 450)
+        var detector = new ArtifactDetailSwitchDetector(
+            initialSignature, maximumStableDistance: 4, lockTolerance: 0.5);
+        var sameDetailDetector = new ArtifactSameDetailSelectionDetector(
+            initialSignature,
+            baselineSelectionScore,
+            minimumSelectionIncrease: 0.08);
+        while (timer.ElapsedMilliseconds < 900)
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var capture = CaptureToRectArea();
-            if (detector.Observe(DetailSignature(capture.SrcMat)))
+            var detailSignature = DetailSignature(capture.SrcMat);
+            var changedAndStable = detector.Observe(
+                detailSignature,
+                ArtifactDetailLockDetector.VisualSignature(capture.SrcMat));
+            var sameDetailButSelected = false;
+            if (!changedAndStable && timer.ElapsedMilliseconds >= 450)
             {
-                _logger.LogDebug(
-                    "圣遗物 {ScanIndex} 扫描详情切换等待 {ElapsedMilliseconds}ms",
-                    scanIndex,
-                    timer.ElapsedMilliseconds);
-                return capture.SrcMat.Clone();
+                using var liveItem = capture.DeriveCrop(liveItemRect);
+                sameDetailButSelected = sameDetailDetector.Observe(
+                    detailSignature,
+                    ArtifactGridSelectionDetector.Score(liveItem.SrcMat));
             }
-            await Delay(8, cancellationToken);
-        }
-
-        throw new InvalidDataException(
-            $"圣遗物 {scanIndex} 扫描详情切换在 450ms 内未发生，拒绝解析旧详情帧。");
-    }
-
-    private async Task<Mat> CaptureAfterLockDetailStableAsync(
-        double initialSignature,
-        int scanIndex,
-        CancellationToken cancellationToken)
-    {
-        var timer = Stopwatch.StartNew();
-        var detector = new ArtifactDetailSwitchDetector(initialSignature, 0.5);
-        while (timer.ElapsedMilliseconds < 450)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            using var capture = CaptureToRectArea();
-            if (detector.Observe(
-                    DetailSignature(capture.SrcMat),
-                    ArtifactDetailLockDetector.VisualSignature(capture.SrcMat)))
+            if (changedAndStable || sameDetailButSelected)
             {
                 _logger.LogDebug(
-                    "圣遗物 {ScanIndex} 详情切换等待 {ElapsedMilliseconds}ms",
+                    "圣遗物 {ScanIndex} {Operation}详情确认等待 {ElapsedMilliseconds}ms，依据={Evidence}",
                     scanIndex,
-                    timer.ElapsedMilliseconds);
+                    operation,
+                    timer.ElapsedMilliseconds,
+                    changedAndStable ? "详情已切换" : "目标格已选中且详情相同");
                 return capture.SrcMat.Clone();
             }
             await Delay(16, cancellationToken);
         }
 
         throw new InvalidDataException(
-            $"圣遗物 {scanIndex} 详情切换在 450ms 内未稳定，拒绝解析旧详情帧。");
+            $"圣遗物 {scanIndex} {operation}详情在 900ms 内既未切换，也无法证明目标格已选中。");
     }
 
-    private static double DetailSignature(Mat capture)
-    {
-        var rect = ArtifactUiCoordinateMapper.ToCaptureRect(
-            capture.Size(),
-            1144.64, 166.68, 15.04, 392.13);
-        var bounded = AutoArtifactSalvageTask.ClampRectToBounds(
-                          rect, capture.Width, capture.Height)
-                      ?? throw new InvalidDataException("详情切换检测区域超出截图范围");
-        using var region = capture.SubMat(bounded);
-        return Cv2.Sum(region).Val0;
-    }
+    private static ArtifactPanelSignature DetailSignature(Mat capture) =>
+        new(
+            ArtifactVisualSignature.Compute(
+                capture, 1090, 100, 410, 230),
+            ArtifactVisualSignature.Compute(
+                capture, 1090, 220, 310, 300));
 
     public void Dispose()
     {

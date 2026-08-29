@@ -150,28 +150,10 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
     }
 
     internal static ulong DetailSignature(Mat capture)
-    {
-        using var detail = ArtifactUiCoordinateMapper.CropNormalized(
+        => ArtifactVisualSignature.Compute(
             capture,
             NameRoi.X, NameRoi.Y,
             NameRoi.Width, NameRoi.Height);
-        using var gray = detail.Channels() == 4
-            ? detail.CvtColor(ColorConversionCodes.BGRA2GRAY)
-            : detail.CvtColor(ColorConversionCodes.BGR2GRAY);
-        using var textMask = gray.Threshold(170, 255, ThresholdTypes.Binary);
-        using var reduced = textMask.Resize(
-            new Size(9, 8), 0, 0, InterpolationFlags.Area);
-        ulong signature = 0;
-        var bit = 0;
-        for (var y = 0; y < 8; y++)
-        for (var x = 0; x < 8; x++)
-        {
-            if (reduced.At<byte>(y, x) > reduced.At<byte>(y, x + 1))
-                signature |= 1UL << bit;
-            bit++;
-        }
-        return signature;
-    }
 
     internal static bool IsFavorite(Mat capture)
     {

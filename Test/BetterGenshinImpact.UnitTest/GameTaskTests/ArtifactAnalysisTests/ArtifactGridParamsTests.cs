@@ -27,6 +27,15 @@ public class ArtifactGridParamsTests
         Assert.Equal(new Size(width, height), parameters.CaptureSize);
     }
 
+    [Fact]
+    public void ArtifactPagingFallback_UsesDynamicGridDetectionOnlyWhenRequested()
+    {
+        var parameters = GridParams.ArtifactsForCapture(
+            new Size(3840, 2160), 1132, fastScroll: false);
+
+        Assert.False(parameters.FastScroll);
+    }
+
     [Theory]
     [InlineData(1920, 1080, 20, 56, 681, 917)]
     [InlineData(3840, 2160, 40, 112, 1362, 1834)]

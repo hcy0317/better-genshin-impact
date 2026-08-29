@@ -58,13 +58,16 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             CaptureSize = captureSize;
         }
 
-        internal static GridParams ArtifactsForCapture(Size captureSize, int totalItems)
+        internal static GridParams ArtifactsForCapture(
+            Size captureSize,
+            int totalItems,
+            bool fastScroll = true)
         {
             if (totalItems <= 0) throw new ArgumentOutOfRangeException(nameof(totalItems));
             var roi = ArtifactRoiForCapture(captureSize);
             return new GridParams(
                 roi,
-                8, 3, 40, 32, 0.024, true, true, 60,
+                8, 3, 40, 32, 0.024, true, fastScroll, 60,
                 totalItems, visibleRows: 5, fastScrollRows: 5,
                 captureSize: captureSize);
         }

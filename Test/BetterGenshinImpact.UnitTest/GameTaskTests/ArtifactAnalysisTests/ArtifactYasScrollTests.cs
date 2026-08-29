@@ -54,4 +54,34 @@ public class ArtifactYasScrollTests
             averageInputsPerRow, rows));
     }
 
+    [Theory]
+    [InlineData(1.0, 100)]
+    [InlineData(8.0, 100)]
+    [InlineData(10.0, 100)]
+    [InlineData(25.0, 100)]
+    public void VerifiedFastRowBatching_StaysInsideThePerRowScrollBudget(
+        double averageInputsPerRow,
+        int expectedMilliseconds)
+    {
+        Assert.Equal(expectedMilliseconds,
+            ArtifactRowScrollPlanner.EstimatedVerificationDelay(
+                averageInputsPerRow));
+        Assert.InRange(expectedMilliseconds, 0, 100);
+    }
+
+    [Theory]
+    [InlineData(1.0, 0)]
+    [InlineData(4.0, 2)]
+    [InlineData(5.0, 3)]
+    [InlineData(7.0, 5)]
+    [InlineData(9.0, 7)]
+    public void VerifiedFastRowBatching_PreadvancesBeforeSingleInputVerification(
+        double averageInputsPerRow,
+        int expectedPreadvanceInputs)
+    {
+        Assert.Equal(expectedPreadvanceInputs,
+            ArtifactRowScrollPlanner.FastPreadvanceInputs(
+                averageInputsPerRow));
+    }
+
 }

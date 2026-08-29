@@ -214,39 +214,67 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
 
         private async Task ScrollRowsFastAsync(int rowsToScroll)
         {
-            var inputCount = ArtifactRowScrollPlanner.EstimateInputCount(
-                this.averageInputsPerRow,
-                rowsToScroll);
-            for (var inputIndex = 0; inputIndex < inputCount; inputIndex++)
-            {
-                this.input.Mouse.VerticalScroll(-1);
-            }
-            await TaskControl.Delay(80, this.ct);
-
             var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
-            for (var attempt = 0; attempt <= 10; attempt++)
+            for (var row = 1; row <= rowsToScroll; row++)
             {
-                using var capture = TaskControl.CaptureToRectArea();
-                var color = ArtifactGridLayout.ReadBgr(capture.SrcMat, flagPosition);
-                if (ArtifactRowScrollDetector.IsNear(
-                        this.initialFlagColor!.Value,
-                        color))
+                var detector = new ArtifactRowScrollDetector(
+                    this.initialFlagColor!.Value);
+                var preadvanceInputs =
+                    ArtifactRowScrollPlanner.FastPreadvanceInputs(
+                        this.averageInputsPerRow);
+                var inputCount = 0;
+                var aligned = false;
+                var samples = 0;
+                if (preadvanceInputs > 0)
                 {
-                    this.logger.LogDebug(
-                        "YAS 圣遗物快速推进 {Rows} 行完成，预估输入 {InputCount} 次、补齐 {AlignInputs} 次",
-                        rowsToScroll,
-                        inputCount,
-                        attempt);
-                    return;
+                    for (var inputIndex = 0; inputIndex < preadvanceInputs; inputIndex++)
+                    {
+                        this.input.Mouse.VerticalScroll(-1);
+                        inputCount++;
+                    }
+                    await TaskControl.Delay(
+                        ArtifactRowScrollPlanner.VerificationDelayMilliseconds,
+                        this.ct);
+                    using var capture = TaskControl.CaptureToRectArea();
+                    var color = ArtifactGridLayout.ReadBgr(
+                        capture.SrcMat, flagPosition);
+                    detector.Observe(color);
+                    samples++;
                 }
 
-                if (attempt == 10) break;
-                this.input.Mouse.VerticalScroll(-1);
-                await TaskControl.Delay(80, this.ct);
-            }
+                while (samples < ArtifactRowScrollPlanner.MaximumVerificationSamples)
+                {
+                    this.input.Mouse.VerticalScroll(-1);
+                    inputCount++;
+                    await TaskControl.Delay(
+                        ArtifactRowScrollPlanner.VerificationDelayMilliseconds,
+                        this.ct);
+                    using var capture = TaskControl.CaptureToRectArea();
+                    var color = ArtifactGridLayout.ReadBgr(
+                        capture.SrcMat, flagPosition);
+                    samples++;
+                    if (!detector.Observe(color)) continue;
 
-            throw new InvalidOperationException(
-                $"YAS 圣遗物快速推进 {rowsToScroll} 行后连续 10 次未能对齐");
+                    aligned = true;
+                    break;
+                }
+
+                if (!aligned)
+                {
+                    throw new InvalidOperationException(
+                        $"YAS 圣遗物快速推进第 {row}/{rowsToScroll} 行后未能验证对齐");
+                }
+
+                this.averageInputsPerRow =
+                    (this.averageInputsPerRow * this.calibratedRows + inputCount) /
+                    (this.calibratedRows + 1);
+                this.calibratedRows++;
+                this.logger.LogDebug(
+                    "YAS 圣遗物快速推进第 {CurrentRow}/{TargetRows} 行验证对齐，共 {InputCount} 次滚轮输入",
+                    row,
+                    rowsToScroll,
+                    inputCount);
+            }
         }
 
         internal static bool HasVerticalMovement(bool phaseDetected, Point2d shift)

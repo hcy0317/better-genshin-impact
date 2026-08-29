@@ -43,6 +43,11 @@ internal sealed class ArtifactRowScrollDetector
 
 internal static class ArtifactRowScrollPlanner
 {
+    internal const int VerificationDelayMilliseconds = 20;
+    internal const int MaximumVerificationSamples = 5;
+    internal const int MaximumVerificationDelayMilliseconds =
+        VerificationDelayMilliseconds * MaximumVerificationSamples;
+
     internal static int RowsToScroll(int totalRows, int visibleRows, int scrolledRows)
     {
         if (totalRows <= 0) throw new ArgumentOutOfRangeException(nameof(totalRows));
@@ -60,6 +65,19 @@ internal static class ArtifactRowScrollPlanner
         return Math.Max(0, (int)Math.Round(
             averageInputsPerRow * rows - 2,
             MidpointRounding.AwayFromZero));
+    }
+
+    internal static int FastPreadvanceInputs(double averageInputsPerRow)
+    {
+        if (averageInputsPerRow <= 0)
+            throw new ArgumentOutOfRangeException(nameof(averageInputsPerRow));
+        return Math.Max(0, (int)Math.Floor(averageInputsPerRow) - 2);
+    }
+
+    internal static int EstimatedVerificationDelay(double averageInputsPerRow)
+    {
+        _ = FastPreadvanceInputs(averageInputsPerRow);
+        return MaximumVerificationDelayMilliseconds;
     }
 
 }
