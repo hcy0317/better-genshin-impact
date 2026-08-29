@@ -940,11 +940,13 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var horizontalJumpIsValid = normalizedHorizontalJump <= 0.22
                                         || IsCameraGuidedShift(
                                             observedHorizontalShift,
-                                            cameraHorizontalOffset);
+                                            cameraHorizontalOffset,
+                                            imageWidth);
             var verticalJumpIsValid = normalizedVerticalJump <= 0.22
                                       || IsCameraGuidedShift(
                                           observedVerticalShift,
-                                          cameraVerticalOffset);
+                                          cameraVerticalOffset,
+                                          imageHeight);
             if (!horizontalJumpIsValid || !verticalJumpIsValid)
             {
                 return false;
@@ -962,11 +964,19 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
         private static bool IsCameraGuidedShift(
             int observedScreenShift,
-            int requestedCameraOffset)
+            int requestedCameraOffset,
+            int imageExtent)
         {
-            return observedScreenShift != 0
-                   && requestedCameraOffset != 0
-                   && Math.Sign(observedScreenShift) == -Math.Sign(requestedCameraOffset);
+            if (observedScreenShift == 0
+                || requestedCameraOffset == 0
+                || Math.Sign(observedScreenShift) != -Math.Sign(requestedCameraOffset))
+            {
+                return false;
+            }
+
+            var maximumExpectedShift = Math.Abs(requestedCameraOffset) * 1.5
+                                       + imageExtent * 0.05;
+            return Math.Abs(observedScreenShift) <= maximumExpectedShift;
         }
 
         internal static int GetVisibleEnemyCameraOffset(EnemySeekVisual healthBar, int imageWidth)

@@ -596,6 +596,12 @@ public class CombatScriptResourceTests
             1080,
             cameraHorizontalOffset: AutoFightSeek.GetVisibleEnemyCameraOffset(farRight, 1920),
             cameraVerticalOffset: AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(farRight, 1080)));
+        Assert.False(AutoFightSeek.IsVisibleHealthTargetConsistent(
+            new EnemySeekVisual(1450, 385, 100, 11, 1100),
+            new EnemySeekVisual(950, 385, 100, 11, 1100),
+            1920,
+            1080,
+            cameraHorizontalOffset: 120));
         Assert.True(AutoFightSeek.IsVisibleHealthTargetConsistent(
             farRight, turnsTowardCenter, 1920, 1080));
     }
