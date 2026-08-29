@@ -920,7 +920,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             // 普通悬浮血条随目标接近而变厚，使用高度判断是否已进入有效战斗距离。
             var closeHeightThreshold = Math.Clamp(
                 (int)Math.Round(imageHeight / 108d, MidpointRounding.AwayFromZero),
-                8,
+                4,
                 12);
             return healthBar.Height < closeHeightThreshold;
         }
@@ -1677,7 +1677,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         verticalCameraOffset))
                 {
                     logger.LogWarning(
-                        "血条候选跨帧跳变，停止本轮接近并恢复战斗结束检查：上一目标=({PreviousX},{PreviousY},{PreviousWidth}x{PreviousHeight})，当前=({CurrentX},{CurrentY},{CurrentWidth}x{CurrentHeight})",
+                        "血条候选跨帧跳变，停止追踪旧目标但保留当前已检测到敌人的结果：上一目标=({PreviousX},{PreviousY},{PreviousWidth}x{PreviousHeight})，当前=({CurrentX},{CurrentY},{CurrentWidth}x{CurrentHeight})",
                         previousVisual.X,
                         previousVisual.Y,
                         previousVisual.Width,
@@ -1686,7 +1686,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         currentVisual.Y,
                         currentVisual.Width,
                         currentVisual.Height);
-                    return false;
+                    return true;
                 }
 
                 if (currentDecision.Action == AutoFightSeekAction.KeepFighting)

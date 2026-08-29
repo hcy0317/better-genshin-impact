@@ -207,6 +207,42 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
+    [InlineData(648, 5, true)]
+    [InlineData(648, 6, false)]
+    [InlineData(720, 6, true)]
+    [InlineData(720, 7, false)]
+    [InlineData(1080, 9, true)]
+    [InlineData(1080, 10, false)]
+    public void ShouldApproachVisibleEnemy_CloseHeightScalesWithResolution(
+        int imageHeight,
+        int healthBarHeight,
+        bool expected)
+    {
+        var healthBar = new EnemySeekVisual(
+            400, 240, 120, healthBarHeight, 120 * healthBarHeight);
+
+        Assert.Equal(expected, AutoFightSeek.ShouldApproachVisibleEnemy(
+            healthBar,
+            imageWidth: imageHeight * 16 / 9,
+            imageHeight));
+    }
+
+    [Fact]
+    public void VisibleTargetSwitch_MustKeepTheEnemyDetectedResult()
+    {
+        var source = File.ReadAllText(SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "AutoFightSeek.cs"));
+        var section = SourceSection(
+            source,
+            "private static async Task<bool> HandleVisibleEnemyApproachAsync",
+            "private static async Task<bool> HandleFixedTopHealthApproachAsync");
+
+        Assert.Matches(
+            @"(?s)血条候选跨帧跳变.*?return true;",
+            section);
+    }
+
+    [Theory]
     [InlineData(12, 430, 24, 20, (int)EnemyIndicatorDirection.Left)]
     [InlineData(1460, 430, 24, 20, (int)EnemyIndicatorDirection.Right)]
     [InlineData(744, 24, 24, 20, (int)EnemyIndicatorDirection.Forward)]
