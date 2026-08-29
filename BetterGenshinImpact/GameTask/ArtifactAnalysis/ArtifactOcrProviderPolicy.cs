@@ -30,17 +30,32 @@ internal sealed class ArtifactPaddleOcrSession : IDisposable
 
     internal ArtifactPaddleOcrSession(bool? forceCpuOcr = null)
     {
-        _factory = ArtifactOcrProviderPolicy.CreateFactory(forceCpuOcr);
-        Service = new PaddleOcrService(
-            _factory,
-            ArtifactOcrProviderPolicy.ResolveCurrentModel());
+        var factory = ArtifactOcrProviderPolicy.CreateFactory(forceCpuOcr);
+        try
+        {
+            Service = new PaddleOcrService(
+                factory,
+                ArtifactOcrProviderPolicy.ResolveCurrentModel());
+            _factory = factory;
+        }
+        catch
+        {
+            factory.Dispose();
+            throw;
+        }
     }
 
     internal PaddleOcrService Service { get; }
 
     public void Dispose()
     {
-        Service.Dispose();
-        _factory.Dispose();
+        try
+        {
+            Service.Dispose();
+        }
+        finally
+        {
+            _factory.Dispose();
+        }
     }
 }

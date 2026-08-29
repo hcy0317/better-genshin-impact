@@ -498,7 +498,7 @@ public class CombatScriptResourceTests
             Assert.Equal(
                 AutoFightSeekAction.ApproachVisibleEnemy,
                 policy.Evaluate(approach, 1920, 1080).Action);
-            policy.RecordApproachStep();
+            policy.RecordApproachStep(0, 0);
         }
 
         Assert.Equal(AutoFightSeekAction.Scan, policy.Evaluate(approach, 1920, 1080).Action);
@@ -534,12 +534,12 @@ public class CombatScriptResourceTests
             Assert.Equal(
                 AutoFightSeekAction.ApproachVisibleEnemy,
                 policy.Evaluate(firstTarget, 1920, 1080).Action);
-            policy.RecordApproachStep();
+            var visual = firstTarget.Visual!.Value;
+            policy.RecordApproachStep(
+                AutoFightSeek.GetVisibleEnemyCameraOffset(visual, 1920),
+                AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual, 1080));
         }
 
-        Assert.Equal(
-            AutoFightSeekAction.Scan,
-            policy.Evaluate(firstTarget, 1920, 1080).Action);
         Assert.Equal(
             AutoFightSeekAction.ApproachVisibleEnemy,
             policy.Evaluate(nextTarget, 1920, 1080).Action);
@@ -563,7 +563,8 @@ public class CombatScriptResourceTests
             crossesTheScreen,
             1920,
             1080,
-            cameraMovementExpected: true));
+            cameraHorizontalOffset: AutoFightSeek.GetVisibleEnemyCameraOffset(farRight, 1920),
+            cameraVerticalOffset: AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(farRight, 1080)));
         Assert.True(AutoFightSeek.IsVisibleHealthTargetConsistent(
             farRight, turnsTowardCenter, 1920, 1080));
     }

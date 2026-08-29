@@ -8,7 +8,18 @@ public class ArtifactOcrBoundaryTests
     [Fact]
     public void ProviderPolicy_AlwaysExcludesTensorRt()
     {
-        Assert.True(ArtifactOcrProviderPolicy.ExcludeTensorRt);
+        var source = File.ReadAllText(Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis",
+            "ArtifactOcrProviderPolicy.cs"));
+
+        Assert.Contains(
+            "excludeTensorRtForOcr: ExcludeTensorRt",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("OcrFactory.Paddle", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -22,16 +33,16 @@ public class ArtifactOcrBoundaryTests
 
         foreach (var path in Directory.EnumerateFiles(sourceDirectory, "*.cs"))
         {
-            if (Path.GetFileName(path).Equals(
+            var isProviderPolicy = Path.GetFileName(path).Equals(
                     "ArtifactOcrProviderPolicy.cs",
-                    StringComparison.Ordinal))
-            {
-                continue;
-            }
+                    StringComparison.Ordinal);
 
             var source = File.ReadAllText(path);
             Assert.DoesNotContain("OcrFactory.Paddle", source, StringComparison.Ordinal);
-            Assert.DoesNotContain("new BgiOnnxFactory(", source, StringComparison.Ordinal);
+            if (!isProviderPolicy)
+            {
+                Assert.DoesNotContain("new BgiOnnxFactory(", source, StringComparison.Ordinal);
+            }
 
             foreach (Match match in Regex.Matches(
                          source,

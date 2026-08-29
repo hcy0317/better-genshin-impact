@@ -211,7 +211,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private int _approachSteps;
         private int _missingFrames;
         private EnemySeekVisual? _trackedVisual;
-        private bool _cameraMovementPending;
+        private int _pendingHorizontalCameraOffset;
+        private int _pendingVerticalCameraOffset;
 
         internal VisibleHealthApproachPolicy(int maxApproachSteps, int missingFramesBeforeReset)
         {
@@ -238,13 +239,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                                 currentVisual,
                                 imageWidth,
                                 imageHeight,
-                                cameraMovementExpected: _cameraMovementPending))
+                                _pendingHorizontalCameraOffset,
+                                _pendingVerticalCameraOffset))
                         {
                             _approachSteps = 0;
                         }
                         _trackedVisual = currentVisual;
                     }
-                    _cameraMovementPending = false;
+                    ClearPendingCameraMovement();
                     _missingFrames = 0;
                     return _approachSteps >= _maxApproachSteps
                         ? new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None)
@@ -256,7 +258,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     _approachSteps = 0;
                     _missingFrames = 0;
                     _trackedVisual = decision.Visual;
-                    _cameraMovementPending = false;
+                    ClearPendingCameraMovement();
                     return decision;
                 }
 
@@ -266,13 +268,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     _approachSteps = 0;
                     _missingFrames = 0;
                     _trackedVisual = null;
-                    _cameraMovementPending = false;
+                    ClearPendingCameraMovement();
                 }
                 return decision;
             }
         }
 
-        internal void RecordApproachStep()
+        internal void RecordApproachStep(
+            int horizontalCameraOffset,
+            int verticalCameraOffset)
         {
             lock (_gate)
             {
@@ -280,7 +284,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 {
                     _approachSteps++;
                 }
-                _cameraMovementPending = true;
+                _pendingHorizontalCameraOffset = horizontalCameraOffset;
+                _pendingVerticalCameraOffset = verticalCameraOffset;
                 _missingFrames = 0;
             }
         }
@@ -292,8 +297,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 _approachSteps = 0;
                 _missingFrames = 0;
                 _trackedVisual = null;
-                _cameraMovementPending = false;
+                ClearPendingCameraMovement();
             }
+        }
+
+        private void ClearPendingCameraMovement()
+        {
+            _pendingHorizontalCameraOffset = 0;
+            _pendingVerticalCameraOffset = 0;
         }
     }
 
@@ -866,7 +877,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             EnemySeekVisual current,
             int imageWidth,
             int imageHeight,
-            bool cameraMovementExpected = false)
+            int cameraHorizontalOffset = 0,
+            int cameraVerticalOffset = 0)
         {
             if (imageWidth <= 0 || imageHeight <= 0)
             {
@@ -875,8 +887,17 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
             var normalizedHorizontalJump = Math.Abs(current.CenterX - previous.CenterX) / (double)imageWidth;
             var normalizedVerticalJump = Math.Abs(current.CenterY - previous.CenterY) / (double)imageHeight;
-            if (!cameraMovementExpected
-                && (normalizedHorizontalJump > 0.22 || normalizedVerticalJump > 0.22))
+            var observedHorizontalShift = current.CenterX - previous.CenterX;
+            var observedVerticalShift = current.CenterY - previous.CenterY;
+            var horizontalJumpIsValid = normalizedHorizontalJump <= 0.22
+                                        || IsCameraGuidedShift(
+                                            observedHorizontalShift,
+                                            cameraHorizontalOffset);
+            var verticalJumpIsValid = normalizedVerticalJump <= 0.22
+                                      || IsCameraGuidedShift(
+                                          observedVerticalShift,
+                                          cameraVerticalOffset);
+            if (!horizontalJumpIsValid || !verticalJumpIsValid)
             {
                 return false;
             }
@@ -889,6 +910,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                                   && currentVerticalError <= previousVerticalError + 0.08;
             var heightRatio = current.Height / (double)Math.Max(1, previous.Height);
             return keepsConverging && heightRatio is >= 0.45 and <= 2.25;
+        }
+
+        private static bool IsCameraGuidedShift(
+            int observedScreenShift,
+            int requestedCameraOffset)
+        {
+            return observedScreenShift != 0
+                   && requestedCameraOffset != 0
+                   && Math.Sign(observedScreenShift) == -Math.Sign(requestedCameraOffset);
         }
 
         internal static int GetVisibleEnemyCameraOffset(EnemySeekVisual healthBar, int imageWidth)
@@ -1540,16 +1570,21 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             while (ShouldContinueVisibleEnemyApproach(currentDecision, completedSteps))
             {
                 var previousDecision = currentDecision;
-                var cameraMovementExpected = previousDecision.Visual is { } guidedVisual
-                    && (GetVisibleEnemyCameraOffset(guidedVisual, currentImageWidth) != 0
-                        || GetVisibleEnemyCameraVerticalOffset(guidedVisual, currentImageHeight) != 0);
+                var horizontalCameraOffset = previousDecision.Visual is { } guidedVisual
+                    ? GetVisibleEnemyCameraOffset(guidedVisual, currentImageWidth)
+                    : 0;
+                var verticalCameraOffset = previousDecision.Visual is { } guidedVerticalVisual
+                    ? GetVisibleEnemyCameraVerticalOffset(guidedVerticalVisual, currentImageHeight)
+                    : 0;
                 await MoveForwardTask.ApproachVisibleEnemyAsync(
                     currentDecision,
                     currentImageWidth,
                     currentImageHeight,
                     logger,
                     ct);
-                VisibleHealthApproach.RecordApproachStep();
+                VisibleHealthApproach.RecordApproachStep(
+                    horizontalCameraOffset,
+                    verticalCameraOffset);
                 completedSteps++;
                 await Task.Delay(IndicatorReacquireDelayMilliseconds, ct);
                 currentDecision = CaptureSeekDecision(
@@ -1566,7 +1601,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         currentVisual,
                         currentImageWidth,
                         currentImageHeight,
-                        cameraMovementExpected))
+                        horizontalCameraOffset,
+                        verticalCameraOffset))
                 {
                     logger.LogWarning(
                         "血条候选跨帧跳变，停止本轮接近并恢复战斗结束检查：上一目标=({PreviousX},{PreviousY},{PreviousWidth}x{PreviousHeight})，当前=({CurrentX},{CurrentY},{CurrentWidth}x{CurrentHeight})",
