@@ -37,14 +37,25 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             throw new NotSupportedException("角色配装检测当前仅支持简体中文游戏界面。");
         }
 
-        _ocrFactory = ArtifactOcrProviderPolicy.CreateFactory(
-            forceCpuOcr: ForceCpuOcr);
         var model = ArtifactInventoryUi.SelectOcrModel(new CultureInfo(cultureName));
-        _ocrRecognizer = new Rec(
-            model.RecognitionModel,
-            model.RecLabel(),
-            model.RecognitionVersion,
-            _ocrFactory);
+        var labels = model.RecLabel();
+        var factory = ArtifactOcrProviderPolicy.CreateFactory(
+            forceCpuOcr: ForceCpuOcr);
+        try
+        {
+            var recognizer = new Rec(
+                model.RecognitionModel,
+                labels,
+                model.RecognitionVersion,
+                factory);
+            _ocrFactory = factory;
+            _ocrRecognizer = recognizer;
+        }
+        catch
+        {
+            factory.Dispose();
+            throw;
+        }
     }
 
     internal ArtifactCharacterDetailSample Read(

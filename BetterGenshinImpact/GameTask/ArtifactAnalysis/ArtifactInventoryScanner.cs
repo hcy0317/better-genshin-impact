@@ -154,13 +154,13 @@ internal sealed class ArtifactInventoryUi : IDisposable
         {
             throw new NotSupportedException("Artifact analysis currently requires the Simplified Chinese game UI.");
         }
+        _setCatalog = new ArtifactSetCatalog(Path.Combine(
+            AppContext.BaseDirectory, "GameTask", "ArtifactAnalysis", "Assets", "artifact-sets.zh.json"));
         _artifactParser = new AutoArtifactSalvageTask(
             new AutoArtifactSalvageTaskParam(5, null, null, null, null, new CultureInfo(cultureName)), logger);
         _ocrSession = new ArtifactPaddleOcrSession(
             forceCpuOcr: ForceCpuOcr);
         _ocrService = _ocrSession.Service;
-        _setCatalog = new ArtifactSetCatalog(Path.Combine(
-            AppContext.BaseDirectory, "GameTask", "ArtifactAnalysis", "Assets", "artifact-sets.zh.json"));
     }
 
     internal static PaddleOcrService.PaddleOcrModelType SelectOcrModel(
