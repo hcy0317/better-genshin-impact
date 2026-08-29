@@ -14,6 +14,18 @@ internal static class ArtifactGameIdentityVerifier
         string expectedUid,
         CancellationToken cancellationToken)
     {
+        using var ocrSession = new ArtifactPaddleOcrSession();
+        await EnsureExpectedUidAsync(
+            expectedUid,
+            ocrSession.Service,
+            cancellationToken);
+    }
+
+    internal static async Task EnsureExpectedUidAsync(
+        string expectedUid,
+        IOcrService ocrService,
+        CancellationToken cancellationToken)
+    {
         string lastText = string.Empty;
         for (var attempt = 1; attempt <= 2; attempt++)
         {
@@ -21,7 +33,7 @@ internal static class ArtifactGameIdentityVerifier
             using var uidRegion = ArtifactUiCoordinateMapper.CropNormalized(
                 capture.SrcMat,
                 1395, 868, 205, 32);
-            lastText = OcrFactory.Paddle.OcrResult(uidRegion).Text;
+            lastText = ocrService.OcrResult(uidRegion).Text;
             if (TryParseUid(lastText, out var liveUid)
                 && string.Equals(liveUid, expectedUid, StringComparison.Ordinal))
             {

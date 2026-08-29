@@ -116,7 +116,11 @@ public class ImageRegion : Region
     /// <param name="failAction">失败后做什么</param>
     /// <returns>返回最优的一个识别结果RectArea</returns>
     /// <exception cref="Exception"></exception>
-    public Region Find(RecognitionObject ro, Action<Region>? successAction = null, Action? failAction = null)
+    public Region Find(
+        RecognitionObject ro,
+        Action<Region>? successAction = null,
+        Action? failAction = null,
+        IOcrService? ocrService = null)
     {
         if (ro == null)
         {
@@ -238,7 +242,7 @@ public class ImageRegion : Region
                 : null;
             var roi = ownedRoi ?? SrcMat;
 
-            var result = OcrFactory.Paddle.OcrResult(roi);
+            var result = (ocrService ?? OcrFactory.Paddle).OcrResult(roi);
             var text = StringUtils.RemoveAllSpace(result.Text);
             text = ApplyTextReplacements(text, ro.ReplaceDictionary);
 
@@ -326,7 +330,7 @@ public class ImageRegion : Region
 
                 Cv2.InRange(roi, ro.LowerColor, ro.UpperColor, roi);
             }
-            var result = OcrFactory.Paddle.OcrResult(roi);
+            var result = (ocrService ?? OcrFactory.Paddle).OcrResult(roi);
             var text = StringUtils.RemoveAllSpace(result.Text);
             text = ApplyTextReplacements(text, ro.ReplaceDictionary);
 
@@ -384,8 +388,11 @@ public class ImageRegion : Region
     /// <param name="failAction">失败后做什么</param>
     /// <returns>无内嵌图片的 RectArea List</returns>
     /// <exception cref="Exception"></exception>
-    public List<Region> FindMulti(RecognitionObject ro, Action<List<Region>>? successAction = null,
-        Action? failAction = null)
+    public List<Region> FindMulti(
+        RecognitionObject ro,
+        Action<List<Region>>? successAction = null,
+        Action? failAction = null,
+        IOcrService? ocrService = null)
     {
         if (ro == null)
         {
@@ -500,7 +507,7 @@ public class ImageRegion : Region
                 : null;
             var roi = ownedRoi ?? SrcMat;
 
-            var result = OcrFactory.Paddle.OcrResult(roi);
+            var result = (ocrService ?? OcrFactory.Paddle).OcrResult(roi);
             var resRaList = new List<Region>();
             foreach (var ocrRegion in result.Regions)
             {

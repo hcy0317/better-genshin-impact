@@ -37,10 +37,8 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             throw new NotSupportedException("角色配装检测当前仅支持简体中文游戏界面。");
         }
 
-        _ocrFactory = new BgiOnnxFactory(
-            App.GetLogger<BgiOnnxFactory>(),
-            forceCpuOcr: ForceCpuOcr,
-            excludeTensorRtForOcr: true);
+        _ocrFactory = ArtifactOcrProviderPolicy.CreateFactory(
+            forceCpuOcr: ForceCpuOcr);
         var model = ArtifactInventoryUi.SelectOcrModel(new CultureInfo(cultureName));
         _ocrRecognizer = new Rec(
             model.RecognitionModel,

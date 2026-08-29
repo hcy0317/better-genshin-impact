@@ -1,6 +1,5 @@
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
-using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.GameTask.AutoArtifactSalvage;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.Job;
@@ -142,7 +141,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
     private static readonly Regex CountPattern = new(@"(?<count>\d{1,5})\s*/", RegexOptions.Compiled);
     private readonly AutoArtifactSalvageTask _artifactParser;
     private readonly ArtifactSetCatalog _setCatalog;
-    private readonly BgiOnnxFactory _ocrFactory;
+    private readonly ArtifactPaddleOcrSession _ocrSession;
     private readonly PaddleOcrService _ocrService;
     private readonly ILogger _logger;
     private double? _lastDetailSignature;
@@ -157,13 +156,9 @@ internal sealed class ArtifactInventoryUi : IDisposable
         }
         _artifactParser = new AutoArtifactSalvageTask(
             new AutoArtifactSalvageTaskParam(5, null, null, null, null, new CultureInfo(cultureName)), logger);
-        _ocrFactory = new BgiOnnxFactory(
-            App.GetLogger<BgiOnnxFactory>(),
-            forceCpuOcr: ForceCpuOcr,
-            excludeTensorRtForOcr: true);
-        _ocrService = new PaddleOcrService(
-            _ocrFactory,
-            SelectOcrModel(new CultureInfo(cultureName)));
+        _ocrSession = new ArtifactPaddleOcrSession(
+            forceCpuOcr: ForceCpuOcr);
+        _ocrService = _ocrSession.Service;
         _setCatalog = new ArtifactSetCatalog(Path.Combine(
             AppContext.BaseDirectory, "GameTask", "ArtifactAnalysis", "Assets", "artifact-sets.zh.json"));
     }
@@ -561,8 +556,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
 
     public void Dispose()
     {
-        _ocrService.Dispose();
-        _ocrFactory.Dispose();
+        _ocrSession.Dispose();
     }
 
     private static string ResolveSlot(string typeName) => typeName switch
