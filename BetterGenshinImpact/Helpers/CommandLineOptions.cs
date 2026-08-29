@@ -16,6 +16,7 @@ public class CommandLineOptions
     public const string AutomationResultArgument = "--automation-result";
     public const string AutomationRunIdArgument = "--automation-run-id";
     public const string AutomationTimeoutArgument = "--automation-timeout-seconds";
+    public const string ArtifactHostRequestArgument = "--artifact-host-request";
 
     private static CommandLineOptions? _instance;
 
@@ -54,6 +55,8 @@ public class CommandLineOptions
 
     public int AutomationTimeoutSeconds { get; }
 
+    public string? ArtifactHostRequestPath { get; }
+
     /// <summary>
     /// 是否有命令行任务参数（startOneDragon / --startGroups / --TaskProgress / start）
     /// </summary>
@@ -66,7 +69,8 @@ public class CommandLineOptions
     public bool ShouldDeferGameStart => Action is CommandLineAction.StartOneDragon
         or CommandLineAction.ChildSessionOneDragon
         or CommandLineAction.StartGroups
-        or CommandLineAction.TaskProgress;
+        or CommandLineAction.TaskProgress
+        or CommandLineAction.ArtifactHost;
 
     private CommandLineOptions(
         CommandLineAction action,
@@ -77,7 +81,8 @@ public class CommandLineOptions
         int? restartFromProcessId = null,
         string? automationResultPath = null,
         string? automationRunId = null,
-        int automationTimeoutSeconds = 14_400)
+        int automationTimeoutSeconds = 14_400,
+        string? artifactHostRequestPath = null)
     {
         Action = action;
         OneDragonConfigName = oneDragonConfigName;
@@ -88,6 +93,7 @@ public class CommandLineOptions
         AutomationResultPath = automationResultPath;
         AutomationRunId = automationRunId;
         AutomationTimeoutSeconds = automationTimeoutSeconds;
+        ArtifactHostRequestPath = artifactHostRequestPath;
     }
 
     internal static CommandLineOptions Parse(string[] args)
@@ -178,6 +184,13 @@ public class CommandLineOptions
                 groupNames: extra);
         }
 
+        if (arg1.Equals(ArtifactHostRequestArgument, StringComparison.OrdinalIgnoreCase))
+        {
+            return Create(
+                CommandLineAction.ArtifactHost,
+                artifactHostRequestPath: extra.Length == 1 ? extra[0] : null);
+        }
+
         if (arg1.Contains("start", StringComparison.OrdinalIgnoreCase))
         {
             return Create(CommandLineAction.Start);
@@ -191,7 +204,8 @@ public class CommandLineOptions
             string[]? groupNames = null,
             string? automationResultPath = null,
             string? automationRunId = null,
-            int automationTimeoutSeconds = 14_400)
+            int automationTimeoutSeconds = 14_400,
+            string? artifactHostRequestPath = null)
         {
             return new CommandLineOptions(
                 action,
@@ -202,7 +216,8 @@ public class CommandLineOptions
                 restartFromProcessId,
                 automationResultPath,
                 automationRunId,
-                automationTimeoutSeconds);
+                automationTimeoutSeconds,
+                artifactHostRequestPath);
         }
     }
 
@@ -251,4 +266,7 @@ public enum CommandLineAction
 
     /// <summary>--TaskProgress — 启动任务进度</summary>
     TaskProgress,
+
+    /// <summary>--artifact-host-request — 执行网页创建的原生圣遗物任务</summary>
+    ArtifactHost,
 }

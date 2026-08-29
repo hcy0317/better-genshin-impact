@@ -24,7 +24,8 @@ namespace BetterGenshinImpact.Service;
 public class ApplicationHostService(
     IServiceProvider serviceProvider,
     InstanceService instanceService,
-    ChildSessionAutomationService childSessionAutomationService) : IHostedService
+    ChildSessionAutomationService childSessionAutomationService,
+    ArtifactHostService artifactHostService) : IHostedService
 {
     private INavigationWindow? _navigationWindow;
     private readonly ILogger<ApplicationHostService> _logger = App.GetLogger<ApplicationHostService>();
@@ -35,6 +36,10 @@ public class ApplicationHostService(
     /// <param name="cancellationToken">Indicates that the start process has been aborted.</param>
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        if (instanceService.Context.InstanceType == BetterGiInstanceType.Primary)
+        {
+            artifactHostService.StartWatching();
+        }
         await HandleActivationAsync();
         instanceService.MarkApplicationReady();
     }
@@ -116,6 +121,14 @@ public class ApplicationHostService(
                                 taskProgressScheduler.OnStartMultiScriptTaskProgressAsync(cmdOptions.GroupNames),
                                 "任务进度");
                         }
+                        break;
+
+                    case CommandLineAction.ArtifactHost:
+                        if (string.IsNullOrWhiteSpace(cmdOptions.ArtifactHostRequestPath))
+                        {
+                            throw new InvalidOperationException("圣遗物宿主请求路径缺失");
+                        }
+                        artifactHostService.QueueRequest(cmdOptions.ArtifactHostRequestPath);
                         break;
 
                     case CommandLineAction.Start:

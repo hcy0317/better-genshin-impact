@@ -7,12 +7,13 @@ namespace BetterGenshinImpact.GameTask.AutoArtifactSalvage
     /// </summary>
     public class ArtifactStat
     {
-        public ArtifactStat(string name, ArtifactAffix mainAffix, ArtifactAffix[] minorAffix, int level)
+        public ArtifactStat(string name, ArtifactAffix mainAffix, ArtifactAffix[] minorAffix, int level, string typeName = "")
         {
             Name = name;
             MainAffix = mainAffix;
             MinorAffixes = minorAffix;
             Level = level;
+            TypeName = typeName;
         }
 
         /// <summary>
@@ -34,6 +35,8 @@ namespace BetterGenshinImpact.GameTask.AutoArtifactSalvage
         /// 等级
         /// </summary>
         public int Level { get; private set; }
+
+        public string TypeName { get; private set; }
 
         // PS：圣遗物的种类和品质在点击查看之前就可以通过识别图标获悉，所以不必在此模型类中获取
 

@@ -635,6 +635,16 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
                 return;
             }
 
+            if (commandLineOptions.Action == CommandLineAction.ArtifactHost)
+            {
+                if (!string.IsNullOrWhiteSpace(commandLineOptions.ArtifactHostRequestPath))
+                {
+                    App.GetService<ArtifactHostService>()
+                        ?.QueueRequest(commandLineOptions.ArtifactHostRequestPath);
+                }
+                return;
+            }
+
             var mainWindow = Application.Current.MainWindow;
             mainWindow?.Show();
             mainWindow?.Activate();

@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
@@ -14,6 +15,8 @@ using BetterGenshinImpact.Helpers;
 using BetterGenshinImpact.Helpers.Extensions;
 using BetterGenshinImpact.Helpers.Win32;
 using BetterGenshinImpact.Service;
+using BetterGenshinImpact.GameTask.ArtifactAnalysis;
+using BetterGenshinImpact.Helpers.Http;
 using BetterGenshinImpact.Service.ChildSession;
 using BetterGenshinImpact.Service.Instance;
 using BetterGenshinImpact.Service.Interface;
@@ -137,6 +140,18 @@ public partial class App : Application
                 services.AddSingleton<NotifyIconViewModel>();
                 services.AddSingleton<ChildSessionService>();
                 services.AddSingleton<ChildSessionAutomationService>();
+                services.AddSingleton<IArtifactInventoryScanner, ArtifactInventoryScanner>();
+                services.AddSingleton<IArtifactCharacterRosterScanner, ArtifactCharacterRosterScanner>();
+                services.AddSingleton<IArtifactLockPlanExecutor, ArtifactLockPlanExecutor>();
+                services.AddSingleton<IArtifactNativePlanExecutor, ArtifactNativePlanExecutor>();
+                services.AddSingleton<IArtifactToolsClient>(_ => new ArtifactToolsClient(
+                    HttpClientFactory.GetClient("artifact-tools", () => new HttpClient
+                    {
+                        BaseAddress = new Uri("http://127.0.0.1:18081/bgi/"),
+                        Timeout = TimeSpan.FromMinutes(10)
+                    })));
+                services.AddSingleton<ArtifactHostCoordinator>();
+                services.AddSingleton<ArtifactHostService>();
                 services.AddTransient<ChildSessionWindowViewModel>();
                 services.AddTransient<ChildSessionWindow>();
 

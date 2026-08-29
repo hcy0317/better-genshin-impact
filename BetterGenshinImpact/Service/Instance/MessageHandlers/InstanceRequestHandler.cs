@@ -499,7 +499,13 @@ internal static class ActivationForwardingPolicy
 {
     internal static void ThrowIfManagedAutomation(string[] arguments)
     {
-        if (CommandLineOptions.Parse(arguments).ShouldDeferGameStart)
+        var options = CommandLineOptions.Parse(arguments);
+        if (options.Action == CommandLineAction.ArtifactHost)
+        {
+            return;
+        }
+
+        if (options.ShouldDeferGameStart)
         {
             throw new InvalidOperationException(
                 "已有 BetterGI 实例时无法转发托管自动化任务，请先退出现有实例后重试。");

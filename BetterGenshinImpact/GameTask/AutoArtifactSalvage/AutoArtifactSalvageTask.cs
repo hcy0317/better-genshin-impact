@@ -88,7 +88,12 @@ public class AutoArtifactSalvageTask : ISoloTask
         artifactAffixStrDic = ArtifactAffix.DefaultStrDic.Select(kvp => new KeyValuePair<ArtifactAffixType, string>(kvp.Key, stringLocalizer.WithCultureGet(cultureInfo, kvp.Value))).ToFrozenDictionary();
     }
 
-    public static async Task OpenInventory(GridScreenName gridScreenName, InputSimulator input, ILogger logger, CancellationToken ct)
+    public static async Task OpenInventory(
+        GridScreenName gridScreenName,
+        InputSimulator input,
+        ILogger logger,
+        CancellationToken ct,
+        bool allowRetryOpenAction = true)
     {
         RecognitionObject? recognitionObjectChecked;
         RecognitionObject? recognitionObjectUnchecked;
@@ -168,7 +173,9 @@ public class AutoArtifactSalvageTask : ISoloTask
             }
 
             // 如果还在主界面就尝试再按下B键打开背包
-            if (Bv.IsInMainUi(ra))
+            if (ArtifactInventoryOpenPolicy.ShouldRetryOpenAction(
+                    allowRetryOpenAction,
+                    Bv.IsInMainUi(ra)))
             {
                 Debug.WriteLine("背包打开失败,再次尝试打开背包");
                 input.SimulateAction(GIActions.OpenInventory);
@@ -562,8 +569,9 @@ public class AutoArtifactSalvageTask : ISoloTask
         {
             nameOcrResult.Text,
             typeOcrResult.Text,
-            mainAffixText
-        }.Concat(levelAndMinorAffixLines));
+            mainAffixText,
+            levelAndMinorAffixOcrResult.Text
+        });
 
         string percentStr = "%";
 
@@ -572,7 +580,8 @@ public class AutoArtifactSalvageTask : ISoloTask
 
         #region 主词条
         var defaultMainAffix = this.artifactAffixStrDic.Select(kvp => kvp.Value).Distinct();
-        string mainAffixTypeLine = mainAffixLines.SingleOrDefault(l => defaultMainAffix.Contains(l)) ?? throw new Exception($"未找到主词条对应的行：\n{mainAffixText}");
+        string mainAffixTypeLine = ResolveKnownAffixLine(mainAffixLines, defaultMainAffix)
+                                   ?? throw new Exception($"未找到主词条对应的行：\n{mainAffixText}");
         ArtifactAffixType mainAffixType = this.artifactAffixStrDic.First(kvp => kvp.Value == mainAffixTypeLine).Key;
         string mainAffixValueLine = mainAffixLines.Select(l =>
         {
@@ -671,7 +680,23 @@ public class AutoArtifactSalvageTask : ISoloTask
             }
             else
             {
-                throw new Exception($"未识别的副词条：{match.Groups[1].Value}");
+                var matchedAffix = ResolveKnownAffixLine(
+                    [match.Groups[1].Value], dic.Values.Distinct());
+                if (matchedAffix is null)
+                {
+                    throw new Exception($"未识别的副词条：{match.Groups[1].Value}");
+                }
+                artifactAffixType = dic.First(kvp => kvp.Value == matchedAffix).Key;
+                if (!string.IsNullOrEmpty(match.Groups[3].Value))
+                {
+                    artifactAffixType = artifactAffixType switch
+                    {
+                        ArtifactAffixType.ATK => ArtifactAffixType.ATKPercent,
+                        ArtifactAffixType.DEF => ArtifactAffixType.DEFPercent,
+                        ArtifactAffixType.HP => ArtifactAffixType.HPPercent,
+                        _ => artifactAffixType
+                    };
+                }
             }
 
             if (!float.TryParse(match.Groups[2].Value.Replace("。", "."), NumberStyles.Any, cultureInfo, out float affixValue))
@@ -683,34 +708,37 @@ public class AutoArtifactSalvageTask : ISoloTask
             // 只有在已经成功识别至少 3 个词条后才执行额外的直方图分析。
             if (minorAffixes.Count >= 3)
             {
-                using var lineRoi = levelAndMinorAffixRoi.SubMat(r.Rect);
-                using var lineHistogram = new Mat();
-                Cv2.CalcHist(
-                    images: [lineRoi],
-                    channels: [0],
-                    mask: null,
-                    hist: lineHistogram,
-                    dims: 1,
-                    histSize: [256],
-                    ranges: [new Rangef(0, 256)]
-                );
-                lineHistogram.GetArray(out float[] histogramFrequencies);
-                // 检查背景和前景像素是否符合未激活的特征。
-                const int backgroundIntensity = 222;
-                const int foregroundIntensity = 152;
-                var backgroundFrequency = histogramFrequencies[backgroundIntensity];
-                var foregroundFrequency = histogramFrequencies[foregroundIntensity];
-                var noiseFrequencyUpperBound = Math.Min(backgroundFrequency, foregroundFrequency);
-                // 检查这两个强度是否比所有其他强度更常见
-                isUnactivated = backgroundFrequency > 0 &&
-                                foregroundFrequency > 0 &&
-                                backgroundFrequency > foregroundFrequency &&
-                                !histogramFrequencies
-                                    .Where((frequency, intensity) =>
-                                        intensity != backgroundIntensity &&
-                                        intensity != foregroundIntensity &&
-                                        frequency > noiseFrequencyUpperBound)
-                                    .Any();
+                var boundedRect = ClampRectToBounds(
+                    r.Rect, levelAndMinorAffixRoi.Width, levelAndMinorAffixRoi.Height);
+                if (boundedRect is { } lineRect)
+                {
+                    using var lineRoi = levelAndMinorAffixRoi.SubMat(lineRect);
+                    using var lineHistogram = new Mat();
+                    Cv2.CalcHist(
+                        images: [lineRoi],
+                        channels: [0],
+                        mask: null,
+                        hist: lineHistogram,
+                        dims: 1,
+                        histSize: [256],
+                        ranges: [new Rangef(0, 256)]
+                    );
+                    lineHistogram.GetArray(out float[] histogramFrequencies);
+                    const int backgroundIntensity = 222;
+                    const int foregroundIntensity = 152;
+                    var backgroundFrequency = histogramFrequencies[backgroundIntensity];
+                    var foregroundFrequency = histogramFrequencies[foregroundIntensity];
+                    var noiseFrequencyUpperBound = Math.Min(backgroundFrequency, foregroundFrequency);
+                    isUnactivated = backgroundFrequency > 0 &&
+                                    foregroundFrequency > 0 &&
+                                    backgroundFrequency > foregroundFrequency &&
+                                    !histogramFrequencies
+                                        .Where((frequency, intensity) =>
+                                            intensity != backgroundIntensity &&
+                                            intensity != foregroundIntensity &&
+                                            frequency > noiseFrequencyUpperBound)
+                                        .Any();
+                }
             }
             minorAffixes.Add(new ArtifactAffix(artifactAffixType, affixValue, isUnactivated));
         }
@@ -736,7 +764,60 @@ public class AutoArtifactSalvageTask : ISoloTask
         }
         #endregion
 
-        return new ArtifactStat(name, mainAffix, minorAffixes.ToArray(), level);
+        return new ArtifactStat(name, mainAffix, minorAffixes.ToArray(), level, typeOcrResult.Text.Trim());
+    }
+
+    internal static string? ResolveKnownAffixLine(
+        IEnumerable<string> ocrLines,
+        IEnumerable<string> knownAffixes)
+    {
+        var candidates = knownAffixes.Distinct(StringComparer.Ordinal).ToArray();
+        foreach (var line in ocrLines.Select(value => value.Trim()).Where(value => value.Length > 0))
+        {
+            var exact = candidates.FirstOrDefault(candidate =>
+                line.Contains(candidate, StringComparison.Ordinal));
+            if (exact is not null) return exact;
+
+            var fuzzy = candidates
+                .Where(candidate => Math.Abs(candidate.Length - line.Length) <= 1)
+                .Select(candidate => new { Candidate = candidate, Distance = EditDistance(line, candidate) })
+                .Where(match => match.Distance <= 1)
+                .OrderBy(match => match.Distance)
+                .ToArray();
+            if (fuzzy.Length == 1 ||
+                (fuzzy.Length > 1 && fuzzy[0].Distance < fuzzy[1].Distance))
+            {
+                return fuzzy[0].Candidate;
+            }
+        }
+        return null;
+    }
+
+    private static int EditDistance(string source, string target)
+    {
+        var previous = Enumerable.Range(0, target.Length + 1).ToArray();
+        for (var i = 1; i <= source.Length; i++)
+        {
+            var current = new int[target.Length + 1];
+            current[0] = i;
+            for (var j = 1; j <= target.Length; j++)
+            {
+                var substitution = previous[j - 1] + (source[i - 1] == target[j - 1] ? 0 : 1);
+                current[j] = Math.Min(Math.Min(previous[j] + 1, current[j - 1] + 1), substitution);
+            }
+            previous = current;
+        }
+        return previous[target.Length];
+    }
+
+    internal static Rect? ClampRectToBounds(Rect rect, int width, int height)
+    {
+        var left = Math.Clamp(rect.X, 0, width);
+        var top = Math.Clamp(rect.Y, 0, height);
+        var right = Math.Clamp((long)rect.X + rect.Width, 0, width);
+        var bottom = Math.Clamp((long)rect.Y + rect.Height, 0, height);
+        if (right <= left || bottom <= top) return null;
+        return new Rect(left, top, (int)(right - left), (int)(bottom - top));
     }
 
     public static ArtifactStatus GetArtifactStatus(Mat src)
@@ -812,4 +893,11 @@ public class AutoArtifactSalvageTask : ISoloTask
         /// </summary>
         Selected
     }
+}
+
+internal static class ArtifactInventoryOpenPolicy
+{
+    internal static bool ShouldRetryOpenAction(
+        bool allowRetry,
+        bool isMainUi) => allowRetry && isMainUi;
 }

@@ -8,6 +8,7 @@ using OpenCvSharp;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -77,6 +78,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             private record Page(ImageRegion PageRegion, Queue<Rect> ItemRects);
             private Page? currentPage;
             private Tuple<ImageRegion, Rect>? current;
+            private int emittedItems;
             Tuple<ImageRegion, Rect> IAsyncEnumerator<Tuple<ImageRegion, Rect>>.Current => current ?? throw new NullReferenceException();
 
             /// <summary>
@@ -322,7 +324,11 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             /// <param name="rects"></param>
             /// <param name="threshold"></param>
             /// <returns></returns>
-            public static IEnumerable<GridCell> PostProcess(Mat mat, IEnumerable<Rect> rects, int threshold)
+            public static IEnumerable<GridCell> PostProcess(
+                Mat mat,
+                IEnumerable<Rect> rects,
+                int threshold,
+                bool validatePhantomBottomColor = true)
             {
                 List<Rect> rectList = rects.ToList();
                 if (!rectList.Any())
@@ -337,7 +343,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
 
                 // 在末尾处有可能补多了，把底部颜色不符的丢掉……  // PS：群友有直接用底部颜色进行识别的，效果不错
                 var result = cells.ToList();
-                foreach (var cell in cells.Where(c => c.IsPhantom))
+                foreach (var cell in cells.Where(c => c.IsPhantom && validatePhantomBottomColor))
                 {
                     // 幻影格子由插值生成，低分辨率下可能坐标越界，直接丢弃
                     if (cell.Rect.X < 0 || cell.Rect.Y < 0 ||
@@ -489,16 +495,24 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
 
             public async ValueTask<bool> MoveNextAsync()
             {
+                if (owner.@params.FastScroll &&
+                    owner.@params.TotalItems > 0 &&
+                    this.emittedItems >= owner.@params.TotalItems)
+                {
+                    return false;
+                }
+
                 if (this.currentPage == null || this.currentPage.ItemRects.Count < 1)
                 {
                     ImageRegion? imageRegion = null;
+                    var firstPage = this.currentPage == null;
                     try
                     {
                         if (this.currentPage != null)   // 当前页遍历完了就向下滚动
                         {
                             using var ra4 = TaskControl.CaptureToRectArea();
                             ra4.MoveTo(this.roi.X + this.roi.Width / 2, this.roi.Y + this.roi.Height / 2);
-                            await TaskControl.Delay(300, ct);
+                            await TaskControl.Delay(owner.@params.PreScrollDelayMilliseconds, ct);
 
                             owner.OnBeforeScroll?.Invoke();
                             if (!await this.gridScroller.TryVerticalScollDown((src, columns) => GetGridItems(src, columns)))
@@ -515,8 +529,16 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                             imageRegion = ra.DeriveCrop(this.roi);
                         }
 
-                        var rects = GetGridItems(imageRegion.SrcMat, this.columns);
-                        var cells = PostProcess(imageRegion.SrcMat, rects, (int)(0.025 * this.roi.Height));
+                        var cells = owner.@params.FastScroll
+                            ? ArtifactGridLayout.CellsInRoi(
+                                    owner.@params.CaptureSize,
+                                    this.roi)
+                                .ToArray()
+                            : PostProcess(
+                                    imageRegion.SrcMat,
+                                    GetGridItems(imageRegion.SrcMat, this.columns),
+                                    (int)(0.025 * this.roi.Height))
+                                .ToArray();
 
                         if (!cells.Any())
                         {
@@ -524,8 +546,25 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                             return false;
                         }
 
+                        var selectedRects = owner.@params.FastScroll
+                            ? SelectFastScrollItems(
+                                cells,
+                                this.columns,
+                                owner.@params.VisibleRows,
+                                owner.@params.FastScrollRows,
+                                this.emittedItems,
+                                owner.@params.TotalItems,
+                                firstPage)
+                            : cells
+                                .OrderBy(c => c.RowNum)
+                                .ThenBy(c => c.ColNum)
+                                .Select(c => c.Rect)
+                                .ToArray();
+
                         this.currentPage?.PageRegion?.Dispose();
-                        this.currentPage = new Page(imageRegion, new Queue<Rect>(cells.OrderBy(c => c.RowNum).ThenBy(c => c.ColNum).Select(c => c.Rect)));
+                        this.currentPage = new Page(
+                            imageRegion,
+                            new Queue<Rect>(selectedRects));
 
                         owner.OnAfterTurnToNewPage?.Invoke(Tuple.Create(imageRegion, cells.Select(c => Tuple.Create(c.Rect, c.IsPhantom))));
                     }
@@ -537,7 +576,57 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 }
 
                 this.current = Tuple.Create(this.currentPage.PageRegion, this.currentPage.ItemRects.Dequeue());
+                this.emittedItems++;
                 return true;
+            }
+
+            internal static IReadOnlyList<Rect> SelectFastScrollItems(
+                IReadOnlyList<GridCell> cells,
+                int columns,
+                int visibleRows,
+                int fastScrollRows,
+                int emittedItems,
+                int totalItems,
+                bool firstPage)
+            {
+                if (columns <= 0) throw new ArgumentOutOfRangeException(nameof(columns));
+                if (visibleRows <= 0) throw new ArgumentOutOfRangeException(nameof(visibleRows));
+                if (fastScrollRows <= 0) throw new ArgumentOutOfRangeException(nameof(fastScrollRows));
+                if (totalItems <= 0) throw new ArgumentOutOfRangeException(nameof(totalItems));
+
+                var expected = Math.Min(
+                    columns * visibleRows,
+                    totalItems - emittedItems);
+                if (expected <= 0) return [];
+
+                var ordered = cells
+                    .OrderBy(cell => cell.RowNum)
+                    .ThenBy(cell => cell.ColNum)
+                    .ToArray();
+                if (firstPage)
+                {
+                    if (ordered.Length < expected)
+                    {
+                        throw new InvalidDataException(
+                            $"圣遗物首屏只识别到 {ordered.Length}/{expected} 个格子");
+                    }
+                    return ordered.Take(expected).Select(cell => cell.Rect).ToArray();
+                }
+
+                var newRows = (int)Math.Ceiling(expected / (double)columns);
+                var firstNewRow = visibleRows - newRows;
+                var bottomRows = ordered
+                    .Where(cell => cell.RowNum >= firstNewRow)
+                    .OrderBy(cell => cell.RowNum)
+                    .ThenBy(cell => cell.ColNum)
+                    .ToArray();
+                if (bottomRows.Length < expected)
+                {
+                    throw new InvalidDataException(
+                        $"圣遗物翻页后的底部新行只识别到 {bottomRows.Length}/{expected} 个格子");
+                }
+
+                return bottomRows.Take(expected).Select(cell => cell.Rect).ToArray();
             }
 
             /// <summary>

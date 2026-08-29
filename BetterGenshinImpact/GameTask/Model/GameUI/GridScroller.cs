@@ -6,6 +6,7 @@ using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -27,6 +28,15 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         private readonly int roundMilliseconds;
         private readonly int s2Round;
         private readonly double s3Scale;
+        private readonly bool fastScroll;
+        private readonly int totalItems;
+        private readonly int visibleRows;
+        private readonly int fastScrollRows;
+        private readonly Size captureSize;
+        private int scrolledRows;
+        private int calibratedRows;
+        private double averageInputsPerRow;
+        private Vec3b? initialFlagColor;
 
         internal GridScroller(GridParams @params, ILogger logger, InputSimulator input, CancellationToken ct)
         {
@@ -39,10 +49,20 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             this.roundMilliseconds = @params.RoundMilliseconds;
             this.s2Round = @params.S2Round;
             this.s3Scale = @params.S3Scale;
+            this.fastScroll = @params.FastScroll;
+            this.totalItems = @params.TotalItems;
+            this.visibleRows = @params.VisibleRows;
+            this.fastScrollRows = @params.FastScrollRows;
+            this.captureSize = @params.CaptureSize;
         }
 
         internal async Task<bool> TryVerticalScollDown(Func<Mat, int, IEnumerable<Rect>> GetGridItems)
         {
+            if (this.fastScroll)
+            {
+                return await TryVerticalScrollDownFast(GetGridItems);
+            }
+
             using var ra = TaskControl.CaptureToRectArea();
             using ImageRegion prevGrid = ra.DeriveCrop(roi);
 
@@ -99,6 +119,139 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 this.logger.LogInformation("滚动到底部了");
                 return false;
             }
+        }
+
+        private async Task<bool> TryVerticalScrollDownFast(
+            Func<Mat, int, IEnumerable<Rect>> getGridItems)
+        {
+            _ = getGridItems;
+            if (this.totalItems <= 0 || this.visibleRows <= 0 || this.fastScrollRows <= 0)
+            {
+                throw new InvalidOperationException("圣遗物快速滚动缺少背包总数或可见行配置");
+            }
+
+            var totalRows = (int)Math.Ceiling(this.totalItems / (double)this.columns);
+            var rowsToScroll = ArtifactRowScrollPlanner.RowsToScroll(
+                totalRows,
+                this.visibleRows,
+                this.scrolledRows);
+            if (rowsToScroll <= 0)
+            {
+                this.logger.LogInformation("YAS 圣遗物滚轮翻页到底");
+                return false;
+            }
+
+            var timer = Stopwatch.StartNew();
+            SystemControl.ActivateWindow();
+            EnsureInitialFlagColor();
+            var targetRow = this.scrolledRows + rowsToScroll;
+            if (this.calibratedRows >= this.visibleRows)
+            {
+                await ScrollRowsFastAsync(rowsToScroll);
+            }
+            else
+            {
+                for (var row = 0; row < rowsToScroll; row++)
+                {
+                    var inputCount = await ScrollOneRowAsync(
+                        row + 1,
+                        rowsToScroll);
+                    this.averageInputsPerRow =
+                        (this.averageInputsPerRow * this.calibratedRows + inputCount) /
+                        (this.calibratedRows + 1);
+                    this.calibratedRows++;
+                }
+            }
+
+            this.scrolledRows = targetRow;
+            this.logger.LogInformation(
+                "YAS 圣遗物滚轮已推进 {Rows} 行，累计 {ScrolledRows} 行，耗时 {ElapsedMilliseconds}ms",
+                rowsToScroll,
+                this.scrolledRows,
+                timer.ElapsedMilliseconds);
+            return true;
+        }
+
+        private void EnsureInitialFlagColor()
+        {
+            if (this.initialFlagColor.HasValue) return;
+
+            var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
+            using var initialCapture = TaskControl.CaptureToRectArea();
+            this.initialFlagColor = ArtifactGridLayout.ReadBgr(
+                initialCapture.SrcMat,
+                flagPosition);
+        }
+
+        private async Task<int> ScrollOneRowAsync(
+            int currentRow,
+            int targetRows)
+        {
+            var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
+            var detector = new ArtifactRowScrollDetector(
+                this.initialFlagColor!.Value);
+
+            for (var attempt = 1; attempt <= 25; attempt++)
+            {
+                this.input.Mouse.VerticalScroll(-1);
+                await TaskControl.Delay(80, this.ct);
+                using var capture = TaskControl.CaptureToRectArea();
+                var color = ArtifactGridLayout.ReadBgr(capture.SrcMat, flagPosition);
+                if (detector.Observe(color))
+                {
+                    this.logger.LogDebug(
+                        "YAS 圣遗物滚轮第 {CurrentRow}/{TargetRows} 行对齐成功，共 {Attempts} 次滚轮输入",
+                        currentRow,
+                        targetRows,
+                        attempt);
+                    return attempt;
+                }
+            }
+
+            throw new InvalidOperationException(
+                $"YAS 圣遗物第 {currentRow}/{targetRows} 行滚动对齐超时");
+        }
+
+        private async Task ScrollRowsFastAsync(int rowsToScroll)
+        {
+            var inputCount = ArtifactRowScrollPlanner.EstimateInputCount(
+                this.averageInputsPerRow,
+                rowsToScroll);
+            for (var inputIndex = 0; inputIndex < inputCount; inputIndex++)
+            {
+                this.input.Mouse.VerticalScroll(-1);
+            }
+            await TaskControl.Delay(80, this.ct);
+
+            var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
+            for (var attempt = 0; attempt <= 10; attempt++)
+            {
+                using var capture = TaskControl.CaptureToRectArea();
+                var color = ArtifactGridLayout.ReadBgr(capture.SrcMat, flagPosition);
+                if (ArtifactRowScrollDetector.IsNear(
+                        this.initialFlagColor!.Value,
+                        color))
+                {
+                    this.logger.LogDebug(
+                        "YAS 圣遗物快速推进 {Rows} 行完成，预估输入 {InputCount} 次、补齐 {AlignInputs} 次",
+                        rowsToScroll,
+                        inputCount,
+                        attempt);
+                    return;
+                }
+
+                if (attempt == 10) break;
+                this.input.Mouse.VerticalScroll(-1);
+                await TaskControl.Delay(80, this.ct);
+            }
+
+            throw new InvalidOperationException(
+                $"YAS 圣遗物快速推进 {rowsToScroll} 行后连续 10 次未能对齐");
+        }
+
+        internal static bool HasVerticalMovement(bool phaseDetected, Point2d shift)
+        {
+            return phaseDetected || Math.Abs(shift.Y) > 1;
         }
 
         /// <summary>

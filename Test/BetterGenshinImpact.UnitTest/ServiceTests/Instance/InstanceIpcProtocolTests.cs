@@ -102,6 +102,17 @@ public class InstanceIpcProtocolTests
     }
 
     [Fact]
+    public void ActivationForwarding_ShouldAllowArtifactHostRequest()
+    {
+        ActivationForwardingPolicy.ThrowIfManagedAutomation(
+        [
+            "BetterGI.exe",
+            "--artifact-host-request",
+            @"C:\BetterGI\User\launch-requests\artifact-analysis\request.json"
+        ]);
+    }
+
+    [Fact]
     public void CommandLineParser_ShouldRecognizeChildSessionOneDragonAutomation()
     {
         var options = CommandLineOptions.Parse(

@@ -26,15 +26,24 @@ public class BgiOnnxFactory : IDisposable
     /// </summary>
     private readonly ConcurrentDictionary<BgiOnnxModel, string?> _cachedModelPaths = new();
     private readonly ConcurrentDictionary<BgiOnnxModel, Lazy<BgiYoloPredictor>> _sharedYoloPredictors = new();
+    private readonly bool _excludeTensorRtForOcr;
 
 
     /// <summary>
     /// 请勿直接实例化此类
     /// </summary>
     /// <param name="logger"></param>
-    public BgiOnnxFactory(ILogger<BgiOnnxFactory> logger)
+    public BgiOnnxFactory(ILogger<BgiOnnxFactory> logger) : this(logger, null, false)
+    {
+    }
+
+    internal BgiOnnxFactory(
+        ILogger<BgiOnnxFactory> logger,
+        bool? forceCpuOcr,
+        bool excludeTensorRtForOcr = false)
     {
         _logger = logger;
+        _excludeTensorRtForOcr = excludeTensorRtForOcr;
 
         var config = GetConfig();
         if (config.AutoAppendCudaPath) AppendCudaPath();
@@ -48,7 +57,7 @@ public class BgiOnnxFactory : IDisposable
         DmlDeviceId = config.GpuDevice;
         TrtUseEmbedMode = config.EmbedTensorRtCache;
         EnableCache = config.EnableTensorRtCache;
-        CpuOcr = config.CpuOcr;
+        CpuOcr = forceCpuOcr ?? config.CpuOcr;
         OpenVinoDevice = config.OpenVinoDevice;
         OpenVinoCache = config.EnableOpenVinoCache;
         ProviderTypes = GetProviderType(config.InferenceDevice);
@@ -400,7 +409,16 @@ public class BgiOnnxFactory : IDisposable
     {
         _logger.LogDebug("[ONNX]创建推理会话，模型: {ModelName}", model.Name);
         ProviderType[]? providerTypes = null;
-        if (CpuOcr && ocr) providerTypes = [ProviderType.Cpu];
+        if (ocr)
+        {
+            providerTypes = ResolveOcrProviderTypes(
+                CpuOcr,
+                _excludeTensorRtForOcr,
+                ProviderTypes);
+            _logger.LogDebug(
+                "[ONNX] OCR provider策略: {Providers}",
+                string.Join(",", providerTypes.Select<ProviderType, string>(Enum.GetName!)));
+        }
 
         if (!EnableCache)
             return new InferenceSession(model.ModalPath, CreateSessionOptions(model, false, providerTypes));
@@ -409,6 +427,20 @@ public class BgiOnnxFactory : IDisposable
         return cached == null
             ? new InferenceSession(model.ModalPath, CreateSessionOptions(model, true, providerTypes))
             : new InferenceSession(cached, CreateSessionOptions(model, false, providerTypes));
+    }
+
+    internal static ProviderType[] ResolveOcrProviderTypes(
+        bool cpuOcr,
+        bool excludeTensorRt,
+        IReadOnlyList<ProviderType> providers)
+    {
+        if (cpuOcr) return [ProviderType.Cpu];
+        if (!excludeTensorRt) return providers.ToArray();
+
+        var result = providers
+            .Where(provider => provider != ProviderType.TensorRt)
+            .ToArray();
+        return result.Length > 0 ? result : [ProviderType.Cpu];
     }
 
     /// <summary>
