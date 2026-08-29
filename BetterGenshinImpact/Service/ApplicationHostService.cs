@@ -151,6 +151,7 @@ public class ApplicationHostService(
         }
         catch (Exception exception)
         {
+            TaskFailureDiagnostics.CaptureScreenshotOnce(exception, $"命令行{taskName}执行失败");
             _logger.LogError(exception, "命令行{TaskName}执行失败", taskName);
             CommandLineTaskFailurePolicy.MarkFailed(exitCode => Environment.ExitCode = exitCode);
         }

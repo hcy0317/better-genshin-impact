@@ -28,6 +28,7 @@ namespace BetterGenshinImpact.GameTask
         private readonly ILogger<TaskTriggerDispatcher> _logger = App.GetLogger<TaskTriggerDispatcher>();
         private readonly OverlayMetricsService? _metricsService = App.GetService<OverlayMetricsService>();
         private readonly CustomHtmlMaskService? _customHtmlMaskService = App.GetService<CustomHtmlMaskService>();
+        private readonly FailureScreenshotFrameCache _failureScreenshotFrameCache = new(TimeSpan.FromSeconds(1));
 
         private static TaskTriggerDispatcher? _instance;
 
@@ -61,7 +62,7 @@ namespace BetterGenshinImpact.GameTask
 
         private GameUiCategory PrevGameUiCategory = GameUiCategory.Unknown; // 上一个UI类别
         private DateTime PrevGameUiChangeTime = DateTime.Now; // 上一次UI变化时间
-        
+
 
         public TaskTriggerDispatcher()
         {
@@ -130,6 +131,7 @@ namespace BetterGenshinImpact.GameTask
         {
             // 初始化截图器
             ChatUiHotkeyGuard.Reset();
+            _failureScreenshotFrameCache.Clear();
             GameCapture = GameCaptureFactory.Create(mode);
             // 激活窗口 保证后面能够正常获取窗口信息
             SystemControl.ActivateWindow(hWnd);
@@ -209,9 +211,15 @@ namespace BetterGenshinImpact.GameTask
             ChatUiHotkeyGuard.Reset();
         }
 
+        internal Mat? TryCloneLatestFrame(out TimeSpan age)
+        {
+            return _failureScreenshotFrameCache.TryClone(DateTimeOffset.UtcNow, out age);
+        }
+
         public void Dispose()
         {
             Stop();
+            _failureScreenshotFrameCache.Dispose();
         }
 
         public void Tick(object? sender, EventArgs e)
@@ -249,7 +257,7 @@ namespace BetterGenshinImpact.GameTask
                     HtmlMaskWindow.HideAll();
                     return;
                 }
-                
+
                 // 如果是最小化状态，直接不进行截图
                 if (SystemControl.IsGenshinImpactMinimized())
                 {
@@ -373,6 +381,16 @@ namespace BetterGenshinImpact.GameTask
                     return;
                 }
 
+                try
+                {
+                    _failureScreenshotFrameCache.TryUpdate(bitmap, DateTimeOffset.UtcNow);
+                }
+                catch (Exception cacheException)
+                {
+                    // 诊断缓存不能影响实时任务处理。
+                    _logger.LogDebug(cacheException, "更新错误截图缓存帧失败");
+                }
+
                 if (shouldShowPictureInPicture && !active)
                 {
                     PictureInPictureService.Update(bitmap);
@@ -414,7 +432,7 @@ namespace BetterGenshinImpact.GameTask
                     {
                         // 判断当前UI
                         content.CurrentGameUiCategory = Bv.WhichGameUiForTriggers(content.CaptureRectArea);
-                        
+
                         if (content.CurrentGameUiCategory != PrevGameUiCategory)
                         {
                             PrevGameUiChangeTime = DateTime.Now;
@@ -528,6 +546,16 @@ namespace BetterGenshinImpact.GameTask
 
         public void TakeScreenshot()
         {
+            SaveScreenshot("手动截图", string.Empty);
+        }
+
+        internal void TakeFailureScreenshot(string context)
+        {
+            SaveScreenshot(context, "error-");
+        }
+
+        private void SaveScreenshot(string context, string fileNamePrefix)
+        {
             try
             {
                 var path = Global.Absolute($@"log\screenshot\");
@@ -536,37 +564,54 @@ namespace BetterGenshinImpact.GameTask
                     Directory.CreateDirectory(path);
                 }
 
-                Mat mat;
+                Mat? mat;
                 try
                 {
                     mat = TaskControl.CaptureGameImage(GameCapture);
                 }
-                catch (Exception)
+                catch (Exception captureException)
                 {
-                    _logger.LogInformation("截图失败，未获取到图像");
-                    return;
+                    mat = _failureScreenshotFrameCache.TryClone(DateTimeOffset.UtcNow, out var cachedFrameAge);
+                    if (mat == null)
+                    {
+                        _logger.LogInformation("截图失败，未获取到实时图像且没有可用的缓存帧");
+                        _logger.LogDebug(captureException, "实时截图失败且缓存帧不可用");
+                        return;
+                    }
+
+                    _logger.LogWarning(
+                        captureException,
+                        "实时截图失败，改用最近有效缓存帧；缓存帧年龄 {AgeSeconds:F1} 秒",
+                        cachedFrameAge.TotalSeconds);
                 }
 
-                var name = $@"{DateTime.Now:yyyyMMddHHmmssffff}.png";
-                var savePath = Global.Absolute($@"log\screenshot\{name}");
-                if (TaskContext.Instance().Config.CommonConfig.ScreenshotUidCoverEnabled)
+                using (mat)
                 {
-                    var assetScale = TaskContext.Instance().SystemInfo.ScaleTo1080PRatio;
-                    var rect = new Rect((int)(mat.Width - MaskWindowConfig.UidCoverRightBottomRect.X * assetScale),
-                        (int)(mat.Height - MaskWindowConfig.UidCoverRightBottomRect.Y * assetScale),
-                        (int)(MaskWindowConfig.UidCoverRightBottomRect.Width * assetScale),
-                        (int)(MaskWindowConfig.UidCoverRightBottomRect.Height * assetScale));
-                    mat.Rectangle(rect, Scalar.White, -1);
-                    Cv2.ImWrite(savePath, mat);
-                }
-                else
-                {
-                    Cv2.ImWrite(savePath, mat);
-                }
+                    var name = $@"{fileNamePrefix}{DateTime.Now:yyyyMMddHHmmssffff}.png";
+                    var savePath = Global.Absolute($@"log\screenshot\{name}");
+                    if (TaskContext.Instance().Config.CommonConfig.ScreenshotUidCoverEnabled)
+                    {
+                        var assetScale = TaskContext.Instance().SystemInfo.ScaleTo1080PRatio;
+                        var rect = new Rect((int)(mat.Width - MaskWindowConfig.UidCoverRightBottomRect.X * assetScale),
+                            (int)(mat.Height - MaskWindowConfig.UidCoverRightBottomRect.Y * assetScale),
+                            (int)(MaskWindowConfig.UidCoverRightBottomRect.Width * assetScale),
+                            (int)(MaskWindowConfig.UidCoverRightBottomRect.Height * assetScale));
+                        mat.Rectangle(rect, Scalar.White, -1);
+                        if (!Cv2.ImWrite(savePath, mat))
+                        {
+                            throw new IOException($"OpenCV failed to write screenshot: {savePath}");
+                        }
+                    }
+                    else
+                    {
+                        if (!Cv2.ImWrite(savePath, mat))
+                        {
+                            throw new IOException($"OpenCV failed to write screenshot: {savePath}");
+                        }
+                    }
 
-                mat.Dispose();
-
-                _logger.LogInformation("截图已保存: {Name}", name);
+                    _logger.LogInformation("截图已保存: {Name}；上下文: {Context}", name, context);
+                }
             }
             catch (Exception e)
             {

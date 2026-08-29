@@ -32,6 +32,12 @@ public partial class AutoDomainConfig : ObservableObject
     private int _leftRightMoveTimes = 3;
 
     /// <summary>
+    /// 寻找石化古树的最长等待时间，秒；超出后终止本轮，避免无限挂机。
+    /// </summary>
+    [ObservableProperty]
+    private int _petrifiedTreeSearchTimeoutSeconds = PetrifiedTreeSearchProgress.DefaultTimeoutSeconds;
+
+    /// <summary>
     /// 自动吃药
     /// </summary>
     [ObservableProperty]

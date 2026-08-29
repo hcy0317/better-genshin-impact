@@ -305,19 +305,36 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
     /// <returns>当前剩余原粹树脂。</returns>
     private async Task<OriginalResinInfo> RecognizeOriginalResinInfoFromBigMap()
     {
-        using var capture = CaptureToRectArea();
-        using var resinIconSearchRegion = capture.DeriveCrop(ScaleRect(1200, 25, 580, 50));
-        var resinIconRegion = resinIconSearchRegion.Find(LoadRecognitionObject("OriginalResinTopIcon"));
-        if (resinIconRegion.IsEmpty())
+        var iconLeft = 0;
+        var iconRight = 0;
+        var iconBottom = 0;
+        var resinIconFound = false;
+        for (var attempt = 1; attempt <= 4; attempt++)
         {
-            throw new InvalidOperationException("未找到原粹树脂图标");
+            using var capture = CaptureToRectArea(forceNew: true);
+            using var resinIconSearchRegion = capture.DeriveCrop(ScaleRect(1200, 25, 580, 50));
+            using var resinIconRegion = resinIconSearchRegion.Find(LoadRecognitionObject("OriginalResinTopIcon"));
+            if (!resinIconRegion.IsEmpty())
+            {
+                iconLeft = resinIconSearchRegion.X + resinIconRegion.Left;
+                iconRight = resinIconSearchRegion.X + resinIconRegion.Right;
+                iconBottom = resinIconSearchRegion.Y + resinIconRegion.Bottom;
+                resinIconRegion.Click();
+                resinIconFound = true;
+                break;
+            }
+
+            if (attempt < 4)
+            {
+                _logger.LogDebug("{Name}：未找到原粹树脂图标，重试 {Attempt}/4", Name, attempt);
+                await Delay(300, _ct);
+            }
         }
 
-        var iconLeft = resinIconSearchRegion.X + resinIconRegion.Left;
-        var iconRight = resinIconSearchRegion.X + resinIconRegion.Right;
-        var iconBottom = resinIconSearchRegion.Y + resinIconRegion.Bottom;
-
-        resinIconRegion.Click();
+        if (!resinIconFound)
+        {
+            throw new InvalidOperationException("连续 4 次未找到原粹树脂图标");
+        }
         await Delay(500, _ct);
 
         using var clickedCapture = CaptureToRectArea();
@@ -1178,6 +1195,9 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
 
         var navigationStopwatch = Stopwatch.StartNew();
         var navigationTimeout = TimeSpan.FromSeconds(20);
+        var navigationProgress = new RewardNavigationProgress(
+            navigationTimeout,
+            TimeSpan.FromSeconds(3));
         var adjustCameraTask = AdjustRewardCameraTask(page, navigationCts);
         var moveToRewardTask = MoveToRewardTask(page, navigationCts);
         var monitorRewardPromptTask = MonitorRewardPromptTask(page, navigationCts);
@@ -1187,9 +1207,11 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
             while (true)
             {
                 _ct.ThrowIfCancellationRequested();
-                if (navigationStopwatch.Elapsed >= navigationTimeout)
+                if (navigationProgress.IsTimedOut(navigationStopwatch.Elapsed))
                 {
-                    throw new TimeoutException("超时未找到征讨之花领奖界面");
+                    var failure = new TimeoutException("超时未找到征讨之花领奖界面");
+                    TaskFailureDiagnostics.CaptureScreenshotOnce(failure, "自动首领讨伐-寻找征讨之花超时");
+                    throw failure;
                 }
 
                 var completedTask = await Task.WhenAny(Task.Delay(500, _ct),adjustCameraTask,moveToRewardTask,monitorRewardPromptTask);
@@ -1277,6 +1299,10 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
         var maxTargetX = captureRect.Width * 0.55;
         var centerX = captureRect.Width / 2.0;
         var halfHeight = captureRect.Height / 2.0;
+        var missingProgress = new RewardNavigationProgress(
+            TimeSpan.MaxValue,
+            TimeSpan.FromSeconds(3));
+        var stopwatch = Stopwatch.StartNew();
 
         while (!ct.IsCancellationRequested)
         {
@@ -1284,7 +1310,13 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
             var boxRegions = page.Locator(LoadRecognitionObject("RewardBox")).FindAll();
             if (boxRegions.Count < 1)
             {
-                _logger.LogWarning("{Name}：未找到征讨之花图标，调整视角重试", Name);
+                if (missingProgress.ShouldLogMissing(stopwatch.Elapsed))
+                {
+                    _logger.LogInformation(
+                        "{Name}：寻找征讨之花进行中，已等待 {Elapsed:F1} 秒，尚未识别到图标",
+                        Name,
+                        stopwatch.Elapsed.TotalSeconds);
+                }
                 Simulation.SendInput.Mouse.MoveMouseBy(ScaleX(200), 0);
                 await Delay(250, ct);
                 continue;
@@ -1322,6 +1354,19 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
             while (!ct.IsCancellationRequested)
             {
                 ct.ThrowIfCancellationRequested();
+                var rewardBoxes = page.Locator(LoadRecognitionObject("RewardBox")).FindAll();
+                if (rewardBoxes.Count < 1)
+                {
+                    if (isMovingForward)
+                    {
+                        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+                        isMovingForward = false;
+                    }
+
+                    await Delay(250, ct);
+                    continue;
+                }
+
                 if (page.Locator("Space", climbRect).IsExist())
                 {
                     if (isMovingForward)

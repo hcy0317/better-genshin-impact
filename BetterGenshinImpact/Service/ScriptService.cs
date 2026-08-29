@@ -54,7 +54,7 @@ public partial class ScriptService : IScriptService
     public bool ShouldSkipTask(ScriptGroupProject project)
     {
 
-        if (project.GroupInfo is { Config.PathingConfig.Enabled: true } )
+        if (project.GroupInfo is { Config.PathingConfig.Enabled: true })
         {
             if (IsCurrentHourEqual(project.GroupInfo.Config.PathingConfig.SkipDuring))
             {
@@ -75,9 +75,9 @@ public partial class ScriptService : IScriptService
                     _logger.LogInformation($"{project.Name}任务已经不在执行周期（当前值${index}!=配置值${tcc.Index}），将跳过此任务！");
                     return true;
                 }
-               
+
             }
-            
+
         }
 
         if (TaskContext.Instance().Config.OtherConfig.FarmingPlanConfig.Enabled)
@@ -90,7 +90,7 @@ public partial class ScriptService : IScriptService
                     return true;
                 }
                 string message;
-                if (FarmingStatsRecorder.IsDailyFarmingLimitReached(task.FarmingInfo,out message))
+                if (FarmingStatsRecorder.IsDailyFarmingLimitReached(task.FarmingInfo, out message))
                 {
                     _logger.LogInformation($"{project.Name}:{message},跳过此任务！");
                     return true;
@@ -101,23 +101,23 @@ public partial class ScriptService : IScriptService
                 TaskControl.Logger.LogError($"锄地规划统计异常：{e.Message}");
             }
 
-            
+
         }
         string skipMessage;
-        if (ExecutionRecordStorage.IsSkipTask(project,out skipMessage))
+        if (ExecutionRecordStorage.IsSkipTask(project, out skipMessage))
         {
             TaskControl.Logger.LogInformation($"{project.Name}:{skipMessage},跳过此任务！");
             return true;
         }
         return false; // 不跳过
     }
-    
-    
-    
-    
+
+
+
+
     //优先执行的配置组，统计每个project执行次数
     private readonly Dictionary<string, int> _projectExecutionCount = new();
-    
+
     public async Task RunMulti(IEnumerable<ScriptGroupProject> projectList, string? groupName = null, TaskProgress? taskProgress = null, bool propagateExceptions = false)
     {
         groupName ??= "默认";
@@ -126,7 +126,7 @@ public partial class ScriptService : IScriptService
         CancellationContext.Instance.Set();
 
         var list = ReloadScriptProjects(projectList);
-        
+
         //恢复临时的跳过标志
         foreach (var scriptGroupProject in projectList)
         {
@@ -153,9 +153,9 @@ public partial class ScriptService : IScriptService
                 propagateExceptions);
             return;
         }
-        
-        
-        if (!string.IsNullOrEmpty(groupName)&&!RunnerContext.Instance.IsPreExecution)
+
+
+        if (!string.IsNullOrEmpty(groupName) && !RunnerContext.Instance.IsPreExecution)
         {
             // if (hasTimer)
             // {
@@ -167,10 +167,10 @@ public partial class ScriptService : IScriptService
 
         // var timerOperation = hasTimer ? DispatcherTimerOperationEnum.UseCacheImageWithTriggerEmpty : DispatcherTimerOperationEnum.UseSelfCaptureImage;
 
-        
+
         bool fisrt = true;
-        
-        
+
+
         //非优先执行配置下，清空执行计数
         if (!RunnerContext.Instance.IsPreExecution)
         {
@@ -246,7 +246,7 @@ public partial class ScriptService : IScriptService
                             // 存在优先执行的项目，则优先执行
                             if (preExecutionProjects.Count > 0)
                             {
-   
+
                                 _logger.LogInformation($"存在{preExecutionProjects.Count}个需优先执行的任务！");
                                 // 设置执行状态，进入优先执行任务
                                 RunnerContext.Instance.IsPreExecution = true;
@@ -260,7 +260,7 @@ public partial class ScriptService : IScriptService
                     {
                         projectIndex++;
                     }
-                    
+
 
                     for (int y = 0; y < exeProjects.Count; y++)
                     {
@@ -307,18 +307,19 @@ public partial class ScriptService : IScriptService
                             break;
                         }
 
-                        if (fisrt )
+                        if (fisrt)
                         {
                             fisrt = false;
                             Notify.Event(NotificationEvent.GroupStart).Success($"配置组{groupName}启动");
                         }
 
-                        if (!RunnerContext.Instance.IsPreExecution &&taskProgress != null)
+                        if (!RunnerContext.Instance.IsPreExecution && taskProgress != null)
                         {
                             taskProgress.CurrentScriptGroupProjectInfo = new TaskProgress.ScriptGroupProjectInfo
                             {
                                 Name = exeProject.Name,
-                                FolderName = exeProject.FolderName, Index = projectIndex,
+                                FolderName = exeProject.FolderName,
+                                Index = projectIndex,
                                 GroupName = taskProgress?.CurrentScriptGroupName ?? ""
                             };
                             TaskProgressManager.SaveTaskProgress(taskProgress);
@@ -340,6 +341,7 @@ public partial class ScriptService : IScriptService
 
 
                         var projectFailed = false;
+                        Exception? projectFailure = null;
                         for (var i = 0; i < exeProject.RunNum; i++)
                         {
                             try
@@ -376,17 +378,17 @@ public partial class ScriptService : IScriptService
                             }
                             catch (Exception e)
                             {
+                                TaskFailureDiagnostics.CaptureScreenshotOnce(
+                                    e,
+                                    $"配置组 {groupName} / 脚本 {exeProject.Name}");
                                 _logger.LogDebug(e, "执行脚本时发生异常");
                                 _logger.LogError("执行脚本时发生异常: {Msg}", e.Message);
                                 if (!RunnerContext.Instance.IsPreExecution && taskProgress != null && taskProgress.CurrentScriptGroupProjectInfo != null)
                                 {
                                     taskProgress.CurrentScriptGroupProjectInfo.Status = 2;
                                 }
-                                if (propagateExceptions)
-                                {
-                                    managedFailures.Add(e);
-                                    projectFailed = true;
-                                }
+                                projectFailure = e;
+                                projectFailed = true;
                             }
                             finally
                             {
@@ -400,6 +402,34 @@ public partial class ScriptService : IScriptService
 
                             if (projectFailed)
                             {
+                                _logger.LogWarning(
+                                    "脚本 {Name} 执行失败，开始恢复主界面；恢复失败将停止配置组，避免后续任务在错误界面空转",
+                                    exeProject.Name);
+                                var recoveryStopwatch = Stopwatch.StartNew();
+                                try
+                                {
+                                    await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+                                        projectFailure!,
+                                        () => new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token));
+                                    _logger.LogInformation(
+                                        "脚本 {Name} 失败后的主界面恢复成功，耗时 {ElapsedSeconds:0.000} 秒",
+                                        exeProject.Name,
+                                        recoveryStopwatch.Elapsed.TotalSeconds);
+                                }
+                                catch (TaskFailureRecoveryException recoveryException)
+                                {
+                                    _logger.LogError(
+                                        recoveryException,
+                                        "脚本 {Name} 失败后的主界面恢复失败，耗时 {ElapsedSeconds:0.000} 秒，停止配置组",
+                                        exeProject.Name,
+                                        recoveryStopwatch.Elapsed.TotalSeconds);
+                                    throw;
+                                }
+
+                                if (propagateExceptions)
+                                {
+                                    managedFailures.Add(projectFailure!);
+                                }
                                 break;
                             }
 
@@ -437,17 +467,17 @@ public partial class ScriptService : IScriptService
 
                 managedFailures.ThrowIfAny($"配置组 {groupName} 中有脚本执行失败。");
             }, propagateExceptions);
-        
+
 
         // 还原定时器
         // TaskTriggerDispatcher.Instance().SetTriggers(GameTaskManager.LoadInitialTriggers());
-        
-        if (!string.IsNullOrEmpty(groupName)&&!RunnerContext.Instance.IsPreExecution)
+
+        if (!string.IsNullOrEmpty(groupName) && !RunnerContext.Instance.IsPreExecution)
         {
             _logger.LogInformation("配置组 {Name} 执行结束", groupName);
         }
 
-        if (!fisrt&&!RunnerContext.Instance.IsPreExecution)
+        if (!fisrt && !RunnerContext.Instance.IsPreExecution)
         {
             if (CancellationContext.Instance.IsManualStop is false)
             {
@@ -636,6 +666,9 @@ public partial class ScriptService : IScriptService
                     var sw = Stopwatch.StartNew();
                     var loseFocusCount = 0;
                     var inputDispatchFailureLogged = false;
+                    var waitHeartbeat = new GameStartupWaitHeartbeat(TimeSpan.FromSeconds(30));
+                    var lastObservedUi = "尚未取得画面";
+                    var lastCachedFrameAge = TimeSpan.Zero;
                     while (true)
                     {
                         if (sw.Elapsed >= TimeSpan.FromMinutes(5))
@@ -650,14 +683,46 @@ public partial class ScriptService : IScriptService
                             return;
                         }
 
+                        if (waitHeartbeat.ShouldReport(sw.Elapsed))
+                        {
+                            TaskControl.Logger.LogInformation(
+                                "等待进入主界面：已等待 {ElapsedSeconds:0} 秒，剩余超时预算 {RemainingSeconds:0} 秒，截图器={DispatcherEnabled}，上下文={ContextInitialized}，游戏前台={GameActive}，最近界面={ObservedUi}，缓存帧年龄={CachedFrameAgeSeconds:0.0} 秒",
+                                sw.Elapsed.TotalSeconds,
+                                Math.Max(0, 300 - sw.Elapsed.TotalSeconds),
+                                homePageViewModel.TaskDispatcherEnabled,
+                                TaskContext.Instance().IsInitialized,
+                                SystemControl.IsGenshinImpactActiveByProcess(),
+                                lastObservedUi,
+                                lastCachedFrameAge.TotalSeconds);
+                        }
+
                         if (!homePageViewModel.TaskDispatcherEnabled || !TaskContext.Instance().IsInitialized)
                         {
                             await Task.Delay(500);
                             continue;
                         }
 
-                        using var content = TaskControl.CaptureToRectArea();
-                        if (Bv.IsInMainUi(content) || Bv.IsInAnyClosableUi(content) || Bv.IsInDomain(content))
+                        var latestFrame = TaskTriggerDispatcher.Instance().TryCloneLatestFrame(out lastCachedFrameAge);
+                        if (latestFrame == null)
+                        {
+                            lastObservedUi = "无可用缓存帧";
+                            await Task.Delay(500);
+                            continue;
+                        }
+
+                        using var content = new CaptureContent(latestFrame, 0, 0);
+                        var imageRegion = content.CaptureRectArea;
+                        var isMainUi = Bv.IsInMainUi(imageRegion);
+                        var isClosableUi = !isMainUi && Bv.IsInAnyClosableUi(imageRegion);
+                        var isDomain = !isMainUi && !isClosableUi && Bv.IsInDomain(imageRegion);
+                        lastObservedUi = isMainUi
+                            ? "主界面"
+                            : isClosableUi
+                                ? "可关闭界面"
+                                : isDomain
+                                    ? "秘境界面"
+                                    : "未识别启动界面";
+                        if (isMainUi || isClosableUi || isDomain)
                         {
                             return;
                         }
@@ -676,7 +741,7 @@ public partial class ScriptService : IScriptService
                             if (!SystemControl.IsGenshinImpactActiveByProcess())
                             {
                                 loseFocusCount++;
-                                if (loseFocusCount>50 && loseFocusCount<100)
+                                if (loseFocusCount > 50 && loseFocusCount < 100)
                                 {
                                     SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
                                 }
@@ -736,6 +801,35 @@ internal static class GameStartupInputRecovery
             failure = exception;
             return false;
         }
+    }
+}
+
+internal sealed class GameStartupWaitHeartbeat
+{
+    private readonly TimeSpan _interval;
+    private TimeSpan _nextReport;
+
+    internal GameStartupWaitHeartbeat(TimeSpan interval)
+    {
+        if (interval <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(interval));
+        }
+        _interval = interval;
+        _nextReport = interval;
+    }
+
+    internal bool ShouldReport(TimeSpan elapsed)
+    {
+        if (elapsed < _nextReport)
+        {
+            return false;
+        }
+        do
+        {
+            _nextReport += _interval;
+        } while (_nextReport <= elapsed);
+        return true;
     }
 }
 

@@ -58,6 +58,7 @@ public class GameLoadingTrigger : ITaskTrigger
     private DateTime _prevAgePromptOcrTime = DateTime.MinValue;
     private DateTime _prevDoorFallbackClickTime = DateTime.MinValue;
     private bool _agePromptTextMatched = false;
+    private bool _recognizedDoorClickSucceeded;
     private int _doorFallbackClickCount;
     private List<Region> _latestLoadingOcrRegions = [];
 
@@ -345,6 +346,7 @@ public class GameLoadingTrigger : ITaskTrigger
             }
 
             biliLoginClicked = true;
+            _recognizedDoorClickSucceeded = true;
             _logger.LogInformation("检测到开门按钮，已自动点击进入游戏");
             return;
         }
@@ -364,18 +366,15 @@ public class GameLoadingTrigger : ITaskTrigger
                                     loadingText.Contains("登录") ||
                                     loadingText.Contains("公告") ||
                                     loadingText.Contains("更新");
-            var fallbackInterval = hasDoorText
-                ? TimeSpan.FromSeconds(5)
-                : TimeSpan.FromSeconds(15);
-            var mayUseTimedFallback =
-                (DateTime.Now - _triggerStartTime) >= TimeSpan.FromSeconds(20);
-
-            if (!hasBlockingPrompt &&
-                (hasDoorText || mayUseTimedFallback) &&
-                (DateTime.Now - _prevDoorFallbackClickTime) >= fallbackInterval)
+            if (GameLoadingInputPolicy.ShouldUseCenterFallback(
+                    hasBlockingPrompt,
+                    hasDoorText,
+                    _recognizedDoorClickSucceeded,
+                    DateTime.Now - _triggerStartTime,
+                    DateTime.Now - _prevDoorFallbackClickTime,
+                    _doorFallbackClickCount))
             {
                 _prevDoorFallbackClickTime = DateTime.Now;
-                _doorFallbackClickCount++;
                 if (!GameLoadingInputPolicy.TryClick(
                         hasRecognizedTarget: false,
                         prepareInput: () =>
@@ -394,6 +393,7 @@ public class GameLoadingTrigger : ITaskTrigger
                     return;
                 }
 
+                _doorFallbackClickCount++;
                 _logger.LogInformation(
                     "自动开门兜底点击：方式={Mode}，次数={Count}",
                     hasDoorText ? "OCR" : "定时",

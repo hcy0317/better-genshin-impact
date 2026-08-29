@@ -69,7 +69,7 @@ public class CameraRotateTask(CancellationToken ct)
                 break;
             }
 
-            if (count > maxTryTimes)
+            if (count >= maxTryTimes)
             {
                 Logger.LogWarning("视角转动到目标角度超时，停止转动");
                 break;

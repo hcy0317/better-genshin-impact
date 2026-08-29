@@ -45,7 +45,7 @@ public class ResinStatus
             TemplateImageMat = GameTaskManager.LoadAssetImage("AutoFight", "original_resin_top_icon.png", systemInfo),
             DrawOnWindow = false
         }.InitTemplate();
-        using ImageRegion crop1 = region.DeriveCrop(new Rect((int)(1300 * assetScale), (int)(25 * assetScale), (int)(160 * assetScale), (int)(50 * assetScale)));   // 数字位数的不同导致了水平方向上宽泛的区域
+        using ImageRegion crop1 = region.DeriveCrop(GetOriginalResinSearchRect(assetScale));
         //Cv2.ImShow("test", crop1.SrcMat);
         //Cv2.WaitKey();
         var originalResinRes = crop1.Find(originalResinTopIconRa);
@@ -57,12 +57,7 @@ public class ResinStatus
         var originalResinCountRect = new Rect(crop1.X + originalResinRes.Right + (int)(25 * assetScale), (int)(37 * assetScale), (int)(110 * assetScale)/* 考虑最长的“200/200” */, (int)(24 * assetScale));
         using ImageRegion originalResinCountRegion = region.DeriveCrop(originalResinCountRect);
         string cnt1 = ocrService.OcrWithoutDetector(originalResinCountRegion.SrcMat);
-        var match = System.Text.RegularExpressions.Regex.Match(cnt1, @"(\d+)\s*[/17]\s*(2|20|200)");
-        if (match.Success)
-        {
-            var numericPart = match.Groups[1].Value;
-            status.OriginalResinCount = StringUtils.TryExtractPositiveInt(numericPart, 0);
-        }
+        status.OriginalResinCount = ParseOriginalResinCount(cnt1);
 
         // 2. 浓缩树脂
         int startX = crop1.X + originalResinRes.Left - (int)(180 * assetScale); // 从原粹树脂图标位置起算
@@ -86,10 +81,41 @@ public class ResinStatus
             //Cv2.ImShow("bitwise", bitwise);
             //Cv2.WaitKey();
             string cnt40 = ocrService.OcrWithoutDetector(bitwiseNot);
-            status.CondensedResinCount = StringUtils.TryExtractPositiveInt(cnt40, 0);
+            status.CondensedResinCount = ParseCondensedResinCount(cnt40);
         }
 
         return status;
+    }
+
+    internal static int ParseOriginalResinCount(string? text)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            text ?? string.Empty,
+            @"(\d+)\s*[/17]\s*(2|20|200)");
+        if (!match.Success)
+        {
+            throw new InvalidOperationException($"无法识别原粹树脂数量：{text}");
+        }
+        return int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal static int ParseCondensedResinCount(string? text)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(text ?? string.Empty, @"\d+");
+        if (!match.Success)
+        {
+            throw new InvalidOperationException($"无法识别浓缩树脂数量：{text}");
+        }
+        return int.Parse(match.Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal static Rect GetOriginalResinSearchRect(double assetScale)
+    {
+        return new Rect(
+            (int)(1200 * assetScale),
+            (int)(25 * assetScale),
+            (int)(580 * assetScale),
+            (int)(50 * assetScale));
     }
 
     public void Print(ILogger logger)

@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Script.Utils;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask;
 using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.Core.Script.Dependence;
@@ -60,6 +61,10 @@ public class AutoPathingScript
         }
         catch (Exception e)
         {
+            var context = string.IsNullOrWhiteSpace(sourcePath)
+                ? "地图追踪执行失败"
+                : $"地图追踪执行失败-{System.IO.Path.GetFileName(sourcePath)}";
+            TaskFailureDiagnostics.CaptureScreenshotOnce(e, context);
             _logFailure("执行地图追踪时候发生错误", e);
             throw;
         }

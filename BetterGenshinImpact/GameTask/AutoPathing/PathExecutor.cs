@@ -793,6 +793,10 @@ public partial class PathExecutor
         Logger.LogDebug("粗略接近途经点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
         await WaitUntilRotatedTo(targetOrientation, 5);
         moveToStartTime = DateTime.UtcNow;
+        var progressHeartbeat = new PathProgressHeartbeat(moveToStartTime, TimeSpan.FromSeconds(15));
+        var movementWatchdog = new PathMovementWatchdog(
+            () => moveToStartTime,
+            TimeSpan.FromSeconds(60));
         var lastPositionRecord = DateTime.UtcNow;
         var fastMode = false;
         var prevPositions = new List<Point2f>();
@@ -835,13 +839,43 @@ public partial class PathExecutor
                  }
 
                  additionalTimeInMs = additionalTimeInMs + 1000;//当做起步补偿
-             }
+            }
             var distance = Navigation.GetDistance(waypoint, position);
+            var progressObservedAt = DateTime.UtcNow;
             Debug.WriteLine($"接近目标点中，距离为{distance}");
             if (distance < 4)
             {
                 Logger.LogDebug("到达路径点附近");
                 break;
+            }
+
+            if (movementWatchdog.ShouldAbort(
+                    waypoint.MoveMode == MoveModeEnum.Climb.Code,
+                    progressObservedAt))
+            {
+                Logger.LogWarning(
+                    "攀爬途经点等待超时：耗时={ElapsedSeconds:F1}s，当前位置=({CurrentX:F1},{CurrentY:F1})，目标位置=({TargetX:F1},{TargetY:F1})，剩余距离={Distance:F1}；保留路线并重试当前分段",
+                    (progressObservedAt - moveToStartTime).TotalSeconds,
+                    position.X,
+                    position.Y,
+                    waypoint.GameX,
+                    waypoint.GameY,
+                    distance);
+                throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
+            }
+
+            if (progressHeartbeat.ShouldReport(progressObservedAt))
+            {
+                Logger.LogDebug(
+                    "途经点仍在接近中：耗时={ElapsedSeconds:F1}s，移动模式={MoveMode}，当前位置=({CurrentX:F1},{CurrentY:F1})，目标位置=({TargetX:F1},{TargetY:F1})，剩余距离={Distance:F1}，帧数={FrameCount}",
+                    (progressObservedAt - moveToStartTime).TotalSeconds,
+                    waypoint.MoveMode,
+                    position.X,
+                    position.Y,
+                    waypoint.GameX,
+                    waypoint.GameY,
+                    distance,
+                    num);
             }
 
             if (distance > 500)
@@ -1112,13 +1146,13 @@ public partial class PathExecutor
         Logger.LogDebug("精确接近目标点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
 
         var stepsTaken = 0;
+        var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
         while (!ct.IsCancellationRequested)
         {
             stepsTaken++;
             if (stepsTaken > 25)
             {
-                Logger.LogWarning("精确接近超时");
-                break;
+                throw new RetryException("精确接近目标点超时，重试当前路线分段");
             }
 
             using var screen = CaptureToRectArea();
@@ -1133,7 +1167,18 @@ public partial class PathExecutor
             }
 
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
-            await WaitUntilRotatedTo(targetOrientation, 2);
+            var rotated = await WaitUntilRotatedTo(targetOrientation, 2, maxTryTimes: 20);
+            if (rotationPolicy.Observe(rotated))
+            {
+                Logger.LogWarning(
+                    "精确接近连续 {Failures} 次无法完成视角转向，停止小碎步接近，避免在错误方向空转",
+                    rotationPolicy.ConsecutiveFailures);
+                throw new RetryException("精确接近连续转向失败，重试当前路线分段");
+            }
+            if (!rotated)
+            {
+                continue;
+            }
             // 小碎步接近
             Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
             Thread.Sleep(60);
@@ -1369,14 +1414,14 @@ public partial class PathExecutor
         return (position,time);
     }
 
-    private async Task WaitUntilRotatedTo(int targetOrientation, int maxDiff)
+    private async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes = 50)
     {
-        if (await _rotateTask.WaitUntilRotatedTo(targetOrientation, maxDiff))
+        if (await _rotateTask.WaitUntilRotatedTo(targetOrientation, maxDiff, maxTryTimes))
         {
-            return;
+            return true;
         }
         await ResolveAnomalies();
-        await _rotateTask.WaitUntilRotatedTo(targetOrientation, maxDiff);
+        return await _rotateTask.WaitUntilRotatedTo(targetOrientation, maxDiff, maxTryTimes);
     }
 
     /**

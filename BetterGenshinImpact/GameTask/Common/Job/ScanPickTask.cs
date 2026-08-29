@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition.ONNX;
+using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoPick.Assets;
@@ -24,7 +25,9 @@ namespace BetterGenshinImpact.GameTask.Common.Job;
 /// </summary>
 public class ScanPickTask
 {
-    private readonly BgiYoloPredictor _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiWorld);
+    private readonly BgiYoloPredictor _predictor = App.ServiceProvider
+        .GetRequiredService<BgiOnnxFactory>()
+        .GetOrCreateYoloPredictor(BgiOnnxModel.BgiWorld);
     private readonly double _dpi = TaskContext.Instance().DpiScale;
     private readonly RECT _realCaptureRect = TaskContext.Instance().SystemInfo.CaptureAreaRect;
 
@@ -33,9 +36,10 @@ public class ScanPickTask
     {
         try
         {
+            await _predictor.WarmUpAsync(Logger, ct);
             await DoOnce(ct, seconds);
         }
-        catch (Exception e)
+        catch (Exception e) when (e is not OperationCanceledException and not NormalEndException)
         {
             Logger.LogDebug(e, "拾取周边物品异常");
             Logger.LogError("拾取周边物品异常: {Msg}", e.Message);
@@ -51,6 +55,12 @@ public class ScanPickTask
         var sec = seconds ?? TaskContext.Instance().Config.AutoFightConfig.PickDropsAfterFightSeconds;
         Stopwatch timeoutStopwatch = Stopwatch.StartNew();
         TimeSpan finishTime = TimeSpan.FromSeconds(sec);
+        var completionPolicy = CreateCompletionPolicy(sec);
+        var stallPolicy = new LootTargetStallPolicy(
+            requiredRepeatedPickupAttempts: 6,
+            coordinateTolerance: 40);
+        var stalledCandidateRecoveries = 0;
+        var stoppedByStableEmptyCoverage = false;
 
         Simulation.SendInput.SimulateAction(GIActions.Drop);
         await ResetCamera(ct);
@@ -75,11 +85,22 @@ public class ScanPickTask
                 }
             }
 
-            // 一整圈都没有发现物品时，不要提前结束扫描，继续按配置时长扫描
             if (!hasItems)
             {
+                if (completionPolicy.ObserveSweep(foundItems: false, timeoutStopwatch.Elapsed))
+                {
+                    stoppedByStableEmptyCoverage = true;
+                    Logger.LogInformation(
+                        "连续 {EmptySweeps} 轮完整扫描未识别到可拾取物品，提前结束拾取扫描（耗时 {Elapsed:F1} 秒）",
+                        completionPolicy.ConsecutiveEmptySweeps,
+                        timeoutStopwatch.Elapsed.TotalSeconds);
+                    break;
+                }
+
                 continue;
             }
+
+            completionPolicy.ObserveSweep(foundItems: true, timeoutStopwatch.Elapsed);
 
             // 扫圈中命中物品时相机已转到物品方向，保持当前视角直接移动；
             // 检测坐标只在当前视角下有效，回正相机会让物品移出视野、坐标失效
@@ -91,21 +112,54 @@ public class ScanPickTask
             var movementDecision = GetMovementDecision(toPickItem, frameSize.Width, frameSize.Height);
             if (movementDecision.Pickup)
             {
+                if (stallPolicy.Observe(toPickItem, pickupAttempted: true))
+                {
+                    stalledCandidateRecoveries++;
+                    Logger.LogInformation(
+                        "同一拾取候选连续 {Attempts} 次触发拾取仍未消失，转动视角跳过（恢复 {Recovery}/3）",
+                        6,
+                        stalledCandidateRecoveries);
+                    stallPolicy.Reset();
+                    if (stalledCandidateRecoveries >= 3)
+                    {
+                        stoppedByStableEmptyCoverage = true;
+                        Logger.LogInformation(
+                            "拾取候选连续卡住 3 次，视为无可达战利品并提前结束（耗时 {Elapsed:F1} 秒）",
+                            timeoutStopwatch.Elapsed.TotalSeconds);
+                        break;
+                    }
+
+                    Simulation.SendInput.Mouse.MoveMouseBy(400, 0);
+                    await Delay(300, ct);
+                    continue;
+                }
+
                 Simulation.ReleaseAllKey();
                 AutoPickAssets.Get(frameSize.Width, frameSize.Height, TaskContext.Instance().Config.AutoPickConfig.PickKey)
                     .PressPickKey();
             }
             else
             {
+                stallPolicy.Observe(toPickItem, pickupAttempted: false);
                 MoveTowardsItem(toPickItem, frameSize.Width, frameSize.Height);
             }
 
             await Delay(200, ct);
             Simulation.SendInput.SimulateAction(GIActions.Drop);
         }
-        Logger.LogInformation("超时或视野内没有可拾取物品，结束扫描");
+        if (!stoppedByStableEmptyCoverage)
+        {
+            Logger.LogInformation("达到配置扫描时长 {Seconds} 秒，结束拾取扫描", sec);
+        }
         Simulation.ReleaseAllKey();
         Simulation.SendInput.SimulateAction(GIActions.Drop);
+    }
+
+    internal static LootScanCompletionPolicy CreateCompletionPolicy(int configuredSeconds)
+    {
+        return new LootScanCompletionPolicy(
+            requiredEmptySweeps: 1,
+            minimumScanDuration: TimeSpan.FromSeconds(Math.Min(configuredSeconds, 3)));
     }
 
     /// <summary>

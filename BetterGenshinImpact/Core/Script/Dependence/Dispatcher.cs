@@ -33,6 +33,18 @@ public class Dispatcher
 {
     private readonly ILogger<Dispatcher> _logger = App.GetLogger<Dispatcher>();
 
+    internal static ExpandoObject ToScriptDictionary(IReadOnlyDictionary<string, int> values)
+    {
+        dynamic expando = new ExpandoObject();
+        var scriptValues = (IDictionary<string, object>)expando;
+        foreach (var (name, count) in values)
+        {
+            scriptValues[name] = count;
+        }
+
+        return expando;
+    }
+
     private readonly object _config;
 
     public Dispatcher(object config)
@@ -297,13 +309,7 @@ public class Dispatcher
                     }
                     else
                     {
-                        dynamic expando = new ExpandoObject();
-                        var expandoDict = (IDictionary<string, object>)expando;
-                        foreach (var kvp in (Dictionary<string, int>)result)
-                        {
-                            expandoDict[kvp.Key] = kvp.Value;
-                        }
-                        return expandoDict;
+                        return ToScriptDictionary((Dictionary<string, int>)result);
                     }
                 }
             default:
@@ -329,7 +335,7 @@ public class Dispatcher
     /// <param name="param">秘境任务参数</param>  
     /// <param name="customCt">自定义取消令牌</param>  
     /// <returns></returns>  
-    public async Task<Dictionary<string, int>> RunAutoDomainTask(AutoDomainParam param, CancellationToken? customCt = null)
+    public async Task<object> RunAutoDomainTask(AutoDomainParam param, CancellationToken? customCt = null)
     {  
         if (param == null)  
         {  
@@ -337,7 +343,8 @@ public class Dispatcher
         }  
   
         CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;  
-        return await new AutoDomainTask(param).Start(cancellationToken);
+        Dictionary<string, int> rewards = await new AutoDomainTask(param).Start(cancellationToken);
+        return ToScriptDictionary(rewards);
     }  
 
     /// <summary>
@@ -346,7 +353,7 @@ public class Dispatcher
     /// <param name="param">自动首领讨伐任务参数</param>
     /// <param name="customCt">自定义取消令牌</param>
     /// <returns></returns>
-    public async Task<Dictionary<string, int>> RunAutoBossTask(AutoBossParam param, CancellationToken? customCt = null)
+    public async Task<object> RunAutoBossTask(AutoBossParam param, CancellationToken? customCt = null)
     {
         if (param == null)
         {
@@ -354,7 +361,8 @@ public class Dispatcher
         }
 
         CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;
-        return await new AutoBossTask(param).Start(cancellationToken);
+        Dictionary<string, int> rewards = await new AutoBossTask(param).Start(cancellationToken);
+        return ToScriptDictionary(rewards);
     }
 
     /// <summary>  
@@ -458,14 +466,7 @@ public class Dispatcher
         }
         else
         {
-            dynamic expando = new ExpandoObject();
-            var expandoDict = (IDictionary<string, object>)expando;
-            foreach (var kvp in (Dictionary<string, int>)result)
-            {
-                expandoDict[kvp.Key] = kvp.Value;
-            }
-
-            return expandoDict;
+            return ToScriptDictionary((Dictionary<string, int>)result);
         }
     }
 }

@@ -96,6 +96,7 @@ public class TaskControl
 
     private static void CheckAndActivateGameWindow()
     {
+        ThrowIfGameProcessExited();
         var activeProcessName = SystemControl.GetActiveByProcess();
         if (RemoteSessionInputPolicy.ShouldActivateWithoutForegroundVerification(
                 System.Windows.Forms.SystemInformation.TerminalServerSession,
@@ -118,14 +119,24 @@ public class TaskControl
         //未激活则尝试恢复窗口
         while (!SystemControl.IsGenshinImpactActiveByProcess())
         {
-            if (count >= 10 && count % 10 == 0)
+            ThrowIfGameProcessExited();
+            var name = SystemControl.GetActiveByProcess();
+            if (RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
+                    System.Windows.Forms.SystemInformation.TerminalServerSession,
+                    name))
+            {
+                Logger.LogInformation("远程会话 SearchHost 抢占焦点，释放 Win 键并关闭搜索浮层后恢复原神窗口");
+                DismissTransientShellWindow();
+                SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
+                Thread.Sleep(300);
+            }
+            else if (count >= 10 && count % 10 == 0)
             {
                 Logger.LogInformation("多次尝试未恢复，尝试最小化后激活窗口！");
                 SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
             }
             else
             {
-                var name = SystemControl.GetActiveByProcess();
                 Logger.LogInformation("当前获取焦点的窗口为: {Name}，不是原神，尝试恢复窗口", name);
                 SystemControl.FocusWindow(TaskContext.Instance().GameHandle);
             }
@@ -133,6 +144,40 @@ public class TaskControl
             count++;
             Thread.Sleep(1000);
         }
+    }
+
+    private static void DismissTransientShellWindow()
+    {
+        var foregroundWindow = User32.GetForegroundWindow();
+        if (foregroundWindow == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var foregroundProcessName = SystemControl.GetProcessByHandle(
+            foregroundWindow.DangerousGetHandle())?.ProcessName;
+        if (!RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
+                System.Windows.Forms.SystemInformation.TerminalServerSession,
+                foregroundProcessName))
+        {
+            Logger.LogInformation(
+                "SearchHost 关闭前焦点已变化为 {ProcessName}，跳过 Escape 投递",
+                foregroundProcessName ?? "Unknown");
+            return;
+        }
+
+        User32.PostMessage(foregroundWindow, User32.WindowMessage.WM_KEYUP, (nint)User32.VK.VK_LWIN, 0);
+        User32.PostMessage(foregroundWindow, User32.WindowMessage.WM_KEYUP, (nint)User32.VK.VK_RWIN, 0);
+        User32.PostMessage(foregroundWindow, User32.WindowMessage.WM_KEYDOWN, (nint)User32.VK.VK_ESCAPE, 0);
+        User32.PostMessage(foregroundWindow, User32.WindowMessage.WM_KEYUP, (nint)User32.VK.VK_ESCAPE, 0);
+    }
+
+    private static void ThrowIfGameProcessExited()
+    {
+        var context = TaskContext.Instance();
+        GameProcessExitGuard.ThrowIfExited(
+            context.IsInitialized,
+            () => context.SystemInfo.GameProcess.HasExited);
     }
 
     public static void Sleep(int millisecondsTimeout, CancellationToken ct)
@@ -279,32 +324,7 @@ public class TaskControl
 
     public static Mat CaptureGameImage(IGameCapture? gameCapture)
     {
-        var captureFrame = gameCapture?.Capture();
-        var image = captureFrame?.Frame;
-        if (image == null)
-        {
-            captureFrame?.Dispose();
-            Logger.LogWarning("截图失败!");
-            // 重试3次
-            for (var i = 0; i < 3; i++)
-            {
-                captureFrame = gameCapture?.Capture();
-                image = captureFrame?.Frame;
-                if (image != null)
-                {
-                    return image;
-                }
-
-                captureFrame?.Dispose();
-                Sleep(30);
-            }
-
-            throw new Exception("尝试多次后,截图失败!");
-        }
-        else
-        {
-            return image;
-        }
+        return GameCaptureRetry.Capture(gameCapture, Thread.Sleep, message => Logger.LogWarning(message));
     }
 
     public static Mat? CaptureGameImageNoRetry(IGameCapture? gameCapture)

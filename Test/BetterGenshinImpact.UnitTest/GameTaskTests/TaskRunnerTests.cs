@@ -1,6 +1,8 @@
 using System.Reflection;
 using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
+using BetterGenshinImpact.GameTask.Common.Job;
+using BetterGenshinImpact.GameTask.LogParse;
 using BetterGenshinImpact.GameTask.TaskProgress;
 using BetterGenshinImpact.Service;
 using BetterGenshinImpact.Service.Interface;
@@ -58,6 +60,146 @@ public class TaskRunnerTests
             failures.ThrowIfAny("one dragon failed");
         });
         Assert.Equal(new Exception[] { first, second }, report.InnerExceptions);
+    }
+
+    [Fact]
+    public async Task SuccessfulStateRecoveryAllowsManagedAutomationToContinue()
+    {
+        var taskFailure = new InvalidOperationException("map could not open");
+        var attempted = new List<string>();
+
+        await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+            taskFailure,
+            () =>
+            {
+                attempted.Add("recover main ui");
+                return Task.CompletedTask;
+            });
+        attempted.Add("next project");
+
+        Assert.Equal(["recover main ui", "next project"], attempted);
+    }
+
+    [Fact]
+    public async Task FailedStateRecoveryPreservesBothFailuresAndStopsLaterWork()
+    {
+        var taskFailure = new InvalidOperationException("map could not open");
+        var recoveryFailure = new TimeoutException("main ui recovery timed out");
+        var attemptedLaterWork = false;
+
+        var report = await Assert.ThrowsAsync<TaskFailureRecoveryException>(async () =>
+        {
+            await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+                taskFailure,
+                () => Task.FromException(recoveryFailure));
+            attemptedLaterWork = true;
+        });
+
+        Assert.False(attemptedLaterWork);
+        Assert.Equal(new Exception[] { taskFailure, recoveryFailure }, report.InnerExceptions);
+    }
+
+    [Fact]
+    public void FailedStateRecoveryRemainsFatalOutsidePropagationMode()
+    {
+        var recoveryFailure = new TaskFailureRecoveryException(
+            new InvalidOperationException("project failed"),
+            new TimeoutException("recovery failed"));
+
+        var termination = TaskRunnerFailurePolicy.GetTerminationException(
+            recoveryFailure,
+            isContinuousRunGroup: false,
+            propagateExceptions: false);
+
+        Assert.Same(recoveryFailure, termination);
+    }
+
+    [Theory]
+    [MemberData(nameof(NormalTerminationExceptions))]
+    public async Task StateRecoveryNeverConvertsTerminationIntoManagedFailure(Exception termination)
+    {
+        var recoveryAttempted = false;
+
+        var report = await Assert.ThrowsAsync(
+            termination.GetType(),
+            () => TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+                termination,
+                () =>
+                {
+                    recoveryAttempted = true;
+                    return Task.CompletedTask;
+                }));
+
+        Assert.Same(termination, report);
+        Assert.False(recoveryAttempted);
+    }
+
+    [Fact]
+    public void ReturnMainUiRecoveryMustRejectAnUnverifiedFinalState()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => ReturnMainUiRecoveryGuard.ThrowIfNotRecovered(false, 8));
+
+        Assert.Contains("8", exception.Message, StringComparison.Ordinal);
+        ReturnMainUiRecoveryGuard.ThrowIfNotRecovered(true, 8);
+    }
+
+    [Fact]
+    public void ReturnMainUiPassiveRecovery_ShouldUseTenSecondBoundedGraceWindow()
+    {
+        var policy = new ReturnMainUiPassiveRecoveryPolicy(
+            timeout: TimeSpan.FromSeconds(10),
+            heartbeatInterval: TimeSpan.FromSeconds(5));
+
+        Assert.False(policy.IsTimedOut(TimeSpan.FromSeconds(9.9)));
+        Assert.True(policy.IsTimedOut(TimeSpan.FromSeconds(10)));
+        Assert.True(policy.ShouldLogHeartbeat(TimeSpan.FromSeconds(5)));
+        Assert.False(policy.ShouldLogHeartbeat(TimeSpan.FromSeconds(5.1)));
+    }
+
+    [Fact]
+    public void FailedExecutionRecordReceivesAnEndTimeWithoutBecomingSuccessful()
+    {
+        var record = new ExecutionRecord
+        {
+            StartTime = new DateTime(2026, 8, 25, 4, 10, 0),
+            ServerStartTime = new DateTimeOffset(2026, 8, 25, 4, 10, 0, TimeSpan.FromHours(8))
+        };
+        var endTime = new DateTime(2026, 8, 25, 4, 12, 30);
+        var serverEndTime = new DateTimeOffset(2026, 8, 25, 4, 12, 30, TimeSpan.FromHours(8));
+
+        ExecutionRecordFinalizer.Complete(record, serverEndTime, endTime);
+
+        Assert.Equal(endTime, record.EndTime);
+        Assert.Equal(serverEndTime, record.ServerEndTime);
+        Assert.False(record.IsSuccessful);
+    }
+
+    [Fact]
+    public void FailureScreenshotIsCapturedOnceAcrossNestedReportingBoundaries()
+    {
+        var original = new InvalidOperationException("project failed");
+        var outer = new AggregateException("group failed", original);
+        var captures = new List<string>();
+
+        TaskFailureDiagnostics.CaptureScreenshotOnce(original, "project", captures.Add);
+        TaskFailureDiagnostics.CaptureScreenshotOnce(outer, "group", captures.Add);
+
+        Assert.Equal(["project"], captures);
+    }
+
+    [Fact]
+    public void FailureScreenshotErrorsNeverReplaceTheOriginalFailure()
+    {
+        var original = new InvalidOperationException("project failed");
+
+        var exception = Record.Exception(() =>
+            TaskFailureDiagnostics.CaptureScreenshotOnce(
+                original,
+                "project",
+                _ => throw new IOException("disk full")));
+
+        Assert.Null(exception);
     }
 
     [Theory]
@@ -139,6 +281,34 @@ public class TaskRunnerTests
 
         Assert.Contains("存在正在运行中的独立任务", exception.Message);
         TaskRunnerFailurePolicy.ThrowIfLockUnavailable(propagateExceptions: false);
+    }
+
+    [Fact]
+    public async Task StartupContentionDoesNotReplaceTheRunningTaskCancellationOwner()
+    {
+        using var semaphore = new SemaphoreSlim(0, 1);
+        var cancellationInitializationCount = 0;
+
+        var acquired = await TaskRunnerStartupGate.TryAcquireAsync(
+            semaphore,
+            () => Interlocked.Increment(ref cancellationInitializationCount));
+
+        Assert.False(acquired);
+        Assert.Equal(0, cancellationInitializationCount);
+    }
+
+    [Fact]
+    public async Task StartupGateReleasesOwnershipWhenCancellationInitializationFails()
+    {
+        using var semaphore = new SemaphoreSlim(1, 1);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            TaskRunnerStartupGate.TryAcquireAsync(
+                semaphore,
+                () => throw new InvalidOperationException("initialization failed")));
+
+        Assert.True(await semaphore.WaitAsync(0));
+        semaphore.Release();
     }
 
     [Theory]

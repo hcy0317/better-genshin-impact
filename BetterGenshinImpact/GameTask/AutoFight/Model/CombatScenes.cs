@@ -48,7 +48,6 @@ public class CombatScenes : IDisposable
     public MultiGameStatus? CurrentMultiGameStatus { set; get; }
 
     private readonly BgiYoloPredictor _predictor;
-    private readonly bool _ownsPredictor;
 
     private readonly AutoFightAssets _autoFightAssets;
 
@@ -60,13 +59,12 @@ public class CombatScenes : IDisposable
     {
         if (predictor == null)
         {
-            _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiAvatarSide);
-            _ownsPredictor = true;
+            _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>()
+                .GetOrCreateYoloPredictor(BgiOnnxModel.BgiAvatarSide);
         }
         else
         {
             _predictor = predictor;
-            _ownsPredictor = false;
         }
         _systemInfo = systemInfo ?? TaskContext.Instance().SystemInfo;
         var captureRect = _systemInfo.ScaleMax1080PCaptureRect;
@@ -292,7 +290,7 @@ public class CombatScenes : IDisposable
     {
         SpeedTimer speedTimer = new();
         speedTimer.Record("角色侧面头像图像转换");
-        var result = _predictor.Predictor.Classify(img);
+        var result = _predictor.UsePredictor(predictor => predictor.Classify(img));
         speedTimer.Record("角色侧面头像分类识别");
         Debug.WriteLine($"角色侧面头像识别结果：{result}");
         speedTimer.DebugPrint();
@@ -656,9 +654,6 @@ public class CombatScenes : IDisposable
 
     public void Dispose()
     {
-        if (_ownsPredictor)
-        {
-            _predictor.Dispose();
-        }
+        GC.SuppressFinalize(this);
     }
 }

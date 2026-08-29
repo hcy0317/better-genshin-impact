@@ -1315,6 +1315,7 @@ public class AutoLeyLineOutcropTask : ISoloTask
 
     private async Task<bool> RecognizeTextInRegion(int timeoutMs)
     {
+        AutoFightSeek.ResetSeekState();
         var start = DateTime.UtcNow;
         var noTextCount = 0;
         var fightTextDetectedAt = DateTime.MinValue;

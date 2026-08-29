@@ -54,6 +54,7 @@ public class TpTask
 
     private const double DefaultDisplayTpPointZoomLevel = 4.4; // 传送点显示时的默认地图比例
     private const double MoonCanonDisplayTpPointZoomLevel = 3.0;
+    private const double TeleportDisplayZoomMeasurementTolerance = 0.1;
     private const int DefaultBigMapOpenTimeoutMs = 2400;
     private const int MoonCanonBigMapOpenTimeoutMs = 7000;
     private const int UiRecognitionPollIntervalMs = 40;
@@ -106,9 +107,10 @@ public class TpTask
     private const int TeleportPanelMinimumTimeoutMs = 900;
     private const int TeleportConfirmTimeoutMs = 4000;
     private const int SwitchAreaCandidateTimeoutMs = 1500;
-    private const int SwitchAreaSelectionTimeoutMs = 600;
+    private const int SwitchAreaSelectionTimeoutMs = 1000;
     private const int SwitchAreaSelectionMinimumWaitMs = 120;
     private const int SwitchAreaSelectionStableChecks = 2;
+    private const int SwitchAreaSelectionMaxClickAttempts = 3;
     private const int TeleportTimeoutMs = 60_000;
     private const int TeleportLoadingPollIntervalMs = 100;
     private const int TeleportMinimumCompletionMs = 1000;
@@ -607,7 +609,9 @@ public class TpTask
                 {
                     if (!IsTeleportPointDisplayZoomLevelReached(evaluation.View.ZoomLevel, mapName))
                     {
-                        var displayTpPointZoomLevel = GetDisplayTpPointZoomLevel(mapName);
+                        var displayTpPointZoomLevel = GetDisplayTpPointZoomLevel(mapName)
+                                                      + _tpConfig.PrecisionThreshold
+                                                      + TeleportDisplayZoomMeasurementTolerance;
                         Logger.LogWarning(
                             "地图缩放未到传送点显示级别，已跳过点击：zoom={ZoomLevel:0.00} required<={RequiredZoomLevel:0.00}",
                             evaluation.View.ZoomLevel,
@@ -769,8 +773,21 @@ public class TpTask
 
     private bool IsTeleportPointDisplayZoomLevelReached(double zoomLevel, string mapName)
     {
-        return IsFinite(zoomLevel) &&
-               zoomLevel <= GetDisplayTpPointZoomLevel(mapName) + _tpConfig.PrecisionThreshold;
+        return IsTeleportPointDisplayZoomLevelReached(
+            zoomLevel,
+            GetDisplayTpPointZoomLevel(mapName),
+            _tpConfig.PrecisionThreshold);
+    }
+
+    internal static bool IsTeleportPointDisplayZoomLevelReached(
+        double zoomLevel,
+        double displayZoomLevel,
+        double precisionThreshold)
+    {
+        return IsFinite(zoomLevel)
+               && zoomLevel <= displayZoomLevel
+                              + precisionThreshold
+                              + TeleportDisplayZoomMeasurementTolerance;
     }
 
     private bool IsTeleportClickViewSafeAfterZoom(TeleportClickView clickView, double targetZoomLevel)
@@ -2510,12 +2527,53 @@ public class TpTask
                 .FirstOrDefault(r => IsSwitchAreaCandidateMatch(r.Text, minCountryLocalized, areaName));
             if (matchRect != null)
             {
-                var clickedCandidateRect = new Rect(matchRect.X, matchRect.Y, matchRect.Width, matchRect.Height);
-                matchRect.Click();
-                await WaitForAreaSelectionApplied(areaName, minCountryLocalized, clickedCandidateRect);
-                RememberAreaSwitchCenterPoint(areaName);
-                Logger.LogInformation("切换到区域：{Country}", areaName);
-                return true;
+                var applied = await AreaSelectionClickController.TryApplyAsync(
+                    SwitchAreaSelectionMaxClickAttempts,
+                    async attempt =>
+                    {
+                        using var retryCapture = CaptureToRectArea();
+                        var retryMatch = FindSwitchAreaCandidates(retryCapture)
+                            .OrderByDescending(candidate => candidate.Y)
+                            .FirstOrDefault(candidate => IsSwitchAreaCandidateMatch(
+                                candidate.Text,
+                                minCountryLocalized,
+                                areaName));
+                        if (retryMatch is null)
+                        {
+                            Logger.LogWarning(
+                                "区域选择器或候选已消失，不再复用旧坐标：{Country}，重试 {Attempt}/{MaxAttempts}",
+                                areaName,
+                                attempt,
+                                SwitchAreaSelectionMaxClickAttempts);
+                            return false;
+                        }
+                        var clickedCandidateRect = new Rect(
+                            retryMatch.X,
+                            retryMatch.Y,
+                            retryMatch.Width,
+                            retryMatch.Height);
+                        retryMatch.Click();
+                        var confirmed = await WaitForAreaSelectionApplied(
+                            areaName,
+                            minCountryLocalized,
+                            clickedCandidateRect);
+                        if (!confirmed)
+                        {
+                            Logger.LogWarning(
+                                "区域选择点击未确认：{Country}，重试 {Attempt}/{MaxAttempts}",
+                                areaName,
+                                attempt,
+                                SwitchAreaSelectionMaxClickAttempts);
+                        }
+
+                        return confirmed;
+                    });
+                if (applied)
+                {
+                    RememberAreaSwitchCenterPoint(areaName);
+                    Logger.LogInformation("切换到区域：{Country}", areaName);
+                    return true;
+                }
             }
 
             await Delay(UiRecognitionPollIntervalMs, ct);
@@ -2528,7 +2586,7 @@ public class TpTask
         return false;
     }
 
-    private async Task WaitForAreaSelectionApplied(
+    private async Task<bool> WaitForAreaSelectionApplied(
         string areaName,
         string localizedAreaName,
         Rect clickedCandidateRect)
@@ -2549,7 +2607,7 @@ public class TpTask
                 consecutiveMissingChecks++;
                 if (consecutiveMissingChecks >= SwitchAreaSelectionStableChecks)
                 {
-                    return;
+                    return true;
                 }
             }
             else
@@ -2560,7 +2618,8 @@ public class TpTask
             await Delay(UiRecognitionPollIntervalMs, ct);
         }
 
-        Logger.LogDebug("区域选择动画等待达到上限：{Country}", areaName);
+        Logger.LogWarning("区域选择动画等待达到上限且未确认生效：{Country}", areaName);
+        return false;
     }
 
     private static bool IsSameSwitchAreaCandidatePosition(Rect clickedCandidateRect, Region candidate)

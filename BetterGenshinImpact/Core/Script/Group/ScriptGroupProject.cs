@@ -101,8 +101,8 @@ public partial class ScriptGroupProject : ObservableObject
         get => _skipFlag;
         set => SetProperty(ref _skipFlag, value);
     }
-    
-    
+
+
     [ObservableProperty]
     private bool? _allowJsNotification = true;
 
@@ -232,121 +232,146 @@ public partial class ScriptGroupProject : ObservableObject
             Type = Type
         };
         ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
-        if (Type == "Javascript")
+        Exception? executionFailure = null;
+        try
         {
-            if (Project == null)
+            if (Type == "Javascript")
             {
-                throw new Exception("JS脚本未初始化");
-            }
-            JsScriptSettingsObject ??= new ExpandoObject();
-
-            // 清理配置中的无效值
-            CleanInvalidSettingsValues();
-
-            var pathingPartyConfig = GroupInfo?.Config.PathingConfig;
-            await Project.ExecuteAsync(JsScriptSettingsObject, pathingPartyConfig);
-        }
-        else if (Type == "KeyMouse")
-        {
-            // 加载并执行
-            var json = await File.ReadAllTextAsync(Global.Absolute(@$"User\KeyMouseScript\{Name}"));
-            await KeyMouseMacroPlayer.PlayMacro(json, CancellationContext.Instance.Cts.Token, false);
-        }
-        else if (Type == "Pathing")
-        {
-            // 加载并执行
-            var task = PathingTask.BuildFromFilePath(Path.Combine(MapPathingViewModel.PathJsonPath, FolderName, Name));
-            if (task == null)
-            {
-                return;
-            }
-            var pathingTask = new PathExecutor(CancellationContext.Instance.Cts.Token);
-            pathingTask.PartyConfig = GroupInfo?.Config.PathingConfig;
-            if (pathingTask.PartyConfig is null || pathingTask.PartyConfig.AutoPickEnabled)
-            {
-                TaskTriggerDispatcher.Instance().AddTrigger("AutoPick", null);
-            }
-            await pathingTask.Pathing(task);
-
-            
-            executionRecord.IsSuccessful = pathingTask.SuccessEnd;
-            OtherConfig.AutoRestart autoRestart = TaskContext.Instance().Config.OtherConfig.AutoRestartConfig;
-            if (!pathingTask.SuccessEnd)
-            {
-                TaskControl.Logger.LogWarning($"此追踪脚本未正常走完！");
-                if (autoRestart.Enabled && autoRestart.IsPathingFailureExceptional && !pathingTask.SuccessEnd)
+                if (Project == null)
                 {
-                    throw new Exception($"路径追踪任务未完全走完，判定失败，触发异常！");
+                    throw new Exception("JS脚本未初始化");
                 }
+                JsScriptSettingsObject ??= new ExpandoObject();
+
+                // 清理配置中的无效值
+                CleanInvalidSettingsValues();
+
+                var pathingPartyConfig = GroupInfo?.Config.PathingConfig;
+                await Project.ExecuteAsync(JsScriptSettingsObject, pathingPartyConfig);
             }
-
-            if (task.FarmingInfo.AllowFarmingCount)
+            else if (Type == "KeyMouse")
             {
-                var successFight = pathingTask.SuccessEnd;
-                var fightCount = 0;
-               
-                //未走完完整路径下，才校验打架次数
-                if (!successFight)
+                // 加载并执行
+                var json = await File.ReadAllTextAsync(Global.Absolute(@$"User\KeyMouseScript\{Name}"));
+                await KeyMouseMacroPlayer.PlayMacro(json, CancellationContext.Instance.Cts.Token, false);
+            }
+            else if (Type == "Pathing")
+            {
+                // 加载并执行
+                var task = PathingTask.BuildFromFilePath(Path.Combine(MapPathingViewModel.PathJsonPath, FolderName, Name));
+                if (task == null)
                 {
-                    fightCount = task.Positions.Count(pos => pos.Action == ActionEnum.Fight.Code);
-                    successFight = pathingTask.SuccessFight >= fightCount;
-                    //判断为锄地脚本
-                    if (task.FarmingInfo.PrimaryTarget!="disable")
-                    {
+                    return;
+                }
+                var pathingTask = new PathExecutor(CancellationContext.Instance.Cts.Token);
+                pathingTask.PartyConfig = GroupInfo?.Config.PathingConfig;
+                if (pathingTask.PartyConfig is null || pathingTask.PartyConfig.AutoPickEnabled)
+                {
+                    TaskTriggerDispatcher.Instance().AddTrigger("AutoPick", null);
+                }
+                await pathingTask.Pathing(task);
 
-                        if (autoRestart.Enabled
-                            &&autoRestart.IsFightFailureExceptional
-                            &&!successFight)
-                        {
-                            throw new Exception($"实际战斗次数({pathingTask.SuccessFight})<预期战斗次数（{fightCount}），判定失败，触发异常！");
-                        }
+
+                executionRecord.IsSuccessful = pathingTask.SuccessEnd;
+                OtherConfig.AutoRestart autoRestart = TaskContext.Instance().Config.OtherConfig.AutoRestartConfig;
+                if (!pathingTask.SuccessEnd)
+                {
+                    TaskControl.Logger.LogWarning($"此追踪脚本未正常走完！");
+                    if (autoRestart.Enabled && autoRestart.IsPathingFailureExceptional && !pathingTask.SuccessEnd)
+                    {
+                        throw new Exception($"路径追踪任务未完全走完，判定失败，触发异常！");
                     }
                 }
 
-                if (successFight)
+                if (task.FarmingInfo.AllowFarmingCount)
                 {
-                    //每日锄地记录
-                    FarmingStatsRecorder.RecordFarmingSession(task.FarmingInfo, new FarmingRouteInfo
+                    var successFight = pathingTask.SuccessEnd;
+                    var fightCount = 0;
+
+                    //未走完完整路径下，才校验打架次数
+                    if (!successFight)
                     {
-                        GroupName = GroupInfo?.Name ?? "",
-                        FolderName = FolderName,
-                        ProjectName = Name
-                    });
+                        fightCount = task.Positions.Count(pos => pos.Action == ActionEnum.Fight.Code);
+                        successFight = pathingTask.SuccessFight >= fightCount;
+                        //判断为锄地脚本
+                        if (task.FarmingInfo.PrimaryTarget != "disable")
+                        {
+
+                            if (autoRestart.Enabled
+                                && autoRestart.IsFightFailureExceptional
+                                && !successFight)
+                            {
+                                throw new Exception($"实际战斗次数({pathingTask.SuccessFight})<预期战斗次数（{fightCount}），判定失败，触发异常！");
+                            }
+                        }
+                    }
+
+                    if (successFight)
+                    {
+                        //每日锄地记录
+                        FarmingStatsRecorder.RecordFarmingSession(task.FarmingInfo, new FarmingRouteInfo
+                        {
+                            GroupName = GroupInfo?.Name ?? "",
+                            FolderName = FolderName,
+                            ProjectName = Name
+                        });
+                    }
+                    else
+                    {
+                        TaskControl.Logger.LogWarning($"实际战斗次数({pathingTask.SuccessFight})<预期战斗次数（{fightCount}），判定失败，此次不纳入成功锄地规划的统计上限！");
+                    }
+
                 }
-                else
-                {
-                    TaskControl.Logger.LogWarning($"实际战斗次数({pathingTask.SuccessFight})<预期战斗次数（{fightCount}），判定失败，此次不纳入成功锄地规划的统计上限！");
-                }
+
+
+
 
             }
-            
-
-            
-
-        }
-        else if (Type == "Shell")
-        {
-            ShellConfig? shellConfig = null;
-            if (GroupInfo?.Config.EnableShellConfig ?? false)
+            else if (Type == "Shell")
             {
-                shellConfig = GroupInfo?.Config.ShellConfig;
+                ShellConfig? shellConfig = null;
+                if (GroupInfo?.Config.EnableShellConfig ?? false)
+                {
+                    shellConfig = GroupInfo?.Config.ShellConfig;
+                }
+
+                var task = new ShellTask(ShellTaskParam.BuildFromConfig(Name, shellConfig ?? new ShellConfig()));
+                await task.Start(CancellationContext.Instance.Cts.Token);
             }
 
-            var task = new ShellTask(ShellTaskParam.BuildFromConfig(Name, shellConfig ?? new ShellConfig()));
-            await task.Start(CancellationContext.Instance.Cts.Token);
+            if (Type != "Pathing")
+            {
+                executionRecord.IsSuccessful = true;
+            }
         }
-
-        if (Type != "Pathing")
+        catch (Exception exception)
         {
-            executionRecord.IsSuccessful = true;
+            executionFailure = exception;
+            throw;
         }
-
-        executionRecord.ServerEndTime =
-            GroupInfo?.Config.PathingConfig.TaskCompletionSkipRuleConfig.IsBoundaryTimeBasedOnServerTime ?? false
-                ? ServerTimeHelper.GetServerTimeNow()
-                : DateTimeOffset.Now;
-        executionRecord.EndTime = DateTime.Now;
-        ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
+        finally
+        {
+            try
+            {
+                var serverEndTime =
+                    GroupInfo?.Config.PathingConfig.TaskCompletionSkipRuleConfig.IsBoundaryTimeBasedOnServerTime ?? false
+                        ? ServerTimeHelper.GetServerTimeNow()
+                        : DateTimeOffset.Now;
+                ExecutionRecordFinalizer.Complete(executionRecord, serverEndTime, DateTime.Now);
+                ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
+            }
+            catch (Exception recordFailure)
+            {
+                if (executionFailure is not null)
+                {
+                    throw new AggregateException(
+                        "任务执行失败且执行记录保存失败。",
+                        executionFailure,
+                        recordFailure);
+                }
+                throw;
+            }
+        }
     }
 
     partial void OnTypeChanged(string value)

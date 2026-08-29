@@ -16,6 +16,7 @@ using OpenCvSharp;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using Newtonsoft.Json;
@@ -138,34 +139,38 @@ internal class GoToSereniteaPotTask
             }
         }
 
-        for (int attempt = 0; attempt < 10; attempt++) // 尝试点击传送按钮
+        var teleportRequested = false;
+        var confirmationFailures = 0;
+        var teleportDiscovery = Stopwatch.StartNew();
+        while (confirmationFailures < 3
+               && teleportDiscovery.Elapsed < TimeSpan.FromSeconds(30))
         {
             using var ra = CaptureToRectArea();
             var teleportBtn = ra.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", ra));
             if (teleportBtn.IsExist())
             {
-                await Delay(300, ct);
-                teleportBtn.Click();
-                await Delay(500, ct);
-        
-                bool isReClickRequired = true;
-                for(int i = 0; i < 10; i++)     
+                // TeleportButton 匹配的是左侧 F 键提示图标，点击图标不会触发右侧“传送”按钮。
+                // 与 TpTask 的传送确认保持一致，直接发送 F，并要求地图连续两帧关闭后才确认生效。
+                Logger.LogDebug(
+                    "领取尘歌壶奖励: 发送 F 确认传送，尝试 {Attempt}/3。",
+                    confirmationFailures + 1);
+                Simulation.SendInput.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_F);
+                var progress = new SereniteaPotTeleportProgress();
+                teleportRequested = await NewRetry.WaitForAction(() =>
                 {
                     using var buttonCapture = CaptureToRectArea();
-                    teleportBtn = buttonCapture.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", buttonCapture));
-                    if (!teleportBtn.IsExist())     //传送按钮消失
-                    {
-                        isReClickRequired = false;
-                        break;
-                    }
-                    await Delay(500, ct);   // 传送按钮还在，等待游戏反应
+                    return progress.Observe(Bv.IsInBigMapUi(buttonCapture));
+                }, ct, retryTimes: 8, delayMs: 500);
+                if (teleportRequested)
+                {
+                    break;
                 }
 
-                if (isReClickRequired)
-                {
-                    continue;   //传送按钮未消失，再次尝试点击
-                }
-                break; // 找到并点击传送按钮、确认按钮消失后退出循环
+                confirmationFailures++;
+                Logger.LogWarning(
+                    "领取尘歌壶奖励: F 确认传送未生效，地图仍然打开，重试 {Attempt}/3。",
+                    confirmationFailures);
+                continue;
             }
         
             //未找到传送按钮，点击传送住宅按钮
@@ -177,22 +182,32 @@ internal class GoToSereniteaPotTask
                 continue; // 找到并点击传送住宅按钮后再次点击传送按钮
             }
         
-            if (attempt == 9)
-            {
-                Logger.LogWarning("领取尘歌壶奖励:{text}", "传送至尘歌壶失败");
-                return false;
-            }
-        
             Logger.LogInformation("领取尘歌壶奖励:{text}", "传送按钮、传送住宅按钮未找到，重试");
             await Delay(800, ct);    // 重试间隔
         }
-        
-        await NewRetry.WaitForAction(() =>
+
+        if (!teleportRequested)
+        {
+            var failure = new TimeoutException("尘歌壶地图传送确认连续 3 次未生效");
+            Logger.LogWarning(failure, "领取尘歌壶奖励: 传送至尘歌壶失败");
+            TaskFailureDiagnostics.CaptureScreenshotOnce(failure, "领取尘歌壶奖励-地图传送确认失败");
+            return false;
+        }
+
+        var enteredMainUi = await NewRetry.WaitForAction(() =>
         {
             using var capture = CaptureToRectArea();
             return Bv.IsInMainUi(capture);
-        }, ct);
-        return true;
+        }, ct, retryTimes: 45, delayMs: 1000);
+        if (enteredMainUi)
+        {
+            return true;
+        }
+
+        var loadingFailure = new TimeoutException("尘歌壶地图传送已确认，但 45 秒内未进入主界面");
+        Logger.LogWarning(loadingFailure, "领取尘歌壶奖励: 等待进入尘歌壶超时");
+        TaskFailureDiagnostics.CaptureScreenshotOnce(loadingFailure, "领取尘歌壶奖励-等待进入尘歌壶超时");
+        return false;
     }
 
     /// <summary>
@@ -299,14 +314,20 @@ internal class GoToSereniteaPotTask
             }
         }
         Logger.LogInformation("领取尘歌壶奖励:{text}", "寻找阿圆");
-        CancellationTokenSource treeCts = new();
-        await using var cancellationRegistration = ct.Register(treeCts.Cancel);
+        using var treeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         // 中键回正视角
         Simulation.SendInput.Mouse.MiddleButtonClick();
         await Delay(900, ct);
-        int continuousCount = 0;
+        var searchStopwatch = Stopwatch.StartNew();
+        var searchProgress = new SereniteaPotSearchProgress(
+            timeout: TimeSpan.FromSeconds(30),
+            heartbeatInterval: TimeSpan.FromSeconds(10));
+        var attempts = 0;
+        var consecutiveMisses = 0;
+        var lastObservation = "未识别到阿圆标识";
         while (!ct.IsCancellationRequested)
         {
+            attempts++;
             using var ra = CaptureToRectArea();
             var list = ra.FindMulti(new RecognitionObject
             {
@@ -319,69 +340,97 @@ internal class GoToSereniteaPotTask
             if (ayuanIcon == null)
             {
                 Simulation.SendInput.Mouse.MoveMouseBy(ra.Width / 10, 0);
-                continuousCount++;
+                consecutiveMisses++;
+                lastObservation = "未识别到阿圆标识";
             }
             else
             {
+                consecutiveMisses = 0;
                 // 判断阿圆的icon 是否在屏幕上四分之一 避免角色遮挡
                 if ((ayuanIcon.Height / 2 + ayuanIcon.Y) > (ra.Height / 4))
                 {
+                    lastObservation = "已识别标识，正在调整俯仰";
                     var moveY = (ayuanIcon.Height / 2 + ayuanIcon.Y) - (ra.Height / 4) + 100; // 加个偏移，快速收敛
                     Simulation.SendInput.Mouse.MoveMouseBy(0, (int)(moveY * TaskContext.Instance().DpiScale));
                     await Delay(300, ct);
-                    continue;
-                }
-                var middle = ra.Width / 2;
-                var ayuanMiddle = ayuanIcon.X + ayuanIcon.Width / 2;
-                if (Math.Abs(middle - ayuanMiddle) > ayuanIcon.Width*1.4) //放宽范围，尽快找到阿圆
-                {
-                    if(ayuanMiddle - middle > 0)
-                    {
-                        Simulation.SendInput.Mouse.MoveMouseBy((ayuanMiddle - middle)/2, 0);//未对正前小转
-                        await Delay(300, ct);
-                    }
-                    else if(ayuanMiddle - middle < 0)
-                    {
-                        Simulation.SendInput.Mouse.MoveMouseBy((ayuanMiddle - middle)*3/2, 0);//转过头回转加大距离
-                        await Delay(300, ct);
-                    }
                 }
                 else
                 {
-                    Logger.LogInformation("领取尘歌壶奖励:{text}", "寻找阿圆成功");
-                    break;
+                    var middle = ra.Width / 2;
+                    var ayuanMiddle = ayuanIcon.X + ayuanIcon.Width / 2;
+                    if (Math.Abs(middle - ayuanMiddle) > ayuanIcon.Width*1.4) //放宽范围，尽快找到阿圆
+                    {
+                        lastObservation = "已识别标识，正在调整水平朝向";
+                        if(ayuanMiddle - middle > 0)
+                        {
+                            Simulation.SendInput.Mouse.MoveMouseBy((ayuanMiddle - middle)/2, 0);//未对正前小转
+                            await Delay(300, ct);
+                        }
+                        else if(ayuanMiddle - middle < 0)
+                        {
+                            Simulation.SendInput.Mouse.MoveMouseBy((ayuanMiddle - middle)*3/2, 0);//转过头回转加大距离
+                            await Delay(300, ct);
+                        }
+                    }
+                    else
+                    {
+                        Logger.LogInformation("领取尘歌壶奖励:{text}", "寻找阿圆成功");
+                        break;
+                    }
                 }
                 await Delay(300, ct);
             }
             await Delay(500, ct); // 默认开启动态模糊，停顿时间太短的情况下，截图可能会模糊，导致识别失败
-            if (continuousCount > 180)
+            if (searchProgress.ShouldLogHeartbeat(searchStopwatch.Elapsed))
+            {
+                Logger.LogInformation(
+                    "领取尘歌壶奖励:寻找阿圆进行中，已等待 {Elapsed:F1} 秒，尝试 {Attempts} 次，连续未识别 {Misses} 次，状态={Observation}",
+                    searchStopwatch.Elapsed.TotalSeconds,
+                    attempts,
+                    consecutiveMisses,
+                    lastObservation);
+            }
+            if (searchProgress.IsTimedOut(searchStopwatch.Elapsed))
             {
                 fail = true;
-                Logger.LogWarning("领取尘歌壶奖励:{text}", "寻找阿圆失败");
+                var timeout = new TimeoutException(
+                    $"寻找阿圆超过 30 秒，尝试 {attempts} 次，最后状态：{lastObservation}");
+                Logger.LogWarning(
+                    "领取尘歌壶奖励:寻找阿圆失败，已等待 {Elapsed:F1} 秒，尝试 {Attempts} 次，最后状态={Observation}",
+                    searchStopwatch.Elapsed.TotalSeconds,
+                    attempts,
+                    lastObservation);
+                TaskFailureDiagnostics.CaptureScreenshotOnce(timeout, "领取尘歌壶奖励-寻找阿圆超时");
                 return;
             }
         }
 
         TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyDown); // 向前走
         Logger.LogInformation("领取尘歌壶奖励:{text}", "接近阿圆");
-        var findDialog = new Task(async () =>
+        var approachStopwatch = Stopwatch.StartNew();
+        var approachToken = treeCts.Token;
+        while (!approachToken.IsCancellationRequested)
         {
-            while (!treeCts.IsCancellationRequested)
+            using var capture = CaptureToRectArea();
+            if (Bv.FindF(capture, text: this.ayuanHeyString))
             {
-                using var capture = CaptureToRectArea();
-                if (Bv.FindF(capture, text: this.ayuanHeyString))
-                {
-                    TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                    Logger.LogInformation("领取尘歌壶奖励:{text}", "接近阿圆成功");
-                    treeCts.Cancel();
-                    break;
-                }
-                TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.Drop);//防止爬墙
-                await Delay(50, treeCts.Token);
+                TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+                Logger.LogInformation("领取尘歌壶奖励:{text}", "接近阿圆成功");
+                break;
             }
-        }, treeCts.Token);
-        findDialog.Start();
-        await Task.WhenAll(findDialog);
+            if (approachStopwatch.Elapsed >= TimeSpan.FromSeconds(20))
+            {
+                TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+                fail = true;
+                var timeout = new TimeoutException("接近阿圆超过 20 秒，始终未出现对话交互");
+                Logger.LogWarning("领取尘歌壶奖励:接近阿圆失败，已等待 {Elapsed:F1} 秒", approachStopwatch.Elapsed.TotalSeconds);
+                TaskFailureDiagnostics.CaptureScreenshotOnce(timeout, "领取尘歌壶奖励-接近阿圆超时");
+                break;
+            }
+            TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.Drop);//防止爬墙
+            await Delay(50, approachToken);
+        }
+        TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
     }
 
     private async Task BuyMaxNumber(CancellationToken ct)

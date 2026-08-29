@@ -49,4 +49,21 @@ public class RemoteSessionInputPolicyTests
                 lastActivation,
                 activationIntervalMilliseconds));
     }
+
+    [Theory]
+    [InlineData(true, "SearchHost", true)]
+    [InlineData(true, "searchhost", true)]
+    [InlineData(true, "YuanShen", false)]
+    [InlineData(false, "SearchHost", false)]
+    public void ShouldDismissTransientShellWindow_ShouldOnlyCloseSearchInRemoteSession(
+        bool isTerminalServerSession,
+        string activeProcessName,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
+                isTerminalServerSession,
+                activeProcessName));
+    }
 }

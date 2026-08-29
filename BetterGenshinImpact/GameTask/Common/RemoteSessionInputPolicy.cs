@@ -26,4 +26,12 @@ internal static class RemoteSessionInputPolicy
                activationIntervalMilliseconds >= 0 &&
                now - lastActivation >= activationIntervalMilliseconds;
     }
+
+    internal static bool ShouldDismissTransientShellWindow(
+        bool isTerminalServerSession,
+        string? activeProcessName)
+    {
+        return isTerminalServerSession &&
+               string.Equals(activeProcessName, "SearchHost", StringComparison.OrdinalIgnoreCase);
+    }
 }

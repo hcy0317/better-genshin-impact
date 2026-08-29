@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.GameTask;
 using Microsoft.Extensions.Logging;
@@ -14,7 +15,7 @@ using Vanara;
 
 namespace BetterGenshinImpact.Core.Recognition.ONNX;
 
-public class BgiOnnxFactory
+public class BgiOnnxFactory : IDisposable
 {
     private readonly ILogger _logger;
 
@@ -24,6 +25,7 @@ public class BgiOnnxFactory
     ///     这样能避免并发加载模型问题。比如使用了未完全构建好的缓存文件，导致模型加载失败。
     /// </summary>
     private readonly ConcurrentDictionary<BgiOnnxModel, string?> _cachedModelPaths = new();
+    private readonly ConcurrentDictionary<BgiOnnxModel, Lazy<BgiYoloPredictor>> _sharedYoloPredictors = new();
 
 
     /// <summary>
@@ -302,13 +304,90 @@ public class BgiOnnxFactory
     /// <returns>BgiYoloPredictor</returns>
     public BgiYoloPredictor CreateYoloPredictor(BgiOnnxModel model)
     {
+        return CreateYoloPredictor(model, null);
+    }
+
+    private BgiYoloPredictor CreateYoloPredictor(
+        BgiOnnxModel model,
+        Action<BgiYoloPredictor>? initializationFailed)
+    {
         // logger.LogDebug("[Yolo]创建yolo预测器，模型: {ModelName}", model.Name);
-        if (!EnableCache) return new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, false));
+        if (!EnableCache) return new BgiYoloPredictor(
+            model, model.ModalPath, CreateSessionOptions(model, false), _logger,
+            initializationFailed);
 
         var cached = GetCached(model);
         return cached == null
-            ? new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, true))
-            : new BgiYoloPredictor(model, cached, CreateSessionOptions(model, false));
+            ? new BgiYoloPredictor(model, model.ModalPath, CreateSessionOptions(model, true), _logger,
+                initializationFailed)
+            : new BgiYoloPredictor(model, cached, CreateSessionOptions(model, false), _logger,
+                initializationFailed);
+    }
+
+    /// <summary>
+    /// 获取由工厂持有生命周期的共享 YOLO predictor。
+    /// 共享调用方应通过 BgiYoloPredictor.UsePredictor 或封装后的 Detect 串行执行推理。
+    /// </summary>
+    public BgiYoloPredictor GetOrCreateYoloPredictor(BgiOnnxModel model)
+    {
+        var predictor = _sharedYoloPredictors.GetOrAdd(
+            model,
+            key => new Lazy<BgiYoloPredictor>(
+                () => CreateYoloPredictor(
+                    key,
+                    failed => EvictFailedSharedPredictor(key, failed)),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+        try
+        {
+            return predictor.Value;
+        }
+        catch
+        {
+            ((ICollection<KeyValuePair<BgiOnnxModel, Lazy<BgiYoloPredictor>>>)
+                    _sharedYoloPredictors)
+                .Remove(new KeyValuePair<BgiOnnxModel, Lazy<BgiYoloPredictor>>(
+                    model, predictor));
+            throw;
+        }
+    }
+
+    internal void EvictFailedSharedPredictor(
+        BgiOnnxModel model,
+        BgiYoloPredictor failed)
+    {
+        if (_sharedYoloPredictors.TryGetValue(model, out var current)
+            && current.IsValueCreated
+            && ReferenceEquals(current.Value, failed)
+            && _sharedYoloPredictors.TryRemove(model, out _))
+        {
+            failed.Dispose();
+            _logger.LogWarning(
+                "[ONNX]共享模型 {Model} 初始化失败，已清除缓存以允许下次重试。",
+                model.Name);
+        }
+    }
+
+    public void Dispose()
+    {
+        foreach (var predictor in _sharedYoloPredictors.Values)
+        {
+            if (predictor.IsValueCreated)
+            {
+                try
+                {
+                    predictor.Value.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogWarning(
+                        exception,
+                        "[ONNX]释放共享预测器时跳过构造失败的缓存项。");
+                }
+            }
+        }
+
+        _sharedYoloPredictors.Clear();
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>
