@@ -1,6 +1,7 @@
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace BetterGenshinImpact.GameTask.Model.GameUI;
 
@@ -14,6 +15,8 @@ internal sealed class ArtifactRowScrollDetector
     {
         this.initialColor = initialColor;
     }
+
+    internal bool HasObservedChange => this.hasChanged;
 
     internal bool Observe(Vec3b color)
     {
@@ -43,6 +46,9 @@ internal sealed class ArtifactRowScrollDetector
 
 internal static class ArtifactRowScrollPlanner
 {
+    internal const int CalibrationDelayMilliseconds = 80;
+    internal const int CalibrationInputLimit = 12;
+    internal const int PerRowBudgetMilliseconds = 1_500;
     internal const int VerificationDelayMilliseconds = 20;
     internal const int MaximumVerificationSamples = 5;
     internal const int MaximumVerificationDelayMilliseconds =
@@ -80,6 +86,38 @@ internal static class ArtifactRowScrollPlanner
         return MaximumVerificationDelayMilliseconds;
     }
 
+}
+
+internal static class ArtifactGridAlignmentPlanner
+{
+    internal static bool IsAligned(
+        IEnumerable<Rect> items,
+        Size captureSize,
+        Rect roi,
+        int columns)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        if (captureSize.Width <= 0 || captureSize.Height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(captureSize));
+        if (columns <= 0) throw new ArgumentOutOfRangeException(nameof(columns));
+
+        var template = ArtifactGridLayout.CellsInRoi(captureSize, roi);
+        if (template.Count < columns * 2) return false;
+        var firstRow = template[0].Rect;
+        var secondRow = template[columns].Rect;
+        var yTolerance = Math.Max(4, (int)Math.Round(firstRow.Height * 0.12));
+        var heightTolerance = Math.Max(4, (int)Math.Round(firstRow.Height * 0.10));
+        var candidates = items.Where(item =>
+            Math.Abs(item.Height - firstRow.Height) <= heightTolerance).ToArray();
+        var minimumItemsPerRow = Math.Max(1, columns - 1);
+
+        return candidates.Count(item =>
+                Math.Abs(item.Y - firstRow.Y) <= yTolerance)
+            >= minimumItemsPerRow
+            && candidates.Count(item =>
+                Math.Abs(item.Y - secondRow.Y) <= yTolerance)
+            >= minimumItemsPerRow;
+    }
 }
 
 internal static class ArtifactGridLayout
@@ -136,19 +174,24 @@ internal static class ArtifactGridLayout
             throw new ArgumentOutOfRangeException(nameof(position));
         }
 
+        var radius = Math.Max(1, (int)Math.Round(capture.Width / 1600d * 2));
+        var left = Math.Max(0, position.X - radius);
+        var top = Math.Max(0, position.Y - radius);
+        var right = Math.Min(capture.Width, position.X + radius + 1);
+        var bottom = Math.Min(capture.Height, position.Y + radius + 1);
+        using var patch = new Mat(capture, new Rect(
+            left, top, right - left, bottom - top));
+        var mean = Cv2.Mean(patch);
         return capture.Channels() switch
         {
-            4 => ToBgr(capture.At<Vec4b>(position.Y, position.X)),
-            3 => capture.At<Vec3b>(position.Y, position.X),
-            1 => ToBgr(capture.At<byte>(position.Y, position.X)),
+            4 or 3 => new Vec3b(
+                (byte)Math.Round(mean.Val0),
+                (byte)Math.Round(mean.Val1),
+                (byte)Math.Round(mean.Val2)),
+            1 => ToBgr((byte)Math.Round(mean.Val0)),
             var channels => throw new InvalidOperationException(
                 $"不支持的圣遗物翻页截图通道数：{channels}")
         };
-    }
-
-    private static Vec3b ToBgr(Vec4b color)
-    {
-        return new Vec3b(color.Item0, color.Item1, color.Item2);
     }
 
     private static Vec3b ToBgr(byte color)

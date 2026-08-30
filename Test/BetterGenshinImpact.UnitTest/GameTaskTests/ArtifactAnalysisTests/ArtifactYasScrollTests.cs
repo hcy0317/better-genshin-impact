@@ -16,6 +16,53 @@ public class ArtifactYasScrollTests
     }
 
     [Fact]
+    public void GridLayout_ScrollFlagUsesAPatchMeanInsteadOfOneNoisyPixel()
+    {
+        using var capture = new Mat(
+            new Size(9, 9),
+            MatType.CV_8UC3,
+            new Scalar(20, 30, 40));
+        capture.Set(4, 4, new Vec3b(65, 75, 85));
+
+        var sampled = ArtifactGridLayout.ReadBgr(capture, new Point(4, 4));
+
+        Assert.True(ArtifactRowScrollDetector.IsNear(
+            new Vec3b(20, 30, 40), sampled));
+    }
+
+    [Fact]
+    public void GridAlignment_AcceptsTwoCompleteRowsAtTheYasTemplatePositions()
+    {
+        var captureSize = new Size(1920, 1080);
+        var roi = GridParams.ArtifactRoiForCapture(captureSize);
+        var items = ArtifactGridLayout.CellsInRoi(captureSize, roi)
+            .Take(16)
+            .Select(cell => cell.Rect)
+            .ToArray();
+
+        Assert.True(ArtifactGridAlignmentPlanner.IsAligned(
+            items, captureSize, roi, 8));
+    }
+
+    [Fact]
+    public void GridAlignment_RejectsAnOverscrolledPartialTopRow()
+    {
+        var captureSize = new Size(1920, 1080);
+        var roi = GridParams.ArtifactRoiForCapture(captureSize);
+        const int overscroll = 40;
+        var items = ArtifactGridLayout.CellsInRoi(captureSize, roi)
+            .Take(16)
+            .Select(cell => cell.Rect)
+            .Select(rect => rect.Y >= overscroll
+                ? new Rect(rect.X, rect.Y - overscroll, rect.Width, rect.Height)
+                : new Rect(rect.X, 0, rect.Width, rect.Height - (overscroll - rect.Y)))
+            .ToArray();
+
+        Assert.False(ArtifactGridAlignmentPlanner.IsAligned(
+            items, captureSize, roi, 8));
+    }
+
+    [Fact]
     public void GridLayout_UsesTheYasFiveByEightArtifactPositions()
     {
         var roi = GridParams.ArtifactRoiForCapture(new Size(1920, 1080));
@@ -67,6 +114,21 @@ public class ArtifactYasScrollTests
             ArtifactRowScrollPlanner.EstimatedVerificationDelay(
                 averageInputsPerRow));
         Assert.InRange(expectedMilliseconds, 0, 100);
+    }
+
+    [Fact]
+    public void CalibrationAndFastVerification_StayInsideOnePointFiveSecondsPerRow()
+    {
+        Assert.InRange(
+            ArtifactRowScrollPlanner.CalibrationInputLimit
+                * ArtifactRowScrollPlanner.CalibrationDelayMilliseconds,
+            0,
+            1_500);
+        Assert.InRange(
+            ArtifactRowScrollPlanner.MaximumVerificationDelayMilliseconds,
+            0,
+            1_500);
+        Assert.Equal(1_500, ArtifactRowScrollPlanner.PerRowBudgetMilliseconds);
     }
 
     [Theory]
