@@ -5,6 +5,23 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests;
 
 public class TaskControlCaptureTests
 {
+    [Theory]
+    [InlineData(true, true, false, true)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(false, true, false, false)]
+    public void DispatcherCapturePolicy_YieldsForegroundCaptureToIndependentTasks(
+        bool gameActive,
+        bool independentTaskRunning,
+        bool hasEnabledTriggers,
+        bool expected)
+    {
+        Assert.Equal(expected, TaskTriggerCapturePolicy.ShouldSkip(
+            gameActive,
+            independentTaskRunning,
+            hasEnabledTriggers));
+    }
+
     [Fact]
     public void CaptureGameImageRetriesWithoutEnteringTaskSleep()
     {

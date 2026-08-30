@@ -96,9 +96,8 @@ internal sealed class ArtifactLockExecutionTask(
                 if (index >= liveCount || processed == pending.Count) break;
                 if (!pending.TryGetValue(index, out var action)) { index++; continue; }
 
-                var current = index == 0
-                    ? await reader.ReadInitiallySelectedItemAsync(page, rect, index, ct)
-                    : await reader.ReadItemAsync(page, rect, index, ct);
+                var current = await reader.ReadItemAsync(
+                    page, rect, index, ct);
                 if (!string.Equals(
                         current.ContentFingerprint,
                         action.ExpectedFingerprint,

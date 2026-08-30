@@ -16,6 +16,9 @@ public class ArtifactCharacterDetailsReaderTests
     [InlineData("等级90/90", 90)]
     [InlineData("等级90./90", 90)]
     [InlineData("等级90/90.", 90)]
+    [InlineData("等级90%90", 90)]
+    [InlineData("等级90％90", 90)]
+    [InlineData("等级90 /.90", 90)]
     [InlineData("等级9090", 90)]
     [InlineData("等级8090", 80)]
     [InlineData("等级190", 1)]
@@ -32,6 +35,9 @@ public class ArtifactCharacterDetailsReaderTests
     [InlineData("等级90/9O")]
     [InlineData("等级809090")]
     [InlineData("等级80/80/90")]
+    [InlineData("等级90%%90")]
+    [InlineData("等级90/..90")]
+    [InlineData("等级90%80")]
     public void DetailLevel_RejectsDamagedOrAmbiguousText(string text)
     {
         Assert.False(ArtifactCharacterDetailsReader.TryParseLevel(text, out _));

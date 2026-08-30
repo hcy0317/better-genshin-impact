@@ -186,6 +186,33 @@ public class ArtifactOcrBoundaryTests
         Assert.DoesNotContain("OcrResult(uidRegion)", source, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void ArtifactTraversal_NeverAssumesTheFirstGridItemIsSelected()
+    {
+        var sourceDirectory = Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis");
+        var inventorySource = File.ReadAllText(Path.Combine(
+            sourceDirectory, "ArtifactInventoryScanner.cs"));
+        var lockSource = File.ReadAllText(Path.Combine(
+            sourceDirectory, "ArtifactLockPlanExecutor.cs"));
+
+        Assert.DoesNotContain(
+            "? reader.CaptureInitiallySelectedItem",
+            inventorySource,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "? await reader.ReadInitiallySelectedItemAsync",
+            lockSource,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "CaptureInitiallySelectedItem(",
+            inventorySource,
+            StringComparison.Ordinal);
+    }
+
     private static string FindRepoRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

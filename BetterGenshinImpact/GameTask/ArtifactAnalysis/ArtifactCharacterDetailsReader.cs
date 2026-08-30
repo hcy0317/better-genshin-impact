@@ -182,9 +182,20 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             .Replace("./", "/", StringComparison.Ordinal)
             .Replace("。/", "/", StringComparison.Ordinal)
             .Replace("·/", "/", StringComparison.Ordinal)
+            .Replace("/.", "/", StringComparison.Ordinal)
+            .Replace("/。", "/", StringComparison.Ordinal)
+            .Replace("/·", "/", StringComparison.Ordinal)
             .TrimEnd('.', '。', '·');
         if (normalized.StartsWith("等级", StringComparison.Ordinal))
             normalized = normalized[2..];
+        normalized = normalized.Replace('％', '%');
+        var percent = normalized.IndexOf('%');
+        if (percent > 0
+            && percent == normalized.LastIndexOf('%')
+            && normalized.Where(character => character != '%').All(char.IsDigit))
+        {
+            normalized = normalized[..percent] + "/" + normalized[(percent + 1)..];
+        }
         if (normalized.Length == 0) return false;
 
         int[] validLimits = [20, 40, 50, 60, 70, 80, 90];
