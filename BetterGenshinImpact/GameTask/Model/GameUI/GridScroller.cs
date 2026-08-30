@@ -37,6 +37,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         private int calibratedRows;
         private double averageInputsPerRow;
         private Vec3b? initialFlagColor;
+        private IReadOnlyList<ArtifactGridRowSignature>? alignedRowSignatures;
 
         internal GridScroller(GridParams @params, ILogger logger, InputSimulator input, CancellationToken ct)
         {
@@ -142,7 +143,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
 
             var timer = Stopwatch.StartNew();
             SystemControl.ActivateWindow();
-            EnsureInitialFlagColor();
+            CaptureScrollBaseline();
             var targetRow = this.scrolledRows + rowsToScroll;
             if (this.calibratedRows >= this.visibleRows)
             {
@@ -172,15 +173,18 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             return true;
         }
 
-        private void EnsureInitialFlagColor()
+        private void CaptureScrollBaseline()
         {
-            if (this.initialFlagColor.HasValue) return;
-
             var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
             using var initialCapture = TaskControl.CaptureToRectArea();
             this.initialFlagColor = ArtifactGridLayout.ReadBgr(
                 initialCapture.SrcMat,
                 flagPosition);
+            this.alignedRowSignatures = ArtifactGridLayout.ReadRowSignatures(
+                initialCapture.SrcMat,
+                initialCapture.SrcMat.Size(),
+                this.roi,
+                this.columns);
         }
 
         private async Task<int> ScrollOneRowAsync(
@@ -208,6 +212,12 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 if (detector.Observe(color))
                 {
                     EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
+                    if (!ConfirmExactlyOneRow(capture.SrcMat, getGridItems, false))
+                    {
+                        throw new InvalidOperationException(
+                            $"YAS 圣遗物第 {currentRow}/{targetRows} 行颜色对齐但内容未证明恰好推进一行");
+                    }
+                    EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
                     this.initialFlagColor = color;
                     this.logger.LogDebug(
                         "YAS 圣遗物滚轮第 {CurrentRow}/{TargetRows} 行对齐成功，共 {Attempts} 次滚轮输入",
@@ -218,7 +228,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 }
                 if (attempt == ArtifactRowScrollPlanner.CalibrationInputLimit
                     && detector.HasObservedChange
-                    && IsGridAligned(capture.SrcMat, getGridItems))
+                    && ConfirmExactlyOneRow(capture.SrcMat, getGridItems, true))
                 {
                     EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
                     this.initialFlagColor = color;
@@ -285,9 +295,10 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                     {
                         if (samples == ArtifactRowScrollPlanner.MaximumVerificationSamples
                             && detector.HasObservedChange
-                            && IsGridAligned(
+                            && ConfirmExactlyOneRow(
                                 capture.SrcMat,
-                                getGridItems))
+                                getGridItems,
+                                true))
                         {
                             EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
                             aligned = true;
@@ -302,6 +313,12 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                     }
 
                     aligned = true;
+                    EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
+                    if (!ConfirmExactlyOneRow(capture.SrcMat, getGridItems, false))
+                    {
+                        throw new InvalidOperationException(
+                            $"YAS 圣遗物快速推进第 {row}/{rowsToScroll} 行颜色对齐但内容未证明恰好推进一行");
+                    }
                     EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
                     this.initialFlagColor = color;
                     break;
@@ -336,6 +353,29 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 capture.Size(),
                 this.roi,
                 this.columns);
+        }
+
+        private bool ConfirmExactlyOneRow(
+            Mat capture,
+            Func<Mat, int, IEnumerable<Rect>> getGridItems,
+            bool requireGeometry)
+        {
+            if (this.alignedRowSignatures is null) return false;
+            if (requireGeometry && !IsGridAligned(capture, getGridItems)) return false;
+
+            var current = ArtifactGridLayout.ReadRowSignatures(
+                capture,
+                capture.Size(),
+                this.roi,
+                this.columns);
+            if (!ArtifactRowContentShiftVerifier.IsExactlyOneRow(
+                    this.alignedRowSignatures,
+                    current))
+            {
+                return false;
+            }
+            this.alignedRowSignatures = current;
+            return true;
         }
 
         private static void EnsureWithinRowBudget(

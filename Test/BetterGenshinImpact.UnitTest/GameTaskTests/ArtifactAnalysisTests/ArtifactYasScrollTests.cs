@@ -63,6 +63,43 @@ public class ArtifactYasScrollTests
     }
 
     [Fact]
+    public void RowContentShift_AcceptsExactlyOneVisibleRowAdvance()
+    {
+        var before = Signatures(1, 3, 7, 15, 31);
+        var after = Signatures(3, 7, 15, 31, 63);
+
+        Assert.True(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
+            before, after));
+    }
+
+    [Fact]
+    public void RowContentShift_RejectsTwoVisibleRowsOfAdvance()
+    {
+        var before = Signatures(1, 3, 7, 15, 31);
+        var after = Signatures(7, 15, 31, 63, 127);
+
+        Assert.False(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
+            before, after));
+    }
+
+    [Fact]
+    public void RowContentShift_RejectsNoAdvanceAndAmbiguousRepeatedRows()
+    {
+        var distinct = Signatures(1, 3, 7, 15, 31);
+        var repeated = Signatures(7, 7, 7, 7, 7);
+
+        Assert.False(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
+            distinct, distinct));
+        Assert.False(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
+            repeated, repeated));
+    }
+
+    private static ArtifactGridRowSignature[] Signatures(params ulong[] values) =>
+        values.Select(value => new ArtifactGridRowSignature(
+            value,
+            value << 1)).ToArray();
+
+    [Fact]
     public void GridLayout_UsesTheYasFiveByEightArtifactPositions()
     {
         var roi = GridParams.ArtifactRoiForCapture(new Size(1920, 1080));

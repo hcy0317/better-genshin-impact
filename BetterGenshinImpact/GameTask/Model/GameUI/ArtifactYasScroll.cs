@@ -2,6 +2,7 @@ using OpenCvSharp;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 
 namespace BetterGenshinImpact.GameTask.Model.GameUI;
 
@@ -120,6 +121,49 @@ internal static class ArtifactGridAlignmentPlanner
     }
 }
 
+internal readonly record struct ArtifactGridRowSignature(
+    ulong Left,
+    ulong Right);
+
+internal static class ArtifactRowContentShiftVerifier
+{
+    private const double MaximumAverageDistance = 16;
+    private const double MinimumCompetingAdvantage = 1;
+
+    internal static bool IsExactlyOneRow(
+        IReadOnlyList<ArtifactGridRowSignature> before,
+        IReadOnlyList<ArtifactGridRowSignature> after)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        if (before.Count != after.Count || before.Count < 3) return false;
+
+        var oneRow = AverageDistance(before, after, 1);
+        var stationary = AverageDistance(before, after, 0);
+        var twoRows = AverageDistance(before, after, 2);
+        return oneRow <= MaximumAverageDistance
+            && oneRow + MinimumCompetingAdvantage < stationary
+            && oneRow + MinimumCompetingAdvantage < twoRows;
+    }
+
+    private static double AverageDistance(
+        IReadOnlyList<ArtifactGridRowSignature> before,
+        IReadOnlyList<ArtifactGridRowSignature> after,
+        int rowShift)
+    {
+        var comparisons = before.Count - rowShift;
+        var total = 0;
+        for (var index = 0; index < comparisons; index++)
+        {
+            var left = before[index + rowShift];
+            var right = after[index];
+            total += BitOperations.PopCount(left.Left ^ right.Left);
+            total += BitOperations.PopCount(left.Right ^ right.Right);
+        }
+        return total / (double)comparisons;
+    }
+}
+
 internal static class ArtifactGridLayout
 {
     private const double FirstCellX = 99;
@@ -192,6 +236,69 @@ internal static class ArtifactGridLayout
             var channels => throw new InvalidOperationException(
                 $"不支持的圣遗物翻页截图通道数：{channels}")
         };
+    }
+
+    internal static IReadOnlyList<ArtifactGridRowSignature> ReadRowSignatures(
+        Mat capture,
+        Size captureSize,
+        Rect roi,
+        int columns)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        if (columns <= 0) throw new ArgumentOutOfRangeException(nameof(columns));
+        var cells = CellsInRoi(captureSize, roi);
+        if (cells.Count == 0 || cells.Count % columns != 0)
+            throw new InvalidOperationException("圣遗物网格行签名缺少完整模板");
+
+        using var grid = new Mat(capture, roi);
+        var signatures = new List<ArtifactGridRowSignature>(cells.Count / columns);
+        for (var row = 0; row < cells.Count / columns; row++)
+        {
+            var first = cells[row * columns].Rect;
+            var last = cells[(row + 1) * columns - 1].Rect;
+            var verticalMargin = Math.Max(2, (int)Math.Round(first.Height * 0.12));
+            var rowRect = new Rect(
+                first.X,
+                first.Y + verticalMargin,
+                last.Right - first.X,
+                first.Height - verticalMargin * 2);
+            var leftWidth = rowRect.Width / 2;
+            using var left = new Mat(grid, new Rect(
+                rowRect.X, rowRect.Y, leftWidth, rowRect.Height));
+            using var right = new Mat(grid, new Rect(
+                rowRect.X + leftWidth,
+                rowRect.Y,
+                rowRect.Width - leftWidth,
+                rowRect.Height));
+            signatures.Add(new ArtifactGridRowSignature(
+                ComputeDifferenceHash(left),
+                ComputeDifferenceHash(right)));
+        }
+        return signatures;
+    }
+
+    private static ulong ComputeDifferenceHash(Mat region)
+    {
+        using var gray = region.Channels() switch
+        {
+            4 => region.CvtColor(ColorConversionCodes.BGRA2GRAY),
+            3 => region.CvtColor(ColorConversionCodes.BGR2GRAY),
+            1 => region.Clone(),
+            var channels => throw new InvalidOperationException(
+                $"不支持的圣遗物行签名截图通道数：{channels}")
+        };
+        using var reduced = gray.Resize(
+            new Size(9, 8), 0, 0, InterpolationFlags.Area);
+        ulong signature = 0;
+        var bit = 0;
+        for (var y = 0; y < 8; y++)
+        for (var x = 0; x < 8; x++)
+        {
+            if (reduced.At<byte>(y, x) > reduced.At<byte>(y, x + 1))
+                signature |= 1UL << bit;
+            bit++;
+        }
+        return signature;
     }
 
     private static Vec3b ToBgr(byte color)
