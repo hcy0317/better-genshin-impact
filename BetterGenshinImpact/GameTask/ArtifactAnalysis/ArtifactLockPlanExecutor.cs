@@ -20,11 +20,13 @@ public sealed class ArtifactLockPlanExecutor : IArtifactLockPlanExecutor
         IReadOnlyList<ArtifactExecutionActionDto> actions,
         int expectedArtifactCount,
         bool reusePreparedInventory,
+        IReadOnlyList<ArtifactItemDto> verifiedArtifacts,
         CancellationToken cancellationToken)
     {
         var task = new ArtifactLockExecutionTask(
             actions, expectedArtifactCount,
-            reusePreparedInventory, cancellationToken);
+            reusePreparedInventory, verifiedArtifacts,
+            cancellationToken);
         await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
         if (!task.Completed)
         {
@@ -37,6 +39,7 @@ internal sealed class ArtifactLockExecutionTask(
     IReadOnlyList<ArtifactExecutionActionDto> actions,
     int expectedArtifactCount,
     bool reusePreparedInventory,
+    IReadOnlyList<ArtifactItemDto> verifiedArtifacts,
     CancellationToken externalCancellationToken) : ISoloTask
 {
     private readonly ILogger _logger = App.GetLogger<ArtifactLockExecutionTask>();
@@ -64,6 +67,21 @@ internal sealed class ArtifactLockExecutionTask(
 
             var pending = actions.OrderBy(action => action.ScanIndex)
                 .ToDictionary(action => action.ScanIndex);
+            var verifiedByIndex = verifiedArtifacts.ToDictionary(
+                artifact => artifact.ScanIndex);
+            foreach (var action in pending.Values)
+            {
+                if (!verifiedByIndex.TryGetValue(action.ScanIndex, out var verified)
+                    || verified.LocalDetailSignature is null
+                    || !string.Equals(
+                        verified.ContentFingerprint,
+                        action.ExpectedFingerprint,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"Artifact action at index {action.ScanIndex} is not bound to the local preflight observation.");
+                }
+            }
             if (pending.Count == 0)
             {
                 _logger.LogInformation("全部目标已达锁定状态，无需点击");
@@ -96,17 +114,17 @@ internal sealed class ArtifactLockExecutionTask(
                 if (index >= liveCount || processed == pending.Count) break;
                 if (!pending.TryGetValue(index, out var action)) { index++; continue; }
 
-                var current = await reader.ReadItemAsync(
+                var selected = await reader.SelectItemAsync(
                     page, rect, index, ct);
-                if (!string.Equals(
-                        current.ContentFingerprint,
-                        action.ExpectedFingerprint,
-                        StringComparison.Ordinal))
+                var verified = verifiedByIndex[index];
+                if (!ArtifactLockExecutionPolicy.MatchesPreparedDetail(
+                        verified.LocalDetailSignature!.Value,
+                        selected.DetailSignature))
                 {
                     throw new InvalidDataException(
-                        $"Artifact fingerprint changed after preflight at index {index}.");
+                        $"Artifact detail changed after preflight at index {index}.");
                 }
-                var currentLocked = current.Locked;
+                var currentLocked = selected.Locked;
                 if (currentLocked != action.ExpectedLocked
                     && currentLocked != action.DesiredLocked)
                 {
@@ -173,7 +191,7 @@ internal sealed class ArtifactLockExecutionTask(
         Rect itemRect,
         CancellationToken cancellationToken)
     {
-        const int maxClicks = 3;
+        const int maxClicks = 2;
         var cellBounds = new Rect(
             page.X + itemRect.X,
             page.Y + itemRect.Y,
@@ -223,7 +241,7 @@ internal sealed class ArtifactLockExecutionTask(
             desiredLocked,
             initialVisualSignature,
             tolerance: 0.5);
-        for (var attempt = 0; attempt < 30; attempt++)
+        for (var attempt = 0; attempt < 20; attempt++)
         {
             await Delay(16, cancellationToken);
             using var refreshed = CaptureToRectArea();
@@ -275,11 +293,16 @@ internal static class ArtifactLockExecutionPolicy
             : ArtifactLockDecision.Inspect;
     }
 
+    internal static bool MatchesPreparedDetail(
+        ArtifactPanelSignature expected,
+        ArtifactPanelSignature current) =>
+        current.DistanceFrom(expected) <= 4;
+
     internal static bool IsStableDetailState(int consecutiveDesiredFrames) =>
-        consecutiveDesiredFrames >= 3;
+        consecutiveDesiredFrames >= 2;
 
     internal static bool CanTreatAsStableUnchanged(int consecutiveUnchangedFrames) =>
-        consecutiveUnchangedFrames >= 5;
+        consecutiveUnchangedFrames >= 3;
 
     internal static ArtifactToggleDecision FromTransition(
         ArtifactDetailTransitionOutcome transition,
@@ -289,7 +312,7 @@ internal static class ArtifactLockExecutionPolicy
         {
             return ArtifactToggleDecision.Complete;
         }
-        if (transition == ArtifactDetailTransitionOutcome.UnchangedStable && clickCount < 3)
+        if (transition == ArtifactDetailTransitionOutcome.UnchangedStable && clickCount < 2)
         {
             return ArtifactToggleDecision.Retry;
         }

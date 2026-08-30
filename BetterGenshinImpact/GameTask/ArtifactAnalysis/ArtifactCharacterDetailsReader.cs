@@ -5,6 +5,7 @@ using OpenCvSharp;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
 
@@ -13,12 +14,55 @@ internal sealed record ArtifactCharacterDetailSample(
     int Level,
     bool Favorite);
 
+internal sealed record ArtifactCharacterPartialDetail(
+    string? CharacterName,
+    int? Level,
+    bool Favorite,
+    InvalidOperationException? NameFailure,
+    InvalidOperationException? LevelFailure)
+{
+    internal bool IsComplete => CharacterName is not null && Level.HasValue;
+
+    internal IEnumerable<Exception> Failures
+    {
+        get
+        {
+            if (NameFailure is not null) yield return NameFailure;
+            if (LevelFailure is not null) yield return LevelFailure;
+        }
+    }
+
+    internal ArtifactCharacterPartialDetail Merge(ArtifactCharacterPartialDetail retry) =>
+        new(
+            CharacterName ?? retry.CharacterName,
+            Level ?? retry.Level,
+            retry.Favorite,
+            CharacterName is null ? retry.NameFailure ?? NameFailure : null,
+            Level is null ? retry.LevelFailure ?? LevelFailure : null);
+
+    internal ArtifactCharacterDetailSample RequireComplete()
+    {
+        if (CharacterName is not null && Level.HasValue)
+        {
+            return new ArtifactCharacterDetailSample(
+                CharacterName,
+                Level.Value,
+                Favorite);
+        }
+
+        throw new InvalidOperationException(
+            "右侧角色详情仍有字段无法识别。",
+            new AggregateException(Failures));
+    }
+}
+
 /// <summary>
 /// Reads the selected character from the right-hand detail panel.
 /// The left grid is deliberately used only for locating, clicking and scrolling cards.
 /// </summary>
 internal sealed class ArtifactCharacterDetailsReader : IDisposable
 {
+    private const int MaximumRetrySignatureDistance = 2;
     internal const bool ForceCpuOcr = false;
     internal const bool LoadsDetectionModel = false;
     private static readonly Rect2d NameRoi = new(1221.6667, 105, 216.6667, 40);
@@ -50,21 +94,102 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
         string? gameNickname,
         string? miliastraNickname,
         string? miliastraCharacterKey = null)
+        => ReadPartial(
+                capture,
+                gameNickname,
+                miliastraNickname,
+                miliastraCharacterKey)
+            .RequireComplete();
+
+    internal ArtifactCharacterPartialDetail ReadPartial(
+        Mat capture,
+        string? gameNickname,
+        string? miliastraNickname,
+        string? miliastraCharacterKey = null,
+        bool readName = true,
+        bool readLevel = true)
     {
-        var rawName = ReadText(capture, NameRoi);
-        var characterName = ResolveCharacterName(
-            rawName, gameNickname, miliastraNickname,
-            miliastraCharacterKey);
-        var rawLevel = ReadText(capture, LevelRoi);
-        if (!TryParseLevel(rawLevel, out var level))
+        string? rawName = null;
+        string? rawLevel = null;
+        InvalidOperationException? nameOcrFailure = null;
+        InvalidOperationException? levelOcrFailure = null;
+        try
         {
-            throw new InvalidOperationException($"无法从右侧角色详情读取等级：{rawLevel}");
+            if (readName) rawName = ReadText(capture, NameRoi);
+        }
+        catch (Exception exception)
+        {
+            nameOcrFailure = new InvalidOperationException(
+                "右侧角色名称 OCR 执行失败。",
+                exception);
         }
 
-        return new ArtifactCharacterDetailSample(
+        try
+        {
+            if (readLevel) rawLevel = ReadText(capture, LevelRoi);
+        }
+        catch (Exception exception)
+        {
+            levelOcrFailure = new InvalidOperationException(
+                "右侧角色等级 OCR 执行失败。",
+                exception);
+        }
+
+        var partial = ParseRawPartial(
+            rawName,
+            rawLevel,
+            IsFavorite(capture),
+            gameNickname,
+            miliastraNickname,
+            miliastraCharacterKey);
+        return partial with
+        {
+            NameFailure = nameOcrFailure ?? partial.NameFailure,
+            LevelFailure = levelOcrFailure ?? partial.LevelFailure
+        };
+    }
+
+    internal static ArtifactCharacterPartialDetail ParseRawPartial(
+        string? rawName,
+        string? rawLevel,
+        bool favorite,
+        string? gameNickname = null,
+        string? miliastraNickname = null,
+        string? miliastraCharacterKey = null)
+    {
+        string? characterName = null;
+        InvalidOperationException? nameFailure = null;
+        try
+        {
+            characterName = ResolveCharacterName(
+                rawName,
+                gameNickname,
+                miliastraNickname,
+                miliastraCharacterKey);
+        }
+        catch (InvalidOperationException exception)
+        {
+            nameFailure = exception;
+        }
+
+        int? level = null;
+        InvalidOperationException? levelFailure = null;
+        if (TryParseLevel(rawLevel, out var parsedLevel))
+        {
+            level = parsedLevel;
+        }
+        else
+        {
+            levelFailure = new InvalidOperationException(
+                $"无法从右侧角色详情读取等级：{rawLevel}");
+        }
+
+        return new ArtifactCharacterPartialDetail(
             characterName,
             level,
-            IsFavorite(capture));
+            favorite,
+            nameFailure,
+            levelFailure);
     }
 
     internal static string ResolveCharacterName(
@@ -125,7 +250,43 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             };
         }
 
+        var fuzzyMatches = DefaultAutoFightConfig.CombatAvatarNames
+            .Select(name => new
+            {
+                Name = name,
+                Normalized = Normalize(name)
+            })
+            .Where(candidate => candidate.Normalized.Length == normalized.Length
+                                && EditDistance(normalized, candidate.Normalized) == 1)
+            .Select(candidate => candidate.Name)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (fuzzyMatches.Length == 1)
+        {
+            return fuzzyMatches[0];
+        }
+
         throw new InvalidOperationException($"无法把右侧角色名称 OCR 结果映射到标准角色：{rawText}");
+    }
+
+    private static int EditDistance(string left, string right)
+    {
+        var previous = Enumerable.Range(0, right.Length + 1).ToArray();
+        for (var leftIndex = 1; leftIndex <= left.Length; leftIndex++)
+        {
+            var current = new int[right.Length + 1];
+            current[0] = leftIndex;
+            for (var rightIndex = 1; rightIndex <= right.Length; rightIndex++)
+            {
+                var substitution = previous[rightIndex - 1]
+                                   + (left[leftIndex - 1] == right[rightIndex - 1] ? 0 : 1);
+                current[rightIndex] = Math.Min(
+                    Math.Min(current[rightIndex - 1] + 1, previous[rightIndex] + 1),
+                    substitution);
+            }
+            previous = current;
+        }
+        return previous[right.Length];
     }
 
     internal static ulong DetailSignature(Mat capture)
@@ -133,6 +294,12 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             capture,
             NameRoi.X, NameRoi.Y,
             NameRoi.Width, NameRoi.Height);
+
+    internal static bool IsSameDetailForRetry(
+        ulong initialSignature,
+        ulong retrySignature) =>
+        ArtifactVisualSignature.Distance(initialSignature, retrySignature)
+        <= MaximumRetrySignatureDistance;
 
     internal static Rect NameRegionForCapture(Size captureSize) =>
         ArtifactUiCoordinateMapper.ToCaptureRect(
@@ -177,48 +344,29 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
         level = 0;
         var normalized = string.Concat((rawText ?? string.Empty).Where(character =>
             !char.IsWhiteSpace(character)));
-        normalized = normalized
-            .Replace('／', '/')
-            .Replace("./", "/", StringComparison.Ordinal)
-            .Replace("。/", "/", StringComparison.Ordinal)
-            .Replace("·/", "/", StringComparison.Ordinal)
-            .Replace("/.", "/", StringComparison.Ordinal)
-            .Replace("/。", "/", StringComparison.Ordinal)
-            .Replace("/·", "/", StringComparison.Ordinal)
-            .TrimEnd('.', '。', '·');
         if (normalized.StartsWith("等级", StringComparison.Ordinal))
             normalized = normalized[2..];
-        normalized = normalized.Replace('％', '%');
-        var percent = normalized.IndexOf('%');
-        if (percent > 0
-            && percent == normalized.LastIndexOf('%')
-            && normalized.Where(character => character != '%').All(char.IsDigit))
-        {
-            normalized = normalized[..percent] + "/" + normalized[(percent + 1)..];
-        }
-        if (normalized.Length == 0) return false;
+        if (normalized.Length == 0 || normalized.Any(char.IsLetter)) return false;
 
         int[] validLimits = [20, 40, 50, 60, 70, 80, 90];
-        var slash = normalized.IndexOf('/');
-        if (slash >= 0)
+        var numberGroups = Regex.Matches(normalized, @"\d+")
+            .Select(match => match.Value)
+            .ToArray();
+        if (numberGroups.Length == 2)
         {
-            if (slash == 0
-                || slash != normalized.LastIndexOf('/')
-                || !int.TryParse(normalized[..slash], out var current)
-                || !int.TryParse(normalized[(slash + 1)..], out var limit)
-                || current is < 1 or > 90
-                || current > limit
-                || !validLimits.Contains(limit))
+            if (!int.TryParse(numberGroups[1], out var limit)
+                || !validLimits.Contains(limit)
+                || !TryParseCurrentLevel(numberGroups[0], limit, out var current))
             {
                 return false;
             }
             level = current;
             return true;
         }
+        if (numberGroups.Length != 1) return false;
 
-        if (normalized.Any(character => !char.IsDigit(character))) return false;
-        var digits = normalized;
-        if (digits.Length is 0 or > 4) return false;
+        var digits = numberGroups[0];
+        if (digits.Length is 0 or > 5) return false;
         if (int.TryParse(digits, out var single) && single is >= 1 and <= 90)
         {
             level = single;
@@ -231,6 +379,14 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             var limitText = validLimit.ToString();
             if (!digits.EndsWith(limitText, StringComparison.Ordinal)) continue;
             var currentText = digits[..^limitText.Length];
+            if (currentText.Length == 3 && IsObservedSeparatorDigit(currentText[^1]))
+            {
+                currentText = currentText[..^1];
+            }
+            else if (currentText.Length > 2)
+            {
+                continue;
+            }
             if (int.TryParse(currentText, out var current)
                 && current is >= 1 and <= 90
                 && current <= validLimit)
@@ -242,6 +398,34 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
         level = candidates[0];
         return true;
     }
+
+    private static bool TryParseCurrentLevel(
+        string digits,
+        int limit,
+        out int current)
+    {
+        if (int.TryParse(digits, out current)
+            && current is >= 1 and <= 90
+            && current <= limit)
+        {
+            return true;
+        }
+
+        if (digits.Length == 3
+            && IsObservedSeparatorDigit(digits[^1])
+            && int.TryParse(digits[..^1], out current)
+            && current is >= 1 and <= 90
+            && current <= limit)
+        {
+            return true;
+        }
+
+        current = 0;
+        return false;
+    }
+
+    private static bool IsObservedSeparatorDigit(char value) =>
+        value is '1' or '7';
 
     private static string Normalize(string? value) =>
         string.Concat((value ?? string.Empty).Where(character =>

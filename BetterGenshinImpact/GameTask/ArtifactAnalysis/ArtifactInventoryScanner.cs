@@ -63,11 +63,16 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
         await new ReturnMainUiTask().Start(ct);
         ct.ThrowIfCancellationRequested();
         using var ocrSession = new ArtifactRecognitionOnlyOcrSession(
-            forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr);
+            forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr,
+            parallelRecognizerCount:
+                ArtifactRecognitionOnlyOcrSession.InventoryParallelRecognizerCount);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
             uid, ocrSession.RecognizeWithoutDetector, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
-        using var reader = new ArtifactInventoryUi(_logger, ocrSession.RecognizeWithoutDetector);
+        using var reader = new ArtifactInventoryUi(
+            _logger,
+            ocrSession.RecognizeWithoutDetector,
+            ocrSession.RecognizeBatch);
         var observedCount = reader.ReadArtifactCount();
 
         if (observedCount != expectedArtifactCount)
@@ -82,6 +87,7 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
         }
         else
         {
+            reader.AllowUnconfirmedCaptureForFingerprintValidation();
             if (targets.Any(target => target.ScanIndex < 0 || target.ScanIndex >= observedCount))
             {
                 throw new InvalidDataException(
@@ -90,6 +96,19 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
             var targetIndices = targets.Select(target => target.ScanIndex).ToHashSet();
             var artifacts = await ArtifactInventoryScanSession.ReadItemsAsync(
                 reader, observedCount, targetIndices, ct);
+            var expectedTargets = targets.ToDictionary(target => target.ScanIndex);
+            foreach (var artifact in artifacts)
+            {
+                if (!expectedTargets.TryGetValue(artifact.ScanIndex, out var target)
+                    || !string.Equals(
+                        artifact.ContentFingerprint,
+                        target.ExpectedFingerprint,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"圣遗物执行前核验在索引 {artifact.ScanIndex} 读到的内容指纹与计划不一致。");
+                }
+            }
             _logger.LogInformation(
                 "圣遗物数量未变化（{ArtifactCount} 件），已逐项核验 {TargetCount} 个执行目标的指纹与锁状态",
                 observedCount,
@@ -127,11 +146,16 @@ internal sealed class ArtifactInventoryScanTask(
         await new ReturnMainUiTask().Start(ct);
         ct.ThrowIfCancellationRequested();
         using var ocrSession = new ArtifactRecognitionOnlyOcrSession(
-            forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr);
+            forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr,
+            parallelRecognizerCount:
+                ArtifactRecognitionOnlyOcrSession.InventoryParallelRecognizerCount);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
             uid, ocrSession.RecognizeWithoutDetector, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
-        using var reader = new ArtifactInventoryUi(_logger, ocrSession.RecognizeWithoutDetector);
+        using var reader = new ArtifactInventoryUi(
+            _logger,
+            ocrSession.RecognizeWithoutDetector,
+            ocrSession.RecognizeBatch);
         var expectedCount = reader.ReadArtifactCount();
         var artifacts = await ArtifactInventoryScanSession.ReadItemsAsync(
             reader, expectedCount, null, ct);
@@ -149,19 +173,24 @@ internal sealed class ArtifactInventoryUi : IDisposable
     private readonly ArtifactSetCatalog _setCatalog;
     private readonly ArtifactRecognitionOnlyOcrSession? _ownedFixedRegionOcrSession;
     private readonly Func<Mat, string> _fixedRegionRecognizer;
+    private readonly Func<Mat[], string[]> _fixedRegionBatchRecognizer;
     private readonly IOcrService? _injectedLegacyOcrService;
     private readonly ArtifactRetryableLazy<ArtifactPaddleOcrSession>
         _ownedLegacyOcrSession = new();
     private readonly ILogger _logger;
+    private bool _allowUnconfirmedCapture;
     private ArtifactPanelSignature? _lastDetailSignature;
 
     internal ArtifactInventoryUi(ILogger logger)
-        : this(logger, fixedRegionRecognizer: null)
+        : this(logger, fixedRegionRecognizer: null, fixedRegionBatchRecognizer: null)
     {
     }
 
     internal ArtifactInventoryUi(ILogger logger, IOcrService ocrService)
-        : this(logger, ocrService.OcrWithoutDetector)
+        : this(
+            logger,
+            ocrService.OcrWithoutDetector,
+            regions => regions.Select(ocrService.OcrWithoutDetector).ToArray())
     {
         _injectedLegacyOcrService = ocrService;
     }
@@ -169,8 +198,18 @@ internal sealed class ArtifactInventoryUi : IDisposable
     internal ArtifactInventoryUi(
         ILogger logger,
         Func<Mat, string>? fixedRegionRecognizer)
+        : this(logger, fixedRegionRecognizer, fixedRegionBatchRecognizer: null)
+    {
+    }
+
+    internal ArtifactInventoryUi(
+        ILogger logger,
+        Func<Mat, string>? fixedRegionRecognizer,
+        Func<Mat[], string[]>? fixedRegionBatchRecognizer,
+        bool allowUnconfirmedCapture = false)
     {
         _logger = logger;
+        _allowUnconfirmedCapture = allowUnconfirmedCapture;
         var cultureName = TaskContext.Instance().Config.OtherConfig.GameCultureInfoName;
         if (!string.Equals(cultureName, "zh-Hans", StringComparison.OrdinalIgnoreCase))
         {
@@ -184,10 +223,16 @@ internal sealed class ArtifactInventoryUi : IDisposable
                 forceCpuOcr: ForceCpuOcr);
             _fixedRegionRecognizer =
                 _ownedFixedRegionOcrSession.RecognizeWithoutDetector;
+            _fixedRegionBatchRecognizer =
+                _ownedFixedRegionOcrSession.RecognizeBatch;
         }
         else
         {
             _fixedRegionRecognizer = fixedRegionRecognizer;
+            _fixedRegionBatchRecognizer = fixedRegionBatchRecognizer
+                ?? (regions => regions
+                    .Select(_fixedRegionRecognizer)
+                    .ToArray());
         }
     }
 
@@ -227,16 +272,11 @@ internal sealed class ArtifactInventoryUi : IDisposable
         int scanIndex,
         CancellationToken ct)
     {
-        var selected = await SelectAndCaptureScanItemAsync(page, itemRect, scanIndex, ct);
-        using var capture = selected.Capture;
-        return ArtifactCapturedItem.Create(
-            scanIndex,
-            selected.Locked,
-            capture,
-            ReadRarity(capture));
+        return await SelectAndCaptureScanItemAsync(
+            page, itemRect, scanIndex, ct);
     }
 
-    internal async Task<bool> SelectItemAsync(
+    internal async Task<ArtifactSelectedLockItem> SelectItemAsync(
         ImageRegion page,
         Rect itemRect,
         int scanIndex,
@@ -244,8 +284,10 @@ internal sealed class ArtifactInventoryUi : IDisposable
     {
         var selected = await SelectAndCaptureLockItemAsync(
             page, itemRect, scanIndex, cancellationToken);
-        selected.Capture.Dispose();
-        return selected.Locked;
+        using var capture = selected.Capture;
+        return new ArtifactSelectedLockItem(
+            selected.Locked,
+            ComputeDetailSignature(capture));
     }
 
     internal async Task<ArtifactItemDto> ReadItemAsync(
@@ -270,6 +312,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         try
         {
             item = ParseFastItem(frame, rarity);
+            item = item with { LocalDetailSignature = frame.DetailSignature };
             _logger.LogDebug(
                 "圣遗物 {ScanIndex} 固定区域 OCR 耗时 {ElapsedMilliseconds}ms",
                 frame.ScanIndex,
@@ -280,7 +323,8 @@ internal sealed class ArtifactInventoryUi : IDisposable
         {
             throw;
         }
-        catch (Exception exception)
+        catch (Exception exception) when (
+            exception is FormatException or InvalidDataException)
         {
             _logger.LogWarning(
                 "圣遗物 {ScanIndex} 固定区域 OCR 失败，回退 Paddle：{Message}",
@@ -288,7 +332,10 @@ internal sealed class ArtifactInventoryUi : IDisposable
                 exception.Message);
         }
 
-        item = ParseLegacyItem(frame, rarity);
+        item = ParseLegacyItem(frame, rarity) with
+        {
+            LocalDetailSignature = frame.DetailSignature
+        };
         _logger.LogDebug(
             "圣遗物 {ScanIndex} Paddle 回退解析耗时 {ElapsedMilliseconds}ms",
             frame.ScanIndex,
@@ -298,25 +345,32 @@ internal sealed class ArtifactInventoryUi : IDisposable
 
     private ArtifactItemDto ParseFastItem(ArtifactCapturedItem frame, int rarity)
     {
-        var slotText = InferFixed(frame, 1110, 153, 190, 40);
+        var fixedTexts = InferFixedBatch(frame,
+        [
+            (1110, 153, 190, 40),
+            (1110, 224.3, 143.9, 24),
+            (1110, 248.4, 136.8, 38.4),
+            (1117, 360, 70, 22),
+            (1130.2, 398.1, 230.0, 29.2),
+            (1130.2, 427.3, 230.0, 30.9),
+            (1130.2, 458.2, 230.0, 32.7),
+            (1130.2, 490.9, 360.0, 32.1),
+            (1110, 465, 280, 32),
+            (1110, 500, 280, 32),
+            (1110, 530, 280, 32),
+            (1154.9, 762.6, 243.5, 25.2)
+        ]);
+        var slotText = fixedTexts[0];
         if (ArtifactFastTextParser.IsEnhancementMaterial(slotText))
         {
             throw new ArtifactEnhancementMaterialException(slotText);
         }
         var slot = ArtifactFastTextParser.ParseSlot(slotText);
         var mainStat = ArtifactFastTextParser.ParseAffix(
-            InferFixed(frame, 1110, 224.3, 143.9, 24),
-            InferFixed(frame, 1110, 248.4, 136.8, 38.4));
-        var level = ArtifactFastTextParser.ParseLevel(
-            InferFixed(frame, 1117, 360, 70, 22));
-        var substats = new[]
-            {
-                (1130.2, 398.1, 230.0, 29.2),
-                (1130.2, 427.3, 230.0, 30.9),
-                (1130.2, 458.2, 230.0, 32.7),
-                (1130.2, 490.9, 360.0, 32.1)
-            }
-            .Select(rect => InferFixed(frame, rect.Item1, rect.Item2, rect.Item3, rect.Item4))
+            fixedTexts[1],
+            fixedTexts[2]);
+        var level = ArtifactFastTextParser.ParseLevel(fixedTexts[3]);
+        var substats = fixedTexts[4..8]
             .Where(text => !string.IsNullOrWhiteSpace(text))
             .Select(text => ArtifactFastTextParser.TryParseAffixLine(
                 text, out var affix) ? affix : null)
@@ -329,9 +383,13 @@ internal sealed class ArtifactInventoryUi : IDisposable
                 $"固定区域只识别到 {substats.Length}/{requiredSubstats} 条副词条");
         }
 
-        var setText = InferFixed(
-            frame, 1110, SetNameTop(Math.Max(substats.Length, requiredSubstats)), 280, 32);
-        var equipText = InferFixed(frame, 1154.9, 762.6, 243.5, 25.2);
+        var setText = fixedTexts[Math.Max(substats.Length, requiredSubstats) switch
+        {
+            >= 4 => 10,
+            3 => 9,
+            _ => 8
+        }];
+        var equipText = fixedTexts[11];
 
         return new ArtifactItemDto(
             frame.ScanIndex,
@@ -421,7 +479,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         return ArtifactRarityDetector.Detect(capture);
     }
 
-    private async Task<(bool Locked, Mat Capture)> SelectAndCaptureScanItemAsync(
+    private async Task<ArtifactCapturedItem> SelectAndCaptureScanItemAsync(
         ImageRegion page,
         Rect itemRect,
         int scanIndex,
@@ -433,36 +491,27 @@ internal sealed class ArtifactInventoryUi : IDisposable
         var liveItemRect = ToLiveItemRect(page, itemRect);
         EnsureInitialDetailSignature();
         item.Click();
-        Mat capture;
-        try
-        {
-            capture = await CaptureAfterDetailConfirmedAsync(
-                _lastDetailSignature.Value,
-                baselineSelectionScore,
-                liveItemRect,
-                scanIndex,
-                "扫描",
-                cancellationToken);
-        }
-        catch (InvalidDataException exception)
-        {
-            _logger.LogWarning(
-                exception,
-                "圣遗物 {ScanIndex} 首次点击后详情未切换，补点一次",
-                scanIndex);
-            item.Click();
-            capture = await CaptureAfterDetailConfirmedAsync(
-                _lastDetailSignature.Value,
-                baselineSelectionScore,
-                liveItemRect,
-                scanIndex,
-                "扫描补点",
-                cancellationToken);
-        }
-        _lastDetailSignature = DetailSignature(capture);
-        var detailLocked = ArtifactDetailLockDetector.IsLocked(capture);
-        LogLockSignalMismatch(scanIndex, gridLocked, detailLocked);
-        return (gridLocked, capture);
+        var captured = await CaptureAfterDetailConfirmedAsync(
+            _lastDetailSignature.Value,
+            baselineSelectionScore,
+            liveItemRect,
+            scanIndex,
+            "扫描",
+            capture =>
+            {
+                var signature = ComputeDetailSignature(capture);
+                var detailLocked = ArtifactDetailLockDetector.IsLocked(capture);
+                var frame = ArtifactCapturedItem.Create(
+                    scanIndex,
+                    gridLocked,
+                    capture,
+                    ReadRarity(capture));
+                return (signature, detailLocked, frame);
+            },
+            cancellationToken);
+        _lastDetailSignature = captured.signature;
+        LogLockSignalMismatch(scanIndex, gridLocked, captured.detailLocked);
+        return captured.frame;
     }
 
     private async Task<(bool Locked, Mat Capture)> SelectAndCaptureLockItemAsync(
@@ -476,33 +525,15 @@ internal sealed class ArtifactInventoryUi : IDisposable
         var liveItemRect = ToLiveItemRect(page, itemRect);
         EnsureInitialDetailSignature();
         item.Click();
-        Mat capture;
-        try
-        {
-            capture = await CaptureAfterDetailConfirmedAsync(
-                _lastDetailSignature.Value,
-                baselineSelectionScore,
-                liveItemRect,
-                scanIndex,
-                "锁定核验",
-                cancellationToken);
-        }
-        catch (InvalidDataException exception)
-        {
-            _logger.LogWarning(
-                exception,
-                "圣遗物 {ScanIndex} 锁定核验首次点击后详情未切换，补点一次",
-                scanIndex);
-            item.Click();
-            capture = await CaptureAfterDetailConfirmedAsync(
-                _lastDetailSignature.Value,
-                baselineSelectionScore,
-                liveItemRect,
-                scanIndex,
-                "锁定核验补点",
-                cancellationToken);
-        }
-        _lastDetailSignature = DetailSignature(capture);
+        var capture = await CaptureAfterDetailConfirmedAsync(
+            _lastDetailSignature.Value,
+            baselineSelectionScore,
+            liveItemRect,
+            scanIndex,
+            "锁定核验",
+            static capture => capture.Clone(),
+            cancellationToken);
+        _lastDetailSignature = ComputeDetailSignature(capture);
         var detailLocked = ArtifactDetailLockDetector.IsLocked(capture);
         var gridLocked = ReadSelectedGridLockState(page, itemRect);
         LogLockSignalMismatch(scanIndex, gridLocked, detailLocked);
@@ -514,7 +545,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         if (_lastDetailSignature is not null) return;
 
         using var initialCapture = CaptureToRectArea();
-        _lastDetailSignature = DetailSignature(initialCapture.SrcMat);
+        _lastDetailSignature = ComputeDetailSignature(initialCapture.SrcMat);
     }
 
     private void LogLockSignalMismatch(
@@ -563,6 +594,36 @@ internal sealed class ArtifactInventoryUi : IDisposable
         return _fixedRegionRecognizer(region).Trim();
     }
 
+    private string[] InferFixedBatch(
+        ArtifactCapturedItem frame,
+        IReadOnlyList<(double Left, double Top, double Width, double Height)> rects)
+    {
+        var regions = rects
+            .Select(rect => frame.CropBaseRect(
+                rect.Left,
+                rect.Top,
+                rect.Width,
+                rect.Height))
+            .ToArray();
+        try
+        {
+            var results = _fixedRegionBatchRecognizer(regions);
+            if (results.Length != regions.Length)
+            {
+                throw new InvalidDataException(
+                    $"固定区域批量 OCR 返回 {results.Length}/{regions.Length} 条结果");
+            }
+            return results.Select(text => text.Trim()).ToArray();
+        }
+        finally
+        {
+            foreach (var region in regions) region.Dispose();
+        }
+    }
+
+    internal void AllowUnconfirmedCaptureForFingerprintValidation() =>
+        _allowUnconfirmedCapture = true;
+
     private IOcrService LegacyOcrService
     {
         get
@@ -605,12 +666,13 @@ internal sealed class ArtifactInventoryUi : IDisposable
         return (absolute.Top - LegacyDetectionRegion.Y, absolute.Height);
     }
 
-    private async Task<Mat> CaptureAfterDetailConfirmedAsync(
+    private async Task<T> CaptureAfterDetailConfirmedAsync<T>(
         ArtifactPanelSignature initialSignature,
         double baselineSelectionScore,
         Rect liveItemRect,
         int scanIndex,
         string operation,
+        Func<Mat, T> projector,
         CancellationToken cancellationToken)
     {
         var timer = Stopwatch.StartNew();
@@ -620,40 +682,59 @@ internal sealed class ArtifactInventoryUi : IDisposable
             initialSignature,
             baselineSelectionScore,
             minimumSelectionIncrease: 0.08);
-        while (timer.ElapsedMilliseconds < 900)
+        while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var capture = CaptureToRectArea();
-            var detailSignature = DetailSignature(capture.SrcMat);
+            var detailSignature = ComputeDetailSignature(capture.SrcMat);
             var changedAndStable = detector.Observe(
                 detailSignature,
                 ArtifactDetailLockDetector.VisualSignature(capture.SrcMat));
             var sameDetailButSelected = false;
-            if (!changedAndStable && timer.ElapsedMilliseconds >= 450)
+            if (!changedAndStable)
             {
                 using var liveItem = capture.DeriveCrop(liveItemRect);
                 sameDetailButSelected = sameDetailDetector.Observe(
                     detailSignature,
                     ArtifactGridSelectionDetector.Score(liveItem.SrcMat));
             }
-            if (changedAndStable || sameDetailButSelected)
+            var confirmed = changedAndStable || sameDetailButSelected;
+            var decision = ArtifactDetailCapturePolicy.Decide(
+                scanIndex,
+                timer.ElapsedMilliseconds,
+                confirmed);
+            if (decision == ArtifactDetailCaptureDecision.Confirmed)
             {
+                var evidence = changedAndStable
+                    ? "详情已切换"
+                    : "目标格已选中且详情相同";
                 _logger.LogDebug(
                     "圣遗物 {ScanIndex} {Operation}详情确认等待 {ElapsedMilliseconds}ms，依据={Evidence}",
                     scanIndex,
                     operation,
                     timer.ElapsedMilliseconds,
-                    changedAndStable ? "详情已切换" : "目标格已选中且详情相同");
-                return capture.SrcMat.Clone();
+                    evidence);
+                return projector(capture.SrcMat);
+            }
+            if (decision == ArtifactDetailCaptureDecision.TimedOut)
+            {
+                if (_allowUnconfirmedCapture)
+                {
+                    _logger.LogWarning(
+                        "圣遗物 {ScanIndex} {Operation}在 {ElapsedMilliseconds}ms 内未取得选中证明；仅供随后精确指纹核验，不得直接执行写操作",
+                        scanIndex,
+                        operation,
+                        timer.ElapsedMilliseconds);
+                    return projector(capture.SrcMat);
+                }
+                throw new InvalidDataException(
+                    $"圣遗物 {scanIndex} {operation}在 {timer.ElapsedMilliseconds}ms 内未证明目标格已选中，拒绝解析可能的旧详情帧。");
             }
             await Delay(16, cancellationToken);
         }
-
-        throw new InvalidDataException(
-            $"圣遗物 {scanIndex} {operation}详情在 900ms 内既未切换，也无法证明目标格已选中。");
     }
 
-    private static ArtifactPanelSignature DetailSignature(Mat capture) =>
+    internal static ArtifactPanelSignature ComputeDetailSignature(Mat capture) =>
         new(
             ArtifactVisualSignature.Compute(
                 capture, 1090, 100, 410, 230),
@@ -682,6 +763,10 @@ internal sealed class ArtifactInventoryUi : IDisposable
 
 }
 
+internal readonly record struct ArtifactSelectedLockItem(
+    bool Locked,
+    ArtifactPanelSignature DetailSignature);
+
 internal sealed class ArtifactCapturedItem : IDisposable
 {
     private static readonly Size OcrReferenceSize = ArtifactUiCoordinateMapper.LogicalSize;
@@ -701,6 +786,7 @@ internal sealed class ArtifactCapturedItem : IDisposable
         int scanIndex,
         bool locked,
         int rarity,
+        ArtifactPanelSignature detailSignature,
         Size sourceSize,
         Rect coreBounds,
         Mat coreCapture,
@@ -710,6 +796,7 @@ internal sealed class ArtifactCapturedItem : IDisposable
         ScanIndex = scanIndex;
         Locked = locked;
         Rarity = rarity;
+        DetailSignature = detailSignature;
         SourceSize = sourceSize;
         _coreBounds = coreBounds;
         CoreCapture = coreCapture;
@@ -720,6 +807,7 @@ internal sealed class ArtifactCapturedItem : IDisposable
     internal int ScanIndex { get; }
     internal bool Locked { get; }
     internal int Rarity { get; }
+    internal ArtifactPanelSignature DetailSignature { get; }
     internal Size SourceSize { get; }
     internal Mat CoreCapture { get; }
     internal Mat EquipmentCapture { get; }
@@ -753,6 +841,7 @@ internal sealed class ArtifactCapturedItem : IDisposable
             scanIndex,
             locked,
             rarity,
+            ArtifactInventoryUi.ComputeDetailSignature(fullCapture),
             sourceSize,
             coreBounds,
             NormalizeCapture(core, coreBounds.Size),

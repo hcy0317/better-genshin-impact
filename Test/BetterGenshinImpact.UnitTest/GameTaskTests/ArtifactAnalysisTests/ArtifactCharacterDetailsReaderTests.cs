@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.ArtifactAnalysis;
+using BetterGenshinImpact.GameTask.AutoFight.Config;
 using OpenCvSharp;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
@@ -19,9 +20,15 @@ public class ArtifactCharacterDetailsReaderTests
     [InlineData("等级90%90", 90)]
     [InlineData("等级90％90", 90)]
     [InlineData("等级90 /.90", 90)]
+    [InlineData("等级90 /*90", 90)]
+    [InlineData("等级90/..90", 90)]
+    [InlineData("等级90%%90", 90)]
+    [InlineData("等级90190", 90)]
+    [InlineData("等级90790", 90)]
     [InlineData("等级9090", 90)]
     [InlineData("等级8090", 80)]
     [InlineData("等级190", 1)]
+    [InlineData("等级201·40", 20)]
     [InlineData("等级40", 40)]
     public void DetailLevel_ParsesSeparatedAndConcatenatedPairs(string text, int expected)
     {
@@ -30,14 +37,13 @@ public class ArtifactCharacterDetailsReaderTests
     }
 
     [Theory]
-    [InlineData("等级90790")]
     [InlineData("等级8O/90")]
     [InlineData("等级90/9O")]
     [InlineData("等级809090")]
     [InlineData("等级80/80/90")]
-    [InlineData("等级90%%90")]
-    [InlineData("等级90/..90")]
     [InlineData("等级90%80")]
+    [InlineData("等级209·40")]
+    [InlineData("等级20040")]
     public void DetailLevel_RejectsDamagedOrAmbiguousText(string text)
     {
         Assert.False(ArtifactCharacterDetailsReader.TryParseLevel(text, out _));
@@ -80,7 +86,27 @@ public class ArtifactCharacterDetailsReaderTests
     }
 
     [Theory]
-    [InlineData("法露珊")]
+    [InlineData("法露珊", "珐露珊")]
+    [InlineData("那维来特", "那维莱特")]
+    public void CharacterName_AcceptsAUniqueSingleCharacterOcrError(
+        string rawText,
+        string expected)
+    {
+        Assert.Equal(expected, ArtifactCharacterDetailsReader.ResolveCharacterName(rawText));
+    }
+
+    [Fact]
+    public void EveryCatalogCharacterNameSurvivesWhitespaceAndSymbolNoise()
+    {
+        foreach (var name in DefaultAutoFightConfig.CombatAvatarNames)
+        {
+            Assert.Equal(name, ArtifactCharacterDetailsReader.ResolveCharacterName(name));
+            var noisy = name.Insert(Math.Max(1, name.Length / 2), " * ");
+            Assert.Equal(name, ArtifactCharacterDetailsReader.ResolveCharacterName(noisy));
+        }
+    }
+
+    [Theory]
     [InlineData("亚")]
     public void CharacterName_RejectsPartialOrFuzzyMatches(string rawText)
     {
@@ -124,6 +150,47 @@ public class ArtifactCharacterDetailsReaderTests
                 rawText,
                 gameNickname,
                 miliastraNickname));
+    }
+
+    [Fact]
+    public void PartialDetail_MergesAValidLevelWithAValidNameFromTheRetryFrame()
+    {
+        var first = ArtifactCharacterDetailsReader.ParseRawPartial(
+            "采来·",
+            "等级20/40",
+            favorite: false);
+        var retry = ArtifactCharacterDetailsReader.ParseRawPartial(
+            "莱依拉",
+            "等级坏",
+            favorite: true);
+
+        var merged = first.Merge(retry).RequireComplete();
+
+        Assert.Equal("莱依拉", merged.CharacterName);
+        Assert.Equal(20, merged.Level);
+        Assert.True(merged.Favorite);
+    }
+
+    [Fact]
+    public void PartialDetail_UsesTheVerifiedRetryFrameFavoriteState()
+    {
+        var first = ArtifactCharacterDetailsReader.ParseRawPartial(
+            "莱依拉", "等级20/40", favorite: true);
+        var retry = ArtifactCharacterDetailsReader.ParseRawPartial(
+            "莱依拉", "等级坏", favorite: false);
+
+        Assert.False(first.Merge(retry).RequireComplete().Favorite);
+    }
+
+    [Fact]
+    public void PartialDetail_MergesOnlyWhenTheRetryFrameStillShowsTheSameDetail()
+    {
+        Assert.True(ArtifactCharacterDetailsReader.IsSameDetailForRetry(
+            0b_1010UL,
+            0b_1011UL));
+        Assert.False(ArtifactCharacterDetailsReader.IsSameDetailForRetry(
+            0b_0000UL,
+            0b_1111UL));
     }
 
     [Fact]

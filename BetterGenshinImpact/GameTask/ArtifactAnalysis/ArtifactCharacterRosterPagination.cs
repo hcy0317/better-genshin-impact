@@ -33,8 +33,8 @@ internal static class ArtifactCharacterPageDetector
             .OrderBy(group => group.Key)
             .Select(group => group.OrderBy(card => card.X).ToList())
             .ToList();
-        AddVisibleSixthRow(grid, rows, assetScale);
-
+        rows = RemoveVerticallyOverlappingRows(rows);
+        AddVisibleSixthRow(grid, rows);
         return rows
             .Take(MaximumRows)
             .Select(row => new ArtifactCharacterPageRow(
@@ -43,10 +43,35 @@ internal static class ArtifactCharacterPageDetector
             .ToArray();
     }
 
+    internal static List<List<Rect>> RemoveVerticallyOverlappingRows(
+        IReadOnlyList<List<Rect>> rows)
+    {
+        var accepted = new List<List<Rect>>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (row.Count == 0) continue;
+            if (accepted.Count == 0)
+            {
+                accepted.Add(row);
+                continue;
+            }
+
+            var previous = accepted[^1];
+            var previousBottom = previous.Max(card => card.Bottom);
+            var currentTop = row.Min(card => card.Y);
+            var minimumHeight = Math.Min(
+                Median(previous.Select(card => card.Height)),
+                Median(row.Select(card => card.Height)));
+            var overlap = previousBottom - currentTop;
+            if (overlap > minimumHeight * 0.10) continue;
+            accepted.Add(row);
+        }
+        return accepted;
+    }
+
     private static void AddVisibleSixthRow(
         Mat grid,
-        List<List<Rect>> rows,
-        double assetScale)
+        List<List<Rect>> rows)
     {
         if (rows.Count >= MaximumRows || rows.Count < 2) return;
         var xs = rows.SelectMany(row => row).Select(card => card.X)
@@ -59,16 +84,23 @@ internal static class ArtifactCharacterPageDetector
         if (pitches.Length == 0) return;
         var pitch = pitches[pitches.Length / 2];
         var nextY = rowYs[^1] + pitch;
-        var cardWidth = Math.Max(1, (int)Math.Round(115 * assetScale));
-        var cardHeight = Math.Max(1, (int)Math.Round(140 * assetScale));
+        var detectedCards = rows.SelectMany(row => row).ToArray();
+        var cardWidth = Median(detectedCards.Select(card => card.Width));
+        var cardHeight = Median(detectedCards.Select(card => card.Height));
         var visibleHeight = Math.Min(cardHeight, grid.Height - nextY);
-        if (visibleHeight < Math.Round(40 * assetScale)) return;
+        if (visibleHeight < Math.Round(cardHeight * 0.28)) return;
 
         var visibleCards = xs
             .Select(x => new Rect(x, nextY, cardWidth, visibleHeight))
             .Where(card => card.Right <= grid.Width && LooksLikeCard(grid, card))
             .ToList();
         if (visibleCards.Count > 0) rows.Add(visibleCards);
+    }
+
+    private static int Median(IEnumerable<int> values)
+    {
+        var ordered = values.Where(value => value > 0).OrderBy(value => value).ToArray();
+        return ordered.Length == 0 ? 1 : ordered[ordered.Length / 2];
     }
 
     private static bool LooksLikeCard(Mat grid, Rect cardRect)
@@ -129,6 +161,14 @@ internal sealed class ArtifactCharacterPageTracker
     internal void Commit(IReadOnlyList<ArtifactCharacterPageRow> rows) =>
         _previousRows = rows.ToArray();
 
+    internal static IReadOnlyList<ArtifactCharacterPageRow> SelectFromStartRow(
+        IReadOnlyList<ArtifactCharacterPageRow> currentRows,
+        int startRow)
+    {
+        if (startRow < 0) throw new ArgumentOutOfRangeException(nameof(startRow));
+        return currentRows.Skip(Math.Min(startRow, currentRows.Count)).ToArray();
+    }
+
     internal static int FindOverlap(
         IReadOnlyList<ArtifactCharacterPageRow> previousRows,
         IReadOnlyList<ArtifactCharacterPageRow> currentRows)
@@ -152,7 +192,7 @@ internal sealed class ArtifactCharacterPageTracker
         return 0;
     }
 
-    private static bool RowsMatch(
+    internal static bool RowsMatch(
         ArtifactCharacterPageRow left,
         ArtifactCharacterPageRow right)
     {
@@ -162,25 +202,32 @@ internal sealed class ArtifactCharacterPageTracker
     }
 }
 
-internal enum ArtifactCharacterScrollObservation
-{
-    NoProgress,
-    AdvancedOneRow,
-    Overshot
-}
-
 internal static class ArtifactCharacterScrollPlanner
 {
-    internal static ArtifactCharacterScrollObservation Observe(
-        IReadOnlyList<ArtifactCharacterPageRow> previousRows,
-        IReadOnlyList<ArtifactCharacterPageRow> currentRows)
+    private const double ReferenceGridHeight = 917;
+    private const double ReferenceRowPitch = 156;
+    internal const int PageAdvanceRows = 6;
+    internal const int SettleDelayMilliseconds = 80;
+
+    internal static double RowPitchForGridHeight(int gridHeight)
     {
-        var overlap = ArtifactCharacterPageTracker.FindOverlap(
-            previousRows, currentRows);
-        var newRows = currentRows.Count - overlap;
-        if (newRows <= 0) return ArtifactCharacterScrollObservation.NoProgress;
-        return previousRows.Count - overlap == 1 && newRows == 1
-            ? ArtifactCharacterScrollObservation.AdvancedOneRow
-            : ArtifactCharacterScrollObservation.Overshot;
+        if (gridHeight <= 0) throw new ArgumentOutOfRangeException(nameof(gridHeight));
+        return ReferenceRowPitch * gridHeight / ReferenceGridHeight;
     }
+
+    internal static IReadOnlyList<Rect> RulerRects(Rect gridRoi)
+    {
+        var top = gridRoi.Y + 8;
+        var height = Math.Max(8, gridRoi.Height - 16);
+        return
+        [
+            new Rect(gridRoi.X + 24, top, 2, height),
+            new Rect(
+                gridRoi.X + 8,
+                top,
+                Math.Max(2, gridRoi.Width - 16),
+                height)
+        ];
+    }
+
 }

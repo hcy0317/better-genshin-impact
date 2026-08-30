@@ -121,6 +121,7 @@ public interface IArtifactLockPlanExecutor
         IReadOnlyList<ArtifactExecutionActionDto> actions,
         int expectedArtifactCount,
         bool reusePreparedInventory,
+        IReadOnlyList<ArtifactItemDto> verifiedArtifacts,
         CancellationToken cancellationToken);
 }
 
@@ -216,6 +217,7 @@ public sealed class ArtifactHostCoordinator(
                         preflight.Actions,
                         request.SourceArtifactCount.Value,
                         observation.CountOnly,
+                        observation.Artifacts,
                         cancellationToken);
                     break;
                 }

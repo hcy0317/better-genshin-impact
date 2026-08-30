@@ -314,6 +314,7 @@ public class ArtifactHostCoordinatorTests
             IReadOnlyList<ArtifactExecutionActionDto> actions,
             int expectedArtifactCount,
             bool reusePreparedInventory,
+            IReadOnlyList<ArtifactItemDto> verifiedArtifacts,
             CancellationToken cancellationToken)
         {
             Calls++;

@@ -1,60 +1,223 @@
 using OpenCvSharp;
+using Microsoft.Win32.SafeHandles;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Linq;
-using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace BetterGenshinImpact.GameTask.Model.GameUI;
 
-internal sealed class ArtifactRowScrollDetector
+internal readonly record struct YasPixelScrollPlan(
+    int InputCount,
+    double ResidualPixels);
+
+internal sealed class YasScrollInputPacer : IDisposable
 {
-    private const int ColorDistanceThreshold = 10;
-    private readonly Vec3b initialColor;
-    private bool hasChanged;
+    private const int HighResolutionThresholdMilliseconds = 10;
+    private const uint CreateWaitableTimerHighResolution = 0x00000002;
+    private const uint TimerModifyStateAndSynchronize = 0x00100002;
+    private EventWaitHandle? _timer;
 
-    internal ArtifactRowScrollDetector(Vec3b initialColor)
+    internal static bool UsesHighResolutionPacing(int milliseconds) =>
+        milliseconds is > 0 and < HighResolutionThresholdMilliseconds;
+
+    internal ValueTask DelayAsync(
+        int milliseconds,
+        CancellationToken cancellationToken)
     {
-        this.initialColor = initialColor;
-    }
-
-    internal bool HasObservedChange => this.hasChanged;
-
-    internal bool Observe(Vec3b color)
-    {
-        var isInitialColor = IsNear(this.initialColor, color);
-        if (!this.hasChanged)
+        if (milliseconds <= 0) return ValueTask.CompletedTask;
+        if (!UsesHighResolutionPacing(milliseconds))
         {
-            this.hasChanged = !isInitialColor;
-            return false;
+            return new ValueTask(Task.Delay(milliseconds, cancellationToken));
         }
 
-        return isInitialColor;
+        cancellationToken.ThrowIfCancellationRequested();
+        var timer = _timer ??= CreateTimer();
+        var dueTime = -milliseconds * 10_000L;
+        if (!SetWaitableTimer(
+                timer.SafeWaitHandle,
+                ref dueTime,
+                0,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                false))
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        if (!cancellationToken.CanBeCanceled)
+        {
+            timer.WaitOne();
+            return ValueTask.CompletedTask;
+        }
+
+        var signaled = WaitHandle.WaitAny([timer, cancellationToken.WaitHandle]);
+        if (signaled == 1) cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.CompletedTask;
     }
 
-    internal static bool IsNear(Vec3b left, Vec3b right)
+    private static EventWaitHandle CreateTimer()
     {
-        return ColorDistance(left, right) <= ColorDistanceThreshold;
+        var handle = CreateWaitableTimerEx(
+            IntPtr.Zero,
+            null,
+            CreateWaitableTimerHighResolution,
+            TimerModifyStateAndSynchronize);
+        if (handle == IntPtr.Zero)
+        {
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "系统不支持 YAS 快速滚动所需的高精度 waitable timer。");
+        }
+
+        var timer = new EventWaitHandle(false, EventResetMode.AutoReset);
+        timer.SafeWaitHandle.Dispose();
+        timer.SafeWaitHandle = new SafeWaitHandle(handle, ownsHandle: true);
+        return timer;
     }
 
-    private static double ColorDistance(Vec3b left, Vec3b right)
+    public void Dispose() => _timer?.Dispose();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWaitableTimerEx(
+        IntPtr timerAttributes,
+        string? timerName,
+        uint flags,
+        uint desiredAccess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWaitableTimer(
+        SafeWaitHandle timer,
+        ref long dueTime,
+        int periodMilliseconds,
+        IntPtr completionRoutine,
+        IntPtr completionArgument,
+        [MarshalAs(UnmanagedType.Bool)] bool resume);
+}
+
+internal static class YasPixelScrollPlanner
+{
+    private const double MaximumRulerColorDistance = 12;
+    internal const int CalibrationInputLimit = 5;
+    internal const int CalibrationSettleDelayMilliseconds = 80;
+    internal const int FirstPageInputIntervalMilliseconds = 20;
+    internal const int FastInputIntervalMilliseconds = 2;
+    internal const int PageSettleSampleIntervalMilliseconds = 20;
+    internal const int MaximumPageSettleSamples = 10;
+
+    internal static YasPixelScrollPlan CreatePlan(
+        double rowPitchPixels,
+        double pixelsPerInput,
+        double residualPixels,
+        int rows)
     {
-        var blue = left.Item0 - right.Item0;
-        var green = left.Item1 - right.Item1;
-        var red = left.Item2 - right.Item2;
-        return Math.Sqrt(blue * blue + green * green + red * red);
+        if (rowPitchPixels <= 0)
+            throw new ArgumentOutOfRangeException(nameof(rowPitchPixels));
+        if (pixelsPerInput <= 0)
+            throw new ArgumentOutOfRangeException(nameof(pixelsPerInput));
+        if (rows <= 0) throw new ArgumentOutOfRangeException(nameof(rows));
+
+        var totalPixels = residualPixels + rowPitchPixels * rows;
+        var inputCount = Math.Max(1, (int)Math.Round(
+            totalPixels / pixelsPerInput,
+            MidpointRounding.AwayFromZero));
+        return new YasPixelScrollPlan(
+            inputCount,
+            totalPixels - inputCount * pixelsPerInput);
     }
+
+    internal static int FindRulerShift(
+        IReadOnlyList<Vec3b> before,
+        IReadOnlyList<Vec3b> after,
+        int maximumShift)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        if (before.Count != after.Count || before.Count < 8) return 0;
+        maximumShift = Math.Min(maximumShift, before.Count - 8);
+        if (maximumShift <= 0) return 0;
+
+        var bestShift = 0;
+        var bestScore = double.MaxValue;
+        for (var shift = 1; shift <= maximumShift; shift++)
+        {
+            var forward = AverageColorDistance(
+                before, 0, after, shift, before.Count - shift);
+            var reverse = AverageColorDistance(
+                before, shift, after, 0, before.Count - shift);
+            var score = Math.Min(forward, reverse);
+            if (score >= bestScore) continue;
+            bestScore = score;
+            bestShift = shift;
+        }
+        return bestScore <= MaximumRulerColorDistance ? bestShift : 0;
+    }
+
+    internal static IReadOnlyList<Vec3b> ReadRuler(Mat capture, Rect rulerRect)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        using var ruler = new Mat(capture, rulerRect);
+        var colors = new Vec3b[ruler.Height];
+        for (var y = 0; y < ruler.Height; y++)
+        {
+            using var row = new Mat(ruler, new Rect(0, y, ruler.Width, 1));
+            var mean = Cv2.Mean(row);
+            colors[y] = ruler.Channels() switch
+            {
+                4 or 3 => new Vec3b(
+                    (byte)Math.Round(mean.Val0),
+                    (byte)Math.Round(mean.Val1),
+                    (byte)Math.Round(mean.Val2)),
+                1 => new Vec3b(
+                    (byte)Math.Round(mean.Val0),
+                    (byte)Math.Round(mean.Val0),
+                    (byte)Math.Round(mean.Val0)),
+                var channels => throw new InvalidOperationException(
+                    $"不支持的 YAS ruler 截图通道数：{channels}")
+            };
+        }
+        return colors;
+    }
+
+    internal static bool IsRulerStable(
+        IReadOnlyList<Vec3b> before,
+        IReadOnlyList<Vec3b> after)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        if (before.Count != after.Count || before.Count == 0) return false;
+        return AverageColorDistance(
+            before, 0, after, 0, before.Count) <= 2;
+    }
+
+    private static double AverageColorDistance(
+        IReadOnlyList<Vec3b> left,
+        int leftStart,
+        IReadOnlyList<Vec3b> right,
+        int rightStart,
+        int count)
+    {
+        double total = 0;
+        for (var index = 0; index < count; index++)
+        {
+            var first = left[leftStart + index];
+            var second = right[rightStart + index];
+            total += Math.Abs(first.Item0 - second.Item0);
+            total += Math.Abs(first.Item1 - second.Item1);
+            total += Math.Abs(first.Item2 - second.Item2);
+        }
+        return total / (count * 3d);
+    }
+
 }
 
 internal static class ArtifactRowScrollPlanner
 {
-    internal const int CalibrationDelayMilliseconds = 80;
-    internal const int CalibrationInputLimit = 12;
-    internal const int PerRowBudgetMilliseconds = 1_500;
-    internal const int VerificationDelayMilliseconds = 20;
-    internal const int MaximumVerificationSamples = 5;
-    internal const int MaximumVerificationDelayMilliseconds =
-        VerificationDelayMilliseconds * MaximumVerificationSamples;
-
     internal static int RowsToScroll(int totalRows, int visibleRows, int scrolledRows)
     {
         if (totalRows <= 0) throw new ArgumentOutOfRangeException(nameof(totalRows));
@@ -62,29 +225,6 @@ internal static class ArtifactRowScrollPlanner
         if (scrolledRows < 0) throw new ArgumentOutOfRangeException(nameof(scrolledRows));
 
         return Math.Min(visibleRows, Math.Max(0, totalRows - visibleRows - scrolledRows));
-    }
-
-    internal static int EstimateInputCount(double averageInputsPerRow, int rows)
-    {
-        if (averageInputsPerRow <= 0) throw new ArgumentOutOfRangeException(nameof(averageInputsPerRow));
-        if (rows <= 0) throw new ArgumentOutOfRangeException(nameof(rows));
-
-        return Math.Max(0, (int)Math.Round(
-            averageInputsPerRow * rows - 2,
-            MidpointRounding.AwayFromZero));
-    }
-
-    internal static int FastPreadvanceInputs(double averageInputsPerRow)
-    {
-        if (averageInputsPerRow <= 0)
-            throw new ArgumentOutOfRangeException(nameof(averageInputsPerRow));
-        return Math.Max(0, (int)Math.Floor(averageInputsPerRow) - 2);
-    }
-
-    internal static int EstimatedVerificationDelay(double averageInputsPerRow)
-    {
-        _ = FastPreadvanceInputs(averageInputsPerRow);
-        return MaximumVerificationDelayMilliseconds;
     }
 
 }
@@ -119,49 +259,61 @@ internal static class ArtifactGridAlignmentPlanner
                 Math.Abs(item.Y - secondRow.Y) <= yTolerance)
             >= minimumItemsPerRow;
     }
-}
 
-internal readonly record struct ArtifactGridRowSignature(
-    ulong Left,
-    ulong Right);
-
-internal static class ArtifactRowContentShiftVerifier
-{
-    private const double MaximumAverageDistance = 16;
-    private const double MinimumCompetingAdvantage = 1;
-
-    internal static bool IsExactlyOneRow(
-        IReadOnlyList<ArtifactGridRowSignature> before,
-        IReadOnlyList<ArtifactGridRowSignature> after)
+    internal static double? VerticalOffsetPixels(
+        IEnumerable<Rect> items,
+        Size captureSize,
+        Rect roi,
+        int columns)
     {
-        ArgumentNullException.ThrowIfNull(before);
-        ArgumentNullException.ThrowIfNull(after);
-        if (before.Count != after.Count || before.Count < 3) return false;
+        ArgumentNullException.ThrowIfNull(items);
+        var template = ArtifactGridLayout.CellsInRoi(captureSize, roi);
+        if (columns <= 0 || template.Count < columns * 2) return null;
+        var firstRow = template[0].Rect;
+        var heightTolerance = Math.Max(4, (int)Math.Round(firstRow.Height * 0.10));
+        var rowTolerance = Math.Max(2, (int)Math.Round(firstRow.Height * 0.04));
+        var candidates = items
+            .Where(item => Math.Abs(item.Height - firstRow.Height) <= heightTolerance)
+            .OrderBy(item => item.Y)
+            .ToArray();
+        var minimumItemsPerRow = Math.Max(1, columns - 1);
+        if (candidates.Length < minimumItemsPerRow) return null;
 
-        var oneRow = AverageDistance(before, after, 1);
-        var stationary = AverageDistance(before, after, 0);
-        var twoRows = AverageDistance(before, after, 2);
-        return oneRow <= MaximumAverageDistance
-            && oneRow + MinimumCompetingAdvantage < stationary
-            && oneRow + MinimumCompetingAdvantage < twoRows;
-    }
-
-    private static double AverageDistance(
-        IReadOnlyList<ArtifactGridRowSignature> before,
-        IReadOnlyList<ArtifactGridRowSignature> after,
-        int rowShift)
-    {
-        var comparisons = before.Count - rowShift;
-        var total = 0;
-        for (var index = 0; index < comparisons; index++)
+        var clusters = new List<List<int>>();
+        foreach (var item in candidates)
         {
-            var left = before[index + rowShift];
-            var right = after[index];
-            total += BitOperations.PopCount(left.Left ^ right.Left);
-            total += BitOperations.PopCount(left.Right ^ right.Right);
+            var cluster = clusters.FirstOrDefault(group =>
+                Math.Abs(group.Average() - item.Y) <= rowTolerance);
+            if (cluster is null)
+            {
+                cluster = [];
+                clusters.Add(cluster);
+            }
+            cluster.Add(item.Y);
         }
-        return total / (double)comparisons;
+
+        var actualFirstRow = clusters
+            .Where(group => group.Count >= minimumItemsPerRow)
+            .Select(group => group.Average())
+            .OrderBy(y => y)
+            .Cast<double?>()
+            .FirstOrDefault();
+        return actualFirstRow.HasValue
+            ? actualFirstRow.Value - firstRow.Y
+            : null;
     }
+
+    internal static int CorrectionInputs(double verticalOffset, double pixelsPerInput)
+    {
+        if (pixelsPerInput <= 0)
+            throw new ArgumentOutOfRangeException(nameof(pixelsPerInput));
+        if (Math.Abs(verticalOffset) <= 1) return 0;
+        var count = Math.Max(1, (int)Math.Round(
+            Math.Abs(verticalOffset) / pixelsPerInput,
+            MidpointRounding.AwayFromZero));
+        return verticalOffset > 0 ? count : -count;
+    }
+
 }
 
 internal static class ArtifactGridLayout
@@ -172,8 +324,11 @@ internal static class ArtifactGridLayout
     private const double CellHeight = 126;
     private const double HorizontalGap = 20;
     private const double VerticalGap = 20;
-    private const double ScrollFlagX = 271.1;
-    private const double ScrollFlagY = 138.3;
+    private const double RulerX = 272;
+    private const double RulerTop = 102;
+    private const double RulerWidth = 2;
+    private const double RulerHeight = 123;
+    private const double RowPitch = 146;
 
     internal static IReadOnlyList<GridCell> CellsInRoi(Size captureSize, Rect roi)
     {
@@ -204,105 +359,20 @@ internal static class ArtifactGridLayout
         return cells;
     }
 
-    internal static Point ScrollFlagPosition(Size captureSize)
+    internal static Rect RulerRect(Size captureSize) =>
+        ArtifactUiCoordinateMapper.ToCaptureRect(
+            captureSize,
+            RulerX,
+            RulerTop,
+            RulerWidth,
+            RulerHeight);
+
+    internal static double RowPitchPixels(Size captureSize)
     {
-        return ArtifactUiCoordinateMapper.ToCapturePoint(
-            captureSize, ScrollFlagX, ScrollFlagY);
+        var top = ArtifactUiCoordinateMapper.ToCapturePoint(captureSize, 0, 0);
+        var next = ArtifactUiCoordinateMapper.ToCapturePoint(
+            captureSize, 0, RowPitch);
+        return next.Y - top.Y;
     }
 
-    internal static Vec3b ReadBgr(Mat capture, Point position)
-    {
-        if (position.X < 0 || position.X >= capture.Width ||
-            position.Y < 0 || position.Y >= capture.Height)
-        {
-            throw new ArgumentOutOfRangeException(nameof(position));
-        }
-
-        var radius = Math.Max(1, (int)Math.Round(capture.Width / 1600d * 2));
-        var left = Math.Max(0, position.X - radius);
-        var top = Math.Max(0, position.Y - radius);
-        var right = Math.Min(capture.Width, position.X + radius + 1);
-        var bottom = Math.Min(capture.Height, position.Y + radius + 1);
-        using var patch = new Mat(capture, new Rect(
-            left, top, right - left, bottom - top));
-        var mean = Cv2.Mean(patch);
-        return capture.Channels() switch
-        {
-            4 or 3 => new Vec3b(
-                (byte)Math.Round(mean.Val0),
-                (byte)Math.Round(mean.Val1),
-                (byte)Math.Round(mean.Val2)),
-            1 => ToBgr((byte)Math.Round(mean.Val0)),
-            var channels => throw new InvalidOperationException(
-                $"不支持的圣遗物翻页截图通道数：{channels}")
-        };
-    }
-
-    internal static IReadOnlyList<ArtifactGridRowSignature> ReadRowSignatures(
-        Mat capture,
-        Size captureSize,
-        Rect roi,
-        int columns)
-    {
-        ArgumentNullException.ThrowIfNull(capture);
-        if (columns <= 0) throw new ArgumentOutOfRangeException(nameof(columns));
-        var cells = CellsInRoi(captureSize, roi);
-        if (cells.Count == 0 || cells.Count % columns != 0)
-            throw new InvalidOperationException("圣遗物网格行签名缺少完整模板");
-
-        using var grid = new Mat(capture, roi);
-        var signatures = new List<ArtifactGridRowSignature>(cells.Count / columns);
-        for (var row = 0; row < cells.Count / columns; row++)
-        {
-            var first = cells[row * columns].Rect;
-            var last = cells[(row + 1) * columns - 1].Rect;
-            var verticalMargin = Math.Max(2, (int)Math.Round(first.Height * 0.12));
-            var rowRect = new Rect(
-                first.X,
-                first.Y + verticalMargin,
-                last.Right - first.X,
-                first.Height - verticalMargin * 2);
-            var leftWidth = rowRect.Width / 2;
-            using var left = new Mat(grid, new Rect(
-                rowRect.X, rowRect.Y, leftWidth, rowRect.Height));
-            using var right = new Mat(grid, new Rect(
-                rowRect.X + leftWidth,
-                rowRect.Y,
-                rowRect.Width - leftWidth,
-                rowRect.Height));
-            signatures.Add(new ArtifactGridRowSignature(
-                ComputeDifferenceHash(left),
-                ComputeDifferenceHash(right)));
-        }
-        return signatures;
-    }
-
-    private static ulong ComputeDifferenceHash(Mat region)
-    {
-        using var gray = region.Channels() switch
-        {
-            4 => region.CvtColor(ColorConversionCodes.BGRA2GRAY),
-            3 => region.CvtColor(ColorConversionCodes.BGR2GRAY),
-            1 => region.Clone(),
-            var channels => throw new InvalidOperationException(
-                $"不支持的圣遗物行签名截图通道数：{channels}")
-        };
-        using var reduced = gray.Resize(
-            new Size(9, 8), 0, 0, InterpolationFlags.Area);
-        ulong signature = 0;
-        var bit = 0;
-        for (var y = 0; y < 8; y++)
-        for (var x = 0; x < 8; x++)
-        {
-            if (reduced.At<byte>(y, x) > reduced.At<byte>(y, x + 1))
-                signature |= 1UL << bit;
-            bit++;
-        }
-        return signature;
-    }
-
-    private static Vec3b ToBgr(byte color)
-    {
-        return new Vec3b(color, color, color);
-    }
 }

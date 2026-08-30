@@ -7,6 +7,20 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactCharacterGridDetectorTests
 {
     [Fact]
+    public void VerticallyOverlappingFalseRowIsRemovedBeforeSixthRowCompletion()
+    {
+        var rows = new[] { 105, 418, 729, 939, 1040, 1351 }
+            .Select(y => new List<Rect> { new(20, y, 230, 280) })
+            .ToList();
+
+        var filtered = ArtifactCharacterPageDetector
+            .RemoveVerticallyOverlappingRows(rows);
+
+        Assert.Equal([105, 418, 729, 1040, 1351],
+            filtered.Select(row => row[0].Y));
+    }
+
+    [Fact]
     public void SelectedCardWithChangedBottomColorIsRestoredFromTheCompleteGrid()
     {
         using var grid = new Mat(new Size(681, 917), MatType.CV_8UC3, Scalar.Black);
@@ -60,5 +74,9 @@ public class ArtifactCharacterGridDetectorTests
         var pageRows = ArtifactCharacterPageDetector.Detect(grid, 1);
         Assert.Equal(6, pageRows.Count);
         Assert.Equal(5, pageRows[5].Cards.Count);
+        Assert.Equal(pageRows[0].Cards[0].X, pageRows[5].Cards[0].X);
+        Assert.Equal(new Rect(
+            pageRows[0].Cards[0].X, 832, 115, 85),
+            pageRows[5].Cards[0]);
     }
 }
