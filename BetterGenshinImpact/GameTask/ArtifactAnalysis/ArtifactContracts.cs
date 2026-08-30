@@ -22,6 +22,9 @@ public sealed record ArtifactItemDto(
     bool Locked)
 {
     [JsonIgnore]
+    internal ArtifactPanelSignature? LocalDetailSignature { get; init; }
+
+    [JsonIgnore]
     public string ContentFingerprint => ArtifactHashes.Sha256(string.Join("|",
         SetKey,
         SlotKey,

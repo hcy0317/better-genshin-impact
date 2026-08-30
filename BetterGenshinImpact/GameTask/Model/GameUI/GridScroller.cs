@@ -34,10 +34,10 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         private readonly int fastScrollRows;
         private readonly Size captureSize;
         private int scrolledRows;
-        private int calibratedRows;
-        private double averageInputsPerRow;
-        private Vec3b? initialFlagColor;
-        private IReadOnlyList<ArtifactGridRowSignature>? alignedRowSignatures;
+        private bool isCalibrated;
+        private bool isFirstPage = true;
+        private double pixelsPerInput;
+        private double residualPixels;
 
         internal GridScroller(GridParams @params, ILogger logger, InputSimulator input, CancellationToken ct)
         {
@@ -143,254 +143,200 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
 
             var timer = Stopwatch.StartNew();
             SystemControl.ActivateWindow();
-            CaptureScrollBaseline();
+            if (!this.isCalibrated)
+            {
+                this.pixelsPerInput = await MeasureScrollPixelsPerInputAsync();
+                this.isCalibrated = true;
+            }
             var targetRow = this.scrolledRows + rowsToScroll;
-            if (this.calibratedRows >= this.visibleRows)
+            var plan = YasPixelScrollPlanner.CreatePlan(
+                ArtifactGridLayout.RowPitchPixels(this.captureSize),
+                this.pixelsPerInput,
+                this.residualPixels,
+                rowsToScroll);
+            await ScrollPageAsync(plan.InputCount);
+            if (!await WaitForPageSettleAsync())
             {
-                await ScrollRowsFastAsync(rowsToScroll, getGridItems);
+                throw new InvalidOperationException(
+                    $"YAS 圣遗物整页滚动 {rowsToScroll} 行后未稳定");
             }
-            else
-            {
-                for (var row = 0; row < rowsToScroll; row++)
-                {
-                    var inputCount = await ScrollOneRowAsync(
-                        row + 1,
-                        rowsToScroll,
-                        getGridItems);
-                    this.averageInputsPerRow =
-                        (this.averageInputsPerRow * this.calibratedRows + inputCount) /
-                        (this.calibratedRows + 1);
-                    this.calibratedRows++;
-                }
-            }
-
+            this.residualPixels = await CorrectPageOffsetAsync(
+                getGridItems,
+                plan.ResidualPixels);
             this.scrolledRows = targetRow;
+            this.isFirstPage = false;
             this.logger.LogInformation(
-                "YAS 圣遗物滚轮已推进 {Rows} 行，累计 {ScrolledRows} 行，耗时 {ElapsedMilliseconds}ms",
+                "YAS 圣遗物整页滚轮已推进 {Rows} 行：{Inputs} 次输入，残差 {Residual:F2}px，累计 {ScrolledRows} 行，耗时 {ElapsedMilliseconds}ms",
                 rowsToScroll,
+                plan.InputCount,
+                this.residualPixels,
                 this.scrolledRows,
                 timer.ElapsedMilliseconds);
             return true;
         }
 
-        private void CaptureScrollBaseline()
+        private async Task<double> MeasureScrollPixelsPerInputAsync()
         {
-            var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
-            using var initialCapture = TaskControl.CaptureToRectArea();
-            this.initialFlagColor = ArtifactGridLayout.ReadBgr(
-                initialCapture.SrcMat,
-                flagPosition);
-            this.alignedRowSignatures = ArtifactGridLayout.ReadRowSignatures(
-                initialCapture.SrcMat,
-                initialCapture.SrcMat.Size(),
-                this.roi,
-                this.columns);
+            var rulerRect = ArtifactGridLayout.RulerRect(this.captureSize);
+            using var baselineCapture = TaskControl.CaptureToRectArea();
+            var baseline = YasPixelScrollPlanner.ReadRuler(
+                baselineCapture.SrcMat,
+                rulerRect);
+            var inputCount = 0;
+            try
+            {
+                for (inputCount = 1;
+                     inputCount <= YasPixelScrollPlanner.CalibrationInputLimit;
+                     inputCount++)
+                {
+                    await SendScrollInputsAsync(
+                        1,
+                        direction: -1,
+                        YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds);
+                    await TaskControl.Delay(
+                        YasPixelScrollPlanner.CalibrationSettleDelayMilliseconds,
+                        this.ct);
+                    using var capture = TaskControl.CaptureToRectArea();
+                    var shifted = YasPixelScrollPlanner.ReadRuler(
+                        capture.SrcMat,
+                        rulerRect);
+                    var pixelShift = YasPixelScrollPlanner.FindRulerShift(
+                        baseline,
+                        shifted,
+                        baseline.Count - 8);
+                    if (pixelShift <= 0) continue;
+
+                    var pixelsPerInput = pixelShift / (double)inputCount;
+                    this.logger.LogInformation(
+                        "YAS 圣遗物 ruler 标定 {Inputs} 次输入移动 {Pixels}px，每次 {PixelsPerInput:F2}px",
+                        inputCount,
+                        pixelShift,
+                        pixelsPerInput);
+                    return pixelsPerInput;
+                }
+                throw new InvalidOperationException(
+                    "YAS 圣遗物 ruler 在5次输入内未能标定滚动速度");
+            }
+            finally
+            {
+                var inputsToUndo = Math.Min(
+                    inputCount,
+                    YasPixelScrollPlanner.CalibrationInputLimit);
+                if (inputsToUndo > 0)
+                {
+                    await SendScrollInputsAsync(
+                        inputsToUndo,
+                        direction: 1,
+                        YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds,
+                        CancellationToken.None);
+                    await TaskControl.Delay(
+                        YasPixelScrollPlanner.CalibrationSettleDelayMilliseconds,
+                        CancellationToken.None);
+                }
+            }
         }
 
-        private async Task<int> ScrollOneRowAsync(
-            int currentRow,
-            int targetRows,
-            Func<Mat, int, IEnumerable<Rect>> getGridItems)
+        private async Task ScrollPageAsync(int inputCount)
         {
-            var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
-            var detector = new ArtifactRowScrollDetector(
-                this.initialFlagColor!.Value);
-            var rowTimer = Stopwatch.StartNew();
+            var interval = this.isFirstPage
+                ? YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds
+                : YasPixelScrollPlanner.FastInputIntervalMilliseconds;
+            await SendScrollInputsAsync(inputCount, direction: -1, interval);
+        }
 
-            for (var attempt = 1;
-                 attempt <= ArtifactRowScrollPlanner.CalibrationInputLimit;
-                 attempt++)
+        private async Task<bool> WaitForPageSettleAsync()
+        {
+            await TaskControl.Delay(
+                YasPixelScrollPlanner.CalibrationSettleDelayMilliseconds,
+                this.ct);
+            var rulerRect = ArtifactGridLayout.RulerRect(this.captureSize);
+            using var baselineCapture = TaskControl.CaptureToRectArea();
+            var previous = YasPixelScrollPlanner.ReadRuler(
+                baselineCapture.SrcMat,
+                rulerRect);
+            for (var sample = 0;
+                 sample < YasPixelScrollPlanner.MaximumPageSettleSamples;
+                 sample++)
             {
-                EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
-                this.input.Mouse.VerticalScroll(-1);
                 await TaskControl.Delay(
-                    ArtifactRowScrollPlanner.CalibrationDelayMilliseconds,
+                    YasPixelScrollPlanner.PageSettleSampleIntervalMilliseconds,
                     this.ct);
                 using var capture = TaskControl.CaptureToRectArea();
-                EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
-                var color = ArtifactGridLayout.ReadBgr(capture.SrcMat, flagPosition);
-                if (detector.Observe(color))
+                var current = YasPixelScrollPlanner.ReadRuler(
+                    capture.SrcMat,
+                    rulerRect);
+                if (YasPixelScrollPlanner.IsRulerStable(previous, current))
                 {
-                    EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
-                    if (!ConfirmExactlyOneRow(capture.SrcMat, getGridItems, false))
-                    {
-                        throw new InvalidOperationException(
-                            $"YAS 圣遗物第 {currentRow}/{targetRows} 行颜色对齐但内容未证明恰好推进一行");
-                    }
-                    EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
-                    this.initialFlagColor = color;
-                    this.logger.LogDebug(
-                        "YAS 圣遗物滚轮第 {CurrentRow}/{TargetRows} 行对齐成功，共 {Attempts} 次滚轮输入",
-                        currentRow,
-                        targetRows,
-                        attempt);
-                    return attempt;
+                    return true;
                 }
-                if (attempt == ArtifactRowScrollPlanner.CalibrationInputLimit
-                    && detector.HasObservedChange
-                    && ConfirmExactlyOneRow(capture.SrcMat, getGridItems, true))
-                {
-                    EnsureWithinRowBudget(rowTimer, currentRow, targetRows);
-                    this.initialFlagColor = color;
-                    this.logger.LogWarning(
-                        "YAS 圣遗物滚轮第 {CurrentRow}/{TargetRows} 行颜色未回到基线，网格几何 fallback 已确认对齐",
-                        currentRow,
-                        targetRows);
-                    return attempt;
-                }
+                previous = current;
             }
-
-            throw new InvalidOperationException(
-                $"YAS 圣遗物第 {currentRow}/{targetRows} 行滚动对齐超时");
+            return false;
         }
 
-        private async Task ScrollRowsFastAsync(
-            int rowsToScroll,
-            Func<Mat, int, IEnumerable<Rect>> getGridItems)
-        {
-            var flagPosition = ArtifactGridLayout.ScrollFlagPosition(this.captureSize);
-            for (var row = 1; row <= rowsToScroll; row++)
-            {
-                var rowTimer = Stopwatch.StartNew();
-                var detector = new ArtifactRowScrollDetector(
-                    this.initialFlagColor!.Value);
-                var preadvanceInputs =
-                    ArtifactRowScrollPlanner.FastPreadvanceInputs(
-                        this.averageInputsPerRow);
-                var inputCount = 0;
-                var aligned = false;
-                var samples = 0;
-                if (preadvanceInputs > 0)
-                {
-                    for (var inputIndex = 0; inputIndex < preadvanceInputs; inputIndex++)
-                    {
-                        this.input.Mouse.VerticalScroll(-1);
-                        inputCount++;
-                    }
-                    await TaskControl.Delay(
-                        ArtifactRowScrollPlanner.VerificationDelayMilliseconds,
-                        this.ct);
-                    using var capture = TaskControl.CaptureToRectArea();
-                    EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
-                    var color = ArtifactGridLayout.ReadBgr(
-                        capture.SrcMat, flagPosition);
-                    detector.Observe(color);
-                    samples++;
-                }
-
-                while (samples < ArtifactRowScrollPlanner.MaximumVerificationSamples)
-                {
-                    EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
-                    this.input.Mouse.VerticalScroll(-1);
-                    inputCount++;
-                    await TaskControl.Delay(
-                        ArtifactRowScrollPlanner.VerificationDelayMilliseconds,
-                        this.ct);
-                    using var capture = TaskControl.CaptureToRectArea();
-                    EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
-                    var color = ArtifactGridLayout.ReadBgr(
-                        capture.SrcMat, flagPosition);
-                    samples++;
-                    if (!detector.Observe(color))
-                    {
-                        if (samples == ArtifactRowScrollPlanner.MaximumVerificationSamples
-                            && detector.HasObservedChange
-                            && ConfirmExactlyOneRow(
-                                capture.SrcMat,
-                                getGridItems,
-                                true))
-                        {
-                            EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
-                            aligned = true;
-                            this.initialFlagColor = color;
-                            this.logger.LogWarning(
-                                "YAS 圣遗物快速推进第 {CurrentRow}/{TargetRows} 行颜色未回到基线，网格几何 fallback 已确认对齐",
-                                row,
-                                rowsToScroll);
-                            break;
-                        }
-                        continue;
-                    }
-
-                    aligned = true;
-                    EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
-                    if (!ConfirmExactlyOneRow(capture.SrcMat, getGridItems, false))
-                    {
-                        throw new InvalidOperationException(
-                            $"YAS 圣遗物快速推进第 {row}/{rowsToScroll} 行颜色对齐但内容未证明恰好推进一行");
-                    }
-                    EnsureWithinRowBudget(rowTimer, row, rowsToScroll);
-                    this.initialFlagColor = color;
-                    break;
-                }
-
-                if (!aligned)
-                {
-                    throw new InvalidOperationException(
-                        $"YAS 圣遗物快速推进第 {row}/{rowsToScroll} 行后未能验证对齐");
-                }
-
-                this.averageInputsPerRow =
-                    (this.averageInputsPerRow * this.calibratedRows + inputCount) /
-                    (this.calibratedRows + 1);
-                this.calibratedRows++;
-                this.logger.LogDebug(
-                    "YAS 圣遗物快速推进第 {CurrentRow}/{TargetRows} 行验证对齐，共 {InputCount} 次滚轮输入",
-                    row,
-                    rowsToScroll,
-                    inputCount);
-            }
-        }
-
-        private bool IsGridAligned(
-            Mat capture,
-            Func<Mat, int, IEnumerable<Rect>> getGridItems)
-        {
-            using var grid = new Mat(capture, this.roi);
-            var items = getGridItems(grid, this.columns).ToList();
-            return ArtifactGridAlignmentPlanner.IsAligned(
-                items,
-                capture.Size(),
-                this.roi,
-                this.columns);
-        }
-
-        private bool ConfirmExactlyOneRow(
-            Mat capture,
+        private async Task<double> CorrectPageOffsetAsync(
             Func<Mat, int, IEnumerable<Rect>> getGridItems,
-            bool requireGeometry)
+            double theoreticalResidual)
         {
-            if (this.alignedRowSignatures is null) return false;
-            if (requireGeometry && !IsGridAligned(capture, getGridItems)) return false;
-
-            var current = ArtifactGridLayout.ReadRowSignatures(
-                capture,
-                capture.Size(),
+            using var capture = TaskControl.CaptureToRectArea();
+            using var grid = new Mat(capture.SrcMat, this.roi);
+            var offset = ArtifactGridAlignmentPlanner.VerticalOffsetPixels(
+                getGridItems(grid, this.columns),
+                this.captureSize,
                 this.roi,
                 this.columns);
-            if (!ArtifactRowContentShiftVerifier.IsExactlyOneRow(
-                    this.alignedRowSignatures,
-                    current))
+            if (!offset.HasValue) return theoreticalResidual;
+
+            var correctionThreshold = Math.Max(4, this.pixelsPerInput / 2d);
+            if (Math.Abs(offset.Value) <= correctionThreshold)
             {
-                return false;
+                return offset.Value;
             }
-            this.alignedRowSignatures = current;
-            return true;
+
+            var correction = ArtifactGridAlignmentPlanner.CorrectionInputs(
+                offset.Value,
+                this.pixelsPerInput);
+            correction = Math.Clamp(correction, -2, 2);
+            if (correction == 0) return offset.Value;
+            await SendScrollInputsAsync(
+                Math.Abs(correction),
+                correction > 0 ? -1 : 1,
+                YasPixelScrollPlanner.FastInputIntervalMilliseconds);
+            await WaitForPageSettleAsync();
+
+            using var correctedCapture = TaskControl.CaptureToRectArea();
+            using var correctedGrid = new Mat(correctedCapture.SrcMat, this.roi);
+            var correctedOffset = ArtifactGridAlignmentPlanner.VerticalOffsetPixels(
+                getGridItems(correctedGrid, this.columns),
+                this.captureSize,
+                this.roi,
+                this.columns);
+            this.logger.LogWarning(
+                "YAS 圣遗物页末实际偏移 {Offset:F1}px，补偿 {Inputs} 次输入，修正后 {CorrectedOffset:F1}px",
+                offset.Value,
+                correction,
+                correctedOffset ?? theoreticalResidual);
+            return correctedOffset ?? theoreticalResidual;
         }
 
-        private static void EnsureWithinRowBudget(
-            Stopwatch timer,
-            int currentRow,
-            int targetRows)
+        private async Task SendScrollInputsAsync(
+            int inputCount,
+            int direction,
+            int intervalMilliseconds,
+            CancellationToken? cancellationToken = null)
         {
-            if (timer.ElapsedMilliseconds
-                <= ArtifactRowScrollPlanner.PerRowBudgetMilliseconds)
+            var effectiveCancellationToken = cancellationToken ?? this.ct;
+            using var pacer = new YasScrollInputPacer();
+            for (var inputIndex = 0; inputIndex < inputCount; inputIndex++)
             {
-                return;
+                this.input.Mouse.VerticalScroll(direction);
+                if (intervalMilliseconds > 0)
+                {
+                    await pacer.DelayAsync(
+                        intervalMilliseconds,
+                        effectiveCancellationToken);
+                }
             }
-
-            throw new TimeoutException(
-                $"YAS 圣遗物第 {currentRow}/{targetRows} 行超过 1.5s 硬性性能上限");
         }
 
         internal static bool HasVerticalMovement(bool phaseDetected, Point2d shift)

@@ -6,6 +6,23 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactDetailSwitchDetectorTests
 {
     [Fact]
+    public void DetailCapturePolicyNeverAcceptsAnUnconfirmedFrame()
+    {
+        Assert.Equal(
+            ArtifactDetailCaptureDecision.Wait,
+            ArtifactDetailCapturePolicy.Decide(
+                scanIndex: 0, elapsedMilliseconds: 449, confirmed: false));
+        Assert.Equal(
+            ArtifactDetailCaptureDecision.TimedOut,
+            ArtifactDetailCapturePolicy.Decide(
+                scanIndex: 0, elapsedMilliseconds: 450, confirmed: false));
+        Assert.InRange(
+            ArtifactDetailCapturePolicy.ConfirmationBudgetMilliseconds,
+            300,
+            500);
+    }
+
+    [Fact]
     public void ScanDetectorRejectsHashCollisionsButAcceptsARealPanelChange()
     {
         var detector = new ArtifactScanDetailChangeDetector(

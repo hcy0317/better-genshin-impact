@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.ArtifactAnalysis;
+using BetterGenshinImpact.Core.Recognition.ONNX;
 using System.Text.RegularExpressions;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
@@ -77,7 +78,7 @@ public class ArtifactOcrBoundaryTests
             inventorySource,
             StringComparison.Ordinal);
         Assert.Contains(
-            "new ArtifactInventoryUi(_logger, ocrSession.RecognizeWithoutDetector)",
+            "new ArtifactInventoryUi(\n            _logger,\n            ocrSession.RecognizeWithoutDetector,\n            ocrSession.RecognizeBatch)",
             inventorySource,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
@@ -152,7 +153,7 @@ public class ArtifactOcrBoundaryTests
     }
 
     [Fact]
-    public void CharacterOcr_RetriesOnlyAfterTheFirstFixedRegionReadFails()
+    public void CharacterOcr_RetriesOnlyTheFieldsMissingFromTheFirstFixedRegionRead()
     {
         var source = File.ReadAllText(Path.Combine(
             FindRepoRoot(),
@@ -162,7 +163,7 @@ public class ArtifactOcrBoundaryTests
             "ArtifactCharacterRosterScanner.cs"));
 
         var firstSuccessReturn = source.IndexOf(
-            "if (first is not null) return first;",
+            "if (first.IsComplete) return first.RequireComplete();",
             StringComparison.Ordinal);
         var retryDelay = source.IndexOf(
             "await Delay(160, cancellationToken);",
@@ -170,6 +171,14 @@ public class ArtifactOcrBoundaryTests
 
         Assert.True(firstSuccessReturn >= 0);
         Assert.True(retryDelay > firstSuccessReturn);
+        Assert.Contains(
+            "readName: !sameDetail || first.CharacterName is null",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "readLevel: !sameDetail || !first.Level.HasValue",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -184,6 +193,119 @@ public class ArtifactOcrBoundaryTests
 
         Assert.Contains("OcrWithoutDetector(uidRegion)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("OcrResult(uidRegion)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ArtifactTraversal_NeverAssumesTheFirstGridItemIsSelected()
+    {
+        var sourceDirectory = Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis");
+        var inventorySource = File.ReadAllText(Path.Combine(
+            sourceDirectory, "ArtifactInventoryScanner.cs"));
+        var lockSource = File.ReadAllText(Path.Combine(
+            sourceDirectory, "ArtifactLockPlanExecutor.cs"));
+
+        Assert.DoesNotContain(
+            "? reader.CaptureInitiallySelectedItem",
+            inventorySource,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "? await reader.ReadInitiallySelectedItemAsync",
+            lockSource,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "CaptureInitiallySelectedItem(",
+            inventorySource,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ArtifactDetailSwitchWait_NeverAcceptsAnUnconfirmedFullScanFrame()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis",
+            "ArtifactInventoryScanner.cs"));
+
+        Assert.Contains(
+            "ArtifactDetailCapturePolicy.Decide",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "拒绝解析可能的旧详情帧",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "catch (InvalidDataException",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("补点一次", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("YAS best-effort", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ScanCaptureProjectsDirectlyToOcrRegionsWithoutAFullFrameClone()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis",
+            "ArtifactInventoryScanner.cs"));
+
+        Assert.Contains("CaptureAfterDetailConfirmedAsync(", source,
+            StringComparison.Ordinal);
+        Assert.Contains("ArtifactCapturedItem.Create", source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("return capture.SrcMat.Clone();", source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FixedArtifactRegions_UseIndependentRecognizersWithoutUnsafeModelBatching()
+    {
+        var root = FindRepoRoot();
+        var inventorySource = File.ReadAllText(Path.Combine(
+            root,
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis",
+            "ArtifactInventoryScanner.cs"));
+        var recognizerSource = File.ReadAllText(Path.Combine(
+            root,
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis",
+            "ArtifactOcrProviderPolicy.cs"));
+
+        Assert.Contains("InferFixedBatch", inventorySource, StringComparison.Ordinal);
+        Assert.Contains("ocrSession.RecognizeBatch", inventorySource, StringComparison.Ordinal);
+        Assert.Contains(
+            "InventoryParallelRecognizerCount = 6",
+            recognizerSource,
+            StringComparison.Ordinal);
+        Assert.Contains("Parallel.For", recognizerSource, StringComparison.Ordinal);
+        Assert.Contains("parallelRecognizerCount:", inventorySource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ArtifactRecognizerConcurrencyIsCappedOnCpuButKeepsCudaParallelism()
+    {
+        Assert.Equal(
+            2,
+            ArtifactRecognitionOnlyOcrSession.ResolveParallelRecognizerCount(
+                requested: 6,
+                [ProviderType.Cpu]));
+        Assert.Equal(
+            6,
+            ArtifactRecognitionOnlyOcrSession.ResolveParallelRecognizerCount(
+                requested: 6,
+                [ProviderType.Cuda, ProviderType.Cpu]));
     }
 
     private static string FindRepoRoot()

@@ -357,6 +357,13 @@ namespace BetterGenshinImpact.GameTask
                 }
 
                 var hasEnabledTriggers = _triggers != null && _triggers.Exists(t => t.IsEnabled);
+                if (TaskTriggerCapturePolicy.ShouldSkip(
+                        active,
+                        TaskControl.TaskSemaphore.CurrentCount == 0,
+                        hasEnabledTriggers))
+                {
+                    return;
+                }
                 if (!hasEnabledTriggers && !active)
                 {
                     // Debug.WriteLine("没有可用的触发器且不处于仅截屏状态, 不再进行截屏");

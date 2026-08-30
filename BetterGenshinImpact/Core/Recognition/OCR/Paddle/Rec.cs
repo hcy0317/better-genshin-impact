@@ -91,7 +91,6 @@ public class Rec(
         try
         {
             resultTensors = srcs
-                // .AsParallel()
                 .Select(src =>
                 {
                     Mat? channel3 = default;
@@ -104,18 +103,18 @@ public class Rec(
                             3 => src,
                             var x => throw new Exception($"Unexpect src channel: {x}, allow: (1/3/4)")
                         };
-                        var result = OcrUtils.ResizeNormImg(channel3, new OcrShape(3, maxWidth, modelHeight),
+                        var result = OcrUtils.ResizeNormImg(
+                            channel3,
+                            new OcrShape(3, maxWidth, modelHeight),
                             out var owner);
                         lock (owners)
                         {
                             owners.Add(owner);
                         }
-
                         return result;
                     }
                     finally
                     {
-                        // Only dispose Mats created in this scope
                         if (channel3 != null && !ReferenceEquals(channel3, src))
                         {
                             channel3.Dispose();
@@ -123,29 +122,26 @@ public class Rec(
                     }
                 })
                 .Select(inputTensor =>
+                {
+                    lock (_session)
                     {
-                        lock (_session)
-                        {
-                            // 多线程推理会出现问题，加锁解决。
-                            using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([
-                                NamedOnnxValue.CreateFromTensor(_session.InputNames[0], inputTensor)
-                            ]);
-                            var output = results[0];
-                            if (output.ElementType is not TensorElementType.Float)
-                                throw new Exception($"Unexpected output tensor type: {output.ElementType}");
-
-                            if (output.ValueType is not OnnxValueType.ONNX_TYPE_TENSOR)
-                                throw new Exception($"Unexpected output tensor value type: {output.ValueType}");
-                            var tensor = output.AsTensor<float>();
-                            // 因为一个已知bug,tensor中内存在dml下使用完后会被释放掉,锁之外的代码会报错
-                            return (tensor.Dimensions.ToArray(), tensor.ToArray());
-                        }
+                        using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([
+                            NamedOnnxValue.CreateFromTensor(_session.InputNames[0], inputTensor)
+                        ]);
+                        var output = results[0];
+                        if (output.ElementType is not TensorElementType.Float)
+                            throw new Exception($"Unexpected output tensor type: {output.ElementType}");
+                        if (output.ValueType is not OnnxValueType.ONNX_TYPE_TENSOR)
+                            throw new Exception($"Unexpected output tensor value type: {output.ValueType}");
+                        var tensor = output.AsTensor<float>();
+                        return (tensor.Dimensions.ToArray(), tensor.ToArray());
                     }
-                ).ToArray();
+                })
+                .ToArray();
         }
         finally
         {
-            owners.ForEach(x => { x.Dispose(); });
+            owners.ForEach(owner => owner.Dispose());
         }
 
         return resultTensors.SelectMany(resultTensor =>

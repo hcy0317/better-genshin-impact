@@ -15,18 +15,15 @@ internal sealed class ArtifactCharacterScanIdentityGuard
             characterKey,
             StringComparison.Ordinal);
 
-    internal void Commit(string characterKey)
+    internal bool TryCommit(string characterKey)
     {
         if (DidNotChange(characterKey))
         {
             throw new InvalidOperationException(
                 $"点击头像后右侧角色没有切换，仍为：{characterKey}");
         }
-        if (!_seen.Add(characterKey))
-        {
-            throw new InvalidOperationException(
-                $"角色分页重复返回了已处理角色：{characterKey}");
-        }
+        var added = _seen.Add(characterKey);
         _previousCharacterKey = characterKey;
+        return added;
     }
 }

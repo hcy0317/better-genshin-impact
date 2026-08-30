@@ -5,6 +5,29 @@ using OpenCvSharp;
 
 namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
 
+internal enum ArtifactDetailCaptureDecision
+{
+    Wait,
+    Confirmed,
+    TimedOut
+}
+
+internal static class ArtifactDetailCapturePolicy
+{
+    internal const int ConfirmationBudgetMilliseconds = 450;
+
+    internal static ArtifactDetailCaptureDecision Decide(
+        int scanIndex,
+        long elapsedMilliseconds,
+        bool confirmed)
+    {
+        if (confirmed) return ArtifactDetailCaptureDecision.Confirmed;
+        return elapsedMilliseconds >= ConfirmationBudgetMilliseconds
+            ? ArtifactDetailCaptureDecision.TimedOut
+            : ArtifactDetailCaptureDecision.Wait;
+    }
+}
+
 internal sealed class ArtifactScanDetailChangeDetector(
     ArtifactPanelSignature initialSignature,
     int maximumStableDistance)

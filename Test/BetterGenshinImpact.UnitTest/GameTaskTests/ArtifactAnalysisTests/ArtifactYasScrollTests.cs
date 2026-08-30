@@ -1,33 +1,26 @@
 using BetterGenshinImpact.GameTask.Model.GameUI;
 using OpenCvSharp;
+using System.Diagnostics;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 
 public class ArtifactYasScrollTests
 {
     [Fact]
-    public void RowDetector_CompletesOnlyAfterTheFlagChangesAndReturns()
+    public void GridScrollerUsesOneRulerCalibrationAndOnePageScrollStateMachine()
     {
-        var detector = new ArtifactRowScrollDetector(new Vec3b(20, 30, 40));
+        var source = File.ReadAllText(Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "Model",
+            "GameUI",
+            "GridScroller.cs"));
 
-        Assert.False(detector.Observe(new Vec3b(20, 30, 40)));
-        Assert.False(detector.Observe(new Vec3b(80, 90, 100)));
-        Assert.True(detector.Observe(new Vec3b(21, 30, 40)));
-    }
-
-    [Fact]
-    public void GridLayout_ScrollFlagUsesAPatchMeanInsteadOfOneNoisyPixel()
-    {
-        using var capture = new Mat(
-            new Size(9, 9),
-            MatType.CV_8UC3,
-            new Scalar(20, 30, 40));
-        capture.Set(4, 4, new Vec3b(65, 75, 85));
-
-        var sampled = ArtifactGridLayout.ReadBgr(capture, new Point(4, 4));
-
-        Assert.True(ArtifactRowScrollDetector.IsNear(
-            new Vec3b(20, 30, 40), sampled));
+        Assert.Contains("MeasureScrollPixelsPerInputAsync", source, StringComparison.Ordinal);
+        Assert.Contains("ScrollPageAsync", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ScrollOneArtifactRowAsync", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("快速推进第", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -63,41 +56,23 @@ public class ArtifactYasScrollTests
     }
 
     [Fact]
-    public void RowContentShift_AcceptsExactlyOneVisibleRowAdvance()
+    public void PageOffsetFeedbackRequestsOnlyTheMissingWheelInputs()
     {
-        var before = Signatures(1, 3, 7, 15, 31);
-        var after = Signatures(3, 7, 15, 31, 63);
+        var captureSize = new Size(1920, 1080);
+        var roi = GridParams.ArtifactRoiForCapture(captureSize);
+        var shifted = ArtifactGridLayout.CellsInRoi(captureSize, roi)
+            .Take(24)
+            .Select(cell => cell.Rect)
+            .Select(rect => new Rect(rect.X, rect.Y + 36, rect.Width, rect.Height))
+            .ToArray();
 
-        Assert.True(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
-            before, after));
+        var offset = ArtifactGridAlignmentPlanner.VerticalOffsetPixels(
+            shifted, captureSize, roi, columns: 8);
+
+        Assert.Equal(36, offset);
+        Assert.Equal(2, ArtifactGridAlignmentPlanner.CorrectionInputs(
+            offset!.Value, pixelsPerInput: 18));
     }
-
-    [Fact]
-    public void RowContentShift_RejectsTwoVisibleRowsOfAdvance()
-    {
-        var before = Signatures(1, 3, 7, 15, 31);
-        var after = Signatures(7, 15, 31, 63, 127);
-
-        Assert.False(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
-            before, after));
-    }
-
-    [Fact]
-    public void RowContentShift_RejectsNoAdvanceAndAmbiguousRepeatedRows()
-    {
-        var distinct = Signatures(1, 3, 7, 15, 31);
-        var repeated = Signatures(7, 7, 7, 7, 7);
-
-        Assert.False(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
-            distinct, distinct));
-        Assert.False(ArtifactRowContentShiftVerifier.IsExactlyOneRow(
-            repeated, repeated));
-    }
-
-    private static ArtifactGridRowSignature[] Signatures(params ulong[] values) =>
-        values.Select(value => new ArtifactGridRowSignature(
-            value,
-            value << 1)).ToArray();
 
     [Fact]
     public void GridLayout_UsesTheYasFiveByEightArtifactPositions()
@@ -125,62 +100,140 @@ public class ArtifactYasScrollTests
             totalRows, visibleRows, scrolledRows));
     }
 
-    [Theory]
-    [InlineData(8.0, 5, 38)]
-    [InlineData(8.4, 5, 40)]
-    [InlineData(1.0, 1, 0)]
-    public void EstimatedScrollInputs_MatchesYasBurstCalculation(
-        double averageInputsPerRow,
-        int rows,
-        int expected)
+    [Fact]
+    public void YasPixelPlanCarriesRoundingResidualAcrossPages()
     {
-        Assert.Equal(expected, ArtifactRowScrollPlanner.EstimateInputCount(
-            averageInputsPerRow, rows));
-    }
+        var first = YasPixelScrollPlanner.CreatePlan(
+            rowPitchPixels: 146,
+            pixelsPerInput: 15,
+            residualPixels: 0,
+            rows: 5);
+        var second = YasPixelScrollPlanner.CreatePlan(
+            rowPitchPixels: 146,
+            pixelsPerInput: 15,
+            residualPixels: first.ResidualPixels,
+            rows: 5);
 
-    [Theory]
-    [InlineData(1.0, 100)]
-    [InlineData(8.0, 100)]
-    [InlineData(10.0, 100)]
-    [InlineData(25.0, 100)]
-    public void VerifiedFastRowBatching_StaysInsideThePerRowScrollBudget(
-        double averageInputsPerRow,
-        int expectedMilliseconds)
-    {
-        Assert.Equal(expectedMilliseconds,
-            ArtifactRowScrollPlanner.EstimatedVerificationDelay(
-                averageInputsPerRow));
-        Assert.InRange(expectedMilliseconds, 0, 100);
+        Assert.Equal(49, first.InputCount);
+        Assert.Equal(-5, first.ResidualPixels, 6);
+        Assert.Equal(48, second.InputCount);
+        Assert.Equal(5, second.ResidualPixels, 6);
+        Assert.Equal(
+            146 * 10,
+            (first.InputCount + second.InputCount) * 15
+                + second.ResidualPixels,
+            6);
     }
 
     [Fact]
-    public void CalibrationAndFastVerification_StayInsideOnePointFiveSecondsPerRow()
+    public void YasPixelPlanDoesNotDriftAcrossTenPages()
     {
-        Assert.InRange(
-            ArtifactRowScrollPlanner.CalibrationInputLimit
-                * ArtifactRowScrollPlanner.CalibrationDelayMilliseconds,
-            0,
-            1_500);
-        Assert.InRange(
-            ArtifactRowScrollPlanner.MaximumVerificationDelayMilliseconds,
-            0,
-            1_500);
-        Assert.Equal(1_500, ArtifactRowScrollPlanner.PerRowBudgetMilliseconds);
+        double residual = 0;
+        var totalInputs = 0;
+        for (var page = 0; page < 10; page++)
+        {
+            var plan = YasPixelScrollPlanner.CreatePlan(
+                rowPitchPixels: 146,
+                pixelsPerInput: 15,
+                residualPixels: residual,
+                rows: 5);
+            totalInputs += plan.InputCount;
+            residual = plan.ResidualPixels;
+        }
+
+        Assert.Equal(146 * 50, totalInputs * 15 + residual, 6);
+        Assert.InRange(Math.Abs(residual), 0, 7.5);
     }
 
-    [Theory]
-    [InlineData(1.0, 0)]
-    [InlineData(4.0, 2)]
-    [InlineData(5.0, 3)]
-    [InlineData(7.0, 5)]
-    [InlineData(9.0, 7)]
-    public void VerifiedFastRowBatching_PreadvancesBeforeSingleInputVerification(
-        double averageInputsPerRow,
-        int expectedPreadvanceInputs)
+    [Fact]
+    public void YasRulerFindsTheCumulativePixelShift()
     {
-        Assert.Equal(expectedPreadvanceInputs,
-            ArtifactRowScrollPlanner.FastPreadvanceInputs(
-                averageInputsPerRow));
+        var before = Enumerable.Range(0, 40)
+            .Select(index => new Vec3b(
+                (byte)(index * 3),
+                (byte)(index * 5),
+                (byte)(index * 7)))
+            .ToArray();
+        var after = Enumerable.Repeat(new Vec3b(250, 250, 250), 7)
+            .Concat(before.Take(before.Length - 7))
+            .ToArray();
+
+        Assert.Equal(7, YasPixelScrollPlanner.FindRulerShift(
+            before, after, maximumShift: 12));
+        Assert.Equal(20, YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds);
+        Assert.Equal(2, YasPixelScrollPlanner.FastInputIntervalMilliseconds);
+    }
+
+    [Fact]
+    public void FastWheelInputsUseHighResolutionPacingInsteadOfTimerQuantizedDelay()
+    {
+        Assert.True(YasScrollInputPacer.UsesHighResolutionPacing(
+            YasPixelScrollPlanner.FastInputIntervalMilliseconds));
+        Assert.False(YasScrollInputPacer.UsesHighResolutionPacing(
+            YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds));
+    }
+
+    [Fact]
+    public async Task FastWheelInputPacingHonorsCancellationBeforeWaiting()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var pacer = new YasScrollInputPacer();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await pacer.DelayAsync(
+                YasPixelScrollPlanner.FastInputIntervalMilliseconds,
+                cancellation.Token));
+    }
+
+    [Fact]
+    public async Task OnePageOfFastWheelInputPacingAvoidsTimerQuantization()
+    {
+        var timer = Stopwatch.StartNew();
+        using var pacer = new YasScrollInputPacer();
+        for (var input = 0; input < 25; input++)
+        {
+            await pacer.DelayAsync(
+                YasPixelScrollPlanner.FastInputIntervalMilliseconds,
+                CancellationToken.None);
+        }
+
+        Assert.InRange(timer.ElapsedMilliseconds, 35, 250);
+    }
+
+    [Fact]
+    public void YasRulerStabilityAcceptsNoiseButRejectsMovement()
+    {
+        var baseline = Enumerable.Range(0, 30)
+            .Select(index => new Vec3b(
+                (byte)(20 + index),
+                (byte)(40 + index),
+                (byte)(60 + index)))
+            .ToArray();
+        var noisy = baseline
+            .Select(color => new Vec3b(
+                (byte)(color.Item0 + 1),
+                color.Item1,
+                color.Item2))
+            .ToArray();
+        var shifted = new[] { new Vec3b(250, 250, 250) }
+            .Concat(baseline.Take(29))
+            .ToArray();
+
+        Assert.True(YasPixelScrollPlanner.IsRulerStable(baseline, noisy));
+        Assert.False(YasPixelScrollPlanner.IsRulerStable(baseline, shifted));
+    }
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory != null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "BetterGenshinImpact.sln")))
+                return directory.FullName;
+            directory = directory.Parent;
+        }
+        throw new DirectoryNotFoundException("Could not locate BetterGenshinImpact.sln.");
     }
 
 }

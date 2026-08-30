@@ -1,9 +1,35 @@
 using BetterGenshinImpact.GameTask.ArtifactAnalysis;
+using System.Text.Json;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 
 public class ArtifactSetCatalogTests
 {
+    [Fact]
+    public void EveryBundledSetNameSurvivesOneInsertedOcrSymbol()
+    {
+        var path = Path.Combine(
+            FindRepoRoot(),
+            "BetterGenshinImpact",
+            "GameTask",
+            "ArtifactAnalysis",
+            "Assets",
+            "artifact-sets.zh.json");
+        var names = JsonSerializer.Deserialize<Dictionary<string, string>>(
+            File.ReadAllText(path))!;
+        var catalog = new ArtifactSetCatalog(names);
+
+        foreach (var pair in names)
+        {
+            var noisy = pair.Value.Insert(
+                Math.Max(1, pair.Value.Length / 2),
+                "*");
+            var expected = string.Concat(pair.Key.Split('_').Select(part =>
+                char.ToUpperInvariant(part[0]) + part[1..]));
+            Assert.Equal(expected, catalog.ResolveSetKey(noisy));
+        }
+    }
+
     [Fact]
     public void ResolveSetKey_AcceptsOneUniqueOcrErrorInTheLocalizedName()
     {
@@ -55,5 +81,17 @@ public class ArtifactSetCatalogTests
         });
 
         Assert.Throws<InvalidDataException>(() => catalog.ResolveSetKey("甲乙丙己"));
+    }
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory != null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "BetterGenshinImpact.sln")))
+                return directory.FullName;
+            directory = directory.Parent;
+        }
+        throw new DirectoryNotFoundException("Could not locate BetterGenshinImpact.sln.");
     }
 }
