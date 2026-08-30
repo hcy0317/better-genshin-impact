@@ -1,11 +1,9 @@
-using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
-using BetterGenshinImpact.Core.Recognition.ONNX;
+using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
 using BetterGenshinImpact.GameTask.Model.GameUI;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 
 namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
@@ -21,15 +19,15 @@ internal sealed record ArtifactCharacterDetailSample(
 /// </summary>
 internal sealed class ArtifactCharacterDetailsReader : IDisposable
 {
-    internal const bool ForceCpuOcr = true;
+    internal const bool ForceCpuOcr = false;
     internal const bool LoadsDetectionModel = false;
     private static readonly Rect2d NameRoi = new(1221.6667, 105, 216.6667, 40);
-    private static readonly Rect2d LevelRoi = new(1215, 161.6667, 183.3333, 48.3333);
+    private static readonly Rect2d LevelRoi = new(1215, 170, 183.3333, 30);
     private static readonly Rect2d FavoriteRoi = new(1156.6667, 813.3333, 55, 55);
-    private readonly BgiOnnxFactory _ocrFactory;
-    private readonly Rec _ocrRecognizer;
+    private readonly IOcrService? _ocrService;
+    private readonly ArtifactRecognitionOnlyOcrSession? _ownedOcrSession;
 
-    internal ArtifactCharacterDetailsReader()
+    internal ArtifactCharacterDetailsReader(IOcrService? ocrService = null)
     {
         var cultureName = TaskContext.Instance().Config.OtherConfig.GameCultureInfoName;
         if (!string.Equals(cultureName, "zh-Hans", StringComparison.OrdinalIgnoreCase))
@@ -37,16 +35,14 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             throw new NotSupportedException("角色配装检测当前仅支持简体中文游戏界面。");
         }
 
-        _ocrFactory = new BgiOnnxFactory(
-            App.GetLogger<BgiOnnxFactory>(),
-            forceCpuOcr: ForceCpuOcr,
-            excludeTensorRtForOcr: true);
-        var model = ArtifactInventoryUi.SelectOcrModel(new CultureInfo(cultureName));
-        _ocrRecognizer = new Rec(
-            model.RecognitionModel,
-            model.RecLabel(),
-            model.RecognitionVersion,
-            _ocrFactory);
+        if (ocrService is not null)
+        {
+            _ocrService = ocrService;
+            return;
+        }
+
+        _ownedOcrSession = new ArtifactRecognitionOnlyOcrSession(
+            forceCpuOcr: ForceCpuOcr);
     }
 
     internal ArtifactCharacterDetailSample Read(
@@ -133,28 +129,22 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
     }
 
     internal static ulong DetailSignature(Mat capture)
-    {
-        using var detail = ArtifactUiCoordinateMapper.CropNormalized(
+        => ArtifactVisualSignature.Compute(
             capture,
             NameRoi.X, NameRoi.Y,
             NameRoi.Width, NameRoi.Height);
-        using var gray = detail.Channels() == 4
-            ? detail.CvtColor(ColorConversionCodes.BGRA2GRAY)
-            : detail.CvtColor(ColorConversionCodes.BGR2GRAY);
-        using var textMask = gray.Threshold(170, 255, ThresholdTypes.Binary);
-        using var reduced = textMask.Resize(
-            new Size(9, 8), 0, 0, InterpolationFlags.Area);
-        ulong signature = 0;
-        var bit = 0;
-        for (var y = 0; y < 8; y++)
-        for (var x = 0; x < 8; x++)
-        {
-            if (reduced.At<byte>(y, x) > reduced.At<byte>(y, x + 1))
-                signature |= 1UL << bit;
-            bit++;
-        }
-        return signature;
-    }
+
+    internal static Rect NameRegionForCapture(Size captureSize) =>
+        ArtifactUiCoordinateMapper.ToCaptureRect(
+            captureSize,
+            NameRoi.X, NameRoi.Y,
+            NameRoi.Width, NameRoi.Height);
+
+    internal static Rect LevelRegionForCapture(Size captureSize) =>
+        ArtifactUiCoordinateMapper.ToCaptureRect(
+            captureSize,
+            LevelRoi.X, LevelRoi.Y,
+            LevelRoi.Width, LevelRoi.Height);
 
     internal static bool IsFavorite(Mat capture)
     {
@@ -174,14 +164,25 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             capture,
             logicalRoi.X, logicalRoi.Y,
             logicalRoi.Width, logicalRoi.Height);
-        return _ocrRecognizer.Run(region).Text.Trim();
+        return RecognizeWithoutDetector(region);
     }
+
+    internal string RecognizeWithoutDetector(Mat region) =>
+        (_ocrService?.OcrWithoutDetector(region)
+            ?? _ownedOcrSession!.RecognizeWithoutDetector(region))
+        .Trim();
 
     internal static bool TryParseLevel(string? rawText, out int level)
     {
         level = 0;
         var normalized = string.Concat((rawText ?? string.Empty).Where(character =>
             !char.IsWhiteSpace(character)));
+        normalized = normalized
+            .Replace('／', '/')
+            .Replace("./", "/", StringComparison.Ordinal)
+            .Replace("。/", "/", StringComparison.Ordinal)
+            .Replace("·/", "/", StringComparison.Ordinal)
+            .TrimEnd('.', '。', '·');
         if (normalized.StartsWith("等级", StringComparison.Ordinal))
             normalized = normalized[2..];
         if (normalized.Length == 0) return false;
@@ -239,7 +240,6 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
 
     public void Dispose()
     {
-        _ocrRecognizer.Dispose();
-        _ocrFactory.Dispose();
+        _ownedOcrSession?.Dispose();
     }
 }

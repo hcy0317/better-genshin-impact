@@ -54,6 +54,7 @@ internal sealed class ArtifactNativePlanTask(
     private readonly ArtifactSetCatalog _catalog = new(Path.Combine(
         AppContext.BaseDirectory, "GameTask", "ArtifactAnalysis", "Assets", "artifact-sets.zh.json"));
     private readonly Dictionary<string, ControlCalibration> _controlCalibrations = new(StringComparer.Ordinal);
+    private IOcrService? _ocrService;
     private static readonly string[] MainStatKeys =
     [
         "hp_", "atk_", "def_", "eleMas", "enerRech_", "critRate_", "critDMG_", "heal_",
@@ -64,6 +65,8 @@ internal sealed class ArtifactNativePlanTask(
     ["hp", "atk", "def", "hp_", "atk_", "def_", "eleMas", "enerRech_", "critRate_", "critDMG_"];
     public string Name => "重建原神圣遗物锁定方案";
     public bool Completed { get; private set; }
+    private IOcrService OcrService => _ocrService
+        ?? throw new InvalidOperationException("Artifact OCR session is unavailable.");
 
     public async Task Start(CancellationToken taskCancellationToken)
     {
@@ -71,9 +74,24 @@ internal sealed class ArtifactNativePlanTask(
             taskCancellationToken,
             externalCancellationToken);
         var ct = linked.Token;
+        ct.ThrowIfCancellationRequested();
+        using var ocrSession = new ArtifactPaddleOcrSession();
+        _ocrService = ocrSession.Service;
+        try
+        {
+            await StartCoreAsync(ct);
+        }
+        finally
+        {
+            _ocrService = null;
+        }
+    }
+
+    private async Task StartCoreAsync(CancellationToken ct)
+    {
         await new ReturnMainUiTask().Start(ct);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
-            expectedUid, ct);
+            expectedUid, OcrService, ct);
         if (!plan.ReplaceAll || !plan.RequiresPreMutationEvidence || plan.Plans.Count == 0)
         {
             throw new InvalidDataException("Native artifact plan is not a complete replacement plan.");
@@ -156,7 +174,7 @@ internal sealed class ArtifactNativePlanTask(
         await foreach ((ImageRegion page, Rect rect) in screen.WithCancellation(ct))
         {
             using var row = page.DeriveCrop(rect);
-            var text = OcrFactory.Paddle.OcrResult(row.SrcMat).Text;
+            var text = OcrService.OcrResult(row.SrcMat).Text;
             if (!text.Contains(localizedName, StringComparison.Ordinal)) continue;
             row.Click();
             await Delay(250, ct);
@@ -298,14 +316,16 @@ internal sealed class ArtifactNativePlanTask(
         File.Move(temporary, target, overwrite: true);
     }
 
-    private static bool HasText(string expected)
+    private bool HasText(string expected)
     {
         using var capture = CaptureToRectArea();
-        return capture.FindMulti(RecognitionObject.Ocr(capture.ToRect()))
+        return capture.FindMulti(
+                RecognitionObject.Ocr(capture.ToRect()),
+                ocrService: OcrService)
             .Any(region => ExactText(region.Text, expected));
     }
 
-    private static void RequireText(string expected)
+    private void RequireText(string expected)
     {
         if (!HasText(expected))
         {
@@ -314,17 +334,19 @@ internal sealed class ArtifactNativePlanTask(
         }
     }
 
-    private static bool TryClickText(string expected)
+    private bool TryClickText(string expected)
     {
         using var capture = CaptureToRectArea();
-        var match = capture.FindMulti(RecognitionObject.Ocr(capture.ToRect()))
+        var match = capture.FindMulti(
+                RecognitionObject.Ocr(capture.ToRect()),
+                ocrService: OcrService)
             .FirstOrDefault(region => ExactText(region.Text, expected));
         if (match is null) return false;
         match.Click();
         return true;
     }
 
-    private static async Task ClickTextAsync(string expected, CancellationToken ct)
+    private async Task ClickTextAsync(string expected, CancellationToken ct)
     {
         if (!TryClickText(expected))
         {
@@ -361,7 +383,7 @@ internal sealed class ArtifactNativePlanTask(
         }
     }
 
-    private static async Task<ControlCalibration> CalibrateControlAsync(
+    private async Task<ControlCalibration> CalibrateControlAsync(
         string label,
         CancellationToken ct)
     {
@@ -431,10 +453,12 @@ internal sealed class ArtifactNativePlanTask(
         }
     }
 
-    private static double CaptureSelectionScore(string expected)
+    private double CaptureSelectionScore(string expected)
     {
         using var capture = CaptureToRectArea();
-        var match = capture.FindMulti(RecognitionObject.Ocr(capture.ToRect()))
+        var match = capture.FindMulti(
+                RecognitionObject.Ocr(capture.ToRect()),
+                ocrService: OcrService)
             .FirstOrDefault(region => ExactText(region.Text, expected))
             ?? throw new InvalidDataException($"Unable to find native plan control '{expected}'.");
         var paddingX = ArtifactUiCoordinateMapper.ScaleLogicalX(

@@ -57,19 +57,21 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         var assets = CharacterDevelopmentAssets.Get(captureRect.Width, captureRect.Height);
 
         await new ReturnMainUiTask().Start(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var detailsReader = new ArtifactCharacterDetailsReader();
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
-            uid, cancellationToken);
+            uid, detailsReader.RecognizeWithoutDetector, cancellationToken);
+        _logger.LogInformation(
+            "角色配装检测 OCR：PpOcrRecV6 固定区域（排除 TensorRT）；不加载 DetV6，第二帧仅在首帧失败时启用");
         try
         {
             Simulation.SendInput.SimulateAction(GIActions.OpenCharacterScreen);
             await OpenCharacterListAsync(assets, cancellationToken);
             var gridParams = GridParams.CharacterDevelopmentForCapture(
                 new Size(captureRect.Width, captureRect.Height));
-            using var detailsReader = new ArtifactCharacterDetailsReader();
             var characters = new Dictionary<string, ArtifactCharacterRosterEntryDto>(StringComparer.Ordinal);
             var pageTracker = new ArtifactCharacterPageTracker();
             var identityGuard = new ArtifactCharacterScanIdentityGuard();
-            ulong? detailSignature = null;
             var clicked = 0;
             while (true)
             {
@@ -86,38 +88,60 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                     pageRows.Count, newRows.Count, newRows.Sum(row => row.Cards.Count));
                 foreach (var rect in newRows.SelectMany(row => row.Cards))
                 {
-                    ClickCharacterCard(gridParams.Roi, rect);
-
-                    using var captured = await CaptureSelectedDetailAsync(
-                        detailSignature, cancellationToken);
-                    detailSignature = captured.DetailSignature;
-                    var detail = await ParseDetailWithOneRetryAsync(
-                        detailsReader, captured,
-                        gameNickname, miliastraNickname,
-                        miliastraCharacterKey,
-                        cancellationToken);
-                    var characterKey = ArtifactCharacterCardReader.ToCharacterKey(
-                        detail.CharacterName);
-                    if (identityGuard.DidNotChange(characterKey))
+                    ArtifactCharacterDetailSample? detail = null;
+                    string? characterKey = null;
+                    TimeoutException? firstClickTimeout = null;
+                    for (var clickAttempt = 1; clickAttempt <= 2; clickAttempt++)
                     {
-                        _logger.LogWarning(
-                            "角色配装检测：点击后右侧角色仍为 {CharacterKey}，补点同一头像并只重试一次 OCR",
-                            characterKey);
-                        ClickCharacterCard(gridParams.Roi, rect);
-                        using var retryCapture = await CaptureSelectedDetailAsync(
-                            detailSignature, cancellationToken);
+                        var clickBaseline = ClickCharacterCard(
+                            gridParams.Roi, rect);
+                        ArtifactCharacterCapturedDetail captured;
+                        try
+                        {
+                            captured = await CaptureSelectedDetailAsync(
+                                clickBaseline,
+                                cancellationToken);
+                        }
+                        catch (TimeoutException exception) when (clickAttempt == 1)
+                        {
+                            firstClickTimeout = exception;
+                            _logger.LogWarning(
+                                exception,
+                                "角色配装检测：首次点击后详情未确认，补点同一头像一次");
+                            continue;
+                        }
+                        catch (TimeoutException exception)
+                        {
+                            throw new TimeoutException(
+                                "角色配装检测连续两次点击都未能确认右侧详情。",
+                                firstClickTimeout is null
+                                    ? exception
+                                    : new AggregateException(
+                                        firstClickTimeout, exception));
+                        }
+                        using (captured)
+                        {
                         detail = await ParseDetailWithOneRetryAsync(
-                            detailsReader, retryCapture,
+                            detailsReader, captured,
                             gameNickname, miliastraNickname,
                             miliastraCharacterKey,
                             cancellationToken);
-                        detailSignature = retryCapture.DetailSignature;
                         characterKey = ArtifactCharacterCardReader.ToCharacterKey(
                             detail.CharacterName);
+                        }
+                        if (!identityGuard.DidNotChange(characterKey)) break;
+                        if (clickAttempt == 2)
+                        {
+                            throw new TimeoutException(
+                                $"补点角色卡片后右侧角色仍为 {characterKey}。");
+                        }
+                        _logger.LogWarning(
+                            "角色配装检测：点击后右侧角色仍为 {CharacterKey}，补点同一头像并只重试一次 OCR",
+                            characterKey);
                     }
 
-                    identityGuard.Commit(characterKey);
-                    detail = await ConfirmFavoriteAsync(detail, cancellationToken);
+                    identityGuard.Commit(characterKey!);
+                    detail = await ConfirmFavoriteAsync(detail!, cancellationToken);
                     AddCharacter(characters, detail);
                     clicked++;
                 }
@@ -243,41 +267,32 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
     }
 
     private static async Task<ArtifactCharacterCapturedDetail> CaptureSelectedDetailAsync(
-        ulong? previousDetailSignature,
+        ArtifactCharacterClickBaseline clickBaseline,
         CancellationToken cancellationToken)
     {
-        if (previousDetailSignature.HasValue)
+        await Delay(80, cancellationToken);
+        var timer = Stopwatch.StartNew();
+        var detector = new ArtifactCharacterDetailSwitchDetector(
+            clickBaseline.DetailSignature, 2);
+        var alreadySelectedDetector = new ArtifactCharacterSameDetailSelectionDetector(
+            clickBaseline.DetailSignature,
+            clickBaseline.SelectionScore);
+        while (timer.ElapsedMilliseconds < 900)
         {
-            var timer = Stopwatch.StartNew();
-            var detector = new ArtifactCharacterDetailChangeDetector(
-                previousDetailSignature.Value, 6);
-            var changed = false;
-            while (timer.ElapsedMilliseconds < 450)
+            cancellationToken.ThrowIfCancellationRequested();
+            using var capture = CaptureToRectArea();
+            var signature = ArtifactCharacterDetailsReader.DetailSignature(
+                capture.SrcMat);
+            if (detector.Observe(signature) ||
+                alreadySelectedDetector.Observe(signature))
             {
-                using var capture = CaptureToRectArea();
-                var signature = ArtifactCharacterDetailsReader.DetailSignature(capture.SrcMat);
-                if (detector.Observe(signature))
-                {
-                    await Delay(40, cancellationToken);
-                    changed = true;
-                    break;
-                }
-                await Delay(12, cancellationToken);
+                return new ArtifactCharacterCapturedDetail(
+                    capture.SrcMat.Clone(), signature);
             }
-            if (!changed)
-            {
-                throw new TimeoutException("点击角色卡片后右侧角色名称没有稳定切换。");
-            }
-        }
-        else
-        {
-            await Delay(80, cancellationToken);
+            await Delay(16, cancellationToken);
         }
 
-        using var latest = CaptureToRectArea();
-        var latestSignature = ArtifactCharacterDetailsReader.DetailSignature(latest.SrcMat);
-        return new ArtifactCharacterCapturedDetail(
-            latest.SrcMat.Clone(), latestSignature);
+        throw new TimeoutException("点击角色卡片后右侧角色详情在 900ms 内未稳定。");
     }
 
     private async Task<ArtifactCharacterDetailSample> ParseDetailWithOneRetryAsync(
@@ -302,7 +317,9 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
             firstFailure = exception;
         }
 
-        await Delay(first is null ? 160 : 50, cancellationToken);
+        if (first is not null) return first;
+
+        await Delay(160, cancellationToken);
         using var retryCapture = CaptureToRectArea();
         try
         {
@@ -310,18 +327,7 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                 retryCapture.SrcMat,
                 gameNickname, miliastraNickname,
                 miliastraCharacterKey);
-            if (first is not null
-                && (!string.Equals(
-                        first.CharacterName,
-                        second.CharacterName,
-                        StringComparison.Ordinal)
-                    || first.Level != second.Level))
-            {
-                throw new InvalidOperationException(
-                    $"角色详情连续两帧不一致：{first.CharacterName} Lv.{first.Level} / "
-                    + $"{second.CharacterName} Lv.{second.Level}");
-            }
-            return second with { Favorite = second.Favorite || first?.Favorite == true };
+            return second;
         }
         catch (Exception retryFailure)
         {
@@ -339,12 +345,18 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         }
     }
 
-    private static void ClickCharacterCard(Rect gridRoi, Rect cardRect)
+    private static ArtifactCharacterClickBaseline ClickCharacterCard(
+        Rect gridRoi,
+        Rect cardRect)
     {
         using var capture = CaptureToRectArea();
         using var page = capture.DeriveCrop(gridRoi);
         using var item = page.DeriveCrop(cardRect);
+        var baseline = new ArtifactCharacterClickBaseline(
+            ArtifactCharacterDetailsReader.DetailSignature(capture.SrcMat),
+            ArtifactGridSelectionDetector.Score(item.SrcMat));
         item.Click();
+        return baseline;
     }
 
     private static async Task<ArtifactCharacterDetailSample> ConfirmFavoriteAsync(
@@ -388,6 +400,10 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         }
         characters.Add(entry.CharacterKey, entry);
     }
+
+    private sealed record ArtifactCharacterClickBaseline(
+        ulong DetailSignature,
+        double SelectionScore);
 
     private sealed class ArtifactCharacterCapturedDetail(
         Mat capture,

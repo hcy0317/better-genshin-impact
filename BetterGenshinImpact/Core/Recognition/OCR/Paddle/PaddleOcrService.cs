@@ -109,9 +109,18 @@ public class PaddleOcrService : IOcrService, IDisposable
 
         public (Det, Rec) Build(BgiOnnxFactory onnxFactory)
         {
-            return (
-                new Det(DetectionModel, DetectionVersion, onnxFactory),
-                new Rec(RecognitionModel, RecLabel(), RecognitionVersion, onnxFactory));
+            var detector = new Det(DetectionModel, DetectionVersion, onnxFactory);
+            try
+            {
+                return (
+                    detector,
+                    new Rec(RecognitionModel, RecLabel(), RecognitionVersion, onnxFactory));
+            }
+            catch
+            {
+                detector.Dispose();
+                throw;
+            }
         }
 
         public static readonly PaddleOcrModelType V4 = Create(
@@ -255,13 +264,22 @@ public class PaddleOcrService : IOcrService, IDisposable
         _localDetModel = modelsDet;
         _localRecModel = modelsRec;
 
-        // 预热模型
-        using var preHeatImageMat = Bv.ImRead(modelType.PreHeatImagePath) ??
-                                    throw new FileNotFoundException($"预热图片未找到: {modelType.PreHeatImagePath}");
-        // Debug输出结果
-        var preHeatResult = RunAll(preHeatImageMat, 1);
-        Debug.WriteLine(
-            $"PaddleOcrService 预热完成，使用模型: {modelType.DetectionModel.Name} 和 {modelType.RecognitionModel.Name}，结果: {preHeatResult.Text}");
+        try
+        {
+            // 预热模型
+            using var preHeatImageMat = Bv.ImRead(modelType.PreHeatImagePath) ??
+                                        throw new FileNotFoundException($"预热图片未找到: {modelType.PreHeatImagePath}");
+            // Debug输出结果
+            var preHeatResult = RunAll(preHeatImageMat, 1);
+            Debug.WriteLine(
+                $"PaddleOcrService 预热完成，使用模型: {modelType.DetectionModel.Name} 和 {modelType.RecognitionModel.Name}，结果: {preHeatResult.Text}");
+        }
+        catch
+        {
+            _localRecModel.Dispose();
+            _localDetModel.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

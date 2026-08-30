@@ -12,8 +12,19 @@ internal static class ArtifactGameIdentityVerifier
 {
     internal static async Task EnsureExpectedUidAsync(
         string expectedUid,
+        IOcrService ocrService,
+        CancellationToken cancellationToken)
+        => await EnsureExpectedUidAsync(
+            expectedUid,
+            uidRegion => ocrService.OcrWithoutDetector(uidRegion),
+            cancellationToken);
+
+    internal static async Task EnsureExpectedUidAsync(
+        string expectedUid,
+        Func<OpenCvSharp.Mat, string> recognizeWithoutDetector,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         string lastText = string.Empty;
         for (var attempt = 1; attempt <= 2; attempt++)
         {
@@ -21,7 +32,7 @@ internal static class ArtifactGameIdentityVerifier
             using var uidRegion = ArtifactUiCoordinateMapper.CropNormalized(
                 capture.SrcMat,
                 1395, 868, 205, 32);
-            lastText = OcrFactory.Paddle.OcrResult(uidRegion).Text;
+            lastText = recognizeWithoutDetector(uidRegion);
             if (TryParseUid(lastText, out var liveUid)
                 && string.Equals(liveUid, expectedUid, StringComparison.Ordinal))
             {

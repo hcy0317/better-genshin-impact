@@ -9,7 +9,7 @@ public class ArtifactOcrModelPolicyTests
     [Fact]
     public void SimplifiedChineseArtifactsUseTheBenchmarkedV6Model()
     {
-        Assert.True(ArtifactInventoryUi.ForceCpuOcr);
+        Assert.False(ArtifactInventoryUi.ForceCpuOcr);
         Assert.Same(
             PaddleOcrService.PaddleOcrModelType.V6,
             ArtifactInventoryUi.SelectOcrModel(new CultureInfo("zh-Hans")));

@@ -42,12 +42,15 @@ internal static partial class ArtifactCharacterCardReader
             ["Yunjin"] = "YunJin"
         };
 
-    internal static int ReadLevel(Mat card, double assetScale)
+    internal static int ReadLevel(
+        Mat card,
+        double assetScale,
+        IOcrService ocrService)
     {
         var y = Math.Clamp((int)Math.Round(112 * assetScale), 0, card.Height - 1);
         using var levelRegion = card.SubMat(new Rect(0, y, card.Width, card.Height - y));
         using var enlarged = levelRegion.Resize(new Size(), 2, 2, InterpolationFlags.Cubic);
-        var text = OcrFactory.Paddle.Ocr(enlarged);
+        var text = ocrService.Ocr(enlarged);
         if (!TryParseLevel(text, out var level))
         {
             throw new InvalidOperationException($"无法识别角色卡片等级：{text}");

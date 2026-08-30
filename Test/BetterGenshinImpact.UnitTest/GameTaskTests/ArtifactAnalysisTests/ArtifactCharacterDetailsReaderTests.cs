@@ -6,14 +6,16 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactCharacterDetailsReaderTests
 {
     [Fact]
-    public void FixedDetailOcr_UsesTheCpuProviderPolicy()
+    public void FixedDetailOcr_PrefersAccelerationWithoutLoadingDetection()
     {
-        Assert.True(ArtifactCharacterDetailsReader.ForceCpuOcr);
+        Assert.False(ArtifactCharacterDetailsReader.ForceCpuOcr);
         Assert.False(ArtifactCharacterDetailsReader.LoadsDetectionModel);
     }
 
     [Theory]
     [InlineData("等级90/90", 90)]
+    [InlineData("等级90./90", 90)]
+    [InlineData("等级90/90.", 90)]
     [InlineData("等级9090", 90)]
     [InlineData("等级8090", 80)]
     [InlineData("等级190", 1)]
@@ -33,6 +35,31 @@ public class ArtifactCharacterDetailsReaderTests
     public void DetailLevel_RejectsDamagedOrAmbiguousText(string text)
     {
         Assert.False(ArtifactCharacterDetailsReader.TryParseLevel(text, out _));
+    }
+
+    [Theory]
+    [InlineData(1920, 1080, 1466, 126, 260, 48, 1458, 204, 220, 36)]
+    [InlineData(3840, 2160, 2932, 252, 520, 96, 2916, 408, 440, 72)]
+    public void FixedDetailOcr_UsesTightNameAndLevelRegions(
+        int width,
+        int height,
+        int nameX,
+        int nameY,
+        int nameWidth,
+        int nameHeight,
+        int levelX,
+        int levelY,
+        int levelWidth,
+        int levelHeight)
+    {
+        var captureSize = new Size(width, height);
+
+        Assert.Equal(
+            new Rect(nameX, nameY, nameWidth, nameHeight),
+            ArtifactCharacterDetailsReader.NameRegionForCapture(captureSize));
+        Assert.Equal(
+            new Rect(levelX, levelY, levelWidth, levelHeight),
+            ArtifactCharacterDetailsReader.LevelRegionForCapture(captureSize));
     }
 
     [Theory]
