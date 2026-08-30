@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.ArtifactAnalysis;
+using BetterGenshinImpact.Core.Recognition.OCR;
 using OpenCvSharp;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
@@ -99,7 +100,7 @@ public class ArtifactPanelCaptureTests
     }
 
     [Fact]
-    public void LegacyStatCard_UsesOnlyTheNormalizedCorePanel()
+    public void LegacyDetectionRegion_StartsAtSlotAndEndsAfterSetName()
     {
         using var fullCapture = new Mat(
             new Size(1920, 1080),
@@ -107,10 +108,53 @@ public class ArtifactPanelCaptureTests
             Scalar.Black);
         using var frame = ArtifactCapturedItem.Create(0, false, fullCapture);
 
-        using var card = frame.CropBaseRect(1120, 100.8, 380, 450);
+        var region = ArtifactInventoryUi.LegacyDetectionRegion;
+        Assert.Equal(new Rect(1090, 153, 410, 409), region);
+        using var card = frame.CropBaseRect(
+            region.X, region.Y, region.Width, region.Height);
 
-        Assert.Equal(new Size(380, 450), card.Size());
+        Assert.Equal(new Size(410, 409), card.Size());
     }
+
+    [Fact]
+    public void LegacyDetectionBands_MergeOnlyConfidentTextOnTheSameSemanticLine()
+    {
+        var result = new OcrResult([
+            Region(90, 20, "死之羽"),
+            Region(25, 80, "攻击"),
+            Region(90, 80, "力"),
+            Region(30, 115, "47"),
+            Region(150, 80, "噪声", score: 0.2f)
+        ]);
+
+        Assert.Equal("死之羽", ArtifactInventoryUi.ReadDetectedBand(result, 0, 55));
+        Assert.Equal("攻击力", ArtifactInventoryUi.ReadDetectedBand(result, 55, 48));
+        Assert.Equal("47", ArtifactInventoryUi.ReadDetectedBand(result, 90, 62));
+    }
+
+    [Theory]
+    [InlineData(4, 372, 37)]
+    [InlineData(3, 342, 37)]
+    [InlineData(2, 307, 37)]
+    public void LegacyDetectionSetBand_FollowsTheVisibleSubstatCount(
+        int substatCount,
+        double expectedTop,
+        double expectedHeight)
+    {
+        Assert.Equal(
+            (expectedTop, expectedHeight),
+            ArtifactInventoryUi.LegacyDetectedSetNameBand(substatCount));
+    }
+
+    private static OcrResultRegion Region(
+        float x,
+        float y,
+        string text,
+        float score = 0.99f) =>
+        new(new RotatedRect(
+            new Point2f(x, y),
+            new Size2f(40, 20),
+            0), text, score);
 
     [Fact]
     public void Create_NormalizesFourKPanelToThe1600By900LogicalScale()

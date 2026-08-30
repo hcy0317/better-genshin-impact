@@ -7,26 +7,6 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactGameIdentityVerifierTests
 {
     [Fact]
-    public async Task EnsureExpectedUid_CancellationPreventsOcrSessionCreation()
-    {
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
-        var factoryCalls = 0;
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
-                "102550550",
-                cancellation.Token,
-                () =>
-                {
-                    factoryCalls++;
-                    throw new InvalidOperationException("OCR session factory must not run after cancellation.");
-                }));
-
-        Assert.Equal(0, factoryCalls);
-    }
-
-    [Fact]
     public async Task EnsureExpectedUid_InjectedServiceCancellationPreventsOcrCall()
     {
         using var cancellation = new CancellationTokenSource();

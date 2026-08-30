@@ -1,12 +1,9 @@
 using BetterGenshinImpact.Core.Recognition.OCR;
-using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
-using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
 using BetterGenshinImpact.GameTask.Model.GameUI;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 
 namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
@@ -22,14 +19,13 @@ internal sealed record ArtifactCharacterDetailSample(
 /// </summary>
 internal sealed class ArtifactCharacterDetailsReader : IDisposable
 {
-    internal const bool ForceCpuOcr = true;
+    internal const bool ForceCpuOcr = false;
     internal const bool LoadsDetectionModel = false;
     private static readonly Rect2d NameRoi = new(1221.6667, 105, 216.6667, 40);
-    private static readonly Rect2d LevelRoi = new(1215, 161.6667, 183.3333, 48.3333);
+    private static readonly Rect2d LevelRoi = new(1215, 170, 183.3333, 30);
     private static readonly Rect2d FavoriteRoi = new(1156.6667, 813.3333, 55, 55);
     private readonly IOcrService? _ocrService;
-    private readonly BgiOnnxFactory? _ownedOcrFactory;
-    private readonly Rec? _ownedOcrRecognizer;
+    private readonly ArtifactRecognitionOnlyOcrSession? _ownedOcrSession;
 
     internal ArtifactCharacterDetailsReader(IOcrService? ocrService = null)
     {
@@ -45,25 +41,8 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             return;
         }
 
-        var model = ArtifactInventoryUi.SelectOcrModel(new CultureInfo(cultureName));
-        var labels = model.RecLabel();
-        var factory = ArtifactOcrProviderPolicy.CreateFactory(
+        _ownedOcrSession = new ArtifactRecognitionOnlyOcrSession(
             forceCpuOcr: ForceCpuOcr);
-        try
-        {
-            var recognizer = new Rec(
-                model.RecognitionModel,
-                labels,
-                model.RecognitionVersion,
-                factory);
-            _ownedOcrFactory = factory;
-            _ownedOcrRecognizer = recognizer;
-        }
-        catch
-        {
-            factory.Dispose();
-            throw;
-        }
     }
 
     internal ArtifactCharacterDetailSample Read(
@@ -155,6 +134,18 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             NameRoi.X, NameRoi.Y,
             NameRoi.Width, NameRoi.Height);
 
+    internal static Rect NameRegionForCapture(Size captureSize) =>
+        ArtifactUiCoordinateMapper.ToCaptureRect(
+            captureSize,
+            NameRoi.X, NameRoi.Y,
+            NameRoi.Width, NameRoi.Height);
+
+    internal static Rect LevelRegionForCapture(Size captureSize) =>
+        ArtifactUiCoordinateMapper.ToCaptureRect(
+            captureSize,
+            LevelRoi.X, LevelRoi.Y,
+            LevelRoi.Width, LevelRoi.Height);
+
     internal static bool IsFavorite(Mat capture)
     {
         using var favorite = ArtifactUiCoordinateMapper.CropNormalized(
@@ -173,16 +164,25 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
             capture,
             logicalRoi.X, logicalRoi.Y,
             logicalRoi.Width, logicalRoi.Height);
-        return (_ocrService?.OcrWithoutDetector(region)
-                ?? _ownedOcrRecognizer!.Run(region).Text)
-            .Trim();
+        return RecognizeWithoutDetector(region);
     }
+
+    internal string RecognizeWithoutDetector(Mat region) =>
+        (_ocrService?.OcrWithoutDetector(region)
+            ?? _ownedOcrSession!.RecognizeWithoutDetector(region))
+        .Trim();
 
     internal static bool TryParseLevel(string? rawText, out int level)
     {
         level = 0;
         var normalized = string.Concat((rawText ?? string.Empty).Where(character =>
             !char.IsWhiteSpace(character)));
+        normalized = normalized
+            .Replace('／', '/')
+            .Replace("./", "/", StringComparison.Ordinal)
+            .Replace("。/", "/", StringComparison.Ordinal)
+            .Replace("·/", "/", StringComparison.Ordinal)
+            .TrimEnd('.', '。', '·');
         if (normalized.StartsWith("等级", StringComparison.Ordinal))
             normalized = normalized[2..];
         if (normalized.Length == 0) return false;
@@ -240,7 +240,6 @@ internal sealed class ArtifactCharacterDetailsReader : IDisposable
 
     public void Dispose()
     {
-        _ownedOcrRecognizer?.Dispose();
-        _ownedOcrFactory?.Dispose();
+        _ownedOcrSession?.Dispose();
     }
 }

@@ -1,6 +1,5 @@
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
-using BetterGenshinImpact.GameTask.AutoArtifactSalvage;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.Job;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -63,12 +62,12 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
         var ct = linked.Token;
         await new ReturnMainUiTask().Start(ct);
         ct.ThrowIfCancellationRequested();
-        using var ocrSession = new ArtifactPaddleOcrSession(
+        using var ocrSession = new ArtifactRecognitionOnlyOcrSession(
             forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
-            uid, ocrSession.Service, ct);
+            uid, ocrSession.RecognizeWithoutDetector, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
-        using var reader = new ArtifactInventoryUi(_logger, ocrSession.Service);
+        using var reader = new ArtifactInventoryUi(_logger, ocrSession.RecognizeWithoutDetector);
         var observedCount = reader.ReadArtifactCount();
 
         if (observedCount != expectedArtifactCount)
@@ -127,12 +126,12 @@ internal sealed class ArtifactInventoryScanTask(
         var ct = linked.Token;
         await new ReturnMainUiTask().Start(ct);
         ct.ThrowIfCancellationRequested();
-        using var ocrSession = new ArtifactPaddleOcrSession(
+        using var ocrSession = new ArtifactRecognitionOnlyOcrSession(
             forceCpuOcr: ArtifactInventoryUi.ForceCpuOcr);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
-            uid, ocrSession.Service, ct);
+            uid, ocrSession.RecognizeWithoutDetector, ct);
         await ArtifactInventoryNavigation.PrepareAsync(_logger, ct);
-        using var reader = new ArtifactInventoryUi(_logger, ocrSession.Service);
+        using var reader = new ArtifactInventoryUi(_logger, ocrSession.RecognizeWithoutDetector);
         var expectedCount = reader.ReadArtifactCount();
         var artifacts = await ArtifactInventoryScanSession.ReadItemsAsync(
             reader, expectedCount, null, ct);
@@ -145,16 +144,31 @@ internal sealed class ArtifactInventoryScanTask(
 
 internal sealed class ArtifactInventoryUi : IDisposable
 {
-    internal const bool ForceCpuOcr = true;
+    internal const bool ForceCpuOcr = false;
     private static readonly Regex CountPattern = new(@"(?<count>\d{1,5})\s*/", RegexOptions.Compiled);
-    private readonly AutoArtifactSalvageTask _artifactParser;
     private readonly ArtifactSetCatalog _setCatalog;
-    private readonly ArtifactPaddleOcrSession? _ownedOcrSession;
-    private readonly IOcrService _ocrService;
+    private readonly ArtifactRecognitionOnlyOcrSession? _ownedFixedRegionOcrSession;
+    private readonly Func<Mat, string> _fixedRegionRecognizer;
+    private readonly IOcrService? _injectedLegacyOcrService;
+    private readonly ArtifactRetryableLazy<ArtifactPaddleOcrSession>
+        _ownedLegacyOcrSession = new();
     private readonly ILogger _logger;
     private ArtifactPanelSignature? _lastDetailSignature;
 
-    internal ArtifactInventoryUi(ILogger logger, IOcrService? ocrService = null)
+    internal ArtifactInventoryUi(ILogger logger)
+        : this(logger, fixedRegionRecognizer: null)
+    {
+    }
+
+    internal ArtifactInventoryUi(ILogger logger, IOcrService ocrService)
+        : this(logger, ocrService.OcrWithoutDetector)
+    {
+        _injectedLegacyOcrService = ocrService;
+    }
+
+    internal ArtifactInventoryUi(
+        ILogger logger,
+        Func<Mat, string>? fixedRegionRecognizer)
     {
         _logger = logger;
         var cultureName = TaskContext.Instance().Config.OtherConfig.GameCultureInfoName;
@@ -164,17 +178,16 @@ internal sealed class ArtifactInventoryUi : IDisposable
         }
         _setCatalog = new ArtifactSetCatalog(Path.Combine(
             AppContext.BaseDirectory, "GameTask", "ArtifactAnalysis", "Assets", "artifact-sets.zh.json"));
-        _artifactParser = new AutoArtifactSalvageTask(
-            new AutoArtifactSalvageTaskParam(5, null, null, null, null, new CultureInfo(cultureName)), logger);
-        if (ocrService is null)
+        if (fixedRegionRecognizer is null)
         {
-            _ownedOcrSession = new ArtifactPaddleOcrSession(
+            _ownedFixedRegionOcrSession = new ArtifactRecognitionOnlyOcrSession(
                 forceCpuOcr: ForceCpuOcr);
-            _ocrService = _ownedOcrSession.Service;
+            _fixedRegionRecognizer =
+                _ownedFixedRegionOcrSession.RecognizeWithoutDetector;
         }
         else
         {
-            _ocrService = ocrService;
+            _fixedRegionRecognizer = fixedRegionRecognizer;
         }
     }
 
@@ -199,7 +212,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
             ArtifactUiCoordinateMapper.ToCaptureRect(
                 capture.SrcMat.Size(),
                 1314.88, 27.09, 189.92, 25.83));
-        var text = _ocrService.OcrWithoutDetector(region.SrcMat);
+        var text = _fixedRegionRecognizer(region.SrcMat);
         var match = CountPattern.Match(text);
         if (!match.Success || !int.TryParse(match.Groups["count"].Value, out var count) || count < 0)
         {
@@ -363,43 +376,71 @@ internal sealed class ArtifactInventoryUi : IDisposable
         ArtifactCapturedItem frame,
         int rarity)
     {
-        using var card = frame.CropBaseRect(1120, 100.8, 380, 450);
-        var stat = _artifactParser.GetArtifactStat(card, _ocrService, out _);
-        var legacySetNameRegion = LegacySetNameRegion(stat.MinorAffixes.Count());
-        using var setRegion = frame.CropBaseRect(
-            1090,
-            legacySetNameRegion.Top,
-            340,
-            legacySetNameRegion.Height);
-        var setText = _ocrService.OcrResult(setRegion).Text;
-        using var equipRegion = frame.CropBaseRect(1150, 745, 320, 50);
-        var equipText = _ocrService.OcrWithoutDetector(equipRegion).Trim();
-        var substats = stat.MinorAffixes.Select(affix =>
-            new ArtifactSubstatDto(StatKey(affix.Type), affix.Value)).ToArray();
-        if (stat.Level == 0 && substats.Length >= 4)
+        var ocrService = LegacyOcrService;
+        using var card = frame.CropBaseRect(
+            LegacyDetectionRegion.X,
+            LegacyDetectionRegion.Y,
+            LegacyDetectionRegion.Width,
+            LegacyDetectionRegion.Height);
+        var detected = ocrService.OcrResult(card);
+        var slot = ArtifactFastTextParser.ParseSlot(
+            ReadDetectedBand(detected, 0, 55));
+        var mainStat = ArtifactFastTextParser.ParseAffix(
+            ReadDetectedBand(detected, 55, 48),
+            ReadDetectedBand(detected, 90, 62));
+        var level = ArtifactFastTextParser.ParseLevel(
+            ReadDetectedBand(detected, 190, 48));
+        var substats = new[]
+            {
+                (245.1, 29.2),
+                (274.3, 30.9),
+                (305.2, 32.7),
+                (337.9, 32.1)
+            }
+            .Select(band => ReadDetectedBand(
+                detected, band.Item1, band.Item2))
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .Select(text => ArtifactFastTextParser.TryParseAffixLine(
+                text, out var affix) ? affix : null)
+            .OfType<ArtifactSubstatDto>()
+            .ToArray();
+        var requiredSubstats = level >= 4 ? 4 : rarity >= 5 ? 3 : 2;
+        if (substats.Length < requiredSubstats)
         {
-            try
-            {
-                var fourthLineText = InferFixed(frame, 1130.2, 490.9, 360.0, 32.1);
-                substats = ArtifactFastTextParser.ApplyDormantFourthLine(
-                    substats, stat.Level, fourthLineText);
-            }
-            catch (Exception exception)
-            {
-                _logger.LogDebug(exception, "旧解析回退未能读取待激活第四词条标记");
-            }
+            throw new InvalidDataException(
+                $"Paddle 回退只识别到 {substats.Length}/{requiredSubstats} 条副词条");
         }
+        var setNameBand = LegacyDetectedSetNameBand(
+            Math.Max(substats.Length, requiredSubstats));
+        var setText = ReadDetectedBand(
+            detected, setNameBand.Top, setNameBand.Height);
+        using var equipRegion = frame.CropBaseRect(1150, 745, 320, 50);
+        var equipText = ocrService.OcrWithoutDetector(equipRegion).Trim();
 
         return new ArtifactItemDto(
             frame.ScanIndex,
             _setCatalog.ResolveSetKey(setText),
-            ResolveSlot(stat.TypeName),
-            stat.Level,
+            slot,
+            level,
             rarity,
-            StatKey(stat.MainAffix.Type),
+            mainStat.Key,
             substats,
             ResolveLocation(equipText),
             frame.Locked);
+    }
+
+    internal static string ReadDetectedBand(
+        OcrResult result,
+        double top,
+        double height)
+    {
+        var bottom = top + height;
+        return string.Concat(result.Regions
+            .Where(region => region.Score > 0.5
+                && region.Rect.Center.Y >= top
+                && region.Rect.Center.Y < bottom)
+            .OrderBy(region => region.Rect.Center.X)
+            .Select(region => region.Text));
     }
 
     private static int ReadRarity(Mat capture)
@@ -546,7 +587,26 @@ internal sealed class ArtifactInventoryUi : IDisposable
         double height)
     {
         using var region = frame.CropBaseRect(left, top, width, height);
-        return _ocrService.OcrWithoutDetector(region).Trim();
+        return _fixedRegionRecognizer(region).Trim();
+    }
+
+    private IOcrService LegacyOcrService
+    {
+        get
+        {
+            if (_injectedLegacyOcrService is not null)
+            {
+                return _injectedLegacyOcrService;
+            }
+
+            return _ownedLegacyOcrSession.GetOrCreate(() =>
+            {
+                _logger.LogInformation(
+                    "圣遗物固定区域解析失败，按需加载 PpOcrDetV6 + PpOcrRecV6 回退（排除 TensorRT）");
+                return new ArtifactPaddleOcrSession(
+                    forceCpuOcr: ForceCpuOcr);
+            }).Service;
+        }
     }
 
     internal static double SetNameTop(int substatCount)
@@ -561,6 +621,16 @@ internal sealed class ArtifactInventoryUi : IDisposable
 
     internal static (double Top, double Height) LegacySetNameRegion(int substatCount) =>
         (SetNameTop(substatCount) - 5, 37);
+
+    internal static Rect LegacyDetectionRegion { get; } =
+        new(1090, 153, 410, 409);
+
+    internal static (double Top, double Height) LegacyDetectedSetNameBand(
+        int substatCount)
+    {
+        var absolute = LegacySetNameRegion(substatCount);
+        return (absolute.Top - LegacyDetectionRegion.Y, absolute.Height);
+    }
 
     private async Task<Mat> CaptureAfterDetailConfirmedAsync(
         ArtifactPanelSignature initialSignature,
@@ -619,18 +689,15 @@ internal sealed class ArtifactInventoryUi : IDisposable
 
     public void Dispose()
     {
-        _ownedOcrSession?.Dispose();
+        try
+        {
+            _ownedLegacyOcrSession.Take()?.Dispose();
+        }
+        finally
+        {
+            _ownedFixedRegionOcrSession?.Dispose();
+        }
     }
-
-    private static string ResolveSlot(string typeName) => typeName switch
-    {
-        var value when value.Contains("生之花", StringComparison.Ordinal) => "flower",
-        var value when value.Contains("死之羽", StringComparison.Ordinal) => "plume",
-        var value when value.Contains("时之沙", StringComparison.Ordinal) => "sands",
-        var value when value.Contains("空之杯", StringComparison.Ordinal) => "goblet",
-        var value when value.Contains("理之冠", StringComparison.Ordinal) => "circlet",
-        _ => throw new InvalidDataException($"Unable to resolve artifact slot from '{typeName}'.")
-    };
 
     private static string ResolveLocation(string equipText)
     {
@@ -640,19 +707,6 @@ internal sealed class ArtifactInventoryUi : IDisposable
             : string.Empty;
     }
 
-    private static string StatKey(ArtifactAffixType type) => type switch
-    {
-        ArtifactAffixType.HP => "hp", ArtifactAffixType.ATK => "atk", ArtifactAffixType.DEF => "def",
-        ArtifactAffixType.HPPercent => "hp_", ArtifactAffixType.ATKPercent => "atk_",
-        ArtifactAffixType.DEFPercent => "def_", ArtifactAffixType.ElementalMastery => "eleMas",
-        ArtifactAffixType.EnergyRecharge => "enerRech_", ArtifactAffixType.CRITRate => "critRate_",
-        ArtifactAffixType.CRITDMG => "critDMG_", ArtifactAffixType.HealingBonus => "heal_",
-        ArtifactAffixType.AnemoDMGBonus => "anemo_dmg_", ArtifactAffixType.CryoDMGBonus => "cryo_dmg_",
-        ArtifactAffixType.DendroDMGBonus => "dendro_dmg_", ArtifactAffixType.ElectroDMGBonus => "electro_dmg_",
-        ArtifactAffixType.GeoDMGBonus => "geo_dmg_", ArtifactAffixType.HydroDMGBonus => "hydro_dmg_",
-        ArtifactAffixType.PhysicalDMGBonus => "physical_dmg_", ArtifactAffixType.PyroDMGBonus => "pyro_dmg_",
-        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
-    };
 }
 
 internal sealed class ArtifactCapturedItem : IDisposable

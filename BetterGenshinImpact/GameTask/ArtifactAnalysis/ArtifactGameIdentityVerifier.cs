@@ -12,30 +12,16 @@ internal static class ArtifactGameIdentityVerifier
 {
     internal static async Task EnsureExpectedUidAsync(
         string expectedUid,
-        CancellationToken cancellationToken)
-    {
-        await EnsureExpectedUidAsync(
-            expectedUid,
-            cancellationToken,
-            static () => new ArtifactPaddleOcrSession());
-    }
-
-    internal static async Task EnsureExpectedUidAsync(
-        string expectedUid,
-        CancellationToken cancellationToken,
-        Func<ArtifactPaddleOcrSession> ocrSessionFactory)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        using var ocrSession = ocrSessionFactory();
-        await EnsureExpectedUidAsync(
-            expectedUid,
-            ocrSession.Service,
-            cancellationToken);
-    }
-
-    internal static async Task EnsureExpectedUidAsync(
-        string expectedUid,
         IOcrService ocrService,
+        CancellationToken cancellationToken)
+        => await EnsureExpectedUidAsync(
+            expectedUid,
+            uidRegion => ocrService.OcrWithoutDetector(uidRegion),
+            cancellationToken);
+
+    internal static async Task EnsureExpectedUidAsync(
+        string expectedUid,
+        Func<OpenCvSharp.Mat, string> recognizeWithoutDetector,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -46,7 +32,7 @@ internal static class ArtifactGameIdentityVerifier
             using var uidRegion = ArtifactUiCoordinateMapper.CropNormalized(
                 capture.SrcMat,
                 1395, 868, 205, 32);
-            lastText = ocrService.OcrResult(uidRegion).Text;
+            lastText = recognizeWithoutDetector(uidRegion);
             if (TryParseUid(lastText, out var liveUid)
                 && string.Equals(liveUid, expectedUid, StringComparison.Ordinal))
             {

@@ -26,6 +26,19 @@ public class BgiOnnxFactoryPredictorCacheTests
         Assert.Equal([ProviderType.Cuda, ProviderType.Cpu], providers);
     }
 
+    [Theory]
+    [InlineData(0, true, false)]
+    [InlineData(0, false, true)]
+    [InlineData(-1, false, false)]
+    public void OcrProviderPolicy_SkipsTensorRtProbingWhenExcluded(
+        int cudaDeviceId,
+        bool excludeTensorRt,
+        bool expected)
+    {
+        Assert.Equal(expected, BgiOnnxFactory.ShouldProbeTensorRt(
+            cudaDeviceId, excludeTensorRt));
+    }
+
     [Fact]
     public void OcrProviderPolicy_ShouldKeepCpuOnlyWhenCpuOcrIsEnabled()
     {

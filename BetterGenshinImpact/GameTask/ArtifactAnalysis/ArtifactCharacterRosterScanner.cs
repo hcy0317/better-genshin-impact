@@ -58,17 +58,17 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
 
         await new ReturnMainUiTask().Start(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
-        using var ocrSession = new ArtifactPaddleOcrSession(
-            forceCpuOcr: ArtifactCharacterDetailsReader.ForceCpuOcr);
+        using var detailsReader = new ArtifactCharacterDetailsReader();
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
-            uid, ocrSession.Service, cancellationToken);
+            uid, detailsReader.RecognizeWithoutDetector, cancellationToken);
+        _logger.LogInformation(
+            "角色配装检测 OCR：PpOcrRecV6 固定区域（排除 TensorRT）；不加载 DetV6，第二帧仅在首帧失败时启用");
         try
         {
             Simulation.SendInput.SimulateAction(GIActions.OpenCharacterScreen);
             await OpenCharacterListAsync(assets, cancellationToken);
             var gridParams = GridParams.CharacterDevelopmentForCapture(
                 new Size(captureRect.Width, captureRect.Height));
-            using var detailsReader = new ArtifactCharacterDetailsReader(ocrSession.Service);
             var characters = new Dictionary<string, ArtifactCharacterRosterEntryDto>(StringComparer.Ordinal);
             var pageTracker = new ArtifactCharacterPageTracker();
             var identityGuard = new ArtifactCharacterScanIdentityGuard();
@@ -317,7 +317,9 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
             firstFailure = exception;
         }
 
-        await Delay(first is null ? 160 : 50, cancellationToken);
+        if (first is not null) return first;
+
+        await Delay(160, cancellationToken);
         using var retryCapture = CaptureToRectArea();
         try
         {
@@ -325,18 +327,7 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                 retryCapture.SrcMat,
                 gameNickname, miliastraNickname,
                 miliastraCharacterKey);
-            if (first is not null
-                && (!string.Equals(
-                        first.CharacterName,
-                        second.CharacterName,
-                        StringComparison.Ordinal)
-                    || first.Level != second.Level))
-            {
-                throw new InvalidOperationException(
-                    $"角色详情连续两帧不一致：{first.CharacterName} Lv.{first.Level} / "
-                    + $"{second.CharacterName} Lv.{second.Level}");
-            }
-            return second with { Favorite = second.Favorite || first?.Favorite == true };
+            return second;
         }
         catch (Exception retryFailure)
         {

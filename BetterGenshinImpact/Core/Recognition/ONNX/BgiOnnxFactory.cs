@@ -124,7 +124,7 @@ public class BgiOnnxFactory : IDisposable
                 List<ProviderType> list = [];
                 SessionOptions? testSession = null;
                 var hasGpu = false;
-                if (CudaDeviceId >= 0)
+                if (ShouldProbeTensorRt(CudaDeviceId, _excludeTensorRtForOcr))
                     // TensorRT 依赖 CUDA，优先作为高性能 provider。
                     try
                     {
@@ -442,6 +442,11 @@ public class BgiOnnxFactory : IDisposable
             .ToArray();
         return result.Length > 0 ? result : [ProviderType.Cpu];
     }
+
+    internal static bool ShouldProbeTensorRt(
+        int cudaDeviceId,
+        bool excludeTensorRt) =>
+        cudaDeviceId >= 0 && !excludeTensorRt;
 
     /// <summary>
     ///     获取带有缓存的模型(目前只支持TensorRT)
