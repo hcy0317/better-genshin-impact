@@ -1222,6 +1222,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             visuals = visuals
                 .Select(visual => ClassifySeekVisual(
                     mask,
+                    imageCrop.SrcMat,
                     visual,
                     imageCrop.Width,
                     imageCrop.Height))
@@ -1368,9 +1369,25 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight)
         {
+            return ClassifySeekVisual(
+                mask,
+                source: null,
+                visual,
+                imageWidth,
+                imageHeight);
+        }
+
+        internal static EnemySeekVisual? ClassifySeekVisual(
+            Mat mask,
+            Mat? source,
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
             if (IsHealthBar(visual, imageHeight))
             {
                 return IsPlayerHudHealthBar(visual, imageWidth, imageHeight)
+                       || !MatchesHealthBarFeature(mask, visual)
                     ? null
                     : visual;
             }
@@ -1382,6 +1399,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
             var templates = DirectionIndicatorTemplateContours.Value;
             if (templates.Count == 0)
+            {
+                return null;
+            }
+
+            if (source != null
+                && !HasDirectionIndicatorPinkRedShare(source, visual))
             {
                 return null;
             }
@@ -1403,6 +1426,71 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return bearing.HasValue
                 ? visual with { IndicatorBearingDegrees = bearing.Value }
                 : null;
+        }
+
+        internal static bool MatchesHealthBarFeature(
+            Mat binaryMask,
+            EnemySeekVisual visual)
+        {
+            var rect = new Rect(visual.X, visual.Y, visual.Width, visual.Height);
+            if (rect.X < 0 || rect.Y < 0
+                || rect.Right > binaryMask.Width
+                || rect.Bottom > binaryMask.Height)
+            {
+                return false;
+            }
+
+            using var candidate = new Mat(binaryMask, rect);
+            var longestRun = 0;
+            for (var y = 0; y < candidate.Height; y++)
+            {
+                var currentRun = 0;
+                for (var x = 0; x < candidate.Width; x++)
+                {
+                    if (candidate.At<byte>(y, x) != 0)
+                    {
+                        currentRun++;
+                        longestRun = Math.Max(longestRun, currentRun);
+                    }
+                    else
+                    {
+                        currentRun = 0;
+                    }
+                }
+            }
+
+            return longestRun >= Math.Ceiling(candidate.Width * 0.60);
+        }
+
+        internal static bool HasDirectionIndicatorPinkRedShare(
+            Mat source,
+            EnemySeekVisual visual)
+        {
+            var rect = new Rect(visual.X, visual.Y, visual.Width, visual.Height);
+            if (rect.X < 0 || rect.Y < 0
+                || rect.Right > source.Width
+                || rect.Bottom > source.Height)
+            {
+                return false;
+            }
+
+            using var candidate = new Mat(source, rect);
+            using var hsv = new Mat();
+            using var lowHueRed = new Mat();
+            using var highHueRed = new Mat();
+            using var allRed = new Mat();
+            Cv2.CvtColor(candidate, hsv, ColorConversionCodes.BGR2HSV);
+            Cv2.InRange(hsv, new Scalar(0, 100, 140), new Scalar(12, 255, 255), lowHueRed);
+            Cv2.InRange(hsv, new Scalar(165, 100, 140), new Scalar(180, 255, 255), highHueRed);
+            Cv2.BitwiseOr(lowHueRed, highHueRed, allRed);
+            var redPixels = Cv2.CountNonZero(allRed);
+            if (redPixels == 0)
+            {
+                return false;
+            }
+
+            var pinkRedShare = Cv2.CountNonZero(highHueRed) / (double)redPixels;
+            return pinkRedShare >= 0.20;
         }
 
         internal static bool MatchesDirectionIndicatorFeature(

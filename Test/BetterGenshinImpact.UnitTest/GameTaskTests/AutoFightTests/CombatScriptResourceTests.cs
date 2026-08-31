@@ -470,8 +470,17 @@ public class CombatScriptResourceTests
     [Fact]
     public void ClassifySeekVisual_MustPreserveHealthBarsButRejectSmallHudNoise()
     {
-        using var mask = Mat.Zeros(1, 1, MatType.CV_8UC1).ToMat();
+        using var mask = Mat.Zeros(1080, 1920, MatType.CV_8UC1).ToMat();
         var fixedTopHealthBar = new EnemySeekVisual(969, 125, 251, 11, 2600);
+        Cv2.Rectangle(
+            mask,
+            new Rect(
+                fixedTopHealthBar.X,
+                fixedTopHealthBar.Y,
+                fixedTopHealthBar.Width,
+                fixedTopHealthBar.Height),
+            Scalar.White,
+            -1);
 
         Assert.Equal(
             fixedTopHealthBar,
@@ -481,6 +490,50 @@ public class CombatScriptResourceTests
             new EnemySeekVisual(1820, 795, 9, 14, 80),
             1920,
             1080));
+    }
+
+    [Fact]
+    public void HealthBarFeature_MustRequireAContinuousHorizontalRedRun()
+    {
+        using var healthMask = Mat.Zeros(24, 48, MatType.CV_8UC1).ToMat();
+        Cv2.Rectangle(healthMask, new Rect(6, 8, 30, 6), Scalar.White, -1);
+        var visual = new EnemySeekVisual(6, 8, 30, 6, 180);
+
+        using var fragmentMask = Mat.Zeros(24, 48, MatType.CV_8UC1).ToMat();
+        for (var x = 6; x < 36; x += 6)
+        {
+            Cv2.Rectangle(fragmentMask, new Rect(x, 8, 3, 6), Scalar.White, -1);
+        }
+
+        Assert.True(AutoFightSeek.MatchesHealthBarFeature(healthMask, visual));
+        Assert.False(AutoFightSeek.MatchesHealthBarFeature(fragmentMask, visual));
+    }
+
+    [Fact]
+    public void DirectionIndicatorColor_MustRejectLowHueRedFoliage()
+    {
+        using var foliageHsv = new Mat(
+            24, 32, MatType.CV_8UC3, new Scalar(10, 180, 220));
+        using var foliageBgr = new Mat();
+        Cv2.CvtColor(foliageHsv, foliageBgr, ColorConversionCodes.HSV2BGR);
+
+        using var arrowHsv = new Mat(
+            24, 32, MatType.CV_8UC3, new Scalar(5, 180, 220));
+        Cv2.Rectangle(
+            arrowHsv,
+            new Rect(0, 0, 10, 24),
+            new Scalar(175, 180, 220),
+            -1);
+        using var arrowBgr = new Mat();
+        Cv2.CvtColor(arrowHsv, arrowBgr, ColorConversionCodes.HSV2BGR);
+        var visual = new EnemySeekVisual(0, 0, 32, 24, 400);
+
+        Assert.False(AutoFightSeek.HasDirectionIndicatorPinkRedShare(
+            foliageBgr,
+            visual));
+        Assert.True(AutoFightSeek.HasDirectionIndicatorPinkRedShare(
+            arrowBgr,
+            visual));
     }
 
     [Theory]
