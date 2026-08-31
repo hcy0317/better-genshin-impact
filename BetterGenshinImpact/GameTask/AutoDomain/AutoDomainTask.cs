@@ -707,9 +707,19 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 while (!cts.Token.IsCancellationRequested)
                 {
                     // 通用化战斗策略
+                    var strategyBlockSucceeded = true;
                     foreach (var command in combatCommands)
                     {
-                        command.Execute(combatScenes);
+                        if (command.Execute(combatScenes)) continue;
+                        Logger.LogWarning(
+                            "自动秘境角色 {Avatar} 未确认切换成功，后推当前策略块",
+                            command.Name);
+                        strategyBlockSucceeded = false;
+                        break;
+                    }
+                    if (!strategyBlockSucceeded)
+                    {
+                        Sleep(250, cts.Token);
                     }
                 }
             }

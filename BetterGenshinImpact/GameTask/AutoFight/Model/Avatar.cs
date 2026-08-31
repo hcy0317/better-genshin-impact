@@ -70,6 +70,11 @@ public class Avatar
     /// </summary>
     public DateTime LastSkillTime { get; set; }
 
+    private DateTime ConfirmedSkillCooldownUntil { get; set; }
+
+    internal bool HasConfirmedSkillCooldown =>
+        DateTime.UtcNow < ConfirmedSkillCooldownUntil;
+
     /// <summary>
     /// 元素爆发是否就绪
     /// </summary>
@@ -264,37 +269,9 @@ public class Avatar
     /// 切换到本角色
     /// 切换cd是1秒，如果切换失败，会尝试再次切换，最多尝试5次
     /// </summary>
-    public void Switch()
+    public bool Switch()
     {
-        var context = new AvatarActiveCheckContext();
-        for (var i = 0; i < 30; i++)
-        {
-            if (Ct is { IsCancellationRequested: true })
-            {
-                return;
-            }
-
-            using var region = CaptureToRectArea();
-            ThrowWhenDefeated(region, Ct);
-
-            // 切换成功
-            if (CombatScenes.GetActiveAvatarIndex(region, context) == Index)
-            {
-                return;
-            }
-
-            SimulateSwitchAction(Index);
-            // Debug.WriteLine($"切换到{Index}号位");
-            // Cv2.ImWrite($"log/切换.png", region.SrcMat);
-
-            // 第10次重试时，战斗状态下执行脱困动作
-            if (i == 10 && AutoFightTask.FightStatusFlag)
-            {
-                PerformUnstuckAction(Ct);
-            }
-
-            Sleep(250, Ct);
-        }
+        return TrySwitch(30);
     }
 
     /// <summary>
@@ -306,6 +283,7 @@ public class Avatar
     public bool TrySwitch(int tryTimes = 4)
     {
         var context = new AvatarActiveCheckContext();
+        var consecutiveTargetFrames = 0;
         for (var i = 0; i < tryTimes; i++)
         {
             if (Ct is { IsCancellationRequested: true })
@@ -316,18 +294,21 @@ public class Avatar
             using var region = CaptureToRectArea();
             ThrowWhenDefeated(region, Ct);
 
-            // 切换成功——即使检测到已为目标角色，也补发一次按键，
-            // 防止颜色识别假阳性（如方法3偶发误判）导致实际未切到目标
-            if (CombatScenes.GetActiveAvatarIndex(region, context) == Index)
+            var currentIndex = CombatScenes.GetActiveAvatarIndex(region, context);
+            consecutiveTargetFrames = AvatarSwitchConfirmationPolicy.Observe(
+                consecutiveTargetFrames,
+                currentIndex,
+                Index);
+            if (AvatarSwitchConfirmationPolicy.IsConfirmed(consecutiveTargetFrames))
             {
-                SimulateSwitchAction(Index);
                 return true;
             }
-            else
+
+            if (currentIndex != Index)
             {
                 if (i == tryTimes - 1 && tryTimes == 4) //默认状态，没有特意设置重试次数的情况下，最后一次重试失败才输出日志
                 {
-                    Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", CombatScenes.GetActiveAvatarIndex(region, context), Index);
+                    Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", currentIndex, Index);
                 }
                 else
                 {
@@ -337,16 +318,41 @@ public class Avatar
                         PerformUnstuckAction(Ct);
                     }
                 }
+
+                SimulateSwitchAction(Index);
+                Sleep(250, Ct);
+                continue;
             }
 
-            SimulateSwitchAction(Index);
-
-            Sleep(250, Ct);
+            // 首帧只证明“可能已切到目标”；短暂等待第二个独立截图，
+            // 避免单帧颜色误判让后续技能在错误角色上执行。
+            Sleep(100, Ct);
         }
         
         Logger.LogWarning("切换角色失败:{Name}", Name);
 
         return false;
+    }
+
+    internal double ReadSkillCurrentCd(ImageRegion imageRegion)
+    {
+        return GetSkillCurrentCd(imageRegion, updateState: false);
+    }
+
+    internal void ConfirmSkillUsed(double detectedCd)
+    {
+        var now = DateTime.UtcNow;
+        LastSkillTime = now;
+        ManualSkillCd = -1;
+        var effectiveCd = detectedCd > 0
+            ? detectedCd
+            : Math.Max(CombatAvatar.SkillHoldCd, CombatAvatar.SkillCd);
+        ConfirmedSkillCooldownUntil = now.AddSeconds(effectiveCd);
+        if (detectedCd > 0)
+        {
+            OcrSkillCd = now.AddSeconds(detectedCd);
+        }
+        ESkillCdTracker.Record(Name, effectiveCd);
     }
 
     private void SimulateSwitchAction(int index)
@@ -581,13 +587,15 @@ public class Avatar
     /// 右下 267x132
     /// 77x77
     /// </summary>
-    private double GetSkillCurrentCd(ImageRegion imageRegion)
+    private double GetSkillCurrentCd(
+        ImageRegion imageRegion,
+        bool updateState = true)
     {
         using var eRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).ECooldownRect);
         using var eRaWhite = OpenCvCommonHelper.InRangeHsv(eRa.SrcMat, new Scalar(0, 0, 235), new Scalar(0, 25, 255));
         var text = OcrFactory.Paddle.OcrWithoutDetector(eRaWhite);
         var cd = StringUtils.TryParseDouble(text);
-        if (cd > 0 && cd <= CombatAvatar.SkillCd)
+        if (updateState && cd > 0 && cd <= CombatAvatar.SkillCd)
         {
             OcrSkillCd = DateTime.UtcNow.AddSeconds(cd);
         }

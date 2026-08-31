@@ -70,7 +70,13 @@ public static class CombatScriptExecutor
                     var command = combatScript.CombatCommands[i];
                     var lastCommand = i == 0 ? command : combatScript.CombatCommands[i - 1];
                     ct.ThrowIfCancellationRequested();
-                    command.Execute(combatScenes, lastCommand);
+                    if (!command.Execute(combatScenes, lastCommand))
+                    {
+                        logger.LogWarning(
+                            "角色 {Avatar} 未确认切换成功，终止本轮策略剩余动作并等待下一轮重试",
+                            command.Name);
+                        break;
+                    }
                 }
             }
             catch (RetryException e)

@@ -79,7 +79,7 @@ public class CombatCommand
         return $"<CombatCommand {Name}, {Method}({Args}) (rounds {ActivatingRound})>";
     }
 
-    public void Execute(CombatScenes combatScenes, CombatCommand? lastCommand = null)
+    public bool Execute(CombatScenes combatScenes, CombatCommand? lastCommand = null)
     {
         Avatar? avatar;
         if (Name == CombatScriptParser.CurrentAvatarName)
@@ -93,13 +93,13 @@ public class CombatCommand
             avatar = combatScenes.SelectAvatar(Name);
             if (avatar == null)
             {
-                return;
+                return false;
             }
 
             if (lastCommand != null && lastCommand.Name != Name)
             {
                 // 上一个命令和当前命令不是同一个角色，直接切换角色
-                avatar.Switch();
+                if (!avatar.TrySwitch(10)) return false;
             }
             else
             {
@@ -115,11 +115,12 @@ public class CombatCommand
                     && Method != Method.Scroll
                     && Method != Method.Ready)
                 {
-                    avatar.Switch();
+                    if (!avatar.TrySwitch(10)) return false;
                 }
             }
         }
         Execute(avatar);
+        return true;
     }
 
     public void Execute(Avatar avatar)

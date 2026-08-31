@@ -406,13 +406,26 @@ public class AutoFightTask : ISoloTask
                         #region 盾奶位技能优先功能
                         
                         var skipModel = guardianAvatar != null && lastFightName != command.Name;
-                        if (GuardianSkillSwitchPolicy.ShouldEnsureGuardianSkill(
-                                guardianSkillHandledForCurrentBlock, skipModel))
+                        var guardianSkillRequired = GuardianSkillSwitchPolicy.ShouldEnsureGuardianSkill(
+                            guardianSkillHandledForCurrentBlock,
+                            skipModel);
+                        if (guardianSkillRequired)
                         {
                             guardianSkillHandledForCurrentBlock = await AutoFightSkill.EnsureGuardianSkill(
                                 guardianAvatar,lastCommand,lastFightName,
                                 _taskParam.GuardianAvatar,_taskParam.GuardianAvatarHold,5,ct,
                                 _taskParam.GuardianCombatSkip,_taskParam.BurstEnabled);
+                        }
+                        if (GuardianSkillSwitchPolicy.ShouldRetryBlock(
+                                guardianSkillRequired,
+                                guardianSkillHandledForCurrentBlock))
+                        {
+                            Logger.LogWarning(
+                                "盾奶位 {GuardianAvatar} 未确认切换并释放战技，后推本轮全部策略后重试",
+                                guardianAvatar!.Name);
+                            lastFightName = "";
+                            await Delay(250, ct);
+                            break;
                         }
                         var avatar = combatScenes.SelectAvatar(command.Name);
 
@@ -537,7 +550,14 @@ public class AutoFightTask : ISoloTask
                         }
                         #endregion
 
-                        command.Execute(combatScenes, lastCommand);
+                        if (!command.Execute(combatScenes, lastCommand))
+                        {
+                            Logger.LogWarning(
+                                "角色 {Avatar} 未确认切换成功，后推本轮剩余策略并从盾位重新开始",
+                                command.Name);
+                            lastFightName = "";
+                            break;
+                        }
                         //统计战斗人次
                         if (i == combatCommands.Count - 1 || command.Name != combatCommands[i + 1].Name)
                         {
