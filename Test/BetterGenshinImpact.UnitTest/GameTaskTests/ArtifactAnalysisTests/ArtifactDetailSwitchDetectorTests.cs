@@ -67,18 +67,56 @@ public class ArtifactDetailSwitchDetectorTests
     }
 
     [Fact]
-    public void InitialArtifactPanelMustStabilizeBeforeItBecomesTheSelectionBaseline()
+    public void NewlySelectedCellCannotAcceptOldSameDetailBeforeTheUiSwitchWindow()
     {
-        var detector = new ArtifactPanelStabilityDetector(
-            maximumStableDistance: 4,
-            lockTolerance: 0.5);
+        Assert.True(ArtifactDetailCapturePolicy.CanAcceptSameDetailSelection(
+            baselineAlreadySelected: true,
+            continuousSelectionMilliseconds: 0,
+            selectionEvidenceStable: true));
+        Assert.False(ArtifactDetailCapturePolicy.CanAcceptSameDetailSelection(
+            baselineAlreadySelected: false,
+            continuousSelectionMilliseconds:
+                ArtifactDetailCapturePolicy.SameDetailSelectionWaitMilliseconds - 1,
+            selectionEvidenceStable: true));
+        Assert.True(ArtifactDetailCapturePolicy.CanAcceptSameDetailSelection(
+            baselineAlreadySelected: false,
+            continuousSelectionMilliseconds:
+                ArtifactDetailCapturePolicy.SameDetailSelectionWaitMilliseconds,
+            selectionEvidenceStable: true));
+    }
 
-        Assert.False(detector.Observe(
-            new ArtifactPanelSignature(0b0000UL, 0b0000UL), 0));
-        Assert.False(detector.Observe(
-            new ArtifactPanelSignature(0b1111UL, 0b1111UL), 2));
-        Assert.True(detector.Observe(
-            new ArtifactPanelSignature(0b1110UL, 0b1111UL), 2.2));
+    [Fact]
+    public void DelayedOrInterruptedSelectionEvidenceRestartsTheSameDetailWait()
+    {
+        var timer = new ArtifactContinuousEvidenceTimer();
+
+        Assert.Equal(0, timer.Observe(false, elapsedMilliseconds: 160));
+        Assert.Equal(0, timer.Observe(true, elapsedMilliseconds: 170));
+        Assert.Equal(16, timer.Observe(true, elapsedMilliseconds: 186));
+        Assert.Equal(0, timer.Observe(false, elapsedMilliseconds: 200));
+        Assert.Equal(0, timer.Observe(true, elapsedMilliseconds: 300));
+        Assert.Equal(180, timer.Observe(true, elapsedMilliseconds: 480));
+    }
+
+    [Fact]
+    public void SelectionProbeIncludesTheObservedOuterWhiteBorder()
+    {
+        using var page = new Mat(
+            new Size(300, 300),
+            MatType.CV_8UC3,
+            new Scalar(40, 80, 160));
+        var cell = new Rect(70, 60, 100, 120);
+        var probe = ArtifactGridSelectionDetector.ExpandProbeRect(
+            cell,
+            page.Size());
+        Cv2.Rectangle(page, probe, Scalar.White, thickness: 4);
+        using var cellImage = page.SubMat(cell);
+        using var probeImage = page.SubMat(probe);
+
+        Assert.False(ArtifactGridSelectionDetector.IsAlreadySelected(
+            ArtifactGridSelectionDetector.Score(cellImage)));
+        Assert.True(ArtifactGridSelectionDetector.IsAlreadySelected(
+            ArtifactGridSelectionDetector.Score(probeImage)));
     }
 
     [Fact]

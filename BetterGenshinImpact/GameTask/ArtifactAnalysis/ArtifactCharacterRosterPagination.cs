@@ -113,14 +113,12 @@ internal static class ArtifactCharacterPageDetector
         return Cv2.CountNonZero(edges) >= cardRect.Width * cardRect.Height * 0.05;
     }
 
-    internal static ulong CardSignature(Mat grid, Rect cardRect)
+    private static ulong CardSignature(Mat grid, Rect cardRect)
     {
         var insetX = Math.Max(2, cardRect.Width / 10);
-        var top = cardRect.Y + Math.Max(
-            2,
-            (int)Math.Round(8 * cardRect.Width / 115.0));
+        var top = cardRect.Y + Math.Max(2, cardRect.Height / 14);
         var height = Math.Min(
-            Math.Max(8, (int)Math.Round(24 * cardRect.Width / 115.0)),
+            Math.Max(1, (int)Math.Round(70 * cardRect.Width / 115.0)),
             cardRect.Bottom - top - 2);
         var inner = new Rect(
             cardRect.X + insetX,
@@ -201,6 +199,54 @@ internal sealed class ArtifactCharacterPageTracker
         if (left.CardSignatures.Count != right.CardSignatures.Count) return false;
         return left.CardSignatures.Zip(right.CardSignatures)
             .All(pair => BitOperations.PopCount(pair.First ^ pair.Second) <= 10);
+    }
+}
+
+internal static class ArtifactCharacterScrollbarDetector
+{
+    internal static bool IsAtBottom(Mat capture, Rect gridRoi)
+    {
+        if (capture.Empty() || capture.Channels() < 3 || gridRoi.Width <= 0 || gridRoi.Height <= 0)
+            return false;
+
+        var bandWidth = Math.Max(8, (int)Math.Round(gridRoi.Width * 0.035));
+        var rightPadding = Math.Max(2, (int)Math.Round(gridRoi.Width * 0.006));
+        var verticalPadding = Math.Max(4, (int)Math.Round(gridRoi.Height * 0.02));
+        var band = new Rect(
+            Math.Max(gridRoi.X, gridRoi.Right - rightPadding - bandWidth),
+            gridRoi.Y + verticalPadding,
+            bandWidth,
+            Math.Max(1, gridRoi.Height - verticalPadding * 2));
+        using var scrollbar = capture.SubMat(band);
+        using var hsv = scrollbar.CvtColor(ColorConversionCodes.BGR2HSV);
+        using var brightLowSaturation = new Mat();
+        Cv2.InRange(
+            hsv,
+            new Scalar(0, 0, 150),
+            new Scalar(180, 60, 255),
+            brightLowSaturation);
+        using var labels = new Mat();
+        using var stats = new Mat();
+        using var centroids = new Mat();
+        var labelCount = Cv2.ConnectedComponentsWithStats(
+            brightLowSaturation,
+            labels,
+            stats,
+            centroids,
+            PixelConnectivity.Connectivity8,
+            MatType.CV_32S);
+        var minimumThumbHeight = Math.Max(20, (int)Math.Round(gridRoi.Height * 0.25));
+        var bottomTolerance = Math.Max(8, (int)Math.Round(gridRoi.Height * 0.04));
+        for (var label = 1; label < labelCount; label++)
+        {
+            var width = stats.At<int>(label, 2);
+            var height = stats.At<int>(label, 3);
+            var top = stats.At<int>(label, 1);
+            if (width > bandWidth || height < minimumThumbHeight) continue;
+            if (band.Y + top + height >= gridRoi.Bottom - bottomTolerance)
+                return true;
+        }
+        return false;
     }
 }
 
