@@ -489,7 +489,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         var gridLocked = ArtifactGridLockDetector.IsLocked(item.SrcMat);
         var baselineSelectionScore = ArtifactGridSelectionDetector.Score(item.SrcMat);
         var liveItemRect = ToLiveItemRect(page, itemRect);
-        EnsureInitialDetailSignature();
+        await EnsureInitialDetailSignatureAsync(cancellationToken);
         item.Click();
         var captured = await CaptureAfterDetailConfirmedAsync(
             _lastDetailSignature.Value,
@@ -523,7 +523,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         using var item = page.DeriveCrop(itemRect);
         var baselineSelectionScore = ArtifactGridSelectionDetector.Score(item.SrcMat);
         var liveItemRect = ToLiveItemRect(page, itemRect);
-        EnsureInitialDetailSignature();
+        await EnsureInitialDetailSignatureAsync(cancellationToken);
         item.Click();
         var capture = await CaptureAfterDetailConfirmedAsync(
             _lastDetailSignature.Value,
@@ -540,12 +540,36 @@ internal sealed class ArtifactInventoryUi : IDisposable
         return (gridLocked, capture);
     }
 
-    private void EnsureInitialDetailSignature()
+    private async Task EnsureInitialDetailSignatureAsync(
+        CancellationToken cancellationToken)
     {
         if (_lastDetailSignature is not null) return;
 
-        using var initialCapture = CaptureToRectArea();
-        _lastDetailSignature = ComputeDetailSignature(initialCapture.SrcMat);
+        var timer = Stopwatch.StartNew();
+        var detector = new ArtifactPanelStabilityDetector(
+            maximumStableDistance: 4,
+            lockTolerance: 0.5);
+        while (timer.ElapsedMilliseconds
+               < ArtifactDetailCapturePolicy.ConfirmationBudgetMilliseconds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var capture = CaptureToRectArea();
+            var detailSignature = ComputeDetailSignature(capture.SrcMat);
+            if (detector.Observe(
+                    detailSignature,
+                    ArtifactDetailLockDetector.VisualSignature(capture.SrcMat)))
+            {
+                _lastDetailSignature = detailSignature;
+                _logger.LogDebug(
+                    "圣遗物初始详情在 {ElapsedMilliseconds}ms 后稳定，开始点击扫描",
+                    timer.ElapsedMilliseconds);
+                return;
+            }
+            await Delay(16, cancellationToken);
+        }
+
+        throw new InvalidDataException(
+            $"圣遗物初始详情在 {timer.ElapsedMilliseconds}ms 内未稳定，拒绝使用噪声基线。");
     }
 
     private void LogLockSignalMismatch(

@@ -67,6 +67,21 @@ public class ArtifactDetailSwitchDetectorTests
     }
 
     [Fact]
+    public void InitialArtifactPanelMustStabilizeBeforeItBecomesTheSelectionBaseline()
+    {
+        var detector = new ArtifactPanelStabilityDetector(
+            maximumStableDistance: 4,
+            lockTolerance: 0.5);
+
+        Assert.False(detector.Observe(
+            new ArtifactPanelSignature(0b0000UL, 0b0000UL), 0));
+        Assert.False(detector.Observe(
+            new ArtifactPanelSignature(0b1111UL, 0b1111UL), 2));
+        Assert.True(detector.Observe(
+            new ArtifactPanelSignature(0b1110UL, 0b1111UL), 2.2));
+    }
+
+    [Fact]
     public void GridSelectionScoreSeparatesABrightSelectedBorderFromAnOrdinaryCard()
     {
         using var ordinary = new Mat(

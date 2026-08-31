@@ -13,8 +13,8 @@ internal sealed record ArtifactCharacterPageRow(
 
 internal static class ArtifactCharacterPageDetector
 {
-    private const int Columns = 5;
-    private const int MaximumRows = 6;
+    internal const int Columns = 5;
+    internal const int MaximumRows = 6;
 
     internal static IReadOnlyList<ArtifactCharacterPageRow> Detect(
         Mat grid,
@@ -113,12 +113,14 @@ internal static class ArtifactCharacterPageDetector
         return Cv2.CountNonZero(edges) >= cardRect.Width * cardRect.Height * 0.05;
     }
 
-    private static ulong CardSignature(Mat grid, Rect cardRect)
+    internal static ulong CardSignature(Mat grid, Rect cardRect)
     {
         var insetX = Math.Max(2, cardRect.Width / 10);
-        var top = cardRect.Y + Math.Max(2, cardRect.Height / 14);
+        var top = cardRect.Y + Math.Max(
+            2,
+            (int)Math.Round(8 * cardRect.Width / 115.0));
         var height = Math.Min(
-            Math.Max(1, (int)Math.Round(70 * cardRect.Width / 115.0)),
+            Math.Max(8, (int)Math.Round(24 * cardRect.Width / 115.0)),
             cardRect.Bottom - top - 2);
         var inner = new Rect(
             cardRect.X + insetX,
