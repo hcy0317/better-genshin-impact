@@ -1077,6 +1077,10 @@ public class CombatScriptResourceTests
             StringComparison.Ordinal);
         Assert.Contains("血条仍有横向误差，本轮只转向不前进", source,
             StringComparison.Ordinal);
+        Assert.Contains("? \"health\" : \"arrow\"", source,
+            StringComparison.Ordinal);
+        Assert.Contains("classificationColor", source,
+            StringComparison.Ordinal);
     }
 
     [Fact]

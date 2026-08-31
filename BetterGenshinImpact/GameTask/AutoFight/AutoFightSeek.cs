@@ -1306,11 +1306,34 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 foreach (var visual in visuals)
                 {
                     var isSelected = visual.Equals(selected);
+                    var isHealthBar = IsHealthBar(visual, annotated.Height);
+                    var classificationColor = isHealthBar
+                        ? new Scalar(255, 128, 0)
+                        : new Scalar(255, 0, 255);
+                    var label = isHealthBar ? "health" : "arrow";
                     Cv2.Rectangle(
                         annotated,
                         new Rect(visual.X, visual.Y, visual.Width, visual.Height),
-                        isSelected ? new Scalar(0, 255, 0) : new Scalar(0, 255, 255),
-                        isSelected ? 3 : 1);
+                        classificationColor,
+                        2);
+                    Cv2.PutText(
+                        annotated,
+                        label,
+                        new Point(
+                            visual.X,
+                            Math.Max(14, visual.Y - 4)),
+                        HersheyFonts.HersheySimplex,
+                        0.45,
+                        classificationColor,
+                        1);
+                    if (isSelected)
+                    {
+                        Cv2.Rectangle(
+                            annotated,
+                            new Rect(visual.X, visual.Y, visual.Width, visual.Height),
+                            new Scalar(0, 255, 0),
+                            3);
+                    }
                 }
 
                 Cv2.Line(
