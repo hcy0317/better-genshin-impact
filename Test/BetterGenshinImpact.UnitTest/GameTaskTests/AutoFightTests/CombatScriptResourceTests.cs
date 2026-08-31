@@ -540,6 +540,44 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
+    public void ClassifySeekVisual_LargeCloseHealthBarFromRuntimeScreenshotMustPass()
+    {
+        using var mask = Mat.Zeros(1080, 1920, MatType.CV_8UC1).ToMat();
+        using var source = Mat.Zeros(1080, 1920, MatType.CV_8UC3).ToMat();
+        var visual = new EnemySeekVisual(1068, 277, 595, 26, 595 * 26);
+        Cv2.Rectangle(
+            mask,
+            new Rect(visual.X, visual.Y, visual.Width, visual.Height),
+            Scalar.White,
+            -1);
+        Cv2.Rectangle(
+            source,
+            new Rect(visual.X, visual.Y, visual.Width, visual.Height),
+            new Scalar(90, 90, 254),
+            -1);
+
+        Assert.Equal(
+            visual,
+            AutoFightSeek.ClassifySeekVisual(mask, source, visual, 1920, 1080));
+        Assert.False(AutoFightSeek.ShouldApproachVisibleEnemy(visual, 1920, 1080));
+    }
+
+    [Fact]
+    public void SelectSeekDecision_ResidualThickHealthFillMustSuppressArrowSearch()
+    {
+        var residualHealthFill = new EnemySeekVisual(1068, 277, 20, 26, 500);
+        var arrow = new EnemySeekVisual(940, 920, 34, 27, 420, 180);
+
+        var decision = AutoFightSeek.SelectSeekDecision(
+            [arrow, residualHealthFill],
+            imageWidth: 1920,
+            imageHeight: 1080);
+
+        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
+        Assert.Equal(residualHealthFill, decision.Visual);
+    }
+
+    [Fact]
     public void DirectionIndicatorColor_MustRejectLowHueRedFoliage()
     {
         using var foliageHsv = new Mat(

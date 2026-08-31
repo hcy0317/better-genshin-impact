@@ -755,6 +755,11 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
         private static bool IsHealthBar(EnemySeekVisual visual, int imageHeight)
         {
+            if (visual.IndicatorBearingDegrees.HasValue)
+            {
+                return false;
+            }
+
             var scale = imageHeight / 1080d;
             var minimumHeight = Math.Clamp(
                 (int)Math.Round(4 * scale, MidpointRounding.AwayFromZero),
@@ -762,13 +767,20 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 4);
             var maximumHeight = Math.Max(
                 minimumHeight,
-                (int)Math.Round(14 * scale, MidpointRounding.AwayFromZero));
-            var minimumWidth = Math.Max(
-                Math.Max(16, (int)Math.Round(24 * scale, MidpointRounding.AwayFromZero)),
-                visual.Height * 3);
+                (int)Math.Round(32 * scale, MidpointRounding.AwayFromZero));
+            var thickHealthBarThreshold = Math.Max(
+                minimumHeight,
+                (int)Math.Round(15 * scale, MidpointRounding.AwayFromZero));
+            var minimumWidth = visual.Height >= thickHealthBarThreshold
+                ? Math.Max(12, (int)Math.Round(18 * scale, MidpointRounding.AwayFromZero))
+                : Math.Max(
+                    Math.Max(16, (int)Math.Round(24 * scale, MidpointRounding.AwayFromZero)),
+                    visual.Height * 3);
+            var thickFillRatio = visual.Area / (double)Math.Max(1, visual.Width * visual.Height);
             return visual.Height >= minimumHeight
                    && visual.Height <= maximumHeight
-                   && visual.Width >= minimumWidth;
+                   && visual.Width >= minimumWidth
+                   && (visual.Height < thickHealthBarThreshold || thickFillRatio >= 0.70);
         }
 
         internal static bool IsDirectionIndicatorGeometry(EnemySeekVisual visual, int imageWidth, int imageHeight)
@@ -1459,10 +1471,11 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         {
             if (IsHealthBar(visual, imageHeight))
             {
-                return IsPlayerHudHealthBar(visual, imageWidth, imageHeight)
-                       || !MatchesHealthBarFeature(mask, source, visual)
-                    ? null
-                    : visual;
+                if (!IsPlayerHudHealthBar(visual, imageWidth, imageHeight)
+                    && MatchesHealthBarFeature(mask, source, visual))
+                {
+                    return visual;
+                }
             }
 
             if (!IsDirectionIndicatorGeometry(visual, imageWidth, imageHeight))
