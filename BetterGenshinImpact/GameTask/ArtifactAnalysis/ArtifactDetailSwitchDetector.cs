@@ -135,6 +135,33 @@ internal sealed class ArtifactSameDetailSelectionDetector(
     }
 }
 
+internal sealed class ArtifactPanelStabilityDetector(
+    int maximumStableDistance,
+    double lockTolerance)
+{
+    private ArtifactPanelSignature? _previousDetailSignature;
+    private double _previousLockSignature;
+
+    internal bool Observe(
+        ArtifactPanelSignature detailSignature,
+        double lockSignature)
+    {
+        if (_previousDetailSignature is null)
+        {
+            _previousDetailSignature = detailSignature;
+            _previousLockSignature = lockSignature;
+            return false;
+        }
+
+        var stable = detailSignature.DistanceFrom(
+                         _previousDetailSignature.Value) <= maximumStableDistance
+                     && Math.Abs(lockSignature - _previousLockSignature) <= lockTolerance;
+        _previousDetailSignature = detailSignature;
+        _previousLockSignature = lockSignature;
+        return stable;
+    }
+}
+
 internal sealed class ArtifactCharacterSameDetailSelectionDetector(
     ulong initialSignature,
     double baselineSelectionScore,

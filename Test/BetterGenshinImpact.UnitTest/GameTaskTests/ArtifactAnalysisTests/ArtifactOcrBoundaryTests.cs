@@ -65,7 +65,8 @@ public class ArtifactOcrBoundaryTests
             "GameTask",
             "ArtifactAnalysis");
         var inventorySource = File.ReadAllText(Path.Combine(
-            sourceDirectory, "ArtifactInventoryScanner.cs"));
+            sourceDirectory, "ArtifactInventoryScanner.cs"))
+            .ReplaceLineEndings("\n");
         var characterSource = File.ReadAllText(Path.Combine(
             sourceDirectory, "ArtifactCharacterRosterScanner.cs"));
 

@@ -72,6 +72,55 @@ public class ArtifactCharacterRosterPaginationTests
     }
 
     [Fact]
+    public void PartialAndFullCardsUseTheSameVisiblePortraitPrefixSignature()
+    {
+        using var grid = new OpenCvSharp.Mat(
+            new OpenCvSharp.Size(160, 180),
+            OpenCvSharp.MatType.CV_8UC3,
+            OpenCvSharp.Scalar.Black);
+        for (var y = 10; y < 60; y++)
+        {
+            OpenCvSharp.Cv2.Line(
+                grid,
+                new OpenCvSharp.Point(15, y),
+                new OpenCvSharp.Point(130, y),
+                new OpenCvSharp.Scalar(y * 3 % 255, y * 5 % 255, y * 7 % 255));
+        }
+
+        var full = ArtifactCharacterPageDetector.CardSignature(
+            grid,
+            new OpenCvSharp.Rect(10, 0, 125, 150));
+        var partial = ArtifactCharacterPageDetector.CardSignature(
+            grid,
+            new OpenCvSharp.Rect(10, 0, 125, 48));
+
+        Assert.Equal(full, partial);
+    }
+
+    [Fact]
+    public void FullRowAfterScrollingMatchesTheSamePreviouslyPartialRow()
+    {
+        var previous = new[]
+        {
+            Rows(1, 1)[0],
+            new ArtifactCharacterPageRow(
+                [new OpenCvSharp.Rect(0, 0, 1, 1)],
+                [0x1234UL])
+        };
+        var current = new[]
+        {
+            new ArtifactCharacterPageRow(
+                [new OpenCvSharp.Rect(0, 0, 1, 8)],
+                [0x1234UL]),
+            Rows(3, 1)[0]
+        };
+
+        Assert.Equal(1, ArtifactCharacterPageTracker.FindOverlap(
+            previous,
+            current));
+    }
+
+    [Fact]
     public void ScrollPlannerUsesTheCharacterUiDesignRowPitch()
     {
         Assert.Equal(6, ArtifactCharacterScrollPlanner.PageAdvanceRows);
@@ -98,6 +147,7 @@ public class ArtifactCharacterRosterPaginationTests
         Assert.Contains("ArtifactCharacterScrollPlanner.PageAdvanceRows", source,
             StringComparison.Ordinal);
         Assert.Contains("ConsumeNextStartRow", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsTerminalPage", source, StringComparison.Ordinal);
         Assert.DoesNotContain("CalibrateFirstPageScrollAsync", source, StringComparison.Ordinal);
         Assert.DoesNotContain("RemainingRowsToAdvance", source, StringComparison.Ordinal);
         Assert.DoesNotContain("ArtifactCharacterScrollPlanner.AdvancedRows", source,
