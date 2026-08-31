@@ -157,6 +157,17 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                     AddCharacter(characters, detail);
                     clicked++;
                 }
+                using (var bottomCapture = CaptureToRectArea())
+                {
+                    if (ArtifactCharacterScrollbarDetector.IsAtBottom(
+                            bottomCapture.SrcMat,
+                            gridParams.Roi))
+                    {
+                        _logger.LogInformation(
+                            "角色配装检测：滚动条滑块已到轨道底部，结束扫描");
+                        break;
+                    }
+                }
                 await MovePointerToScrollAreaAsync(
                     gridParams.Roi,
                     cancellationToken);

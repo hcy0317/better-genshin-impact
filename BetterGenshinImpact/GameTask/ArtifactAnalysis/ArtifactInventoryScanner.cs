@@ -487,9 +487,14 @@ internal sealed class ArtifactInventoryUi : IDisposable
     {
         using var item = page.DeriveCrop(itemRect);
         var gridLocked = ArtifactGridLockDetector.IsLocked(item.SrcMat);
-        var baselineSelectionScore = ArtifactGridSelectionDetector.Score(item.SrcMat);
-        var liveItemRect = ToLiveItemRect(page, itemRect);
-        await EnsureInitialDetailSignatureAsync(cancellationToken);
+        var selectionProbeRect = ArtifactGridSelectionDetector.ExpandProbeRect(
+            itemRect,
+            page.SrcMat.Size());
+        using var selectionProbe = page.DeriveCrop(selectionProbeRect);
+        var baselineSelectionScore = ArtifactGridSelectionDetector.Score(
+            selectionProbe.SrcMat);
+        var liveItemRect = ToLiveItemRect(page, selectionProbeRect);
+        EnsureInitialDetailSignature();
         item.Click();
         var captured = await CaptureAfterDetailConfirmedAsync(
             _lastDetailSignature.Value,
@@ -521,9 +526,14 @@ internal sealed class ArtifactInventoryUi : IDisposable
         CancellationToken cancellationToken)
     {
         using var item = page.DeriveCrop(itemRect);
-        var baselineSelectionScore = ArtifactGridSelectionDetector.Score(item.SrcMat);
-        var liveItemRect = ToLiveItemRect(page, itemRect);
-        await EnsureInitialDetailSignatureAsync(cancellationToken);
+        var selectionProbeRect = ArtifactGridSelectionDetector.ExpandProbeRect(
+            itemRect,
+            page.SrcMat.Size());
+        using var selectionProbe = page.DeriveCrop(selectionProbeRect);
+        var baselineSelectionScore = ArtifactGridSelectionDetector.Score(
+            selectionProbe.SrcMat);
+        var liveItemRect = ToLiveItemRect(page, selectionProbeRect);
+        EnsureInitialDetailSignature();
         item.Click();
         var capture = await CaptureAfterDetailConfirmedAsync(
             _lastDetailSignature.Value,
@@ -540,36 +550,12 @@ internal sealed class ArtifactInventoryUi : IDisposable
         return (gridLocked, capture);
     }
 
-    private async Task EnsureInitialDetailSignatureAsync(
-        CancellationToken cancellationToken)
+    private void EnsureInitialDetailSignature()
     {
         if (_lastDetailSignature is not null) return;
 
-        var timer = Stopwatch.StartNew();
-        var detector = new ArtifactPanelStabilityDetector(
-            maximumStableDistance: 4,
-            lockTolerance: 0.5);
-        while (timer.ElapsedMilliseconds
-               < ArtifactDetailCapturePolicy.ConfirmationBudgetMilliseconds)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            using var capture = CaptureToRectArea();
-            var detailSignature = ComputeDetailSignature(capture.SrcMat);
-            if (detector.Observe(
-                    detailSignature,
-                    ArtifactDetailLockDetector.VisualSignature(capture.SrcMat)))
-            {
-                _lastDetailSignature = detailSignature;
-                _logger.LogDebug(
-                    "圣遗物初始详情在 {ElapsedMilliseconds}ms 后稳定，开始点击扫描",
-                    timer.ElapsedMilliseconds);
-                return;
-            }
-            await Delay(16, cancellationToken);
-        }
-
-        throw new InvalidDataException(
-            $"圣遗物初始详情在 {timer.ElapsedMilliseconds}ms 内未稳定，拒绝使用噪声基线。");
+        using var initialCapture = CaptureToRectArea();
+        _lastDetailSignature = ComputeDetailSignature(initialCapture.SrcMat);
     }
 
     private void LogLockSignalMismatch(
@@ -706,6 +692,9 @@ internal sealed class ArtifactInventoryUi : IDisposable
             initialSignature,
             baselineSelectionScore,
             minimumSelectionIncrease: 0.08);
+        var baselineAlreadySelected = ArtifactGridSelectionDetector.IsAlreadySelected(
+            baselineSelectionScore);
+        var sameDetailSelectionTimer = new ArtifactContinuousEvidenceTimer();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -718,9 +707,17 @@ internal sealed class ArtifactInventoryUi : IDisposable
             if (!changedAndStable)
             {
                 using var liveItem = capture.DeriveCrop(liveItemRect);
-                sameDetailButSelected = sameDetailDetector.Observe(
+                var selectionEvidenceStable = sameDetailDetector.Observe(
                     detailSignature,
                     ArtifactGridSelectionDetector.Score(liveItem.SrcMat));
+                var continuousSelectionMilliseconds = sameDetailSelectionTimer.Observe(
+                    selectionEvidenceStable,
+                    timer.ElapsedMilliseconds);
+                sameDetailButSelected = ArtifactDetailCapturePolicy
+                    .CanAcceptSameDetailSelection(
+                        baselineAlreadySelected,
+                        continuousSelectionMilliseconds,
+                        selectionEvidenceStable);
             }
             var confirmed = changedAndStable || sameDetailButSelected;
             var decision = ArtifactDetailCapturePolicy.Decide(

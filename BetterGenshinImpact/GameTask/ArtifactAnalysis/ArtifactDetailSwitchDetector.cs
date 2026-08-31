@@ -15,6 +15,7 @@ internal enum ArtifactDetailCaptureDecision
 internal static class ArtifactDetailCapturePolicy
 {
     internal const int ConfirmationBudgetMilliseconds = 450;
+    internal const int SameDetailSelectionWaitMilliseconds = 180;
 
     internal static ArtifactDetailCaptureDecision Decide(
         int scanIndex,
@@ -25,6 +26,31 @@ internal static class ArtifactDetailCapturePolicy
         return elapsedMilliseconds >= ConfirmationBudgetMilliseconds
             ? ArtifactDetailCaptureDecision.TimedOut
             : ArtifactDetailCaptureDecision.Wait;
+    }
+
+    internal static bool CanAcceptSameDetailSelection(
+        bool baselineAlreadySelected,
+        long continuousSelectionMilliseconds,
+        bool selectionEvidenceStable) =>
+        selectionEvidenceStable
+        && (baselineAlreadySelected
+            || continuousSelectionMilliseconds >= SameDetailSelectionWaitMilliseconds);
+}
+
+internal sealed class ArtifactContinuousEvidenceTimer
+{
+    private long? _sinceMilliseconds;
+
+    internal long Observe(bool evidenceStable, long elapsedMilliseconds)
+    {
+        if (!evidenceStable)
+        {
+            _sinceMilliseconds = null;
+            return 0;
+        }
+
+        _sinceMilliseconds ??= elapsedMilliseconds;
+        return Math.Max(0, elapsedMilliseconds - _sinceMilliseconds.Value);
     }
 }
 
@@ -135,33 +161,6 @@ internal sealed class ArtifactSameDetailSelectionDetector(
     }
 }
 
-internal sealed class ArtifactPanelStabilityDetector(
-    int maximumStableDistance,
-    double lockTolerance)
-{
-    private ArtifactPanelSignature? _previousDetailSignature;
-    private double _previousLockSignature;
-
-    internal bool Observe(
-        ArtifactPanelSignature detailSignature,
-        double lockSignature)
-    {
-        if (_previousDetailSignature is null)
-        {
-            _previousDetailSignature = detailSignature;
-            _previousLockSignature = lockSignature;
-            return false;
-        }
-
-        var stable = detailSignature.DistanceFrom(
-                         _previousDetailSignature.Value) <= maximumStableDistance
-                     && Math.Abs(lockSignature - _previousLockSignature) <= lockTolerance;
-        _previousDetailSignature = detailSignature;
-        _previousLockSignature = lockSignature;
-        return stable;
-    }
-}
-
 internal sealed class ArtifactCharacterSameDetailSelectionDetector(
     ulong initialSignature,
     double baselineSelectionScore,
@@ -237,6 +236,16 @@ internal static class ArtifactGridSelectionDetector
 
     internal static bool IsAlreadySelected(double score) =>
         score >= AlreadySelectedScore;
+
+    internal static Rect ExpandProbeRect(Rect cell, Size bounds)
+    {
+        var margin = Math.Max(2, (int)Math.Round(cell.Width * 0.04));
+        var left = Math.Max(0, cell.X - margin);
+        var top = Math.Max(0, cell.Y - margin);
+        var right = Math.Min(bounds.Width, cell.Right + margin);
+        var bottom = Math.Min(bounds.Height, cell.Bottom + margin);
+        return new Rect(left, top, right - left, bottom - top);
+    }
 
     internal static double Score(Mat cell)
     {
