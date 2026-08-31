@@ -521,7 +521,7 @@ public class CombatScriptResourceTests
             24, 32, MatType.CV_8UC3, new Scalar(5, 180, 220));
         Cv2.Rectangle(
             arrowHsv,
-            new Rect(0, 0, 10, 24),
+            new Rect(0, 0, 24, 24),
             new Scalar(175, 180, 220),
             -1);
         using var arrowBgr = new Mat();
@@ -533,6 +533,28 @@ public class CombatScriptResourceTests
             visual));
         Assert.True(AutoFightSeek.HasDirectionIndicatorPinkRedShare(
             arrowBgr,
+            visual));
+    }
+
+    [Theory]
+    [InlineData("enemy_direction_indicator_left.png")]
+    [InlineData("enemy_direction_indicator_variant_02.png")]
+    [InlineData("enemy_direction_indicator_variant_03.png")]
+    [InlineData("enemy_direction_indicator_variant_04.png")]
+    [InlineData("enemy_direction_indicator_variant_05.png")]
+    [InlineData("enemy_direction_indicator_variant_06.png")]
+    public void DirectionIndicatorColor_OfficialTemplatesMustRemainAccepted(
+        string fileName)
+    {
+        var path = SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "Assets", "1920x1080",
+            fileName);
+        using var template = Cv2.ImRead(path, ImreadModes.Color);
+        var visual = new EnemySeekVisual(
+            0, 0, template.Width, template.Height, template.Width * template.Height);
+
+        Assert.True(AutoFightSeek.HasDirectionIndicatorPinkRedShare(
+            template,
             visual));
     }
 
@@ -1150,6 +1172,9 @@ public class CombatScriptResourceTests
     [Theory]
     [InlineData(1700, 260, 120, 6, true)]
     [InlineData(800, 1000, 320, 8, true)]
+    [InlineData(1556, 0, 33, 8, true)]
+    [InlineData(116, 133, 27, 8, true)]
+    [InlineData(800, 50, 120, 6, false)]
     [InlineData(900, 320, 180, 6, false)]
     public void PlayerHudHealthBars_AreExcludedWithoutCroppingEdgeIndicators(
         int x,
