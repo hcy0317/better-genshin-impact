@@ -224,7 +224,7 @@ public class ArtifactOcrBoundaryTests
     }
 
     [Fact]
-    public void ArtifactDetailSwitchWait_NeverAcceptsAnUnconfirmedFullScanFrame()
+    public void ArtifactDetailSwitchWait_UsesTheLatestFrameAfterYasLockTimeout()
     {
         var source = File.ReadAllText(Path.Combine(
             FindRepoRoot(),
@@ -238,7 +238,11 @@ public class ArtifactOcrBoundaryTests
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "拒绝解析可能的旧详情帧",
+            "按 yas-lock 语义使用当前详情帧",
+            source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "未证明目标格已选中",
             source,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
@@ -246,7 +250,8 @@ public class ArtifactOcrBoundaryTests
             source,
             StringComparison.Ordinal);
         Assert.DoesNotContain("补点一次", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("YAS best-effort", source, StringComparison.Ordinal);
+        Assert.Contains("同详情选中加速", source,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -259,7 +264,7 @@ public class ArtifactOcrBoundaryTests
             "ArtifactAnalysis",
             "ArtifactInventoryScanner.cs"));
 
-        Assert.Contains("CaptureAfterDetailConfirmedAsync(", source,
+        Assert.Contains("CaptureAfterDetailSwitchedAsync(", source,
             StringComparison.Ordinal);
         Assert.Contains("ArtifactCapturedItem.Create", source,
             StringComparison.Ordinal);

@@ -6,13 +6,29 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactGridPagingTests
 {
     [Fact]
+    public void FastArtifactPaginationHasOneCursorAndNoDuplicateLogicalCounters()
+    {
+        var root = FindRepoRoot();
+        var gridScreen = File.ReadAllText(Path.Combine(
+            root, "BetterGenshinImpact", "GameTask", "Model", "GameUI", "GridScreen.cs"));
+        var gridScroller = File.ReadAllText(Path.Combine(
+            root, "BetterGenshinImpact", "GameTask", "Model", "GameUI", "GridScroller.cs"));
+
+        Assert.Contains("YasPaginationCursor", gridScreen, StringComparison.Ordinal);
+        Assert.DoesNotContain("emittedItems", gridScreen, StringComparison.Ordinal);
+        Assert.DoesNotContain("scrolledRows", gridScroller, StringComparison.Ordinal);
+        Assert.Contains("ScrollRowsFastAsync", gridScroller, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SelectFastScrollItems_FirstPageReturnsTheVisibleCapacity()
     {
         var cells = Cells(rows: 5, columns: 8);
 
         var selected = GridScreen.GridEnumerator.SelectFastScrollItems(
-            cells, columns: 8, visibleRows: 5, fastScrollRows: 5,
-            emittedItems: 0, totalItems: 1125, firstPage: true);
+            cells,
+            columns: 8,
+            new YasPageSlice(0, 0, 5, 40, false));
 
         Assert.Equal(40, selected.Count);
         Assert.Equal(new Rect(0, 0, 10, 10), selected[0]);
@@ -25,8 +41,9 @@ public class ArtifactGridPagingTests
         var cells = Cells(rows: 5, columns: 8);
 
         var selected = GridScreen.GridEnumerator.SelectFastScrollItems(
-            cells, columns: 8, visibleRows: 5, fastScrollRows: 5,
-            emittedItems: 40, totalItems: 1125, firstPage: false);
+            cells,
+            columns: 8,
+            new YasPageSlice(1, 0, 5, 40, false));
 
         Assert.Equal(40, selected.Count);
         Assert.Equal(new Rect(0, 0, 10, 10), selected[0]);
@@ -39,8 +56,9 @@ public class ArtifactGridPagingTests
         var cells = Cells(rows: 5, columns: 8);
 
         var selected = GridScreen.GridEnumerator.SelectFastScrollItems(
-            cells, columns: 8, visibleRows: 5, fastScrollRows: 5,
-            emittedItems: 1120, totalItems: 1125, firstPage: false);
+            cells,
+            columns: 8,
+            new YasPageSlice(28, 4, 1, 5, true));
 
         Assert.Equal(5, selected.Count);
         Assert.Equal([0, 10, 20, 30, 40], selected.Select(rect => rect.X));
@@ -55,10 +73,11 @@ public class ArtifactGridPagingTests
 
         var exception = Assert.Throws<InvalidDataException>(() =>
             GridScreen.GridEnumerator.SelectFastScrollItems(
-                cells, columns: 8, visibleRows: 5, fastScrollRows: 5,
-                emittedItems: 1120, totalItems: 1125, firstPage: false));
+                cells,
+                columns: 8,
+                new YasPageSlice(28, 4, 1, 5, true)));
 
-        Assert.Contains("底部新行", exception.Message);
+        Assert.Contains("cursor 指定格子", exception.Message);
     }
 
     [Fact]
@@ -99,5 +118,17 @@ public class ArtifactGridPagingTests
                     ColNum = column
                 }))
             .ToArray();
+    }
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory != null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "BetterGenshinImpact.sln")))
+                return directory.FullName;
+            directory = directory.Parent;
+        }
+        throw new DirectoryNotFoundException("Could not locate BetterGenshinImpact.sln.");
     }
 }

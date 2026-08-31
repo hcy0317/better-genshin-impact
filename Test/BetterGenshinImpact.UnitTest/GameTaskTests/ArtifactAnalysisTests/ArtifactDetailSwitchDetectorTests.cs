@@ -6,20 +6,18 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactDetailSwitchDetectorTests
 {
     [Fact]
-    public void DetailCapturePolicyNeverAcceptsAnUnconfirmedFrame()
+    public void DetailCapturePolicyUsesShortNonFatalFallbackBudget()
     {
         Assert.Equal(
             ArtifactDetailCaptureDecision.Wait,
             ArtifactDetailCapturePolicy.Decide(
-                scanIndex: 0, elapsedMilliseconds: 449, confirmed: false));
+                scanIndex: 0, elapsedMilliseconds: 249, confirmed: false));
         Assert.Equal(
             ArtifactDetailCaptureDecision.TimedOut,
             ArtifactDetailCapturePolicy.Decide(
-                scanIndex: 0, elapsedMilliseconds: 450, confirmed: false));
-        Assert.InRange(
-            ArtifactDetailCapturePolicy.ConfirmationBudgetMilliseconds,
-            300,
-            500);
+                scanIndex: 0, elapsedMilliseconds: 250, confirmed: false));
+        Assert.Equal(250,
+            ArtifactDetailCapturePolicy.ConfirmationBudgetMilliseconds);
     }
 
     [Fact]
@@ -55,47 +53,14 @@ public class ArtifactDetailSwitchDetectorTests
     }
 
     [Fact]
-    public void SameDetailCanCompleteOnlyAfterTheTargetGridCellShowsSelectionEvidence()
+    public void SameDetailSelectionIsOnlyAnEarlyCompletionSignal()
     {
         var detail = new ArtifactPanelSignature(0b1010UL, 0b1100UL);
         var detector = new ArtifactSameDetailSelectionDetector(
             detail, baselineSelectionScore: 0.10, minimumSelectionIncrease: 0.08);
 
-        Assert.False(detector.Observe(detail, 0.12));
         Assert.False(detector.Observe(detail, 0.21));
         Assert.True(detector.Observe(detail, 0.22));
-    }
-
-    [Fact]
-    public void NewlySelectedCellCannotAcceptOldSameDetailBeforeTheUiSwitchWindow()
-    {
-        Assert.True(ArtifactDetailCapturePolicy.CanAcceptSameDetailSelection(
-            baselineAlreadySelected: true,
-            continuousSelectionMilliseconds: 0,
-            selectionEvidenceStable: true));
-        Assert.False(ArtifactDetailCapturePolicy.CanAcceptSameDetailSelection(
-            baselineAlreadySelected: false,
-            continuousSelectionMilliseconds:
-                ArtifactDetailCapturePolicy.SameDetailSelectionWaitMilliseconds - 1,
-            selectionEvidenceStable: true));
-        Assert.True(ArtifactDetailCapturePolicy.CanAcceptSameDetailSelection(
-            baselineAlreadySelected: false,
-            continuousSelectionMilliseconds:
-                ArtifactDetailCapturePolicy.SameDetailSelectionWaitMilliseconds,
-            selectionEvidenceStable: true));
-    }
-
-    [Fact]
-    public void DelayedOrInterruptedSelectionEvidenceRestartsTheSameDetailWait()
-    {
-        var timer = new ArtifactContinuousEvidenceTimer();
-
-        Assert.Equal(0, timer.Observe(false, elapsedMilliseconds: 160));
-        Assert.Equal(0, timer.Observe(true, elapsedMilliseconds: 170));
-        Assert.Equal(16, timer.Observe(true, elapsedMilliseconds: 186));
-        Assert.Equal(0, timer.Observe(false, elapsedMilliseconds: 200));
-        Assert.Equal(0, timer.Observe(true, elapsedMilliseconds: 300));
-        Assert.Equal(180, timer.Observe(true, elapsedMilliseconds: 480));
     }
 
     [Fact]

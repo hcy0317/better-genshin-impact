@@ -70,28 +70,29 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
             var gridParams = GridParams.CharacterDevelopmentForCapture(
                 new Size(captureRect.Width, captureRect.Height));
             var characters = new Dictionary<string, ArtifactCharacterRosterEntryDto>(StringComparer.Ordinal);
-            var pageTracker = new ArtifactCharacterPageTracker();
             var identityGuard = new ArtifactCharacterScanIdentityGuard();
             var scrollState = new ArtifactCharacterScrollState();
+            var paginationCursor = new UnknownExtentYasCursor(
+                ArtifactCharacterScrollPlanner.PageAdvanceRows);
             var clicked = 0;
             while (true)
             {
                 var pageRows = await DetectPageRowsAsync(
                     gridParams.Roi, assetScale, cancellationToken);
-                var nextStartRow = scrollState.ConsumeNextStartRow();
-                var newRows = nextStartRow.HasValue
-                    ? ArtifactCharacterPageTracker.SelectFromStartRow(
+                var pageSlice = paginationCursor.CurrentPage;
+                var newRows = ArtifactCharacterPageTracker.SelectFromStartRow(
                         pageRows,
-                        nextStartRow.Value)
-                    : pageTracker.SelectUnprocessedRows(pageRows);
-                if (pageTracker.HasPreviousPage && newRows.Count == 0)
-                {
-                    _logger.LogInformation("角色配装检测：分页没有继续前进，已到末页");
-                    break;
-                }
+                        pageSlice.StartRow)
+                    .Take(pageSlice.RowCount)
+                    .ToArray();
                 _logger.LogInformation(
-                    "角色配装检测：当前可见 {VisibleRows} 行，本轮只读取 {NewRows} 个未处理行、{Cards} 张卡片",
-                    pageRows.Count, newRows.Count, newRows.Sum(row => row.Cards.Count));
+                    "CHARACTER_PAGE_PLAN page={Page} visibleRows={VisibleRows} startRow={StartRow} rowCount={RowCount} cards={Cards} final={Final}",
+                    pageSlice.PageIndex,
+                    pageRows.Count,
+                    pageSlice.StartRow,
+                    newRows.Length,
+                    newRows.Sum(row => row.Cards.Count),
+                    pageSlice.IsFinalPage);
                 foreach (var rect in newRows.SelectMany(row => row.Cards))
                 {
                     ArtifactCharacterDetailSample? detail = null;
@@ -157,22 +158,17 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                     AddCharacter(characters, detail);
                     clicked++;
                 }
-                using (var bottomCapture = CaptureToRectArea())
+
+                paginationCursor.CommitRead();
+                if (paginationCursor.Completed)
                 {
-                    if (ArtifactCharacterScrollbarDetector.IsAtBottom(
-                            bottomCapture.SrcMat,
-                            gridParams.Roi))
-                    {
-                        _logger.LogInformation(
-                            "角色配装检测：滚动条滑块已到轨道底部，结束扫描");
-                        break;
-                    }
+                    _logger.LogInformation(
+                        "角色配装检测：末页已按物理推进段数读取完成");
+                    break;
                 }
                 await MovePointerToScrollAreaAsync(
                     gridParams.Roi,
                     cancellationToken);
-                var stableRows = await DetectPageRowsAsync(
-                    gridParams.Roi, assetScale, cancellationToken);
                 if (!scrollState.IsCalibrated)
                 {
                     scrollState.PixelsPerInput = await MeasureScrollPixelsPerInputAsync(
@@ -180,15 +176,23 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                         cancellationToken);
                     scrollState.IsCalibrated = true;
                 }
-                pageTracker.Commit(stableRows);
-
-                var moved = await ScrollPageAsync(
-                    stableRows,
+                var scrollPlan = paginationCursor.PlanScroll();
+                var confirmedRows = await ScrollPageAsync(
                     gridParams.Roi,
-                    assetScale,
                     scrollState,
+                    scrollPlan.RequestedRows,
                     cancellationToken);
-                if (!moved) break;
+                paginationCursor.CommitScroll(new UnknownExtentScrollReceipt(
+                    scrollPlan.RequestedRows,
+                    confirmedRows,
+                    IsStable: true));
+                _logger.LogInformation(
+                    "CHARACTER_SCROLL_RECEIPT page={Page} requestedRows={RequestedRows} confirmedRows={ConfirmedRows} completed={Completed}",
+                    pageSlice.PageIndex,
+                    scrollPlan.RequestedRows,
+                    confirmedRows,
+                    paginationCursor.Completed);
+                if (paginationCursor.Completed) break;
             }
 
             if (characters.Count == 0)
@@ -319,53 +323,143 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         }
     }
 
-    private async Task<bool> ScrollPageAsync(
-        IReadOnlyList<ArtifactCharacterPageRow> initialRows,
+    private async Task<int> ScrollPageAsync(
         Rect gridRoi,
-        double assetScale,
         ArtifactCharacterScrollState scrollState,
+        int requestedRows,
         CancellationToken cancellationToken)
     {
         var rowPitch = ArtifactCharacterScrollPlanner.RowPitchForGridHeight(
             gridRoi.Height);
-        var plan = YasPixelScrollPlanner.CreatePlan(
+        var plans = YasPixelScrollPlanner.CreateSegmentedPlans(
             rowPitch,
             scrollState.PixelsPerInput,
             scrollState.ResidualPixels,
-            ArtifactCharacterScrollPlanner.PageAdvanceRows);
-        var inputInterval = scrollState.IsFirstPage
-            ? YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds
-            : YasPixelScrollPlanner.FastInputIntervalMilliseconds;
-        await SendScrollInputsAsync(
-            plan.InputCount,
-            direction: -1,
-            inputInterval,
-            cancellationToken);
-        scrollState.ResidualPixels = plan.ResidualPixels;
-        scrollState.IsFirstPage = false;
+            requestedRows);
+        var confirmedRows = 0;
+        foreach (var segment in plans)
+        {
+            var beforeRulers = CaptureMotionRulers(gridRoi);
+            var scrollTrace = ArtifactCharacterScrollTraceRecorder.TryStart(
+                gridRoi,
+                segment.InputCount,
+                direction: -1,
+                YasPixelScrollPlanner.FastInputIntervalMilliseconds);
+            try
+            {
+                await SendScrollInputsAsync(
+                    segment.InputCount,
+                    direction: -1,
+                    YasPixelScrollPlanner.FastInputIntervalMilliseconds,
+                    cancellationToken);
+                await Delay(
+                    YasPixelScrollPlanner.SegmentCooldownMilliseconds,
+                    cancellationToken);
+            }
+            finally
+            {
+                scrollTrace?.Complete();
+            }
+
+            var afterRulers = CaptureMotionRulers(gridRoi);
+            var maximumShift = Math.Max(
+                8,
+                (int)Math.Round(rowPitch * 1.5));
+            var rulerShifts = beforeRulers.Zip(afterRulers)
+                .Select(pair => YasPixelScrollPlanner.FindRulerShift(
+                    pair.First,
+                    pair.Second,
+                    maximumShift))
+                .ToArray();
+            var advancedRows = ArtifactCharacterScrollPlanner
+                .ClassifySegmentAdvance(rulerShifts, rowPitch);
+            if (advancedRows == 0)
+            {
+                _logger.LogInformation(
+                    "角色配装检测：第 {Segment}/{RequestedRows} 次短推进冷却后位移为 {Shifts}，已完整回弹到末页",
+                    confirmedRows + 1,
+                    requestedRows,
+                    string.Join(",", rulerShifts));
+                break;
+            }
+            if (advancedRows != 1)
+            {
+                throw new InvalidOperationException(
+                    $"角色列表第 {confirmedRows + 1}/{requestedRows} 次短推进冷却后 ruler 位移为 {string.Join(",", rulerShifts)}px，超过一行，拒绝提交不连续分页。");
+            }
+
+            confirmedRows++;
+            scrollState.ResidualPixels = segment.ResidualPixels;
+            _logger.LogInformation(
+                "角色配装检测：短推进 {Segment}/{RequestedRows} 已由 ruler 位移 {Shifts} 确认 1 行，{Inputs} 次输入，像素残差 {Residual:F2}",
+                confirmedRows,
+                requestedRows,
+                string.Join(",", rulerShifts),
+                segment.InputCount,
+                scrollState.ResidualPixels);
+        }
+
+        if (confirmedRows > 0 && !await WaitForPageSettleAsync(
+                gridRoi,
+                cancellationToken))
+        {
+            throw new InvalidOperationException(
+                $"角色列表 {confirmedRows} 次短推进完成后未连续稳定。");
+        }
+        return confirmedRows;
+    }
+
+    private static IReadOnlyList<Vec3b>[] CaptureMotionRulers(Rect gridRoi)
+    {
+        var rulerRects = ArtifactCharacterScrollPlanner.MotionRulerRects(
+            gridRoi);
+        using var capture = CaptureToRectArea();
+        return rulerRects
+            .Select(rect => (IReadOnlyList<Vec3b>)
+                YasPixelScrollPlanner.ReadRuler(capture.SrcMat, rect).ToArray())
+            .ToArray();
+    }
+
+    private static async Task<bool> WaitForPageSettleAsync(
+        Rect gridRoi,
+        CancellationToken cancellationToken)
+    {
         await Delay(
             YasPixelScrollPlanner.CalibrationSettleDelayMilliseconds,
             cancellationToken);
-        var nextRows = await DetectPageRowsAsync(
-            gridRoi, assetScale, cancellationToken);
-        var overlap = ArtifactCharacterPageTracker.FindOverlap(
-            initialRows, nextRows);
-        var moved = overlap < initialRows.Count;
-        if (!moved)
+        var rulerRects = ArtifactCharacterScrollPlanner.MotionRulerRects(
+            gridRoi);
+        using var baselineCapture = CaptureToRectArea();
+        var previous = rulerRects
+            .Select(rect => YasPixelScrollPlanner.ReadRuler(
+                baselineCapture.SrcMat,
+                rect))
+            .ToArray();
+        var settleTracker = new YasScrollSettleTracker();
+        for (var sample = 0;
+             sample < YasPixelScrollPlanner.MaximumPageSettleSamples;
+             sample++)
         {
-            _logger.LogInformation("角色配装检测：YAS 整页滚动未产生新行，已到末页");
-            return false;
+            await Delay(
+                YasPixelScrollPlanner.PageSettleSampleIntervalMilliseconds,
+                cancellationToken);
+            using var capture = CaptureToRectArea();
+            var current = rulerRects
+                .Select(rect => YasPixelScrollPlanner.ReadRuler(
+                    capture.SrcMat,
+                    rect))
+                .ToArray();
+            var allStable = previous.Zip(current)
+                .All(pair => YasPixelScrollPlanner.IsRulerStable(
+                    pair.First,
+                    pair.Second));
+            if (settleTracker.Observe(allStable))
+            {
+                return true;
+            }
+            previous = current;
         }
-
-        scrollState.SetNextStartRow(overlap);
-
-        _logger.LogInformation(
-            "角色配装检测：YAS 整页实际推进 {Rows}/{TargetRows} 行，{Inputs} 次输入，像素残差 {Residual:F2}",
-            Math.Min(initialRows.Count, initialRows.Count - overlap),
-            ArtifactCharacterScrollPlanner.PageAdvanceRows,
-            plan.InputCount,
-            scrollState.ResidualPixels);
-        return true;
+        return false;
     }
 
     private static async Task SendScrollInputsAsync(
@@ -534,22 +628,9 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
 
     private sealed class ArtifactCharacterScrollState
     {
-        private int? nextStartRow;
-
         internal bool IsCalibrated { get; set; }
-        internal bool IsFirstPage { get; set; } = true;
         internal double PixelsPerInput { get; set; }
         internal double ResidualPixels { get; set; }
-
-        internal void SetNextStartRow(int startRow) =>
-            this.nextStartRow = Math.Max(0, startRow);
-
-        internal int? ConsumeNextStartRow()
-        {
-            var value = this.nextStartRow;
-            this.nextStartRow = null;
-            return value;
-        }
     }
 
     private sealed class ArtifactCharacterCapturedDetail(
