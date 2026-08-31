@@ -56,7 +56,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 imageHeight);
             var verticalCameraOffset = AutoFightSeek.GetIndicatorCameraVerticalOffset(visual, imageHeight);
             logger.LogInformation(
-                "红色敌人方位小三角反馈转向: 候选={SignalCount}，位置=({X},{Y})，尺寸={Width}x{Height}，屏幕方位角={Bearing:F1}°，轮廓主轴={ContourOrientation:F1}°，方向={Direction}，本步转向=({CameraOffset},{VerticalCameraOffset})",
+                "红色敌人方位小三角反馈转向: 候选={SignalCount}，位置=({X},{Y})，尺寸={Width}x{Height}，采用方位角={Bearing:F1}°，模板方位角={TemplateBearing:F1}°，方向={Direction}，本步转向=({CameraOffset},{VerticalCameraOffset})",
                 decision.SignalCount,
                 visual.X,
                 visual.Y,
@@ -228,6 +228,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         EnemyIndicatorDirection Direction,
         EnemySeekVisual? Visual = null,
         int SignalCount = 0);
+
+    internal readonly record struct DirectionIndicatorTemplateSpec(
+        string FileName,
+        double BearingDegrees);
+
+    internal sealed record DirectionIndicatorTemplateFeature(
+        Point[] Contour,
+        Mat Mask,
+        double BearingDegrees);
 
     internal sealed class VisibleHealthApproachPolicy
     {
@@ -429,30 +438,40 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private const int FixedTopHealthMaxAdvanceCount = 6;
         private const int IndicatorReacquireDelayMilliseconds = 120;
         private const int MaxIndicatorTurnFeedbackSteps = 8;
-        // 6 个实拍轮廓在任意旋转后的 I1 距离保留少量抗锯齿余量；
-        // 尺寸门另按 1920x1080 的真实 UI 尺寸过滤小型 HUD 鬼影。
-        private const double DirectionIndicatorFeatureThreshold = 0.27;
-        private const double DirectionIndicatorMinSolidity = 0.60;
-        private const double DirectionIndicatorMaxSolidity = 0.90;
-        private const double DirectionIndicatorMinHollowRatio = 0.002;
-        private const double DirectionIndicatorMaxHollowRatio = 0.25;
+        // 16 个从本机实战截图裁出的完整菱形箭头按 22.5° 覆盖一周；只接受强轮廓匹配，
+        // 再叠加粉红色占比、屏幕环带和跨帧复核，避免红叶与 HUD 图标误报。
+        private const double DirectionIndicatorFeatureThreshold = 0.14;
+        private const double DirectionIndicatorOrientationMinScore = 0.55;
+        private const double DirectionIndicatorMaxScreenBearingDelta = 35;
+        private const double DirectionIndicatorMinSolidity = 0.50;
+        private const double DirectionIndicatorMaxSolidity = 0.92;
         private const double DirectionIndicatorMinPinkRedShare = 0.70;
         private const int HalfTurnMouseOffset = 1920;
         private const int MaxIndicatorCameraStep = 320;
         private const int MaxVisibleEnemyCameraStep = 320;
 
-        private static readonly string[] DirectionIndicatorTemplateNames =
+        private static readonly DirectionIndicatorTemplateSpec[] DirectionIndicatorTemplateSpecs =
         {
-            "enemy_direction_indicator_left.png",
-            "enemy_direction_indicator_variant_02.png",
-            "enemy_direction_indicator_variant_03.png",
-            "enemy_direction_indicator_variant_04.png",
-            "enemy_direction_indicator_variant_05.png",
-            "enemy_direction_indicator_variant_06.png"
+            new("enemy_direction_indicator_live_bearing_000.png", 0),
+            new("enemy_direction_indicator_live_bearing_022_5.png", 22.5),
+            new("enemy_direction_indicator_live_bearing_045.png", 45),
+            new("enemy_direction_indicator_live_bearing_067_5.png", 67.5),
+            new("enemy_direction_indicator_live_bearing_090.png", 90),
+            new("enemy_direction_indicator_live_bearing_112_5.png", 112.5),
+            new("enemy_direction_indicator_live_bearing_135.png", 135),
+            new("enemy_direction_indicator_live_bearing_157_5.png", 157.5),
+            new("enemy_direction_indicator_live_bearing_180.png", 180),
+            new("enemy_direction_indicator_live_bearing_202_5.png", -157.5),
+            new("enemy_direction_indicator_live_bearing_225.png", -135),
+            new("enemy_direction_indicator_live_bearing_247_5.png", -112.5),
+            new("enemy_direction_indicator_live_bearing_270.png", -90),
+            new("enemy_direction_indicator_live_bearing_292_5.png", -67.5),
+            new("enemy_direction_indicator_live_bearing_315.png", -45),
+            new("enemy_direction_indicator_live_bearing_337_5.png", -22.5)
         };
 
-        private static readonly Lazy<IReadOnlyList<Point[]>> DirectionIndicatorTemplateContours =
-            new(LoadDirectionIndicatorTemplateContours);
+        private static readonly Lazy<IReadOnlyList<DirectionIndicatorTemplateFeature>> DirectionIndicatorTemplates =
+            new(LoadDirectionIndicatorTemplates);
 
         private static readonly int[] VerticalSeekWave = { 0, -1, 0, 1 };
         private static readonly int[] VerticalSeekTrackCenters = { -2, 0, 2 };
@@ -745,7 +764,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 minimumHeight,
                 (int)Math.Round(14 * scale, MidpointRounding.AwayFromZero));
             var minimumWidth = Math.Max(
-                Math.Max(12, (int)Math.Round(18 * scale, MidpointRounding.AwayFromZero)),
+                Math.Max(16, (int)Math.Round(24 * scale, MidpointRounding.AwayFromZero)),
                 visual.Height * 3);
             return visual.Height >= minimumHeight
                    && visual.Height <= maximumHeight
@@ -756,7 +775,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         {
             // 实拍箭头的红色轮廓约 30x24~36x31。现场误报集中在 15x15、17x17、
             // 18x21 等小红块；短边、长边和面积必须同时达到真实箭头尺度。
-            if (visual.Width is > 56 || visual.Height is > 56
+            if (visual.Width is > 46 || visual.Height is > 46
                 || Math.Min(visual.Width, visual.Height) < 18
                 || Math.Max(visual.Width, visual.Height) < 22
                 || visual.Area < 160)
@@ -766,14 +785,41 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
             var fillRatio = visual.Area / (double)(visual.Width * visual.Height);
             var aspectRatio = visual.Width / (double)visual.Height;
-            if (fillRatio is < 0.30 or > 0.78 || aspectRatio is < 0.65 or > 1.55)
+            if (fillRatio is < 0.30 or > 0.78 || aspectRatio is < 0.57 or > 1.75)
             {
                 return false;
             }
 
-            var nearHorizontalEdge = visual.CenterX <= imageWidth * 0.2 || visual.CenterX >= imageWidth * 0.8;
-            var nearVerticalEdge = visual.CenterY <= imageHeight * 0.4 || visual.CenterY >= imageHeight * 0.75;
-            return nearHorizontalEdge || nearVerticalEdge;
+            if (IsDirectionIndicatorHudNoise(visual, imageWidth, imageHeight))
+            {
+                return false;
+            }
+
+            var horizontalRadius = Math.Max(1d, imageWidth * 0.26);
+            var verticalRadius = Math.Max(1d, imageHeight * 0.39);
+            var normalizedX = (visual.CenterX - imageWidth / 2d) / horizontalRadius;
+            var normalizedY = (visual.CenterY - imageHeight / 2d) / verticalRadius;
+            return normalizedX * normalizedX + normalizedY * normalizedY >= 0.60;
+        }
+
+        internal static bool IsDirectionIndicatorHudNoise(
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
+            var inTopLeftHud = visual.CenterX <= imageWidth * 0.18
+                               && visual.CenterY <= imageHeight * 0.38;
+            var inTopRightHud = visual.CenterX >= imageWidth * 0.78
+                                && visual.CenterY <= imageHeight * 0.28;
+            var inFarRightHud = visual.CenterX >= imageWidth * 0.88;
+            var inBottomHud = visual.CenterY >= imageHeight * 0.92;
+            var inBottomLeftHud = visual.CenterX <= imageWidth * 0.22
+                                  && visual.CenterY >= imageHeight * 0.75;
+            return inTopLeftHud
+                   || inTopRightHud
+                   || inFarRightHud
+                   || inBottomHud
+                   || inBottomLeftHud;
         }
 
         private static EnemyIndicatorDirection GetIndicatorDirection(
@@ -887,6 +933,19 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         }
 
         internal static double GetIndicatorBearingDegrees(
+            EnemySeekVisual visual,
+            int imageWidth,
+            int imageHeight)
+        {
+            if (visual.IndicatorBearingDegrees is { } templateBearing)
+            {
+                return NormalizeBearingDegrees(templateBearing);
+            }
+
+            return GetIndicatorScreenBearingDegrees(visual, imageWidth, imageHeight);
+        }
+
+        internal static double GetIndicatorScreenBearingDegrees(
             EnemySeekVisual visual,
             int imageWidth,
             int imageHeight)
@@ -1118,10 +1177,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                                && visual.CenterY <= imageHeight * 0.18;
             var inTopRightHud = visual.CenterX >= imageWidth * 0.70
                                 && visual.CenterY <= imageHeight * 0.12;
+            var inVeryTopHud = visual.CenterY <= imageHeight * 0.03;
             return inRightPartyHud
                    || inBottomPlayerHud
                    || inTopLeftHud
-                   || inTopRightHud;
+                   || inTopRightHud
+                   || inVeryTopHud;
         }
 
         internal static bool ShouldContinueLockedRouteSegment(EnemySeekDecision decision, int completedSteps)
@@ -1319,7 +1380,11 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     var classificationColor = isHealthBar
                         ? new Scalar(255, 128, 0)
                         : new Scalar(255, 0, 255);
-                    var label = isHealthBar ? "health" : "arrow";
+                    var label = isHealthBar
+                        ? "health"
+                        : visual.IndicatorBearingDegrees is { } templateBearing
+                            ? $"arrow {templateBearing:F1}"
+                            : "arrow";
                     Cv2.Rectangle(
                         annotated,
                         new Rect(visual.X, visual.Y, visual.Width, visual.Height),
@@ -1395,7 +1460,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             if (IsHealthBar(visual, imageHeight))
             {
                 return IsPlayerHudHealthBar(visual, imageWidth, imageHeight)
-                       || !MatchesHealthBarFeature(mask, visual)
+                       || !MatchesHealthBarFeature(mask, source, visual)
                     ? null
                     : visual;
             }
@@ -1405,7 +1470,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 return null;
             }
 
-            var templates = DirectionIndicatorTemplateContours.Value;
+            var templates = DirectionIndicatorTemplates.Value;
             if (templates.Count == 0)
             {
                 return null;
@@ -1424,20 +1489,39 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 visual.Height)).Clone();
             if (!MatchesDirectionIndicatorFeature(
                     candidate,
-                    templates,
+                    templates.Select(template => template.Contour).ToArray(),
                     DirectionIndicatorFeatureThreshold))
             {
                 return null;
             }
 
-            var bearing = GetDirectionIndicatorOrientationDegrees(candidate);
-            return bearing.HasValue
-                ? visual with { IndicatorBearingDegrees = bearing.Value }
+            var bearingMatch = MatchDirectionIndicatorTemplateBearing(
+                candidate,
+                templates);
+            if (bearingMatch.HasValue
+                && CircularBearingDeltaDegrees(
+                    bearingMatch.Value.bearing,
+                    GetIndicatorScreenBearingDegrees(visual, imageWidth, imageHeight))
+                > DirectionIndicatorMaxScreenBearingDelta)
+            {
+                return null;
+            }
+
+            return bearingMatch.HasValue
+                ? visual with { IndicatorBearingDegrees = bearingMatch.Value.bearing }
                 : null;
         }
 
         internal static bool MatchesHealthBarFeature(
             Mat binaryMask,
+            EnemySeekVisual visual)
+        {
+            return MatchesHealthBarFeature(binaryMask, source: null, visual);
+        }
+
+        internal static bool MatchesHealthBarFeature(
+            Mat binaryMask,
+            Mat? source,
             EnemySeekVisual visual)
         {
             var rect = new Rect(visual.X, visual.Y, visual.Width, visual.Height);
@@ -1467,7 +1551,55 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
             }
 
-            return longestRun >= Math.Ceiling(candidate.Width * 0.60);
+            var foregroundPixels = Cv2.CountNonZero(candidate);
+            var fillRatio = foregroundPixels / (double)(candidate.Width * candidate.Height);
+            if (longestRun < Math.Ceiling(candidate.Width * 0.60)
+                || fillRatio < 0.70)
+            {
+                return false;
+            }
+
+            if (source == null)
+            {
+                return true;
+            }
+
+            if (rect.Right > source.Width || rect.Bottom > source.Height)
+            {
+                return false;
+            }
+
+            using var colorCandidate = new Mat(source, rect);
+            using var salmonMask = new Mat();
+            Cv2.InRange(
+                colorCandidate,
+                new Scalar(50, 50, 180),
+                new Scalar(150, 150, 255),
+                salmonMask);
+            var channels = Cv2.Split(colorCandidate);
+            try
+            {
+                using var blueGreenDifference = new Mat();
+                using var similarBlueGreen = new Mat();
+                Cv2.Absdiff(channels[0], channels[1], blueGreenDifference);
+                Cv2.Threshold(
+                    blueGreenDifference,
+                    similarBlueGreen,
+                    45,
+                    255,
+                    ThresholdTypes.BinaryInv);
+                Cv2.BitwiseAnd(salmonMask, similarBlueGreen, salmonMask);
+                Cv2.BitwiseAnd(salmonMask, candidate, salmonMask);
+            }
+            finally
+            {
+                foreach (var channel in channels)
+                {
+                    channel.Dispose();
+                }
+            }
+
+            return Cv2.CountNonZero(salmonMask) / (double)foregroundPixels >= 0.40;
         }
 
         internal static bool HasDirectionIndicatorPinkRedShare(
@@ -1507,22 +1639,23 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             double threshold)
         {
             var candidateContour = GetLargestExternalContour(candidateMask);
-            var hollowRatio = GetDirectionIndicatorHollowRatio(candidateMask);
             if (candidateContour == null
                 || candidateContour.Length < 3
-                || !HasDirectionIndicatorConcavity(candidateContour)
-                || hollowRatio is not (>= DirectionIndicatorMinHollowRatio and <= DirectionIndicatorMaxHollowRatio))
+                || !HasDirectionIndicatorConcavity(candidateContour))
             {
                 return false;
             }
 
-            return templateContours.Any(template =>
-                template.Length >= 3
-                && Cv2.MatchShapes(
+            var closestTemplateDistance = templateContours
+                .Where(template => template.Length >= 3)
+                .Select(template => Cv2.MatchShapes(
                     candidateContour,
                     template,
                     ShapeMatchModes.I1,
-                    0) <= threshold);
+                    0))
+                .DefaultIfEmpty(double.MaxValue)
+                .Min();
+            return closestTemplateDistance <= threshold;
         }
 
         internal static bool HasDirectionIndicatorConcavity(Point[] contour)
@@ -1593,45 +1726,71 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 .FirstOrDefault();
         }
 
-        internal static double? GetDirectionIndicatorOrientationDegrees(Mat binaryMask)
+        internal static (double bearing, double score)? MatchDirectionIndicatorTemplateBearing(
+            Mat candidateMask)
         {
-            var moments = Cv2.Moments(binaryMask, true);
-            if (Math.Abs(moments.M00) < double.Epsilon)
-            {
-                return null;
-            }
-
-            // 主轴给出箭头的连续朝向，但只确定到 180°；沿主轴的三阶偏度用于区分
-            // “箭头尖端”和“尾翼”，因此不需要穷举 360° 模板。
-            var axisRadians = 0.5 * Math.Atan2(
-                2 * moments.Mu11,
-                moments.Mu20 - moments.Mu02);
-            var axisX = Math.Cos(axisRadians);
-            var axisY = Math.Sin(axisRadians);
-            var skewAlongAxis =
-                moments.Mu30 * axisX * axisX * axisX
-                + 3 * moments.Mu21 * axisX * axisX * axisY
-                + 3 * moments.Mu12 * axisX * axisY * axisY
-                + moments.Mu03 * axisY * axisY * axisY;
-            if (skewAlongAxis < 0)
-            {
-                axisX = -axisX;
-                axisY = -axisY;
-            }
-
-            return Math.Atan2(axisX, -axisY) * 180d / Math.PI;
+            return MatchDirectionIndicatorTemplateBearing(
+                candidateMask,
+                DirectionIndicatorTemplates.Value);
         }
 
-        private static IReadOnlyList<Point[]> LoadDirectionIndicatorTemplateContours()
+        private static (double bearing, double score)? MatchDirectionIndicatorTemplateBearing(
+            Mat candidateMask,
+            IReadOnlyCollection<DirectionIndicatorTemplateFeature> templates)
         {
-            var result = new List<Point[]>();
-            foreach (var fileName in DirectionIndicatorTemplateNames)
+            var bestBearing = 0d;
+            var bestScore = double.NegativeInfinity;
+            foreach (var template in templates)
+            {
+                using var resized = new Mat();
+                using var score = new Mat();
+                Cv2.Resize(
+                    candidateMask,
+                    resized,
+                    template.Mask.Size(),
+                    interpolation: InterpolationFlags.Nearest);
+                Cv2.MatchTemplate(
+                    resized,
+                    template.Mask,
+                    score,
+                    TemplateMatchModes.CCoeffNormed);
+                var currentScore = score.At<float>(0, 0);
+                if (currentScore > bestScore)
+                {
+                    bestScore = currentScore;
+                    bestBearing = template.BearingDegrees;
+                }
+            }
+
+            return bestScore >= DirectionIndicatorOrientationMinScore
+                ? (NormalizeBearingDegrees(bestBearing), bestScore)
+                : null;
+        }
+
+        internal static int GetDirectionIndicatorTemplateCount()
+        {
+            return DirectionIndicatorTemplates.Value.Count;
+        }
+
+        internal static IReadOnlyList<Point[]> GetDirectionIndicatorTemplateContours()
+        {
+            return DirectionIndicatorTemplates.Value
+                .Select(template => template.Contour)
+                .ToArray();
+        }
+
+        private static IReadOnlyList<DirectionIndicatorTemplateFeature> LoadDirectionIndicatorTemplates()
+        {
+            var result = new List<DirectionIndicatorTemplateFeature>();
+            foreach (var spec in DirectionIndicatorTemplateSpecs)
             {
                 try
                 {
                     using var template = GameTaskManager.LoadAssetImage(
                         "AutoFight",
-                        fileName,
+                        spec.FileName,
+                        1920,
+                        1080,
                         ImreadModes.Unchanged);
                     using var mask = new Mat();
                     if (template.Channels() == 4)
@@ -1650,12 +1809,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     var contour = GetLargestExternalContour(mask);
                     if (contour is { Length: >= 3 })
                     {
-                        result.Add(contour);
+                        result.Add(new DirectionIndicatorTemplateFeature(
+                            contour,
+                            mask.Clone(),
+                            spec.BearingDegrees));
                     }
                 }
                 catch
                 {
-                    // 单个样本损坏不应让整套寻敌失效；其余实拍样本继续提供旋转不变特征。
+                    // 单个样本损坏不应让整套寻敌失效；其余实拍方位模板继续提供匹配。
                 }
             }
 
@@ -2044,9 +2206,42 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             ILogger logger,
             CancellationToken ct)
         {
-            var currentDecision = decision;
-            var currentImageWidth = imageWidth;
-            var currentImageHeight = imageHeight;
+            if (decision.Visual is not { } initialVisual)
+            {
+                return false;
+            }
+
+            await Task.Delay(IndicatorReacquireDelayMilliseconds, ct);
+            var currentDecision = CaptureSeekDecision(
+                bloodLower,
+                bloodHigher,
+                out var currentImageWidth,
+                out var currentImageHeight);
+            if (currentDecision.Action == AutoFightSeekAction.KeepFighting)
+            {
+                return true;
+            }
+
+            if (currentDecision.Action != AutoFightSeekAction.ApproachVisibleEnemy
+                || currentDecision.Visual is not { } confirmedVisual
+                || !IsVisibleHealthTargetConsistent(
+                    initialVisual,
+                    confirmedVisual,
+                    imageWidth,
+                    imageHeight,
+                    cameraHorizontalOffset: 0,
+                    cameraVerticalOffset: 0))
+            {
+                logger.LogDebug(
+                    "血条候选未通过 {Delay}ms 静止复核，按瞬时特效或场景横线丢弃：位置=({X},{Y})，尺寸={Width}x{Height}",
+                    IndicatorReacquireDelayMilliseconds,
+                    initialVisual.X,
+                    initialVisual.Y,
+                    initialVisual.Width,
+                    initialVisual.Height);
+                return false;
+            }
+
             var completedSteps = 0;
             while (ShouldContinueVisibleEnemyApproach(currentDecision, completedSteps))
             {

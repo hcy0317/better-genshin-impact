@@ -244,9 +244,9 @@ public class CombatScriptResourceTests
 
     [Theory]
     [InlineData(12, 430, 24, 20, (int)EnemyIndicatorDirection.Left)]
-    [InlineData(1460, 430, 24, 20, (int)EnemyIndicatorDirection.Right)]
+    [InlineData(1120, 430, 24, 20, (int)EnemyIndicatorDirection.Right)]
     [InlineData(744, 24, 24, 20, (int)EnemyIndicatorDirection.Forward)]
-    [InlineData(744, 860, 24, 20, (int)EnemyIndicatorDirection.Behind)]
+    [InlineData(744, 780, 24, 20, (int)EnemyIndicatorDirection.Behind)]
     public void SelectSeekDecision_RedDirectionIndicatorMustDriveApproachDirection(
         int x,
         int y,
@@ -284,16 +284,16 @@ public class CombatScriptResourceTests
     {
         var decision = AutoFightSeek.SelectSeekDecision(
             [
-                new EnemySeekVisual(12, 430, 24, 20, 260, 5),
+                new EnemySeekVisual(400, 430, 24, 20, 260, 5),
                 new EnemySeekVisual(744, 24, 24, 20, 260, 150),
-                new EnemySeekVisual(1460, 430, 24, 20, 260, -3)
+                new EnemySeekVisual(1100, 430, 24, 20, 260, -3)
             ],
             imageWidth: 1500,
             imageHeight: 900);
 
         Assert.Equal(AutoFightSeekAction.Approach, decision.Action);
-        Assert.Equal(744, decision.Visual!.Value.X);
-        Assert.Equal(150, decision.Visual.Value.IndicatorBearingDegrees);
+        Assert.Equal(1100, decision.Visual!.Value.X);
+        Assert.Equal(-3, decision.Visual.Value.IndicatorBearingDegrees);
         Assert.Equal(3, decision.SignalCount);
         Assert.InRange(Math.Abs(AutoFightSeek.GetIndicatorCameraOffset(
             decision.Direction,
@@ -345,8 +345,8 @@ public class CombatScriptResourceTests
 
         var steps = AutoFightSeek.GetIndicatorCameraSteps(visual, 1500, 900);
 
-        Assert.InRange(steps.Sum(), -960, -940);
-        Assert.All(steps, step => Assert.InRange(Math.Abs(step), 1, 640));
+        Assert.InRange(steps.Sum(), -1555, -1540);
+        Assert.All(steps, step => Assert.InRange(Math.Abs(step), 1, 320));
     }
 
     [Fact]
@@ -510,6 +510,36 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
+    public void HealthBarFeature_RuntimeMustRequireTheObservedSalmonFillColor()
+    {
+        using var mask = Mat.Zeros(24, 48, MatType.CV_8UC1).ToMat();
+        Cv2.Rectangle(mask, new Rect(6, 8, 30, 6), Scalar.White, -1);
+        var visual = new EnemySeekVisual(6, 8, 30, 6, 180);
+
+        using var healthSource = Mat.Zeros(24, 48, MatType.CV_8UC3).ToMat();
+        Cv2.Rectangle(
+            healthSource,
+            new Rect(6, 8, 30, 6),
+            new Scalar(90, 90, 254),
+            -1);
+        using var orangeHighlight = Mat.Zeros(24, 48, MatType.CV_8UC3).ToMat();
+        Cv2.Rectangle(
+            orangeHighlight,
+            new Rect(6, 8, 30, 6),
+            new Scalar(20, 140, 230),
+            -1);
+
+        Assert.True(AutoFightSeek.MatchesHealthBarFeature(
+            mask,
+            healthSource,
+            visual));
+        Assert.False(AutoFightSeek.MatchesHealthBarFeature(
+            mask,
+            orangeHighlight,
+            visual));
+    }
+
+    [Fact]
     public void DirectionIndicatorColor_MustRejectLowHueRedFoliage()
     {
         using var foliageHsv = new Mat(
@@ -537,13 +567,23 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
-    [InlineData("enemy_direction_indicator_left.png")]
-    [InlineData("enemy_direction_indicator_variant_02.png")]
-    [InlineData("enemy_direction_indicator_variant_03.png")]
-    [InlineData("enemy_direction_indicator_variant_04.png")]
-    [InlineData("enemy_direction_indicator_variant_05.png")]
-    [InlineData("enemy_direction_indicator_variant_06.png")]
-    public void DirectionIndicatorColor_OfficialTemplatesMustRemainAccepted(
+    [InlineData("enemy_direction_indicator_live_bearing_000.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_022_5.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_045.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_067_5.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_090.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_112_5.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_135.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_157_5.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_180.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_202_5.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_225.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_247_5.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_270.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_292_5.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_315.png")]
+    [InlineData("enemy_direction_indicator_live_bearing_337_5.png")]
+    public void DirectionIndicatorColor_LiveScreenshotTemplatesMustRemainAccepted(
         string fileName)
     {
         var path = SourcePath(
@@ -556,6 +596,91 @@ public class CombatScriptResourceTests
         Assert.True(AutoFightSeek.HasDirectionIndicatorPinkRedShare(
             template,
             visual));
+    }
+
+    [Theory]
+    [InlineData("enemy_direction_indicator_live_bearing_000.png", 0)]
+    [InlineData("enemy_direction_indicator_live_bearing_022_5.png", 22.5)]
+    [InlineData("enemy_direction_indicator_live_bearing_045.png", 45)]
+    [InlineData("enemy_direction_indicator_live_bearing_067_5.png", 67.5)]
+    [InlineData("enemy_direction_indicator_live_bearing_090.png", 90)]
+    [InlineData("enemy_direction_indicator_live_bearing_112_5.png", 112.5)]
+    [InlineData("enemy_direction_indicator_live_bearing_135.png", 135)]
+    [InlineData("enemy_direction_indicator_live_bearing_157_5.png", 157.5)]
+    [InlineData("enemy_direction_indicator_live_bearing_180.png", 180)]
+    [InlineData("enemy_direction_indicator_live_bearing_202_5.png", -157.5)]
+    [InlineData("enemy_direction_indicator_live_bearing_225.png", -135)]
+    [InlineData("enemy_direction_indicator_live_bearing_247_5.png", -112.5)]
+    [InlineData("enemy_direction_indicator_live_bearing_270.png", -90)]
+    [InlineData("enemy_direction_indicator_live_bearing_292_5.png", -67.5)]
+    [InlineData("enemy_direction_indicator_live_bearing_315.png", -45)]
+    [InlineData("enemy_direction_indicator_live_bearing_337_5.png", -22.5)]
+    public void ClassifySeekVisual_LiveScreenshotTemplatesMustPassTheRuntimePipeline(
+        string fileName,
+        double expectedBearing)
+    {
+        var path = SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "Assets", "1920x1080",
+            fileName);
+        using var template = Cv2.ImRead(path, ImreadModes.Unchanged);
+        using var source = Mat.Zeros(1080, 1920, MatType.CV_8UC3).ToMat();
+        using var mask = Mat.Zeros(1080, 1920, MatType.CV_8UC1).ToMat();
+        using var templateBgr = new Mat();
+        using var alpha = new Mat();
+        Cv2.CvtColor(template, templateBgr, ColorConversionCodes.BGRA2BGR);
+        Cv2.ExtractChannel(template, alpha, 3);
+        Assert.InRange(
+            AutoFightSeek.GetDirectionIndicatorHollowRatio(alpha)!.Value,
+            0.03,
+            0.25);
+        var bearingRadians = expectedBearing * Math.PI / 180d;
+        var x = (int)Math.Round(960 + 500 * Math.Sin(bearingRadians) - template.Width / 2d);
+        var y = (int)Math.Round(540 - 420 * Math.Cos(bearingRadians) - template.Height / 2d);
+        var targetRect = new Rect(x, y, template.Width, template.Height);
+        using (var sourceTarget = new Mat(source, targetRect))
+        using (var maskTarget = new Mat(mask, targetRect))
+        {
+            templateBgr.CopyTo(sourceTarget);
+            alpha.CopyTo(maskTarget);
+        }
+        var visual = new EnemySeekVisual(
+            x,
+            y,
+            template.Width,
+            template.Height,
+            Cv2.CountNonZero(alpha));
+
+        Assert.True(AutoFightSeek.IsDirectionIndicatorGeometry(
+            visual,
+            imageWidth: 1920,
+            imageHeight: 1080));
+        Assert.True(AutoFightSeek.HasDirectionIndicatorPinkRedShare(
+            source,
+            visual));
+        var contour = AutoFightSeek.GetLargestExternalContour(alpha);
+        Assert.NotNull(contour);
+        using var candidateMask = new Mat(mask, targetRect);
+        Assert.True(AutoFightSeek.MatchesDirectionIndicatorFeature(
+            candidateMask,
+            [contour!],
+            threshold: 0.27));
+        var loadedTemplates = AutoFightSeek.GetDirectionIndicatorTemplateContours();
+        Assert.Equal(16, loadedTemplates.Count);
+        Assert.True(AutoFightSeek.MatchesDirectionIndicatorFeature(
+            candidateMask,
+            loadedTemplates,
+            threshold: 0.27));
+        var classified = AutoFightSeek.ClassifySeekVisual(
+            mask,
+            source,
+            visual,
+            imageWidth: 1920,
+            imageHeight: 1080);
+        Assert.NotNull(classified);
+        Assert.InRange(
+            Math.Abs((classified!.Value.IndicatorBearingDegrees!.Value - expectedBearing + 540) % 360 - 180),
+            0,
+            0.1);
     }
 
     [Theory]
@@ -575,6 +700,40 @@ public class CombatScriptResourceTests
             new EnemySeekVisual(x, y, width, height, width * height),
             1920,
             1080));
+    }
+
+    [Fact]
+    public void ClassifySeekVisual_TemplateBearingMustAgreeWithItsScreenRingPosition()
+    {
+        var path = SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "Assets", "1920x1080",
+            "enemy_direction_indicator_live_bearing_090.png");
+        using var template = Cv2.ImRead(path, ImreadModes.Unchanged);
+        using var templateBgr = new Mat();
+        using var alpha = new Mat();
+        Cv2.CvtColor(template, templateBgr, ColorConversionCodes.BGRA2BGR);
+        Cv2.ExtractChannel(template, alpha, 3);
+        using var source = Mat.Zeros(1080, 1920, MatType.CV_8UC3).ToMat();
+        using var mask = Mat.Zeros(1080, 1920, MatType.CV_8UC1).ToMat();
+        var targetRect = new Rect(944, 100, template.Width, template.Height);
+        using (var sourceTarget = new Mat(source, targetRect))
+        using (var maskTarget = new Mat(mask, targetRect))
+        {
+            templateBgr.CopyTo(sourceTarget);
+            alpha.CopyTo(maskTarget);
+        }
+
+        Assert.Null(AutoFightSeek.ClassifySeekVisual(
+            mask,
+            source,
+            new EnemySeekVisual(
+                targetRect.X,
+                targetRect.Y,
+                targetRect.Width,
+                targetRect.Height,
+                Cv2.CountNonZero(alpha)),
+            imageWidth: 1920,
+            imageHeight: 1080));
     }
 
     [Fact]
@@ -817,18 +976,16 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
-    [InlineData(1433, 373, 28, 29, -68.6, 60, 85)]
-    [InlineData(75, 14, 24, 24, 127.9, -75, -45)]
-    [InlineData(859, 83, 37, 28, 90.4, -20, 0)]
-    [InlineData(740, 893, 34, 24, 96.5, -170, -135)]
-    public void IndicatorBearing_MustIgnoreUnstableContourOrientationFromRuntimeLogs(
+    [InlineData(1433, 373, 28, 29, 67.5)]
+    [InlineData(75, 14, 24, 24, -67.5)]
+    [InlineData(859, 83, 37, 28, 0)]
+    [InlineData(740, 893, 34, 24, -157.5)]
+    public void IndicatorBearing_MustPreferTheMatchedDirectionTemplate(
         int x,
         int y,
         int width,
         int height,
-        double contourOrientation,
-        double minimumExpectedBearing,
-        double maximumExpectedBearing)
+        double templateBearing)
     {
         var bearing = AutoFightSeek.GetIndicatorBearingDegrees(
             new EnemySeekVisual(
@@ -837,11 +994,11 @@ public class CombatScriptResourceTests
                 width,
                 height,
                 width * height,
-                contourOrientation),
+                templateBearing),
             imageWidth: 1920,
             imageHeight: 1080);
 
-        Assert.InRange(bearing, minimumExpectedBearing, maximumExpectedBearing);
+        Assert.Equal(templateBearing, bearing, 3);
     }
 
     [Fact]
@@ -849,7 +1006,7 @@ public class CombatScriptResourceTests
     {
         var path = SourcePath(
             "BetterGenshinImpact", "GameTask", "AutoFight", "Assets", "1920x1080",
-            "enemy_direction_indicator_variant_03.png");
+            "enemy_direction_indicator_live_bearing_090.png");
         using var template = Cv2.ImRead(path, ImreadModes.Unchanged);
         using var alpha = new Mat();
         Cv2.ExtractChannel(template, alpha, 3);
@@ -882,8 +1039,8 @@ public class CombatScriptResourceTests
         using var rotatedCrop = new Mat(rotated, bounds);
         Assert.True(AutoFightSeek.IsDirectionIndicatorGeometry(
             new EnemySeekVisual(
-                1820,
-                795,
+                1420,
+                400,
                 bounds.Width,
                 bounds.Height,
                 Cv2.CountNonZero(rotatedCrop)),
@@ -908,32 +1065,14 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void DirectionIndicatorFeature_MustRequireTheInternalLightHollow()
+    public void DirectionIndicatorFeature_LiveTemplateMustKeepItsClosedCenterDiamond()
     {
-        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_live_bearing_090.png");
         var templateContour = AutoFightSeek.GetLargestExternalContour(template);
         Assert.NotNull(templateContour);
-        Assert.InRange(AutoFightSeek.GetDirectionIndicatorHollowRatio(template)!.Value, 0.002, 0.25);
-
-        using var solidGhost = template.Clone();
-        using var working = template.Clone();
-        Cv2.FindContours(
-            working,
-            out Point[][] contours,
-            out HierarchyIndex[] hierarchy,
-            RetrievalModes.Tree,
-            ContourApproximationModes.ApproxSimple);
-        for (var i = 0; i < contours.Length; i++)
-        {
-            if (hierarchy[i].Parent >= 0)
-            {
-                Cv2.DrawContours(solidGhost, contours, i, Scalar.White, -1);
-            }
-        }
-
-        Assert.Null(AutoFightSeek.GetDirectionIndicatorHollowRatio(solidGhost));
-        Assert.False(AutoFightSeek.MatchesDirectionIndicatorFeature(
-            solidGhost,
+        Assert.InRange(AutoFightSeek.GetDirectionIndicatorHollowRatio(template)!.Value, 0.03, 0.25);
+        Assert.True(AutoFightSeek.MatchesDirectionIndicatorFeature(
+            template,
             [templateContour!],
             threshold: 0.27));
     }
@@ -952,7 +1091,7 @@ public class CombatScriptResourceTests
     [Fact]
     public void DirectionIndicatorFeature_ConvexHudNotificationDotMustBeRejected()
     {
-        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_live_bearing_090.png");
         var templateContour = AutoFightSeek.GetLargestExternalContour(template);
         Assert.NotNull(templateContour);
 
@@ -968,7 +1107,7 @@ public class CombatScriptResourceTests
     [Fact]
     public void DirectionIndicatorFeature_ConvexTriangleMustBeRejectedWithoutTheArrowNotch()
     {
-        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_live_bearing_090.png");
         var templateContour = AutoFightSeek.GetLargestExternalContour(template);
         Assert.NotNull(templateContour);
 
@@ -987,7 +1126,7 @@ public class CombatScriptResourceTests
     [Fact]
     public void DirectionIndicatorConcavity_UserArrowMustPassButConvexHudShapeMustFail()
     {
-        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_03.png");
+        using var template = LoadDirectionIndicatorAlpha("enemy_direction_indicator_live_bearing_090.png");
         var arrowContour = AutoFightSeek.GetLargestExternalContour(template);
         Assert.NotNull(arrowContour);
 
@@ -998,21 +1137,6 @@ public class CombatScriptResourceTests
 
         Assert.True(AutoFightSeek.HasDirectionIndicatorConcavity(arrowContour!));
         Assert.False(AutoFightSeek.HasDirectionIndicatorConcavity(dotContour!));
-    }
-
-    [Fact]
-    public void DirectionIndicatorOrientation_MustUseTheArrowTipInsteadOfItsScreenPosition()
-    {
-        using var left = LoadDirectionIndicatorAlpha("enemy_direction_indicator_left.png");
-        using var right = LoadDirectionIndicatorAlpha("enemy_direction_indicator_variant_06.png");
-
-        var leftBearing = AutoFightSeek.GetDirectionIndicatorOrientationDegrees(left);
-        var rightBearing = AutoFightSeek.GetDirectionIndicatorOrientationDegrees(right);
-
-        Assert.NotNull(leftBearing);
-        Assert.NotNull(rightBearing);
-        Assert.InRange(leftBearing!.Value, -135, -45);
-        Assert.InRange(rightBearing!.Value, 45, 135);
     }
 
     [Theory]
@@ -1152,7 +1276,9 @@ public class CombatScriptResourceTests
             StringComparison.Ordinal);
         Assert.Contains("血条仍有横向误差，本轮只转向不前进", source,
             StringComparison.Ordinal);
-        Assert.Contains("? \"health\" : \"arrow\"", source,
+        Assert.Contains("? \"health\"", source,
+            StringComparison.Ordinal);
+        Assert.Contains("$\"arrow {templateBearing:F1}\"", source,
             StringComparison.Ordinal);
         Assert.Contains("classificationColor", source,
             StringComparison.Ordinal);

@@ -1,0 +1,130 @@
+[
+  {
+    "asset": "enemy_direction_indicator_live_bearing_000.png",
+    "target_bearing": 0.0,
+    "observed_bearing": 1.533,
+    "source": "selection-20260831-095554-839-000405-ApproachVisibleEnemy.jpg",
+    "rect": [955, 78, 34, 27],
+    "hollow_ratio": 0.03745
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_022_5.png",
+    "target_bearing": 22.5,
+    "observed_bearing": 21.673,
+    "source": "selection-20260831-103816-532-000880-ApproachVisibleEnemy.jpg",
+    "rect": [1112, 104, 33, 24],
+    "hollow_ratio": 0.03919
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_045.png",
+    "target_bearing": 45.0,
+    "observed_bearing": 44.107,
+    "source": "selection-20260831-093610-950-000193-Approach.jpg",
+    "rect": [1277, 186, 29, 24],
+    "hollow_ratio": 0.05056
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_067_5.png",
+    "target_bearing": 67.5,
+    "observed_bearing": 68.356,
+    "source": "selection-20260831-095829-311-000441-Approach.jpg",
+    "rect": [1415, 340, 30, 27],
+    "hollow_ratio": 0.06799
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_090.png",
+    "target_bearing": 90.0,
+    "observed_bearing": 77.788,
+    "source": "selection-20260831-103609-002-000849-ApproachVisibleEnemy.jpg",
+    "rect": [1444, 418, 30, 28],
+    "hollow_ratio": 0.04878
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_112_5.png",
+    "target_bearing": 112.5,
+    "observed_bearing": 126.857,
+    "source": "selection-20260831-095805-955-000436-ApproachVisibleEnemy.jpg",
+    "rect": [1307, 799, 29, 24],
+    "hollow_ratio": 0.06495
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_135.png",
+    "target_bearing": 135.0,
+    "observed_bearing": 134.723,
+    "source": "selection-20260831-102641-138-000733-ApproachVisibleEnemy.jpg",
+    "rect": [1258, 837, 27, 23],
+    "hollow_ratio": 0.05657
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_157_5.png",
+    "target_bearing": 157.5,
+    "observed_bearing": 156.363,
+    "source": "selection-20260831-092608-247-000070-Approach.jpg",
+    "rect": [1109, 904, 32, 26],
+    "hollow_ratio": 0.06407
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_180.png",
+    "target_bearing": -180.0,
+    "observed_bearing": 179.213,
+    "source": "selection-20260831-101854-840-000694-ApproachVisibleEnemy.jpg",
+    "rect": [948, 927, 35, 27],
+    "hollow_ratio": 0.03822
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_202_5.png",
+    "target_bearing": -157.5,
+    "observed_bearing": -158.186,
+    "source": "selection-20260831-102718-630-000740-ApproachVisibleEnemy.jpg",
+    "rect": [791, 908, 33, 26],
+    "hollow_ratio": 0.09029
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_225.png",
+    "target_bearing": -135.0,
+    "observed_bearing": -134.722,
+    "source": "selection-20260831-103632-063-000856-ApproachVisibleEnemy.jpg",
+    "rect": [635, 836, 28, 24],
+    "hollow_ratio": 0.03125
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_247_5.png",
+    "target_bearing": -112.5,
+    "observed_bearing": -132.160,
+    "source": "selection-20260831-095928-513-000461-ApproachVisibleEnemy.jpg",
+    "rect": [618, 825, 28, 24],
+    "hollow_ratio": 0.04418
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_270.png",
+    "target_bearing": -90.0,
+    "observed_bearing": -73.328,
+    "source": "selection-20260831-100507-299-000565-Approach.jpg",
+    "rect": [458, 380, 29, 28],
+    "hollow_ratio": 0.03444
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_292_5.png",
+    "target_bearing": -67.5,
+    "observed_bearing": -66.899,
+    "source": "selection-20260831-100724-296-000625-Approach.jpg",
+    "rect": [482, 328, 30, 29],
+    "hollow_ratio": 0.07672
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_315.png",
+    "target_bearing": -45.0,
+    "observed_bearing": -52.553,
+    "source": "selection-20260831-092744-608-000101-ApproachVisibleEnemy.jpg",
+    "rect": [559, 232, 29, 24],
+    "hollow_ratio": 0.05726
+  },
+  {
+    "asset": "enemy_direction_indicator_live_bearing_337_5.png",
+    "target_bearing": -22.5,
+    "observed_bearing": -23.314,
+    "source": "selection-20260831-103606-044-000847-ApproachVisibleEnemy.jpg",
+    "rect": [763, 108, 32, 24],
+    "hollow_ratio": 0.11094
+  }
+]
