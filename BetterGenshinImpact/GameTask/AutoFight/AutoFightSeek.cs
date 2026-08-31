@@ -436,6 +436,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private const double DirectionIndicatorMaxSolidity = 0.90;
         private const double DirectionIndicatorMinHollowRatio = 0.002;
         private const double DirectionIndicatorMaxHollowRatio = 0.25;
+        private const double DirectionIndicatorMinPinkRedShare = 0.70;
         private const int HalfTurnMouseOffset = 1920;
         private const int MaxIndicatorCameraStep = 320;
         private const int MaxVisibleEnemyCameraStep = 320;
@@ -1113,7 +1114,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var inRightPartyHud = visual.CenterX >= imageWidth * 0.82
                                   && visual.CenterY >= imageHeight * 0.12;
             var inBottomPlayerHud = visual.CenterY >= imageHeight * 0.90;
-            return inRightPartyHud || inBottomPlayerHud;
+            var inTopLeftHud = visual.CenterX <= imageWidth * 0.22
+                               && visual.CenterY <= imageHeight * 0.18;
+            var inTopRightHud = visual.CenterX >= imageWidth * 0.70
+                                && visual.CenterY <= imageHeight * 0.12;
+            return inRightPartyHud
+                   || inBottomPlayerHud
+                   || inTopLeftHud
+                   || inTopRightHud;
         }
 
         internal static bool ShouldContinueLockedRouteSegment(EnemySeekDecision decision, int completedSteps)
@@ -1490,7 +1498,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             }
 
             var pinkRedShare = Cv2.CountNonZero(highHueRed) / (double)redPixels;
-            return pinkRedShare >= 0.20;
+            return pinkRedShare >= DirectionIndicatorMinPinkRedShare;
         }
 
         internal static bool MatchesDirectionIndicatorFeature(
