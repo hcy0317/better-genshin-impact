@@ -111,8 +111,34 @@ public class ArtifactCharacterRosterPaginationTests
         Assert.Equal(312, ArtifactCharacterScrollPlanner.RowPitchForGridHeight(1834), 6);
     }
 
+    [Theory]
+    [InlineData(0, 1, 2, 0)]
+    [InlineData(20, 28, 30, 1)]
+    [InlineData(148, 156, 164, 1)]
+    [InlineData(210, 220, 230, 2)]
+    public void SegmentAdvanceAcceptsAnyTrustedPhysicalRulerShift(
+        int first,
+        int second,
+        int third,
+        int expected)
+    {
+        Assert.Equal(expected,
+            ArtifactCharacterScrollPlanner.ClassifySegmentAdvance(
+                [first, second, third],
+                rowPitch: 156));
+    }
+
     [Fact]
-    public void CharacterScannerUsesRulerCalibrationAndOneWholePageScroll()
+    public void SegmentAdvanceDoesNotTreatUnmatchedRulersAsNoMovementVotes()
+    {
+        Assert.Equal(1,
+            ArtifactCharacterScrollPlanner.ClassifySegmentAdvance(
+                [6, 162, 0],
+                rowPitch: 156));
+    }
+
+    [Fact]
+    public void CharacterScannerUsesRulerCalibrationAndSegmentedPageScroll()
     {
         var source = File.ReadAllText(Path.Combine(
             FindRepoRoot(),
@@ -121,17 +147,19 @@ public class ArtifactCharacterRosterPaginationTests
             "ArtifactAnalysis",
             "ArtifactCharacterRosterScanner.cs"));
 
-        Assert.Contains("pageTracker.Commit(stableRows)", source,
-            StringComparison.Ordinal);
         Assert.Contains("MeasureScrollPixelsPerInputAsync", source,
             StringComparison.Ordinal);
         Assert.Contains("gridRoi.Right -", source, StringComparison.Ordinal);
         Assert.DoesNotContain("gridRoi.Right +", source, StringComparison.Ordinal);
         Assert.Contains("ArtifactCharacterScrollPlanner.PageAdvanceRows", source,
             StringComparison.Ordinal);
-        Assert.Contains("ConsumeNextStartRow", source, StringComparison.Ordinal);
+        Assert.Contains("UnknownExtentYasCursor", source, StringComparison.Ordinal);
+        Assert.Contains("CreateSegmentedPlans", source, StringComparison.Ordinal);
+        Assert.Contains("paginationCursor.CommitScroll", source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("ConsumeNextStartRow", source, StringComparison.Ordinal);
         Assert.DoesNotContain("IsTerminalPage", source, StringComparison.Ordinal);
-        Assert.Contains("ArtifactCharacterScrollbarDetector.IsAtBottom", source,
+        Assert.DoesNotContain("ArtifactCharacterScrollbarDetector.IsAtBottom", source,
             StringComparison.Ordinal);
         Assert.DoesNotContain("CalibrateFirstPageScrollAsync", source, StringComparison.Ordinal);
         Assert.DoesNotContain("RemainingRowsToAdvance", source, StringComparison.Ordinal);

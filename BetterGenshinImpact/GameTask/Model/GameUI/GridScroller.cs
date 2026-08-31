@@ -29,13 +29,8 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         private readonly int s2Round;
         private readonly double s3Scale;
         private readonly bool fastScroll;
-        private readonly int totalItems;
-        private readonly int visibleRows;
-        private readonly int fastScrollRows;
         private readonly Size captureSize;
-        private int scrolledRows;
         private bool isCalibrated;
-        private bool isFirstPage = true;
         private double pixelsPerInput;
         private double residualPixels;
 
@@ -51,9 +46,6 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             this.s2Round = @params.S2Round;
             this.s3Scale = @params.S3Scale;
             this.fastScroll = @params.FastScroll;
-            this.totalItems = @params.TotalItems;
-            this.visibleRows = @params.VisibleRows;
-            this.fastScrollRows = @params.FastScrollRows;
             this.captureSize = @params.CaptureSize;
         }
 
@@ -61,7 +53,8 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         {
             if (this.fastScroll)
             {
-                return await TryVerticalScrollDownFast(GetGridItems);
+                throw new InvalidOperationException(
+                    "圣遗物快速滚动必须由 YasPaginationCursor 提供行数。");
             }
 
             using var ra = TaskControl.CaptureToRectArea();
@@ -122,24 +115,14 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             }
         }
 
-        private async Task<bool> TryVerticalScrollDownFast(
+        internal async Task<YasScrollReceipt> ScrollRowsFastAsync(
+            int rowsToScroll,
             Func<Mat, int, IEnumerable<Rect>> getGridItems)
         {
-            if (this.totalItems <= 0 || this.visibleRows <= 0 || this.fastScrollRows <= 0)
-            {
-                throw new InvalidOperationException("圣遗物快速滚动缺少背包总数或可见行配置");
-            }
-
-            var totalRows = (int)Math.Ceiling(this.totalItems / (double)this.columns);
-            var rowsToScroll = ArtifactRowScrollPlanner.RowsToScroll(
-                totalRows,
-                this.visibleRows,
-                this.scrolledRows);
             if (rowsToScroll <= 0)
-            {
-                this.logger.LogInformation("YAS 圣遗物滚轮翻页到底");
-                return false;
-            }
+                throw new ArgumentOutOfRangeException(nameof(rowsToScroll));
+            if (!this.fastScroll)
+                throw new InvalidOperationException("当前网格未启用 YAS 快速滚动。");
 
             var timer = Stopwatch.StartNew();
             SystemControl.ActivateWindow();
@@ -148,31 +131,52 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 this.pixelsPerInput = await MeasureScrollPixelsPerInputAsync();
                 this.isCalibrated = true;
             }
-            var targetRow = this.scrolledRows + rowsToScroll;
-            var plan = YasPixelScrollPlanner.CreatePlan(
+            var plans = YasPixelScrollPlanner.CreateChunkedPlans(
                 ArtifactGridLayout.RowPitchPixels(this.captureSize),
                 this.pixelsPerInput,
                 this.residualPixels,
-                rowsToScroll);
-            await ScrollPageAsync(plan.InputCount);
+                rowsToScroll,
+                YasPixelScrollPlanner.ArtifactRowsPerSegment);
+            var totalInputs = 0;
+            for (var row = 0; row < plans.Count; row++)
+            {
+                var segment = plans[row];
+                await SendScrollInputsAsync(
+                    segment.InputCount,
+                    direction: -1,
+                    YasPixelScrollPlanner.FastInputIntervalMilliseconds);
+                totalInputs += segment.InputCount;
+                await TaskControl.Delay(
+                    YasPixelScrollPlanner.ArtifactSegmentCooldownMilliseconds,
+                    this.ct);
+                this.residualPixels = segment.ResidualPixels;
+                this.logger.LogDebug(
+                    "YAS 圣遗物短推进 {Row}/{Rows}：{Inputs} 次输入，残差 {Residual:F2}px",
+                    row + 1,
+                    rowsToScroll,
+                    segment.InputCount,
+                    this.residualPixels);
+            }
             if (!await WaitForPageSettleAsync())
             {
                 throw new InvalidOperationException(
-                    $"YAS 圣遗物整页滚动 {rowsToScroll} 行后未稳定");
+                    $"YAS 圣遗物 {rowsToScroll} 次短推进完成后未连续稳定");
             }
             this.residualPixels = await CorrectPageOffsetAsync(
                 getGridItems,
-                plan.ResidualPixels);
-            this.scrolledRows = targetRow;
-            this.isFirstPage = false;
+                this.residualPixels);
             this.logger.LogInformation(
-                "YAS 圣遗物整页滚轮已推进 {Rows} 行：{Inputs} 次输入，残差 {Residual:F2}px，累计 {ScrolledRows} 行，耗时 {ElapsedMilliseconds}ms",
+                "YAS 圣遗物滚动执行器已按 {Segments} 次短推进确认 {Rows} 行：{Inputs} 次输入，残差 {Residual:F2}px，耗时 {ElapsedMilliseconds}ms",
+                plans.Count,
                 rowsToScroll,
-                plan.InputCount,
+                totalInputs,
                 this.residualPixels,
-                this.scrolledRows,
                 timer.ElapsedMilliseconds);
-            return true;
+            return new YasScrollReceipt(
+                rowsToScroll,
+                rowsToScroll,
+                Settled: true,
+                PhysicallyVerified: true);
         }
 
         private async Task<double> MeasureScrollPixelsPerInputAsync()
@@ -236,14 +240,6 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             }
         }
 
-        private async Task ScrollPageAsync(int inputCount)
-        {
-            var interval = this.isFirstPage
-                ? YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds
-                : YasPixelScrollPlanner.FastInputIntervalMilliseconds;
-            await SendScrollInputsAsync(inputCount, direction: -1, interval);
-        }
-
         private async Task<bool> WaitForPageSettleAsync()
         {
             await TaskControl.Delay(
@@ -254,6 +250,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             var previous = YasPixelScrollPlanner.ReadRuler(
                 baselineCapture.SrcMat,
                 rulerRect);
+            var settleTracker = new YasScrollSettleTracker();
             for (var sample = 0;
                  sample < YasPixelScrollPlanner.MaximumPageSettleSamples;
                  sample++)
@@ -265,7 +262,8 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 var current = YasPixelScrollPlanner.ReadRuler(
                     capture.SrcMat,
                     rulerRect);
-                if (YasPixelScrollPlanner.IsRulerStable(previous, current))
+                if (settleTracker.Observe(
+                        YasPixelScrollPlanner.IsRulerStable(previous, current)))
                 {
                     return true;
                 }
@@ -285,7 +283,9 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 this.captureSize,
                 this.roi,
                 this.columns);
-            if (!offset.HasValue) return theoreticalResidual;
+            if (!offset.HasValue)
+                throw new InvalidOperationException(
+                    "YAS 圣遗物滚动后无法测得网格偏移，拒绝提交分页回执。");
 
             var correctionThreshold = Math.Max(4, this.pixelsPerInput / 2d);
             if (Math.Abs(offset.Value) <= correctionThreshold)
@@ -302,7 +302,9 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 Math.Abs(correction),
                 correction > 0 ? -1 : 1,
                 YasPixelScrollPlanner.FastInputIntervalMilliseconds);
-            await WaitForPageSettleAsync();
+            if (!await WaitForPageSettleAsync())
+                throw new InvalidOperationException(
+                    "YAS 圣遗物页末补偿后未稳定，拒绝提交分页回执。");
 
             using var correctedCapture = TaskControl.CaptureToRectArea();
             using var correctedGrid = new Mat(correctedCapture.SrcMat, this.roi);
@@ -311,12 +313,16 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 this.captureSize,
                 this.roi,
                 this.columns);
+            if (!correctedOffset.HasValue ||
+                Math.Abs(correctedOffset.Value) > correctionThreshold)
+                throw new InvalidOperationException(
+                    $"YAS 圣遗物页末补偿后仍未对齐：{correctedOffset?.ToString("F1") ?? "unknown"}px。");
             this.logger.LogWarning(
                 "YAS 圣遗物页末实际偏移 {Offset:F1}px，补偿 {Inputs} 次输入，修正后 {CorrectedOffset:F1}px",
                 offset.Value,
                 correction,
-                correctedOffset ?? theoreticalResidual);
-            return correctedOffset ?? theoreticalResidual;
+                correctedOffset.Value);
+            return correctedOffset.Value;
         }
 
         private async Task SendScrollInputsAsync(

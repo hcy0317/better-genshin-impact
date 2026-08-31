@@ -70,6 +70,8 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             private readonly CancellationToken ct;
             private readonly int columns;
             private readonly GridScroller gridScroller;
+            private readonly YasPaginationCursor? paginationCursor;
+            private readonly string paginationRunId = Guid.NewGuid().ToString("N");
 
             /// <summary>
             /// 单次滚动得到的页面
@@ -78,7 +80,6 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             private record Page(ImageRegion PageRegion, Queue<Rect> ItemRects);
             private Page? currentPage;
             private Tuple<ImageRegion, Rect>? current;
-            private int emittedItems;
             Tuple<ImageRegion, Rect> IAsyncEnumerator<Tuple<ImageRegion, Rect>>.Current => current ?? throw new NullReferenceException();
 
             /// <summary>
@@ -99,6 +100,14 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 this.ct = ct;
                 this.columns = columns;
                 this.gridScroller = gridScroller;
+                if (owner.@params.FastScroll)
+                {
+                    this.paginationCursor = new YasPaginationCursor(
+                        owner.@params.TotalItems,
+                        columns,
+                        owner.@params.VisibleRows,
+                        owner.@params.FastScrollRows);
+                }
             }
 
             /// <summary>
@@ -495,9 +504,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
 
             public async ValueTask<bool> MoveNextAsync()
             {
-                if (owner.@params.FastScroll &&
-                    owner.@params.TotalItems > 0 &&
-                    this.emittedItems >= owner.@params.TotalItems)
+                if (this.paginationCursor?.Completed == true)
                 {
                     return false;
                 }
@@ -505,17 +512,46 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 if (this.currentPage == null || this.currentPage.ItemRects.Count < 1)
                 {
                     ImageRegion? imageRegion = null;
-                    var firstPage = this.currentPage == null;
                     try
                     {
                         if (this.currentPage != null)   // 当前页遍历完了就向下滚动
                         {
+                            if (this.paginationCursor is not null)
+                            {
+                                var committedPage = this.paginationCursor.CurrentPage;
+                                this.paginationCursor.CommitRead();
+                                owner.logger.LogInformation(
+                                    "YAS_PAGE_COMMIT runId={RunId} page={Page} readCount={ReadCount} emittedAfter={EmittedAfter} completed={Completed}",
+                                    this.paginationRunId,
+                                    committedPage.PageIndex,
+                                    committedPage.ItemCount,
+                                    this.paginationCursor.EmittedItems,
+                                    this.paginationCursor.Completed);
+                                if (this.paginationCursor.Completed)
+                                    return false;
+                            }
                             using var ra4 = TaskControl.CaptureToRectArea();
                             ra4.MoveTo(this.roi.X + this.roi.Width / 2, this.roi.Y + this.roi.Height / 2);
                             await TaskControl.Delay(owner.@params.PreScrollDelayMilliseconds, ct);
 
                             owner.OnBeforeScroll?.Invoke();
-                            if (!await this.gridScroller.TryVerticalScollDown((src, columns) => GetGridItems(src, columns)))
+                            if (this.paginationCursor is not null)
+                            {
+                                var plan = this.paginationCursor.PlanNextScroll();
+                                var receipt = await this.gridScroller.ScrollRowsFastAsync(
+                                    plan.RowsToScroll,
+                                    (src, columns) => GetGridItems(src, columns));
+                                owner.logger.LogInformation(
+                                    "YAS_SCROLL_RECEIPT runId={RunId} page={Page} requestedRows={RequestedRows} confirmedRows={ConfirmedRows} settled={Settled} physicallyVerified={PhysicallyVerified}",
+                                    this.paginationRunId,
+                                    this.paginationCursor.CurrentPage.PageIndex,
+                                    receipt.RequestedRows,
+                                    receipt.ConfirmedRows,
+                                    receipt.Settled,
+                                    receipt.PhysicallyVerified);
+                                this.paginationCursor.CommitScroll(receipt);
+                            }
+                            else if (!await this.gridScroller.TryVerticalScollDown((src, columns) => GetGridItems(src, columns)))
                             {
                                 return false;
                             }
@@ -550,16 +586,27 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                             ? SelectFastScrollItems(
                                 cells,
                                 this.columns,
-                                owner.@params.VisibleRows,
-                                owner.@params.FastScrollRows,
-                                this.emittedItems,
-                                owner.@params.TotalItems,
-                                firstPage)
+                                this.paginationCursor!.CurrentPage)
                             : cells
                                 .OrderBy(c => c.RowNum)
                                 .ThenBy(c => c.ColNum)
                                 .Select(c => c.Rect)
                                 .ToArray();
+
+                        if (this.paginationCursor is not null)
+                        {
+                            var slice = this.paginationCursor.CurrentPage;
+                            owner.logger.LogInformation(
+                                "YAS_PAGE_PLAN runId={RunId} page={Page} emitted={Emitted} total={Total} startRow={StartRow} itemCount={ItemCount} rowCount={RowCount} final={Final}",
+                                this.paginationRunId,
+                                slice.PageIndex,
+                                this.paginationCursor.EmittedItems,
+                                this.paginationCursor.TotalItems,
+                                slice.StartRow,
+                                slice.ItemCount,
+                                slice.RowCount,
+                                slice.IsFinalPage);
+                        }
 
                         this.currentPage?.PageRegion?.Dispose();
                         this.currentPage = new Page(
@@ -576,57 +623,39 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                 }
 
                 this.current = Tuple.Create(this.currentPage.PageRegion, this.currentPage.ItemRects.Dequeue());
-                this.emittedItems++;
                 return true;
             }
 
             internal static IReadOnlyList<Rect> SelectFastScrollItems(
                 IReadOnlyList<GridCell> cells,
                 int columns,
-                int visibleRows,
-                int fastScrollRows,
-                int emittedItems,
-                int totalItems,
-                bool firstPage)
+                YasPageSlice slice)
             {
                 if (columns <= 0) throw new ArgumentOutOfRangeException(nameof(columns));
-                if (visibleRows <= 0) throw new ArgumentOutOfRangeException(nameof(visibleRows));
-                if (fastScrollRows <= 0) throw new ArgumentOutOfRangeException(nameof(fastScrollRows));
-                if (totalItems <= 0) throw new ArgumentOutOfRangeException(nameof(totalItems));
-
-                var expected = Math.Min(
-                    columns * visibleRows,
-                    totalItems - emittedItems);
-                if (expected <= 0) return [];
+                if (slice.StartRow < 0 || slice.RowCount < 0 || slice.ItemCount < 0)
+                    throw new ArgumentOutOfRangeException(nameof(slice));
+                if (slice.ItemCount == 0) return [];
 
                 var ordered = cells
                     .OrderBy(cell => cell.RowNum)
                     .ThenBy(cell => cell.ColNum)
                     .ToArray();
-                if (firstPage)
-                {
-                    if (ordered.Length < expected)
-                    {
-                        throw new InvalidDataException(
-                            $"圣遗物首屏只识别到 {ordered.Length}/{expected} 个格子");
-                    }
-                    return ordered.Take(expected).Select(cell => cell.Rect).ToArray();
-                }
-
-                var newRows = (int)Math.Ceiling(expected / (double)columns);
-                var firstNewRow = visibleRows - newRows;
-                var bottomRows = ordered
-                    .Where(cell => cell.RowNum >= firstNewRow)
+                var selectedRows = ordered
+                    .Where(cell => cell.RowNum >= slice.StartRow
+                                   && cell.RowNum < slice.StartRow + slice.RowCount)
                     .OrderBy(cell => cell.RowNum)
                     .ThenBy(cell => cell.ColNum)
                     .ToArray();
-                if (bottomRows.Length < expected)
+                if (selectedRows.Length < slice.ItemCount)
                 {
                     throw new InvalidDataException(
-                        $"圣遗物翻页后的底部新行只识别到 {bottomRows.Length}/{expected} 个格子");
+                        $"圣遗物第 {slice.PageIndex} 页只识别到 {selectedRows.Length}/{slice.ItemCount} 个 cursor 指定格子");
                 }
 
-                return bottomRows.Take(expected).Select(cell => cell.Rect).ToArray();
+                return selectedRows
+                    .Take(slice.ItemCount)
+                    .Select(cell => cell.Rect)
+                    .ToArray();
             }
 
             /// <summary>

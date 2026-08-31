@@ -87,7 +87,6 @@ internal sealed class ArtifactInventoryExecutionInspectionTask(
         }
         else
         {
-            reader.AllowUnconfirmedCaptureForFingerprintValidation();
             if (targets.Any(target => target.ScanIndex < 0 || target.ScanIndex >= observedCount))
             {
                 throw new InvalidDataException(
@@ -178,7 +177,6 @@ internal sealed class ArtifactInventoryUi : IDisposable
     private readonly ArtifactRetryableLazy<ArtifactPaddleOcrSession>
         _ownedLegacyOcrSession = new();
     private readonly ILogger _logger;
-    private bool _allowUnconfirmedCapture;
     private ArtifactPanelSignature? _lastDetailSignature;
 
     internal ArtifactInventoryUi(ILogger logger)
@@ -205,11 +203,9 @@ internal sealed class ArtifactInventoryUi : IDisposable
     internal ArtifactInventoryUi(
         ILogger logger,
         Func<Mat, string>? fixedRegionRecognizer,
-        Func<Mat[], string[]>? fixedRegionBatchRecognizer,
-        bool allowUnconfirmedCapture = false)
+        Func<Mat[], string[]>? fixedRegionBatchRecognizer)
     {
         _logger = logger;
-        _allowUnconfirmedCapture = allowUnconfirmedCapture;
         var cultureName = TaskContext.Instance().Config.OtherConfig.GameCultureInfoName;
         if (!string.Equals(cultureName, "zh-Hans", StringComparison.OrdinalIgnoreCase))
         {
@@ -496,7 +492,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         var liveItemRect = ToLiveItemRect(page, selectionProbeRect);
         EnsureInitialDetailSignature();
         item.Click();
-        var captured = await CaptureAfterDetailConfirmedAsync(
+        var captured = await CaptureAfterDetailSwitchedAsync(
             _lastDetailSignature.Value,
             baselineSelectionScore,
             liveItemRect,
@@ -535,7 +531,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         var liveItemRect = ToLiveItemRect(page, selectionProbeRect);
         EnsureInitialDetailSignature();
         item.Click();
-        var capture = await CaptureAfterDetailConfirmedAsync(
+        var capture = await CaptureAfterDetailSwitchedAsync(
             _lastDetailSignature.Value,
             baselineSelectionScore,
             liveItemRect,
@@ -631,9 +627,6 @@ internal sealed class ArtifactInventoryUi : IDisposable
         }
     }
 
-    internal void AllowUnconfirmedCaptureForFingerprintValidation() =>
-        _allowUnconfirmedCapture = true;
-
     private IOcrService LegacyOcrService
     {
         get
@@ -676,7 +669,7 @@ internal sealed class ArtifactInventoryUi : IDisposable
         return (absolute.Top - LegacyDetectionRegion.Y, absolute.Height);
     }
 
-    private async Task<T> CaptureAfterDetailConfirmedAsync<T>(
+    private async Task<T> CaptureAfterDetailSwitchedAsync<T>(
         ArtifactPanelSignature initialSignature,
         double baselineSelectionScore,
         Rect liveItemRect,
@@ -688,13 +681,10 @@ internal sealed class ArtifactInventoryUi : IDisposable
         var timer = Stopwatch.StartNew();
         var detector = new ArtifactDetailSwitchDetector(
             initialSignature, maximumStableDistance: 4, lockTolerance: 0.5);
-        var sameDetailDetector = new ArtifactSameDetailSelectionDetector(
+        var sameDetailSelectionDetector = new ArtifactSameDetailSelectionDetector(
             initialSignature,
             baselineSelectionScore,
             minimumSelectionIncrease: 0.08);
-        var baselineAlreadySelected = ArtifactGridSelectionDetector.IsAlreadySelected(
-            baselineSelectionScore);
-        var sameDetailSelectionTimer = new ArtifactContinuousEvidenceTimer();
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -703,53 +693,36 @@ internal sealed class ArtifactInventoryUi : IDisposable
             var changedAndStable = detector.Observe(
                 detailSignature,
                 ArtifactDetailLockDetector.VisualSignature(capture.SrcMat));
-            var sameDetailButSelected = false;
+            var sameDetailSelected = false;
             if (!changedAndStable)
             {
                 using var liveItem = capture.DeriveCrop(liveItemRect);
-                var selectionEvidenceStable = sameDetailDetector.Observe(
+                sameDetailSelected = sameDetailSelectionDetector.Observe(
                     detailSignature,
                     ArtifactGridSelectionDetector.Score(liveItem.SrcMat));
-                var continuousSelectionMilliseconds = sameDetailSelectionTimer.Observe(
-                    selectionEvidenceStable,
-                    timer.ElapsedMilliseconds);
-                sameDetailButSelected = ArtifactDetailCapturePolicy
-                    .CanAcceptSameDetailSelection(
-                        baselineAlreadySelected,
-                        continuousSelectionMilliseconds,
-                        selectionEvidenceStable);
             }
-            var confirmed = changedAndStable || sameDetailButSelected;
             var decision = ArtifactDetailCapturePolicy.Decide(
                 scanIndex,
                 timer.ElapsedMilliseconds,
-                confirmed);
+                changedAndStable || sameDetailSelected);
             if (decision == ArtifactDetailCaptureDecision.Confirmed)
             {
-                var evidence = changedAndStable
-                    ? "详情已切换"
-                    : "目标格已选中且详情相同";
                 _logger.LogDebug(
-                    "圣遗物 {ScanIndex} {Operation}详情确认等待 {ElapsedMilliseconds}ms，依据={Evidence}",
+                    "圣遗物 {ScanIndex} {Operation}详情等待 {ElapsedMilliseconds}ms，依据={Evidence}",
                     scanIndex,
                     operation,
                     timer.ElapsedMilliseconds,
-                    evidence);
+                    changedAndStable ? "详情已切换" : "同详情选中加速");
                 return projector(capture.SrcMat);
             }
             if (decision == ArtifactDetailCaptureDecision.TimedOut)
             {
-                if (_allowUnconfirmedCapture)
-                {
-                    _logger.LogWarning(
-                        "圣遗物 {ScanIndex} {Operation}在 {ElapsedMilliseconds}ms 内未取得选中证明；仅供随后精确指纹核验，不得直接执行写操作",
-                        scanIndex,
-                        operation,
-                        timer.ElapsedMilliseconds);
-                    return projector(capture.SrcMat);
-                }
-                throw new InvalidDataException(
-                    $"圣遗物 {scanIndex} {operation}在 {timer.ElapsedMilliseconds}ms 内未证明目标格已选中，拒绝解析可能的旧详情帧。");
+                _logger.LogWarning(
+                    "圣遗物 {ScanIndex} {Operation}详情在 {ElapsedMilliseconds}ms 内未观察到切换；按 yas-lock 语义使用当前详情帧",
+                    scanIndex,
+                    operation,
+                    timer.ElapsedMilliseconds);
+                return projector(capture.SrcMat);
             }
             await Delay(16, cancellationToken);
         }

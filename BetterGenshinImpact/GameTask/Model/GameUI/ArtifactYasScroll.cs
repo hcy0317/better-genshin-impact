@@ -106,9 +106,19 @@ internal static class YasPixelScrollPlanner
     internal const int CalibrationInputLimit = 5;
     internal const int CalibrationSettleDelayMilliseconds = 80;
     internal const int FirstPageInputIntervalMilliseconds = 20;
-    internal const int FastInputIntervalMilliseconds = 2;
+    // 2 ms 会把滚轮消息一次性压进原神的滚动动画队列。真实轨迹显示，
+    // 输入结束时列表仍在高速移动，随后还会回弹；此时读取分页会把末页
+    // 的实际推进量多算一到两行。8 ms 仍使用高精度计时器，整页输入约
+    // 400 ms，同时给游戏留出消费消息的时间，避免形成惯性过冲。
+    internal const int FastInputIntervalMilliseconds = 8;
+    // yas-lock 每个 scroll 批次默认等待 100 ms。BetterGI 将整页拆成
+    // 单行短批次后，为覆盖原神滚动动画的延迟回弹，段间固定留 180 ms。
+    internal const int SegmentCooldownMilliseconds = 180;
+    internal const int ArtifactSegmentCooldownMilliseconds = 100;
+    internal const int ArtifactRowsPerSegment = 2;
     internal const int PageSettleSampleIntervalMilliseconds = 20;
-    internal const int MaximumPageSettleSamples = 10;
+    internal const int MaximumPageSettleSamples = 20;
+    internal const int RequiredConsecutiveStableSamples = 3;
 
     internal static YasPixelScrollPlan CreatePlan(
         double rowPitchPixels,
@@ -129,6 +139,58 @@ internal static class YasPixelScrollPlanner
         return new YasPixelScrollPlan(
             inputCount,
             totalPixels - inputCount * pixelsPerInput);
+    }
+
+    internal static IReadOnlyList<YasPixelScrollPlan> CreateSegmentedPlans(
+        double rowPitchPixels,
+        double pixelsPerInput,
+        double residualPixels,
+        int rows)
+    {
+        if (rows <= 0) throw new ArgumentOutOfRangeException(nameof(rows));
+
+        var plans = new YasPixelScrollPlan[rows];
+        var currentResidual = residualPixels;
+        for (var row = 0; row < rows; row++)
+        {
+            var plan = CreatePlan(
+                rowPitchPixels,
+                pixelsPerInput,
+                currentResidual,
+                rows: 1);
+            plans[row] = plan;
+            currentResidual = plan.ResidualPixels;
+        }
+        return plans;
+    }
+
+    internal static IReadOnlyList<YasPixelScrollPlan> CreateChunkedPlans(
+        double rowPitchPixels,
+        double pixelsPerInput,
+        double residualPixels,
+        int rows,
+        int maximumRowsPerSegment)
+    {
+        if (rows <= 0) throw new ArgumentOutOfRangeException(nameof(rows));
+        if (maximumRowsPerSegment <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maximumRowsPerSegment));
+
+        var plans = new List<YasPixelScrollPlan>();
+        var currentResidual = residualPixels;
+        var remainingRows = rows;
+        while (remainingRows > 0)
+        {
+            var segmentRows = Math.Min(maximumRowsPerSegment, remainingRows);
+            var plan = CreatePlan(
+                rowPitchPixels,
+                pixelsPerInput,
+                currentResidual,
+                segmentRows);
+            plans.Add(plan);
+            currentResidual = plan.ResidualPixels;
+            remainingRows -= segmentRows;
+        }
+        return plans;
     }
 
     internal static int FindRulerShift(
@@ -216,17 +278,18 @@ internal static class YasPixelScrollPlanner
 
 }
 
-internal static class ArtifactRowScrollPlanner
+internal sealed class YasScrollSettleTracker
 {
-    internal static int RowsToScroll(int totalRows, int visibleRows, int scrolledRows)
+    private int _consecutiveStableSamples;
+
+    internal bool Observe(bool isStable)
     {
-        if (totalRows <= 0) throw new ArgumentOutOfRangeException(nameof(totalRows));
-        if (visibleRows <= 0) throw new ArgumentOutOfRangeException(nameof(visibleRows));
-        if (scrolledRows < 0) throw new ArgumentOutOfRangeException(nameof(scrolledRows));
-
-        return Math.Min(visibleRows, Math.Max(0, totalRows - visibleRows - scrolledRows));
+        _consecutiveStableSamples = isStable
+            ? _consecutiveStableSamples + 1
+            : 0;
+        return _consecutiveStableSamples >=
+               YasPixelScrollPlanner.RequiredConsecutiveStableSamples;
     }
-
 }
 
 internal static class ArtifactGridAlignmentPlanner

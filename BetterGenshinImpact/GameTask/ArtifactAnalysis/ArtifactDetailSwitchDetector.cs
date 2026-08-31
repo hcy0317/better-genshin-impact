@@ -14,8 +14,7 @@ internal enum ArtifactDetailCaptureDecision
 
 internal static class ArtifactDetailCapturePolicy
 {
-    internal const int ConfirmationBudgetMilliseconds = 450;
-    internal const int SameDetailSelectionWaitMilliseconds = 180;
+    internal const int ConfirmationBudgetMilliseconds = 250;
 
     internal static ArtifactDetailCaptureDecision Decide(
         int scanIndex,
@@ -26,31 +25,6 @@ internal static class ArtifactDetailCapturePolicy
         return elapsedMilliseconds >= ConfirmationBudgetMilliseconds
             ? ArtifactDetailCaptureDecision.TimedOut
             : ArtifactDetailCaptureDecision.Wait;
-    }
-
-    internal static bool CanAcceptSameDetailSelection(
-        bool baselineAlreadySelected,
-        long continuousSelectionMilliseconds,
-        bool selectionEvidenceStable) =>
-        selectionEvidenceStable
-        && (baselineAlreadySelected
-            || continuousSelectionMilliseconds >= SameDetailSelectionWaitMilliseconds);
-}
-
-internal sealed class ArtifactContinuousEvidenceTimer
-{
-    private long? _sinceMilliseconds;
-
-    internal long Observe(bool evidenceStable, long elapsedMilliseconds)
-    {
-        if (!evidenceStable)
-        {
-            _sinceMilliseconds = null;
-            return 0;
-        }
-
-        _sinceMilliseconds ??= elapsedMilliseconds;
-        return Math.Max(0, elapsedMilliseconds - _sinceMilliseconds.Value);
     }
 }
 

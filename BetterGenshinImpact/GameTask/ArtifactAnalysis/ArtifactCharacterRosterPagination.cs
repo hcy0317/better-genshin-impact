@@ -278,4 +278,42 @@ internal static class ArtifactCharacterScrollPlanner
         ];
     }
 
+    internal static IReadOnlyList<Rect> MotionRulerRects(Rect gridRoi)
+    {
+        var top = gridRoi.Y + 8;
+        var height = Math.Max(8, gridRoi.Height - 16);
+        var width = Math.Clamp(gridRoi.Width / 48, 8, 24);
+        return new[] { 0.2, 0.5, 0.8 }
+            .Select(fraction =>
+            {
+                var centerX = gridRoi.X + (int)Math.Round(
+                    (gridRoi.Width - 1) * fraction);
+                var x = Math.Clamp(
+                    centerX - width / 2,
+                    gridRoi.X,
+                    gridRoi.Right - width);
+                return new Rect(x, top, width, height);
+            })
+            .ToArray();
+    }
+
+    internal static int ClassifySegmentAdvance(
+        IReadOnlyList<int> rulerShifts,
+        double rowPitch)
+    {
+        ArgumentNullException.ThrowIfNull(rulerShifts);
+        if (rulerShifts.Count == 0)
+            throw new ArgumentException("At least one ruler shift is required.",
+                nameof(rulerShifts));
+        if (rowPitch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(rowPitch));
+
+        // FindRulerShift 返回 0 表示该纹理带没有取得可信匹配，并不表示
+        // 页面没有移动。角色头像、选中光效会让部分窄带失配，因此只要
+        // 任意一条通过颜色阈值的 ruler 证明接近一行，就应接受该物理证据。
+        var strongestEvidence = rulerShifts.Max();
+        if (strongestEvidence < rowPitch * 0.15) return 0;
+        return strongestEvidence <= rowPitch * 1.35 ? 1 : 2;
+    }
+
 }

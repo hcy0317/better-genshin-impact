@@ -7,7 +7,7 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 public class ArtifactYasScrollTests
 {
     [Fact]
-    public void GridScrollerUsesOneRulerCalibrationAndOnePageScrollStateMachine()
+    public void GridScrollerUsesOneRulerCalibrationAndChunkedPageScroll()
     {
         var source = File.ReadAllText(Path.Combine(
             FindRepoRoot(),
@@ -18,9 +18,9 @@ public class ArtifactYasScrollTests
             "GridScroller.cs"));
 
         Assert.Contains("MeasureScrollPixelsPerInputAsync", source, StringComparison.Ordinal);
-        Assert.Contains("ScrollPageAsync", source, StringComparison.Ordinal);
+        Assert.Contains("CreateChunkedPlans", source, StringComparison.Ordinal);
+        Assert.Contains("SegmentCooldownMilliseconds", source, StringComparison.Ordinal);
         Assert.DoesNotContain("ScrollOneArtifactRowAsync", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("快速推进第", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -86,20 +86,6 @@ public class ArtifactYasScrollTests
         Assert.Equal(7, cells[^1].ColNum);
     }
 
-    [Theory]
-    [InlineData(141, 5, 0, 5)]
-    [InlineData(141, 5, 135, 1)]
-    [InlineData(141, 5, 136, 0)]
-    public void RowsToScroll_MatchesTheRemainingInventoryRows(
-        int totalRows,
-        int visibleRows,
-        int scrolledRows,
-        int expected)
-    {
-        Assert.Equal(expected, ArtifactRowScrollPlanner.RowsToScroll(
-            totalRows, visibleRows, scrolledRows));
-    }
-
     [Fact]
     public void YasPixelPlanCarriesRoundingResidualAcrossPages()
     {
@@ -146,6 +132,55 @@ public class ArtifactYasScrollTests
     }
 
     [Fact]
+    public void SegmentedPlansKeepOneShotDistanceAndBoundEachBurstToOneRow()
+    {
+        var oneShot = YasPixelScrollPlanner.CreatePlan(
+            rowPitchPixels: 156,
+            pixelsPerInput: 18,
+            residualPixels: 0,
+            rows: 6);
+        var segments = YasPixelScrollPlanner.CreateSegmentedPlans(
+            rowPitchPixels: 156,
+            pixelsPerInput: 18,
+            residualPixels: 0,
+            rows: 6);
+
+        Assert.Equal(6, segments.Count);
+        Assert.Equal(new[] { 9, 8, 9, 9, 8, 9 },
+            segments.Select(segment => segment.InputCount));
+        Assert.Equal(oneShot.InputCount,
+            segments.Sum(segment => segment.InputCount));
+        Assert.Equal(oneShot.ResidualPixels,
+            segments[^1].ResidualPixels,
+            precision: 6);
+    }
+
+    [Fact]
+    public void ArtifactChunkedPlansUseTwoTwoOneRowsWithoutChangingDistance()
+    {
+        var oneShot = YasPixelScrollPlanner.CreatePlan(
+            rowPitchPixels: 146,
+            pixelsPerInput: 18,
+            residualPixels: 0,
+            rows: 5);
+        var chunks = YasPixelScrollPlanner.CreateChunkedPlans(
+            rowPitchPixels: 146,
+            pixelsPerInput: 18,
+            residualPixels: 0,
+            rows: 5,
+            maximumRowsPerSegment: 2);
+
+        Assert.Equal(3, chunks.Count);
+        Assert.Equal(oneShot.InputCount,
+            chunks.Sum(chunk => chunk.InputCount));
+        Assert.Equal(oneShot.ResidualPixels,
+            chunks[^1].ResidualPixels,
+            precision: 6);
+        Assert.Equal(100,
+            YasPixelScrollPlanner.ArtifactSegmentCooldownMilliseconds);
+    }
+
+    [Fact]
     public void YasRulerFindsTheCumulativePixelShift()
     {
         var before = Enumerable.Range(0, 40)
@@ -161,7 +196,8 @@ public class ArtifactYasScrollTests
         Assert.Equal(7, YasPixelScrollPlanner.FindRulerShift(
             before, after, maximumShift: 12));
         Assert.Equal(20, YasPixelScrollPlanner.FirstPageInputIntervalMilliseconds);
-        Assert.Equal(2, YasPixelScrollPlanner.FastInputIntervalMilliseconds);
+        Assert.Equal(8, YasPixelScrollPlanner.FastInputIntervalMilliseconds);
+        Assert.Equal(180, YasPixelScrollPlanner.SegmentCooldownMilliseconds);
     }
 
     [Fact]
@@ -198,7 +234,20 @@ public class ArtifactYasScrollTests
                 CancellationToken.None);
         }
 
-        Assert.InRange(timer.ElapsedMilliseconds, 35, 250);
+        Assert.InRange(timer.ElapsedMilliseconds, 140, 600);
+    }
+
+    [Fact]
+    public void ScrollSettleRequiresThreeConsecutiveStableSamples()
+    {
+        var tracker = new YasScrollSettleTracker();
+
+        Assert.False(tracker.Observe(true));
+        Assert.False(tracker.Observe(true));
+        Assert.False(tracker.Observe(false));
+        Assert.False(tracker.Observe(true));
+        Assert.False(tracker.Observe(true));
+        Assert.True(tracker.Observe(true));
     }
 
     [Fact]
