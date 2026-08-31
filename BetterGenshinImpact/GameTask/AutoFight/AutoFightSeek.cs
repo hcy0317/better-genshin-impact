@@ -126,11 +126,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var cameraOffset = AutoFightSeek.GetVisibleEnemyCameraOffset(visual, imageWidth);
             var verticalCameraOffset = AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual, imageHeight);
             logger.LogInformation(
-                "检测到远距离敌人血条: 位置=({X},{Y})，尺寸={Width}x{Height}，转向=({CameraOffset},{VerticalCameraOffset})",
+                "检测到远距离敌人血条: 位置=({X},{Y})，尺寸={Width}x{Height}，仅高度低于 {CloseHeight}px 才接近，转向=({CameraOffset},{VerticalCameraOffset})",
                 visual.X,
                 visual.Y,
                 visual.Width,
                 visual.Height,
+                AutoFightSeek.GetVisibleEnemyCloseHeightThreshold(imageHeight),
                 cameraOffset,
                 verticalCameraOffset);
 
@@ -438,6 +439,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private const int FixedTopHealthMaxAdvanceCount = 6;
         private const int IndicatorReacquireDelayMilliseconds = 120;
         private const int MaxIndicatorTurnFeedbackSteps = 8;
+        private const int VisibleEnemyCloseHealthBarHeightAt1080 = 6;
         // 16 个从本机实战截图裁出的完整菱形箭头按 22.5° 覆盖一周；只接受强轮廓匹配，
         // 再叠加粉红色占比、屏幕环带和跨帧复核，避免红叶与 HUD 图标误报。
         private const double DirectionIndicatorFeatureThreshold = 0.14;
@@ -1053,11 +1055,18 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         {
             // 红色填充宽度同时受剩余血量影响，不能作为距离尺；
             // 普通悬浮血条随目标接近而变厚，使用高度判断是否已进入有效战斗距离。
-            var closeHeightThreshold = Math.Clamp(
-                (int)Math.Round(imageHeight / 108d, MidpointRounding.AwayFromZero),
-                4,
-                12);
+            var closeHeightThreshold = GetVisibleEnemyCloseHeightThreshold(imageHeight);
             return healthBar.Height < closeHeightThreshold;
+        }
+
+        internal static int GetVisibleEnemyCloseHeightThreshold(int imageHeight)
+        {
+            return Math.Clamp(
+                (int)Math.Round(
+                    imageHeight / 1080d * VisibleEnemyCloseHealthBarHeightAt1080,
+                    MidpointRounding.AwayFromZero),
+                2,
+                16);
         }
 
         internal static bool IsVisibleHealthTargetConsistent(
@@ -1141,10 +1150,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             EnemySeekVisual healthBar,
             int imageHeight)
         {
-            var closeHeightThreshold = Math.Clamp(
-                (int)Math.Round(imageHeight / 108d, MidpointRounding.AwayFromZero),
-                4,
-                12);
+            var closeHeightThreshold = GetVisibleEnemyCloseHeightThreshold(imageHeight);
             var distanceRatio = Math.Clamp(
                 (closeHeightThreshold - healthBar.Height)
                 / (double)Math.Max(1, closeHeightThreshold),

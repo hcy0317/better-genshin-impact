@@ -181,7 +181,7 @@ public class CombatScriptResourceTests
     public void SelectSeekDecision_ThinHealthBarMustApproachEvenWhenRedFillIsWide()
     {
         var decision = AutoFightSeek.SelectSeekDecision(
-            [new EnemySeekVisual(590, 300, 320, 5, 1600)],
+            [new EnemySeekVisual(590, 300, 320, 4, 1280)],
             imageWidth: 1500,
             imageHeight: 900);
 
@@ -207,12 +207,15 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
-    [InlineData(648, 5, true)]
-    [InlineData(648, 6, false)]
-    [InlineData(720, 6, true)]
-    [InlineData(720, 7, false)]
-    [InlineData(1080, 9, true)]
-    [InlineData(1080, 10, false)]
+    [InlineData(648, 5, false)]
+    [InlineData(648, 3, true)]
+    [InlineData(648, 4, false)]
+    [InlineData(720, 3, true)]
+    [InlineData(720, 4, false)]
+    [InlineData(1080, 5, true)]
+    [InlineData(1080, 6, false)]
+    [InlineData(2160, 11, true)]
+    [InlineData(2160, 12, false)]
     public void ShouldApproachVisibleEnemy_CloseHeightScalesWithResolution(
         int imageHeight,
         int healthBarHeight,
@@ -270,7 +273,7 @@ public class CombatScriptResourceTests
     {
         var decision = AutoFightSeek.SelectSeekDecision(
             [
-                new EnemySeekVisual(590, 300, 320, 5, 1600),
+                new EnemySeekVisual(590, 300, 320, 4, 1280),
                 new EnemySeekVisual(12, 430, 24, 20, 260, -90)
             ],
             imageWidth: 1500,
@@ -325,7 +328,7 @@ public class CombatScriptResourceTests
     {
         var decision = AutoFightSeek.SelectSeekDecision(
             [
-                new EnemySeekVisual(720, 300, 60, 5, 300),
+                new EnemySeekVisual(720, 300, 60, 4, 240),
                 new EnemySeekVisual(12, 430, 24, 20, 260, -145),
                 new EnemySeekVisual(1460, 430, 24, 20, 260, 92)
             ],
@@ -1178,8 +1181,8 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
-    [InlineData(720, 300, 60, 5, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
-    [InlineData(80, 300, 180, 5, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
+    [InlineData(720, 300, 60, 4, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
+    [InlineData(80, 300, 180, 4, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
     [InlineData(720, 40, 180, 5, (int)AutoFightSeekAction.ApproachFixedTopHealthTarget)]
     public void SelectSeekDecision_DistantOrOffCenterHealthBarMustDriveApproach(
         int x,
@@ -1221,10 +1224,10 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
-    [InlineData(10, 250)]
-    [InlineData(9, 275)]
-    [InlineData(5, 375)]
-    [InlineData(1, 475)]
+    [InlineData(6, 250)]
+    [InlineData(5, 292)]
+    [InlineData(3, 375)]
+    [InlineData(1, 458)]
     public void VisibleEnemyApproach_UsesShortDistanceSensitivePulses(
         int healthBarHeight,
         int expectedMilliseconds)
