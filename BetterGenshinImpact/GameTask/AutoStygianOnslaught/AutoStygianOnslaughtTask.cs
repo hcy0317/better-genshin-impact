@@ -975,11 +975,21 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
                 AutoFightTask.FightStatusFlag = true;
                 while (!cts.Token.IsCancellationRequested)
                 {
+                    var strategyBlockSucceeded = true;
                     for (var i = 0; i < combatCommands.Count; i++)
                     {
                         var command = combatCommands[i];
                         var lastCommand = i == 0 ? command : combatCommands[i - 1];
-                        command.Execute(combatScenes, lastCommand);
+                        if (command.Execute(combatScenes, lastCommand)) continue;
+                        Logger.LogWarning(
+                            "幽境危战角色 {Avatar} 未确认切换成功，后推当前策略块",
+                            command.Name);
+                        strategyBlockSucceeded = false;
+                        break;
+                    }
+                    if (!strategyBlockSucceeded)
+                    {
+                        Sleep(250, cts.Token);
                     }
                 }
             }

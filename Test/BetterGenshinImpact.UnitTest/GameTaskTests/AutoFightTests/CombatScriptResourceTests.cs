@@ -280,25 +280,26 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void SelectSeekDecision_MultipleArrowsMustChooseTheSmallestTurnAndBoundOneStep()
+    public void SelectSeekDecision_MultipleArrowsMustChooseTheSmallestScreenTurn()
     {
         var decision = AutoFightSeek.SelectSeekDecision(
             [
-                new EnemySeekVisual(12, 430, 24, 20, 260, -145),
-                new EnemySeekVisual(744, 24, 24, 20, 260, 24),
-                new EnemySeekVisual(1460, 430, 24, 20, 260, 92)
+                new EnemySeekVisual(12, 430, 24, 20, 260, 5),
+                new EnemySeekVisual(744, 24, 24, 20, 260, 150),
+                new EnemySeekVisual(1460, 430, 24, 20, 260, -3)
             ],
             imageWidth: 1500,
             imageHeight: 900);
 
         Assert.Equal(AutoFightSeekAction.Approach, decision.Action);
-        Assert.Equal(24, decision.Visual!.Value.IndicatorBearingDegrees);
+        Assert.Equal(744, decision.Visual!.Value.X);
+        Assert.Equal(150, decision.Visual.Value.IndicatorBearingDegrees);
         Assert.Equal(3, decision.SignalCount);
         Assert.InRange(Math.Abs(AutoFightSeek.GetIndicatorCameraOffset(
             decision.Direction,
             decision.Visual.Value,
             1500,
-            900)), 1, 640);
+            900)), 0, 640);
     }
 
     [Fact]
@@ -344,7 +345,7 @@ public class CombatScriptResourceTests
 
         var steps = AutoFightSeek.GetIndicatorCameraSteps(visual, 1500, 900);
 
-        Assert.Equal((int)Math.Round(-145d / 180d * 1920), steps.Sum());
+        Assert.InRange(steps.Sum(), -960, -940);
         Assert.All(steps, step => Assert.InRange(Math.Abs(step), 1, 640));
     }
 
@@ -667,7 +668,7 @@ public class CombatScriptResourceTests
             nearCenter, jumpsFartherRight, 1920, 1080));
         Assert.False(AutoFightSeek.IsVisibleHealthTargetConsistent(
             farRight, crossesTheScreen, 1920, 1080));
-        Assert.True(AutoFightSeek.IsVisibleHealthTargetConsistent(
+        Assert.False(AutoFightSeek.IsVisibleHealthTargetConsistent(
             farRight,
             crossesTheScreen,
             1920,
@@ -738,6 +739,34 @@ public class CombatScriptResourceTests
             imageHeight: 900);
 
         Assert.InRange(bearing, expectedDegrees - 2, expectedDegrees + 2);
+    }
+
+    [Theory]
+    [InlineData(1433, 373, 28, 29, -68.6, 60, 85)]
+    [InlineData(75, 14, 24, 24, 127.9, -75, -45)]
+    [InlineData(859, 83, 37, 28, 90.4, -20, 0)]
+    [InlineData(740, 893, 34, 24, 96.5, -170, -135)]
+    public void IndicatorBearing_MustIgnoreUnstableContourOrientationFromRuntimeLogs(
+        int x,
+        int y,
+        int width,
+        int height,
+        double contourOrientation,
+        double minimumExpectedBearing,
+        double maximumExpectedBearing)
+    {
+        var bearing = AutoFightSeek.GetIndicatorBearingDegrees(
+            new EnemySeekVisual(
+                x,
+                y,
+                width,
+                height,
+                width * height,
+                contourOrientation),
+            imageWidth: 1920,
+            imageHeight: 1080);
+
+        Assert.InRange(bearing, minimumExpectedBearing, maximumExpectedBearing);
     }
 
     [Fact]
@@ -937,6 +966,117 @@ public class CombatScriptResourceTests
 
         Assert.True(AutoFightSeek.GetVisibleEnemyCameraOffset(healthBar, 1920) < 0);
         Assert.True(AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(healthBar, 1080) < 0);
+    }
+
+    [Theory]
+    [InlineData(627, 18, -320)]
+    [InlineData(1380, 22, 320)]
+    [InlineData(100, 60, -320)]
+    [InlineData(1740, 60, 320)]
+    public void VisibleEnemyCameraOffset_MustUseABoundedFeedbackStep(
+        int x,
+        int width,
+        int expectedOffset)
+    {
+        var healthBar = new EnemySeekVisual(x, 400, width, 6, width * 6);
+
+        Assert.Equal(expectedOffset, AutoFightSeek.GetVisibleEnemyCameraOffset(healthBar, 1920));
+    }
+
+    [Theory]
+    [InlineData(10, 250)]
+    [InlineData(9, 275)]
+    [InlineData(5, 375)]
+    [InlineData(1, 475)]
+    public void VisibleEnemyApproach_UsesShortDistanceSensitivePulses(
+        int healthBarHeight,
+        int expectedMilliseconds)
+    {
+        var healthBar = new EnemySeekVisual(
+            900, 400, 80, healthBarHeight, 80 * healthBarHeight);
+
+        Assert.Equal(
+            expectedMilliseconds,
+            AutoFightSeek.GetVisibleEnemyApproachDurationMilliseconds(
+                healthBar,
+                imageHeight: 1080));
+    }
+
+    [Theory]
+    [InlineData(945, 810, 19, 25, -320, -320)]
+    [InlineData(1399, 311, 29, 27, 320, 320)]
+    [InlineData(1100, 99, 36, 27, 200, 230)]
+    public void IndicatorFeedbackStep_MustStayBoundedBeforeReacquisition(
+        int x,
+        int y,
+        int width,
+        int height,
+        int minimumExpectedOffset,
+        int maximumExpectedOffset)
+    {
+        var visual = new EnemySeekVisual(
+            x,
+            y,
+            width,
+            height,
+            width * height);
+
+        Assert.InRange(
+            AutoFightSeek.GetIndicatorCameraOffset(
+                EnemyIndicatorDirection.Forward,
+                visual,
+                imageWidth: 1920,
+                imageHeight: 1080),
+            minimumExpectedOffset,
+            maximumExpectedOffset);
+    }
+
+    [Fact]
+    public void IndicatorFeedback_MustRejectAJumpToAnotherArrow()
+    {
+        var previous = new EnemySeekVisual(1399, 311, 29, 27, 500);
+        var sameTargetAfterTurn = new EnemySeekVisual(1160, 200, 29, 27, 500);
+        var differentFrontTarget = new EnemySeekVisual(950, 100, 29, 27, 500);
+        var differentTarget = new EnemySeekVisual(400, 800, 29, 27, 500);
+
+        Assert.True(AutoFightSeek.IsIndicatorFeedbackContinuous(
+            previous,
+            sameTargetAfterTurn,
+            cameraHorizontalOffset: 320,
+            imageWidth: 1920,
+            imageHeight: 1080));
+        Assert.False(AutoFightSeek.IsIndicatorFeedbackContinuous(
+            previous,
+            differentFrontTarget,
+            cameraHorizontalOffset: 320,
+            imageWidth: 1920,
+            imageHeight: 1080));
+        Assert.False(AutoFightSeek.IsIndicatorFeedbackContinuous(
+            previous,
+            differentTarget,
+            cameraHorizontalOffset: 320,
+            imageWidth: 1920,
+            imageHeight: 1080));
+    }
+
+    [Fact]
+    public void IndicatorTurn_MustReacquireAfterEveryBoundedCameraStep()
+    {
+        var source = File.ReadAllText(SourcePath(
+            "BetterGenshinImpact", "GameTask", "AutoFight", "AutoFightSeek.cs"));
+
+        Assert.Contains("MaxIndicatorTurnFeedbackSteps", source,
+            StringComparison.Ordinal);
+        Assert.Contains("MoveForwardTask.TurnTowardIndicatorAsync", source,
+            StringComparison.Ordinal);
+        Assert.Contains("TurnTowardIndicatorWithFeedbackAsync", source,
+            StringComparison.Ordinal);
+        Assert.Contains("ConfirmDirectionIndicatorAsync", source,
+            StringComparison.Ordinal);
+        Assert.Contains("本轮返回扫描且不执行盲目前进", source,
+            StringComparison.Ordinal);
+        Assert.Contains("血条仍有横向误差，本轮只转向不前进", source,
+            StringComparison.Ordinal);
     }
 
     [Fact]

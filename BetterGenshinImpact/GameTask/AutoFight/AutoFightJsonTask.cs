@@ -364,7 +364,13 @@ public class AutoFightJsonTask : ISoloTask
                                 var avatar = combatScenes.SelectAvatar(action.Character);
                                 if (avatar == null) continue;
 
-                                avatar.Switch();
+                                if (!avatar.TrySwitch(10))
+                                {
+                                    Logger.LogWarning(
+                                        "角色 {Avatar} 未确认切换成功，后推本轮 JSON 策略剩余动作",
+                                        action.Character);
+                                    break;
+                                }
                                 _currentAvatarName = action.Character;
                             }
 
@@ -394,7 +400,18 @@ public class AutoFightJsonTask : ISoloTask
                             }
 
                             // 执行动作
-                            await ExecuteAction(combatScenes, action, RunPendingFinishCheckAsync);
+                            var actionExecuted = await ExecuteAction(
+                                combatScenes,
+                                action,
+                                RunPendingFinishCheckAsync);
+                            if (!actionExecuted)
+                            {
+                                Logger.LogWarning(
+                                    "自动战斗动作 {Name} 未确认执行成功，后推时间线并等待下一轮重试",
+                                    action.Name);
+                                await Delay(250, _ct);
+                                break;
+                            }
 
                             if (_fightEndFlag)
                             {
@@ -402,6 +419,7 @@ public class AutoFightJsonTask : ISoloTask
                             }
 
                             // 确保E技能释放成功
+                            var actionConfirmed = true;
                             if (action.EnsureCast)
                             {
                                 var characterName = string.IsNullOrEmpty(action.Character)
@@ -414,26 +432,47 @@ public class AutoFightJsonTask : ISoloTask
                                     try
                                     {
                                         var retry = 5;
-                                        while (!(await AutoFightSkill.AvatarSkillAsync(Logger, avatar, false, 1, _ct, imageAfterAction)) && retry > 0)
+                                        var cooldownConfirmed = await AutoFightSkill.AvatarSkillAsync(
+                                            Logger, avatar, false, 1, _ct, imageAfterAction);
+                                        while (!cooldownConfirmed && retry > 0)
                                         {
                                             Logger.LogWarning("{Name} 未检测到技能冷却，重新执行", action.Name);
                                             Simulation.ReleaseAllKey();
                                             Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
                                             Simulation.SendInput.SimulateAction(GIActions.Drop);
                                             await Delay(200, _ct);
-                                            await ExecuteAction(combatScenes, action, RunPendingFinishCheckAsync);
+                                            if (!await ExecuteAction(
+                                                    combatScenes,
+                                                    action,
+                                                    RunPendingFinishCheckAsync))
+                                            {
+                                                actionConfirmed = false;
+                                                break;
+                                            }
                                             var previousImage = imageAfterAction;
                                             imageAfterAction = CaptureToRectArea();
                                             previousImage.Dispose();
                                             await Task.Delay(30, _ct);
                                             retry--;
+                                            cooldownConfirmed = await AutoFightSkill.AvatarSkillAsync(
+                                                Logger, avatar, false, 1, _ct, imageAfterAction);
                                         }
+                                        actionConfirmed &= cooldownConfirmed;
                                     }
                                     finally
                                     {
                                         imageAfterAction.Dispose();
                                     }
                                 }
+                            }
+
+                            if (!actionConfirmed)
+                            {
+                                Logger.LogWarning(
+                                    "自动战斗动作 {Name} 未确认技能进入冷却，后推时间线并等待下一轮重试",
+                                    action.Name);
+                                await Delay(250, _ct);
+                                break;
                             }
 
                             evaluator.UpdateLastExecTime(action.Index, action.Name);
@@ -604,7 +643,7 @@ public class AutoFightJsonTask : ISoloTask
     }
 
     /// <summary>执行单个 JSON 动作节点</summary>
-    private async Task ExecuteAction(
+    private async Task<bool> ExecuteAction(
         CombatScenes combatScenes,
         JsonAction action,
         Func<Task<bool>> runPendingFinishCheckAsync)
@@ -623,9 +662,15 @@ public class AutoFightJsonTask : ISoloTask
             CombatCommand? lastSubCmd = null;
             foreach (var cmd in commands)
             {
-                if (_ct.IsCancellationRequested) break;
+                if (_ct.IsCancellationRequested) return false;
 
-                cmd.Execute(combatScenes, lastSubCmd);
+                if (!cmd.Execute(combatScenes, lastSubCmd))
+                {
+                    Logger.LogWarning(
+                        "自动战斗动作 {Name} 的角色切换未确认成功，停止剩余子命令",
+                        action.Name);
+                    return false;
+                }
                 lastSubCmd = cmd;
 
                 if (_fightEndFlag) break;
@@ -644,10 +689,16 @@ public class AutoFightJsonTask : ISoloTask
 
             // 更新当前角色名，供后续无指定角色动作使用
             _currentAvatarName = character;
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception e)
         {
             Logger.LogError("自动战斗：{Name} 执行失败：{Msg}", action.Name, e.Message);
+            throw;
         }
         finally
         {

@@ -23,4 +23,28 @@ internal static class GuardianSkillSwitchPolicy
     {
         return !guardianSkillHandled && shouldSwitch;
     }
+
+    internal static bool ShouldRetryBlock(
+        bool guardianSkillRequired,
+        bool guardianSkillHandled)
+    {
+        return guardianSkillRequired && !guardianSkillHandled;
+    }
+
+    internal static bool IsSkillCastConfirmed(
+        bool baselineCooldownVisible,
+        bool cooldownVisibleAfterInput,
+        bool guardianStillActive)
+    {
+        return !baselineCooldownVisible
+            && cooldownVisibleAfterInput
+            && guardianStillActive;
+    }
+
+    internal static bool CanReuseConfirmedCooldown(
+        bool skillReady,
+        bool hasConfirmedSkillCooldown)
+    {
+        return !skillReady && hasConfirmedSkillCooldown;
+    }
 }

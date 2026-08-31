@@ -15,3 +15,23 @@ public class AvatarActiveCheckContext
     /// </summary>
     public int TotalCheckFailedCount { get; set; } = 0;
 }
+
+internal static class AvatarSwitchConfirmationPolicy
+{
+    private const int RequiredConsecutiveTargetFrames = 2;
+
+    internal static int Observe(
+        int consecutiveTargetFrames,
+        int observedIndex,
+        int expectedIndex)
+    {
+        return observedIndex == expectedIndex
+            ? consecutiveTargetFrames + 1
+            : 0;
+    }
+
+    internal static bool IsConfirmed(int consecutiveTargetFrames)
+    {
+        return consecutiveTargetFrames >= RequiredConsecutiveTargetFrames;
+    }
+}

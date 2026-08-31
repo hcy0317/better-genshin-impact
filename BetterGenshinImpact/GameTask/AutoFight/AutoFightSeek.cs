@@ -1,5 +1,6 @@
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
+using BetterGenshinImpact.Core.Config;
 using Microsoft.Extensions.Logging;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,6 +13,7 @@ using System;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using System.Linq;
 using System.Collections.Generic;
+using System.IO;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -34,7 +36,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return await AutoFightSeek.DetectAndApproachEnemyAsync(logger, ct);
         }
 
-        internal static async Task TurnTowardIndicatorAsync(
+        internal static async Task<(int horizontal, int vertical)> TurnTowardIndicatorAsync(
             EnemySeekDecision decision,
             int imageWidth,
             int imageHeight,
@@ -43,38 +45,36 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         {
             if (decision.Action != AutoFightSeekAction.Approach || decision.Visual is not { } visual)
             {
-                return;
+                return (0, 0);
             }
 
             var bearing = AutoFightSeek.GetIndicatorBearingDegrees(visual, imageWidth, imageHeight);
-            var cameraSteps = AutoFightSeek.GetIndicatorCameraSteps(visual, imageWidth, imageHeight);
+            var cameraOffset = AutoFightSeek.GetIndicatorCameraOffset(
+                decision.Direction,
+                visual,
+                imageWidth,
+                imageHeight);
             var verticalCameraOffset = AutoFightSeek.GetIndicatorCameraVerticalOffset(visual, imageHeight);
             logger.LogInformation(
-                "红色敌人方位小三角: 候选={SignalCount}，首次只选当前目标；位置=({X},{Y})，尺寸={Width}x{Height}，轮廓朝向角={Bearing:F1}°，方向={Direction}，分成 {CameraStepCount} 段完成总转向=({CameraOffset},{VerticalCameraOffset})",
+                "红色敌人方位小三角反馈转向: 候选={SignalCount}，位置=({X},{Y})，尺寸={Width}x{Height}，屏幕方位角={Bearing:F1}°，轮廓主轴={ContourOrientation:F1}°，方向={Direction}，本步转向=({CameraOffset},{VerticalCameraOffset})",
                 decision.SignalCount,
                 visual.X,
                 visual.Y,
                 visual.Width,
                 visual.Height,
                 bearing,
+                visual.IndicatorBearingDegrees,
                 decision.Direction,
-                cameraSteps.Count,
-                cameraSteps.Sum(),
+                cameraOffset,
                 verticalCameraOffset);
 
-            if (cameraSteps.Count == 0 && verticalCameraOffset != 0)
+            if (cameraOffset != 0 || verticalCameraOffset != 0)
             {
-                Simulation.SendInput.Mouse.MoveMouseBy(0, verticalCameraOffset);
+                Simulation.SendInput.Mouse.MoveMouseBy(cameraOffset, verticalCameraOffset);
                 await Task.Delay(180, ct);
             }
 
-            for (var i = 0; i < cameraSteps.Count; i++)
-            {
-                Simulation.SendInput.Mouse.MoveMouseBy(
-                    cameraSteps[i],
-                    i == 0 ? verticalCameraOffset : 0);
-                await Task.Delay(180, ct);
-            }
+            return (cameraOffset, verticalCameraOffset);
         }
 
         internal static async Task AdvanceLockedRouteAsync(
@@ -126,7 +126,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var cameraOffset = AutoFightSeek.GetVisibleEnemyCameraOffset(visual, imageWidth);
             var verticalCameraOffset = AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual, imageHeight);
             logger.LogInformation(
-                "检测到远距离敌人血条: 位置=({X},{Y})，尺寸={Width}x{Height}，转向=({CameraOffset},{VerticalCameraOffset})，短距接近",
+                "检测到远距离敌人血条: 位置=({X},{Y})，尺寸={Width}x{Height}，转向=({CameraOffset},{VerticalCameraOffset})",
                 visual.X,
                 visual.Y,
                 visual.Width,
@@ -140,10 +140,36 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 await Task.Delay(180, ct);
             }
 
-            await MoveWithKeysAsync(ct, GIActions.MoveForward);
+            if (cameraOffset != 0)
+            {
+                logger.LogInformation(
+                    "血条仍有横向误差，本轮只转向不前进，下一帧重新定位");
+                return;
+            }
+
+            var approachDuration = AutoFightSeek.GetVisibleEnemyApproachDurationMilliseconds(
+                visual,
+                imageHeight);
+            logger.LogInformation(
+                "血条横向已对准，执行 {Duration}ms 短脉冲接近后重新截图",
+                approachDuration);
+            await MoveWithKeysAsync(
+                ct,
+                approachDuration,
+                GIActions.MoveForward);
         }
 
-        private static async Task MoveWithKeysAsync(CancellationToken ct, params GIActions[] actions)
+        private static Task MoveWithKeysAsync(
+            CancellationToken ct,
+            params GIActions[] actions)
+        {
+            return MoveWithKeysAsync(ct, 1000, actions);
+        }
+
+        private static async Task MoveWithKeysAsync(
+            CancellationToken ct,
+            int durationMilliseconds,
+            params GIActions[] actions)
         {
             var pressedActions = new List<GIActions>();
             try
@@ -154,7 +180,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     pressedActions.Add(action);
                 }
 
-                await Task.Delay(1000, ct);
+                await Task.Delay(durationMilliseconds, ct);
             }
             finally
             {
@@ -361,6 +387,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private static int _fixedTopHealthLowestWidth;
         private static long _fixedTopHealthLastProgressTicks;
         private static int _fixedTopHealthAdvanceCount;
+        private static int _seekSelectionScreenshotSequence;
 
         private static bool IsIndicatorRouteLocked => Volatile.Read(ref _indicatorRouteLocked) == 1;
 
@@ -401,6 +428,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private const int FixedTopHealthNoProgressSeconds = 10;
         private const int FixedTopHealthMaxAdvanceCount = 6;
         private const int IndicatorReacquireDelayMilliseconds = 120;
+        private const int MaxIndicatorTurnFeedbackSteps = 8;
         // 6 个实拍轮廓在任意旋转后的 I1 距离保留少量抗锯齿余量；
         // 尺寸门另按 1920x1080 的真实 UI 尺寸过滤小型 HUD 鬼影。
         private const double DirectionIndicatorFeatureThreshold = 0.27;
@@ -409,7 +437,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private const double DirectionIndicatorMinHollowRatio = 0.002;
         private const double DirectionIndicatorMaxHollowRatio = 0.25;
         private const int HalfTurnMouseOffset = 1920;
-        private const int MaxIndicatorCameraStep = 640;
+        private const int MaxIndicatorCameraStep = 320;
+        private const int MaxVisibleEnemyCameraStep = 320;
 
         private static readonly string[] DirectionIndicatorTemplateNames =
         {
@@ -861,11 +890,6 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight)
         {
-            if (visual.IndicatorBearingDegrees.HasValue)
-            {
-                return visual.IndicatorBearingDegrees.Value;
-            }
-
             var deltaX = visual.CenterX - imageWidth / 2d;
             var deltaY = visual.CenterY - imageHeight / 2d;
             return Math.Atan2(deltaX, -deltaY) * 180d / Math.PI;
@@ -889,6 +913,45 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                    && bearingDelta <= 25
                    && widthRatio <= 0.35
                    && heightRatio <= 0.35;
+        }
+
+        internal static bool IsIndicatorFeedbackContinuous(
+            EnemySeekVisual previous,
+            EnemySeekVisual current,
+            int cameraHorizontalOffset,
+            int imageWidth,
+            int imageHeight)
+        {
+            var previousBearing = GetIndicatorBearingDegrees(
+                previous, imageWidth, imageHeight);
+            var currentBearing = GetIndicatorBearingDegrees(
+                current, imageWidth, imageHeight);
+            var expectedBearing = NormalizeBearingDegrees(
+                previousBearing
+                - cameraHorizontalOffset / (double)HalfTurnMouseOffset * 180d);
+            var expectedError = CircularBearingDeltaDegrees(
+                expectedBearing,
+                currentBearing);
+            var widthRatio = Math.Abs(previous.Width - current.Width)
+                             / (double)Math.Max(previous.Width, current.Width);
+            var heightRatio = Math.Abs(previous.Height - current.Height)
+                              / (double)Math.Max(previous.Height, current.Height);
+            var stillConverging = Math.Abs(currentBearing)
+                                  <= Math.Abs(previousBearing) + 12;
+            return expectedError <= 25
+                   && widthRatio <= 0.35
+                   && heightRatio <= 0.35
+                   && stillConverging;
+        }
+
+        private static double NormalizeBearingDegrees(double bearing)
+        {
+            return (bearing + 540d) % 360d - 180d;
+        }
+
+        private static double CircularBearingDeltaDegrees(double left, double right)
+        {
+            return Math.Abs(NormalizeBearingDegrees(left - right));
         }
 
         internal static int GetNextRotationCount(int currentRotationCount, bool? seekResult)
@@ -990,7 +1053,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var deadZone = Math.Max(80, imageWidth / 12);
             return Math.Abs(delta) <= deadZone
                 ? 0
-                : Math.Clamp(delta * 2, -960, 960);
+                : Math.Clamp(delta, -MaxVisibleEnemyCameraStep, MaxVisibleEnemyCameraStep);
         }
 
         internal static int GetVisibleEnemyCameraVerticalOffset(EnemySeekVisual healthBar, int imageHeight)
@@ -1000,6 +1063,25 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return Math.Abs(delta) <= 80
                 ? 0
                 : Math.Clamp(delta, -160, 160);
+        }
+
+        internal static int GetVisibleEnemyApproachDurationMilliseconds(
+            EnemySeekVisual healthBar,
+            int imageHeight)
+        {
+            var closeHeightThreshold = Math.Clamp(
+                (int)Math.Round(imageHeight / 108d, MidpointRounding.AwayFromZero),
+                4,
+                12);
+            var distanceRatio = Math.Clamp(
+                (closeHeightThreshold - healthBar.Height)
+                / (double)Math.Max(1, closeHeightThreshold),
+                0,
+                1);
+            return Math.Clamp(
+                (int)Math.Round(250 + distanceRatio * 250),
+                250,
+                500);
         }
 
         private static EnemyIndicatorDirection GetVisibleEnemyDirection(
@@ -1149,11 +1231,13 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
             if (indicatorOnly)
             {
-                return SelectDirectionIndicatorDecision(
+                var indicatorDecision = SelectDirectionIndicatorDecision(
                     visuals,
                     imageCrop.Width,
                     imageCrop.Height,
                     indicatorRouteLocked: false);
+                SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, indicatorDecision);
+                return indicatorDecision;
             }
 
             var fixedTopHealthBar = visuals
@@ -1168,7 +1252,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 .FirstOrDefault();
             var fixedTopState = ObserveFixedTopHealthPresence(fixedTopHealthBar);
 
-            return VisibleHealthApproach.Evaluate(SelectSeekDecision(
+            var decision = VisibleHealthApproach.Evaluate(SelectSeekDecision(
                 visuals,
                 imageCrop.Width,
                 imageCrop.Height,
@@ -1178,6 +1262,81 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 fixedTopState.exhausted),
                 imageCrop.Width,
                 imageCrop.Height);
+            SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, decision);
+            return decision;
+        }
+
+        private static void SaveSeekSelectionScreenshot(
+            Mat source,
+            IReadOnlyCollection<EnemySeekVisual> visuals,
+            EnemySeekDecision decision)
+        {
+            if (decision.Action is not (AutoFightSeekAction.Approach
+                or AutoFightSeekAction.ApproachVisibleEnemy
+                or AutoFightSeekAction.ApproachFixedTopHealthTarget)
+                || decision.Visual is not { } selected)
+            {
+                return;
+            }
+
+            try
+            {
+                var directory = Global.Absolute(@"log\screenshot\auto-fight-seek");
+                Directory.CreateDirectory(directory);
+                var sequence = Interlocked.Increment(ref _seekSelectionScreenshotSequence);
+                var path = Path.Combine(
+                    directory,
+                    $"selection-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{sequence:D6}-{decision.Action}.jpg");
+
+                using var annotated = source.Clone();
+                var frameCenter = new Point(annotated.Width / 2, annotated.Height / 2);
+                Cv2.Line(
+                    annotated,
+                    new Point(frameCenter.X - 16, frameCenter.Y),
+                    new Point(frameCenter.X + 16, frameCenter.Y),
+                    new Scalar(255, 255, 0),
+                    2);
+                Cv2.Line(
+                    annotated,
+                    new Point(frameCenter.X, frameCenter.Y - 16),
+                    new Point(frameCenter.X, frameCenter.Y + 16),
+                    new Scalar(255, 255, 0),
+                    2);
+
+                foreach (var visual in visuals)
+                {
+                    var isSelected = visual.Equals(selected);
+                    Cv2.Rectangle(
+                        annotated,
+                        new Rect(visual.X, visual.Y, visual.Width, visual.Height),
+                        isSelected ? new Scalar(0, 255, 0) : new Scalar(0, 255, 255),
+                        isSelected ? 3 : 1);
+                }
+
+                Cv2.Line(
+                    annotated,
+                    frameCenter,
+                    new Point(selected.CenterX, selected.CenterY),
+                    new Scalar(0, 255, 0),
+                    2);
+                Cv2.PutText(
+                    annotated,
+                    $"{decision.Action} bearing={GetIndicatorBearingDegrees(selected, annotated.Width, annotated.Height):F1}",
+                    new Point(16, 36),
+                    HersheyFonts.HersheySimplex,
+                    0.8,
+                    new Scalar(0, 255, 0),
+                    2);
+
+                if (Cv2.ImWrite(path, annotated))
+                {
+                    Logger.LogDebug("寻敌执行选择前截图: {Path}", path);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "保存寻敌执行选择前截图失败");
+            }
         }
 
         internal static EnemySeekVisual? ClassifySeekVisual(
@@ -1454,31 +1613,31 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var currentImageHeight = imageHeight;
             if (decision.Action == AutoFightSeekAction.Approach)
             {
-                LockIndicatorRoute();
                 logger.LogInformation(
-                    "首次箭头目标已锁定：候选 {SignalCount} 个，选取绝对转角最小的 {Bearing:F1}°；完成分段转身后执行固定 6 秒前进计划",
+                    "首次箭头目标已锁定：候选 {SignalCount} 个，初始屏幕方位角 {Bearing:F1}°；采用逐步转向并在每步后重新截图校正",
                     decision.SignalCount,
                     decision.Visual is { } visual
                         ? GetIndicatorBearingDegrees(visual, imageWidth, imageHeight)
                         : 0d);
-                if (decision.Visual is { } indicatorVisual)
-                {
-                    VisibleHealthApproach.RecordCameraMovement(
-                        GetIndicatorCameraSteps(
-                            indicatorVisual, imageWidth, imageHeight).Sum(),
-                        GetIndicatorCameraVerticalOffset(indicatorVisual, imageHeight));
-                }
-                await MoveForwardTask.TurnTowardIndicatorAsync(
+                var feedbackResult = await TurnTowardIndicatorWithFeedbackAsync(
                     decision,
                     imageWidth,
                     imageHeight,
-                    logger,
-                    ct);
-                currentDecision = CaptureSeekDecision(
                     bloodLower,
                     bloodHigher,
-                    out currentImageWidth,
-                    out currentImageHeight);
+                    logger,
+                    ct);
+                currentDecision = feedbackResult.decision;
+                currentImageWidth = feedbackResult.imageWidth;
+                currentImageHeight = feedbackResult.imageHeight;
+                if (currentDecision.Action == AutoFightSeekAction.ContinueLockedRoute)
+                {
+                    LockIndicatorRoute();
+                }
+                else
+                {
+                    UnlockIndicatorRoute();
+                }
             }
 
             if (currentDecision.Action == AutoFightSeekAction.KeepFighting)
@@ -1514,6 +1673,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     bloodHigher,
                     logger,
                     ct);
+            }
+
+            if (currentDecision.Action == AutoFightSeekAction.Scan)
+            {
+                UnlockIndicatorRoute();
+                logger.LogInformation(
+                    "箭头反馈转向未形成可靠锁定，本轮返回扫描且不执行盲目前进");
+                return false;
             }
 
             var completedLockedSteps = 0;
@@ -1582,6 +1749,129 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 "锁定路线已完成 6 秒前进且仍无血条；解除目标锁定，下一轮将重新选择绝对转角最小的箭头（本帧记录 {SignalCount} 个）",
                 currentDecision.SignalCount);
             return true;
+        }
+
+        private static async Task<(EnemySeekDecision decision, int imageWidth, int imageHeight)>
+            TurnTowardIndicatorWithFeedbackAsync(
+                EnemySeekDecision initialDecision,
+                int imageWidth,
+                int imageHeight,
+                Scalar bloodLower,
+                Scalar? bloodHigher,
+                ILogger logger,
+                CancellationToken ct)
+        {
+            var currentDecision = initialDecision;
+            var currentImageWidth = imageWidth;
+            var currentImageHeight = imageHeight;
+            var indicatorAligned = false;
+
+            for (var step = 0;
+                 step < MaxIndicatorTurnFeedbackSteps
+                 && currentDecision.Action == AutoFightSeekAction.Approach;
+                 step++)
+            {
+                if (currentDecision.Visual is not { } visual)
+                {
+                    break;
+                }
+
+                var bearing = GetIndicatorBearingDegrees(
+                    visual,
+                    currentImageWidth,
+                    currentImageHeight);
+                if (Math.Abs(bearing) < 8)
+                {
+                    logger.LogInformation(
+                        "箭头逐步转向已进入正前方死区：{Bearing:F1}°，停止继续横向转镜",
+                        bearing);
+                    indicatorAligned = true;
+                    break;
+                }
+
+                var previousVisual = visual;
+                var movement = await MoveForwardTask.TurnTowardIndicatorAsync(
+                    currentDecision,
+                    currentImageWidth,
+                    currentImageHeight,
+                    logger,
+                    ct);
+                VisibleHealthApproach.RecordCameraMovement(
+                    movement.horizontal,
+                    movement.vertical);
+
+                await Task.Delay(IndicatorReacquireDelayMilliseconds, ct);
+                var observedDecision = CaptureSeekDecision(
+                    bloodLower,
+                    bloodHigher,
+                    out var observedImageWidth,
+                    out var observedImageHeight);
+                currentDecision = observedDecision;
+                currentImageWidth = observedImageWidth;
+                currentImageHeight = observedImageHeight;
+                if (observedDecision.Action != AutoFightSeekAction.Approach)
+                {
+                    break;
+                }
+
+                var confirmation = await ConfirmDirectionIndicatorAsync(
+                    observedDecision,
+                    observedImageWidth,
+                    observedImageHeight,
+                    bloodLower,
+                    bloodHigher,
+                    logger,
+                    ct);
+                if (!confirmation.HasValue)
+                {
+                    logger.LogWarning(
+                        "箭头逐步转向后复核失败，解除目标并回到扫描，不执行锁定路线前进");
+                    currentDecision = new EnemySeekDecision(
+                        AutoFightSeekAction.Scan,
+                        EnemyIndicatorDirection.None);
+                    break;
+                }
+
+                if (confirmation.Value.decision.Visual is not { } confirmedVisual
+                    || !IsIndicatorFeedbackContinuous(
+                        previousVisual,
+                        confirmedVisual,
+                        movement.horizontal,
+                        currentImageWidth,
+                        currentImageHeight))
+                {
+                    logger.LogWarning(
+                        "箭头逐步转向检测到目标不连续，解除目标并回到扫描，避免切换到其他箭头");
+                    currentDecision = new EnemySeekDecision(
+                        AutoFightSeekAction.Scan,
+                        EnemyIndicatorDirection.None);
+                    break;
+                }
+
+                currentDecision = confirmation.Value.decision;
+                currentImageWidth = confirmation.Value.imageWidth;
+                currentImageHeight = confirmation.Value.imageHeight;
+            }
+
+            if (indicatorAligned)
+            {
+                currentDecision = new EnemySeekDecision(
+                    AutoFightSeekAction.ContinueLockedRoute,
+                    EnemyIndicatorDirection.None,
+                    null,
+                    currentDecision.SignalCount);
+            }
+            else if (currentDecision.Action == AutoFightSeekAction.Approach)
+            {
+                logger.LogWarning(
+                    "箭头逐步转向达到 {Steps} 步上限仍未对准，解除目标并回到扫描",
+                    MaxIndicatorTurnFeedbackSteps);
+                currentDecision = new EnemySeekDecision(
+                    AutoFightSeekAction.Scan,
+                    EnemyIndicatorDirection.None);
+            }
+
+            return (currentDecision, currentImageWidth, currentImageHeight);
         }
 
         private static async Task<(EnemySeekDecision decision, int imageWidth, int imageHeight)?>
@@ -1825,66 +2115,29 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             {
                 while (attempt < maxAttempts)
                 {
-                    if (guardianAvatar.TrySwitch(10))
+                    if (await TryUseGuardianSkillOnceAsync(
+                            guardianAvatar,
+                            guardianAvatarHold,
+                            guardianAvatarName,
+                            ct))
                     {
-                        guardianAvatar.ManualSkillCd = -1;
-                        if (await AvatarSkillAsync(Logger, guardianAvatar, false, 1, ct, assumeActive: true))
-                        {
-                            var cd1 = guardianAvatar.AfterUseSkill();
-                            if (cd1 > 0)
-                            {
-                                Logger.LogInformation("优先第 {text} 盾奶位 {GuardianAvatar} 战技Cd检测：{cd} 秒", guardianAvatarName,
-                                    guardianAvatar.Name, cd1);
-                                guardianAvatar.ManualSkillCd = -1;
-                                return true;
-                            }
-                        }
-            
-                        guardianAvatar.UseSkill(guardianAvatarHold);
-                        var imageAfterUseSkill = CaptureToRectArea();
-                        var retry = 50;
-                        try
-                        {
-                            while (!(await AvatarSkillAsync(Logger, guardianAvatar, false, 1, ct, imageAfterUseSkill, assumeActive: true)) && retry > 0)
-                            {
-                                Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
-                                //防止在纳塔飞天或爬墙
-                                Simulation.ReleaseAllKey();
-                                if (retry % 3 == 0)
-                                {
-                                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
-                                    Simulation.SendInput.SimulateAction(GIActions.Drop);
-                                }
-                                var previousImage = imageAfterUseSkill;
-                                imageAfterUseSkill = CaptureToRectArea();
-                                previousImage.Dispose();
-                                await Task.Delay(30, ct);
-                                // Logger.LogInformation("优先第333 {t}", retry);
-                                retry -= 1;
-                            }
-                        }
-                        finally
-                        {
-                            imageAfterUseSkill.Dispose();
-                        }
-                        
-                        if (retry > 0)
-                        {
-                            Logger.LogInformation("优先第 {text} 盾奶位 {GuardianAvatar} 释放战技：{t}",
-                                guardianAvatarName, guardianAvatar.Name,"成功");
-                            guardianAvatar.LastSkillTime = DateTime.UtcNow;
-                            guardianAvatar.ManualSkillCd = -1;
-                            return true;
-                        }
-                        
-                        Logger.LogInformation("优先第 {text} 盾奶位 {GuardianAvatar} 释放战技：失败重试 {attempt} 次",
-                            guardianAvatarName, guardianAvatar.Name, attempt + 1);
-                        guardianAvatar.ManualSkillCd = 0;
-                        guardianAvatar.UseSkill(guardianAvatarHold);
-                        //防止在纳塔飞天或
-                        Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
-                        Simulation.SendInput.SimulateAction(GIActions.Drop);
+                        Logger.LogInformation(
+                            "优先第 {Position} 盾奶位 {GuardianAvatar} 已确认切换成功且战技进入冷却",
+                            guardianAvatarName,
+                            guardianAvatar.Name);
+                        return true;
                     }
+
+                    Logger.LogWarning(
+                        "优先第 {Position} 盾奶位 {GuardianAvatar} 未确认战技释放，第 {Attempt}/{MaxAttempts} 次失败",
+                        guardianAvatarName,
+                        guardianAvatar.Name,
+                        attempt + 1,
+                        maxAttempts);
+                    Simulation.ReleaseAllKey();
+                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
+                    Simulation.SendInput.SimulateAction(GIActions.Drop);
+                    await Task.Delay(250, ct);
                     attempt++;
                 }
             }
@@ -1948,6 +2201,113 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                             }
                         }
                     }
+                }
+            }
+
+            return GuardianSkillSwitchPolicy.CanReuseConfirmedCooldown(
+                guardianAvatar.IsSkillReady(),
+                guardianAvatar.HasConfirmedSkillCooldown);
+        }
+
+        private static async Task<bool> TryUseGuardianSkillOnceAsync(
+            Avatar guardianAvatar,
+            bool hold,
+            string guardianAvatarName,
+            CancellationToken ct)
+        {
+            if (!guardianAvatar.TrySwitch(10))
+            {
+                Logger.LogWarning(
+                    "优先第 {Position} 盾奶位 {GuardianAvatar} 未确认切换成功，不发送战技按键",
+                    guardianAvatarName,
+                    guardianAvatar.Name);
+                return false;
+            }
+
+            using (var activeCapture = CaptureToRectArea())
+            {
+                if (!guardianAvatar.IsActive(activeCapture))
+                {
+                    Logger.LogWarning(
+                        "盾奶位 {GuardianAvatar} 切换后二次身份确认失败，不发送战技按键",
+                        guardianAvatar.Name);
+                    return false;
+                }
+
+                var baselineCd = guardianAvatar.ReadSkillCurrentCd(activeCapture);
+                var baselineCooldownVisible = baselineCd > 0
+                    || await AvatarSkillAsync(
+                        Logger,
+                        guardianAvatar,
+                        false,
+                        1,
+                        ct,
+                        activeCapture,
+                        assumeActive: true);
+                if (baselineCooldownVisible)
+                {
+                    Logger.LogWarning(
+                        "盾奶位 {GuardianAvatar} 动作前已显示战技冷却，但缺少本轮就绪到冷却转换证据，暂不提交成功",
+                        guardianAvatar.Name);
+                    return false;
+                }
+            }
+
+            if (hold)
+            {
+                Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
+            }
+            else
+            {
+                Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+            }
+            await Task.Delay(250, ct);
+
+            const int cooldownConfirmationAttempts = 8;
+            for (var checkAttempt = 0;
+                 checkAttempt < cooldownConfirmationAttempts;
+                 checkAttempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                using var capture = CaptureToRectArea();
+                if (!guardianAvatar.IsActive(capture))
+                {
+                    Logger.LogWarning(
+                        "盾奶位 {GuardianAvatar} 释放战技确认期间失去出战身份，停止本次确认",
+                        guardianAvatar.Name);
+                    return false;
+                }
+
+                var detectedCd = guardianAvatar.ReadSkillCurrentCd(capture);
+                var cooldownVisible = detectedCd > 0
+                    || await AvatarSkillAsync(
+                        Logger,
+                        guardianAvatar,
+                        false,
+                        1,
+                        ct,
+                        capture,
+                        assumeActive: true);
+                if (GuardianSkillSwitchPolicy.IsSkillCastConfirmed(
+                        baselineCooldownVisible: false,
+                        cooldownVisibleAfterInput: cooldownVisible,
+                        guardianStillActive: true))
+                {
+                    guardianAvatar.ConfirmSkillUsed(detectedCd);
+                    if (detectedCd > 0)
+                    {
+                        Logger.LogInformation(
+                            "优先第 {Position} 盾奶位 {GuardianAvatar} 战技Cd检测：{Cd:F1} 秒",
+                            guardianAvatarName,
+                            guardianAvatar.Name,
+                            detectedCd);
+                    }
+                    return true;
+                }
+
+                if (checkAttempt + 1 < cooldownConfirmationAttempts)
+                {
+                    await Task.Delay(120, ct);
                 }
             }
 
