@@ -16,6 +16,8 @@ internal sealed record ArtifactNativeLockSetGroup(
 
 internal static class ArtifactNativePlanValidator
 {
+    private static readonly string[] QuickMainStatSlots =
+        ["sands", "goblet", "circlet"];
     internal const string TranslationMode =
         "BUILD_SCOPED_LOCK_AND_QUICK_EQUIP_V1";
 
@@ -95,6 +97,8 @@ internal static class ArtifactNativePlanValidator
                     || quick.Sets.Count is < 1 or > 2
                     || quick.Sets.Count == 1 && quick.Sets[0].Pieces != 4
                     || quick.Sets.Count == 2 && quick.Sets.Any(rule => rule.Pieces != 2)
+                    || quick.Sets.Select(rule => rule.SetKey)
+                        .Distinct(StringComparer.Ordinal).Count() != quick.Sets.Count
                     || quick.PrioritySubstats.Count > 3
                     || quick.SecondarySubstats.Count > 3
                     || quick.PrioritySubstats.Intersect(
@@ -104,6 +108,13 @@ internal static class ArtifactNativePlanValidator
                         $"Quick-equip build '{quick.BuildId}' is not representable.");
                 }
             }
+        }
+
+        if (plan.QuickEquipPlans.Select(item => item.BuildId)
+            .Distinct(StringComparer.Ordinal).Count() != plan.QuickEquipPlans.Count)
+        {
+            throw new InvalidDataException(
+                "A quick-equip build cannot target more than one character.");
         }
 
         var selectedBuildCount = plan.LockPlans.Select(item => item.BuildId)
@@ -131,4 +142,10 @@ internal static class ArtifactNativePlanValidator
                     scheme.OrderBy(item => item.SlotKey, StringComparer.Ordinal).ToArray()))
                 .ToArray()))
         .ToArray();
+
+    internal static IReadOnlyDictionary<string, IReadOnlyList<string>> QuickMainStats(
+        ArtifactNativeQuickEquipPlanDto plan) => QuickMainStatSlots.ToDictionary(
+        slot => slot,
+        slot => plan.MainStatsBySlot.GetValueOrDefault(slot, Array.Empty<string>()),
+        StringComparer.Ordinal);
 }

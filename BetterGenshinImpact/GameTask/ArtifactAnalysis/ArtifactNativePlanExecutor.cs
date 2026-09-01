@@ -20,6 +20,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Vanara.PInvoke;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 
 namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
@@ -338,7 +339,7 @@ internal sealed class ArtifactNativePlanTask(
             ct);
         await ClickAnyTextAsync(["取消", "返回"], ct);
 
-        foreach (var (slotKey, mainStats) in quickPlan.MainStatsBySlot)
+        foreach (var (slotKey, mainStats) in ArtifactNativePlanValidator.QuickMainStats(quickPlan))
         {
             if (!IsConfigurableMainSlot(slotKey)) continue;
             await ClickTextAsync(SlotLabel(slotKey), ct);
@@ -378,7 +379,7 @@ internal sealed class ArtifactNativePlanTask(
             ct);
         await ClickAnyTextAsync(["确认", "完成"], ct);
 
-        foreach (var (slotKey, mainStats) in quickPlan.MainStatsBySlot)
+        foreach (var (slotKey, mainStats) in ArtifactNativePlanValidator.QuickMainStats(quickPlan))
         {
             if (!IsConfigurableMainSlot(slotKey)) continue;
             await ClickTextAsync(SlotLabel(slotKey), ct);
@@ -426,7 +427,7 @@ internal sealed class ArtifactNativePlanTask(
                 rule.SetKey, _catalog.LocalizedName(rule.SetKey))),
             quickPlan.Sets.Select(rule => rule.SetKey).ToHashSet(StringComparer.Ordinal));
         await ClickAnyTextAsync(["取消", "返回"], ct);
-        foreach (var (slotKey, mainStats) in quickPlan.MainStatsBySlot)
+        foreach (var (slotKey, mainStats) in ArtifactNativePlanValidator.QuickMainStats(quickPlan))
         {
             if (!IsConfigurableMainSlot(slotKey)) continue;
             await ClickTextAsync(SlotLabel(slotKey), ct);
@@ -477,6 +478,8 @@ internal sealed class ArtifactNativePlanTask(
             throw new InvalidDataException(
                 $"Unable to find quick-equip character '{quickPlan.CharacterKey}'.");
         }
+        Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
+        await Delay(300, ct);
         await ClickAnyTextAsync(["圣遗物"], ct);
         await ClickAnyTextAsync(["快速装备"], ct);
         await ClickAnyTextAsync(["自定义方案", "自定义配置"], ct);

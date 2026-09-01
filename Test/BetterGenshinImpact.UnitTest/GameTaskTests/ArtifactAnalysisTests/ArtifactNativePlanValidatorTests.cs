@@ -44,6 +44,45 @@ public class ArtifactNativePlanValidatorTests
         Assert.Contains("slot", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void DuplicateSetsInAQuickEquipRecipeAreRejected()
+    {
+        var duplicate = Quick("a", 1) with
+        {
+            Sets =
+            [
+                new ArtifactNativeSetRuleDto("GoldenTroupe", 2),
+                new ArtifactNativeSetRuleDto("GoldenTroupe", 2)
+            ]
+        };
+
+        Assert.Throws<InvalidDataException>(() =>
+            ArtifactNativePlanValidator.Validate(
+                Plan([Lock("a")], [duplicate], sourceBuildCount: 1)));
+    }
+
+    [Fact]
+    public void OneBuildCannotTargetTwoCharacters()
+    {
+        var otherCharacter = Quick("a", 1) with { CharacterKey = "Mona" };
+
+        Assert.Throws<InvalidDataException>(() =>
+            ArtifactNativePlanValidator.Validate(Plan(
+                [Lock("a")],
+                [Quick("a", 1), otherCharacter],
+                sourceBuildCount: 1)));
+    }
+
+    [Fact]
+    public void MissingQuickEquipMainStatSlotsExpandToEmptyTargets()
+    {
+        var expanded = ArtifactNativePlanValidator.QuickMainStats(Quick("a", 1));
+
+        Assert.Empty(expanded["sands"]);
+        Assert.Empty(expanded["goblet"]);
+        Assert.Equal(["critRate_"], expanded["circlet"]);
+    }
+
     private static ArtifactNativeSyncPlanDto Plan(
         IReadOnlyList<ArtifactNativeSetPlanDto> locks,
         IReadOnlyList<ArtifactNativeQuickEquipPlanDto> quick,
