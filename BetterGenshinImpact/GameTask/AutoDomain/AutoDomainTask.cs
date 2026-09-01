@@ -1,4 +1,5 @@
 using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.BgiVision;
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.Core.Simulator;
@@ -75,6 +76,8 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     private readonly string limitedFullyAllString;
 
     private List<ResinUseRecord> _resinPriorityListWhenSpecifyUse;
+    private readonly Queue<ResinUseRecord> _pendingSupplementalResinRecords = new();
+    private bool _stopAfterPreparedSupplementalResins;
 
     public AutoDomainTask(AutoDomainParam taskParam)
     {
@@ -126,6 +129,8 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     {
         _ct = ct;
         _rewardSummary.Clear();
+        _pendingSupplementalResinRecords.Clear();
+        _stopAfterPreparedSupplementalResins = false;
 
         Init();
         Notify.Event(NotificationEvent.DomainStart).Success("自动秘境启动");
@@ -179,6 +184,12 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
     private async Task DoDomain()
     {
+        if (!await TryPreparePreferredSupplementalResinBeforeDomain())
+        {
+            Logger.LogWarning("自动秘境：未能按计划优先使用补充树脂，跳过本轮秘境");
+            return;
+        }
+
         if (AutoDomainResinPreflightPolicy.ShouldCheckMapResin(
                 _taskParam.SpecifyResinUse,
                 _taskParam.TransientResinUseCount,
@@ -1373,15 +1384,58 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         // 再 OCR 一次，弹出框，确认当前是否有原粹树脂
         using var ra2 = CaptureToRectArea();
         var textListInPrompt = ra2.FindMulti(RecognitionObject.Ocr(ra2.Width * 0.25, ra2.Height * 0.2, ra2.Width * 0.5, ra2.Height * 0.6));
-        if (textListInPrompt.Any(t => t.Text.Contains("数量不足") || t.Text.Contains("补充原粹树脂")))
+        var claimedPreparedSupplementalReward = false;
+        if (_pendingSupplementalResinRecords.Count > 0)
         {
-            // 没有原粹树脂，直接退出秘境
-            Logger.LogInformation("自动秘境：原粹树脂已用尽，退出秘境");
-            await ExitDomain();
-            return false;
+            var pendingRecord = _pendingSupplementalResinRecords.Peek();
+            if (!await TryClaimRewardAfterSupplement(new BvPage(_ct)))
+            {
+                Logger.LogWarning(
+                    "自动秘境：已使用 {ResinName}，但未能以补充后的原粹树脂完成本轮领奖",
+                    pendingRecord.Name);
+                await ExitDomain();
+                return false;
+            }
+
+            Logger.LogInformation("自动秘境：{ResinName} 对应的本轮奖励领取完成", pendingRecord.Name);
+            _pendingSupplementalResinRecords.Dequeue();
+            claimedPreparedSupplementalReward = true;
+            isLastTurn = _resinPriorityListWhenSpecifyUse.Sum(record => record.RemainCount) <= 0
+                         || (_stopAfterPreparedSupplementalResins
+                             && _pendingSupplementalResinRecords.Count == 0);
         }
 
-        if (chooseResinPrompt)
+        var supplementPromptDetected = textListInPrompt.Any(t =>
+            t.Text.Contains("数量不足") || t.Text.Contains("补充原粹树脂"));
+        if (supplementPromptDetected && !claimedPreparedSupplementalReward)
+        {
+            var transientResinRemainCount = _resinPriorityListWhenSpecifyUse
+                .Where(record => record.Name == "须臾树脂")
+                .Sum(record => record.RemainCount);
+            var fragileResinRemainCount = _resinPriorityListWhenSpecifyUse
+                .Where(record => record.Name == "脆弱树脂")
+                .Sum(record => record.RemainCount);
+            if (AutoDomainResinPreflightPolicy.ShouldExitSupplementPrompt(
+                    _taskParam.SpecifyResinUse,
+                    transientResinRemainCount,
+                    fragileResinRemainCount))
+            {
+                Logger.LogInformation("自动秘境：原粹树脂已用尽，且没有配置可用的补充树脂，退出秘境");
+                await ExitDomain();
+                return false;
+            }
+
+            if (!await TryUseConfiguredSupplementalResinAndClaimReward())
+            {
+                Logger.LogWarning("自动秘境：未能使用计划中配置的须臾树脂或脆弱树脂，退出秘境");
+                await ExitDomain();
+                return false;
+            }
+
+            isLastTurn = _resinPriorityListWhenSpecifyUse.Sum(record => record.RemainCount) <= 0;
+        }
+
+        if (chooseResinPrompt && !supplementPromptDetected && !claimedPreparedSupplementalReward)
         {
             using var ra3 = CaptureToRectArea();
 
@@ -1473,11 +1527,28 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
                 if (successCount == 0)
                 {
-                    // 没有找到对应的树脂
-                    Logger.LogWarning("自动秘境：指定树脂领取次数时，当前可用树脂选项无法满足配置。你可能设置的刷取次数过多！退出秘境。");
-                    Logger.LogInformation("当前刷取情况：{ResinList}", string.Join(", ", _resinPriorityListWhenSpecifyUse.Select(o => $"{o.Name}({o.MaxCount - o.RemainCount}/{o.MaxCount})")));
-                    await ExitDomain();
-                    return false;
+                    var transientResinRemainCount = _resinPriorityListWhenSpecifyUse
+                        .Where(record => record.Name == "须臾树脂")
+                        .Sum(record => record.RemainCount);
+                    var fragileResinRemainCount = _resinPriorityListWhenSpecifyUse
+                        .Where(record => record.Name == "脆弱树脂")
+                        .Sum(record => record.RemainCount);
+                    var canUseSupplementalResin = !AutoDomainResinPreflightPolicy.ShouldExitSupplementPrompt(
+                        _taskParam.SpecifyResinUse,
+                        transientResinRemainCount,
+                        fragileResinRemainCount);
+                    if (canUseSupplementalResin
+                        && await TryUseConfiguredSupplementalResinAndClaimReward())
+                    {
+                        isLastTurn = _resinPriorityListWhenSpecifyUse.Sum(record => record.RemainCount) <= 0;
+                    }
+                    else
+                    {
+                        Logger.LogWarning("自动秘境：指定树脂领取次数时，当前可用树脂选项无法满足配置。你可能设置的刷取次数过多！退出秘境。");
+                        Logger.LogInformation("当前刷取情况：{ResinList}", string.Join(", ", _resinPriorityListWhenSpecifyUse.Select(o => $"{o.Name}({o.MaxCount - o.RemainCount}/{o.MaxCount})")));
+                        await ExitDomain();
+                        return false;
+                    }
                 }
             }
         }
@@ -1546,6 +1617,346 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }
 
         throw new NormalEndException("未检测到秘境结束，可能是背包物品已满。");
+    }
+
+    private async Task<bool> TryPreparePreferredSupplementalResinBeforeDomain()
+    {
+        if (!_taskParam.SpecifyResinUse || _pendingSupplementalResinRecords.Count > 0)
+        {
+            return true;
+        }
+
+        var preferredRecord = _resinPriorityListWhenSpecifyUse.FirstOrDefault(record => record.RemainCount > 0);
+        if (!AutoDomainResinPreflightPolicy.ShouldPrepareSupplementalResinBeforeDomain(
+                _taskParam.SpecifyResinUse,
+                preferredRecord?.Name))
+        {
+            return true;
+        }
+
+        if (preferredRecord == null)
+        {
+            throw new InvalidOperationException("补充树脂预处理缺少优先记录");
+        }
+
+        try
+        {
+            await new TpTask(_ct).OpenBigMapUi();
+            var page = new BvPage(_ct);
+            while (AutoDomainResinPreflightPolicy.ShouldPrepareSupplementalResinBeforeDomain(
+                       _taskParam.SpecifyResinUse,
+                       preferredRecord.Name)
+                   && AutoDomainResinPreflightPolicy.CanPrepareAnotherSupplementalResin(
+                       _taskParam.DomainRoundNum,
+                       _pendingSupplementalResinRecords.Count))
+            {
+                if (!await TryUseSupplementalResinRecord(page, preferredRecord))
+                {
+                    if (_pendingSupplementalResinRecords.Count == 0)
+                    {
+                        return false;
+                    }
+
+                    _stopAfterPreparedSupplementalResins = true;
+                    return true;
+                }
+
+                _pendingSupplementalResinRecords.Enqueue(preferredRecord);
+                preferredRecord = _resinPriorityListWhenSpecifyUse
+                    .FirstOrDefault(record => record.RemainCount > 0);
+                if (preferredRecord == null)
+                {
+                    break;
+                }
+            }
+
+            if (preferredRecord != null
+                && AutoDomainResinPreflightPolicy.ShouldPrepareSupplementalResinBeforeDomain(
+                    _taskParam.SpecifyResinUse,
+                    preferredRecord.Name))
+            {
+                _stopAfterPreparedSupplementalResins = true;
+            }
+
+            return true;
+        }
+        finally
+        {
+            await new ReturnMainUiTask().Start(_ct);
+        }
+    }
+
+    private async Task<bool> TryUseConfiguredSupplementalResinAndClaimReward()
+    {
+        var page = new BvPage(_ct);
+        foreach (var record in _resinPriorityListWhenSpecifyUse.Where(record =>
+                     record.RemainCount > 0
+                     && record.Name is "须臾树脂" or "脆弱树脂"))
+        {
+            if (!await TryUseSupplementalResinRecord(page, record))
+            {
+                continue;
+            }
+
+            if (!await TryClaimRewardAfterSupplement(page))
+            {
+                Logger.LogWarning("自动秘境：补充原粹树脂后未能完成本轮领奖");
+                return false;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryUseSupplementalResinRecord(BvPage page, ResinUseRecord record)
+    {
+        if (!await TryEnsureSupplementPaneOpen(page))
+        {
+            return false;
+        }
+
+        var recognitionObjectName = record.Name == "须臾树脂"
+            ? "TransientResinInSupplementPane"
+            : "FragileResinInSupplementPane";
+        if (!await TrySelectSupplementalResin(page, record.Name, recognitionObjectName)
+            || !await TryUseSelectedSupplementalResin(page, record.Name))
+        {
+            return false;
+        }
+
+        record.RemainCount -= 1;
+        Logger.LogInformation(
+            "自动秘境：已使用 {ResinName} 补充原粹树脂，计划进度 {Used}/{Max}",
+            record.Name,
+            record.MaxCount - record.RemainCount,
+            record.MaxCount);
+        return true;
+    }
+
+    private async Task<bool> TryEnsureSupplementPaneOpen(BvPage page)
+    {
+        var titleLocator = page.Locator("补充原粹树脂", ScaleAssetRect(834, 247, 256, 60))
+            .WithRetryInterval(300);
+        var titleRegions = await titleLocator.TryWaitFor(500);
+        _ct.ThrowIfCancellationRequested();
+        if (titleRegions.Count > 0)
+        {
+            return true;
+        }
+
+        var openButtonLocator = page.Locator(LoadAutoBossRecognitionObject("OpenResinSupplementPaneButton"))
+            .WithRoi(ScaleAssetRect(1200, 25, 580, 50))
+            .WithRetryInterval(300);
+        var openButtons = await openButtonLocator.TryWaitFor(1000);
+        _ct.ThrowIfCancellationRequested();
+        if (openButtons.Count > 0)
+        {
+            openButtons[0].Click();
+            try
+            {
+                await titleLocator.WaitFor(3000);
+                return true;
+            }
+            catch (TimeoutException exception)
+            {
+                Logger.LogWarning("自动秘境：点击地图树脂按钮后未能打开补充面板，原因：{Reason}", exception.Message);
+                return false;
+            }
+        }
+
+        try
+        {
+            await page.Locator("补充原粹树脂", ScaleAssetRect(800, 700, 350, 120)).Click(2000);
+            await titleLocator.WaitFor(3000);
+            return true;
+        }
+        catch (TimeoutException exception)
+        {
+            Logger.LogWarning("自动秘境：未能打开补充原粹树脂面板，原因：{Reason}", exception.Message);
+            return false;
+        }
+    }
+
+    private async Task<bool> TrySelectSupplementalResin(
+        BvPage page,
+        string resinName,
+        string recognitionObjectName)
+    {
+        var iconLocator = page.Locator(LoadAutoBossRecognitionObject(recognitionObjectName))
+            .WithRoi(ScaleAssetRect(644, 378, 620, 192))
+            .WithRetryInterval(300);
+        var icons = await iconLocator.TryWaitFor(1500);
+        _ct.ThrowIfCancellationRequested();
+        if (icons.Count == 0)
+        {
+            Logger.LogInformation("自动秘境：补充面板未找到 {ResinName} 图标，尝试下一种补充树脂", resinName);
+            return false;
+        }
+
+        icons[0].Click();
+        try
+        {
+            await page.Locator(resinName, ScaleAssetRect(906, 587, 110, 31))
+                .WithRetryInterval(300)
+                .WithRetryAction(_ =>
+                {
+                    var currentIcons = iconLocator.FindAll();
+                    if (currentIcons.Count > 0)
+                    {
+                        currentIcons[0].Click();
+                    }
+                })
+                .WaitFor(3000);
+            return true;
+        }
+        catch (TimeoutException exception)
+        {
+            Logger.LogWarning(
+                "自动秘境：未能确认已选中 {ResinName}，原因：{Reason}",
+                resinName,
+                exception.Message);
+            return false;
+        }
+    }
+
+    private async Task<bool> TryUseSelectedSupplementalResin(BvPage page, string resinName)
+    {
+        if (!await TryClickSupplementTextButton(page, "使用", ScaleAssetRect(1163, 761, 61, 38), 3000))
+        {
+            return false;
+        }
+
+        await Delay(500, _ct);
+        var quickUseRegions = await page.Locator("快捷使用", ScaleAssetRect(875, 269, 184, 63))
+            .TryWaitFor(1500);
+        _ct.ThrowIfCancellationRequested();
+        if (quickUseRegions.Count > 0)
+        {
+            var quickUseQuantity = TryRecognizeQuickUseQuantity();
+            if (quickUseQuantity != 1)
+            {
+                Logger.LogWarning(
+                    "自动秘境：快捷使用数量不是 1，已停止补充以避免超额消耗，识别值：{Quantity}",
+                    quickUseQuantity);
+                return false;
+            }
+
+            if (!await TryClickSupplementTextButton(page, "使用", ScaleAssetRect(1152, 740, 64, 35), 3000))
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            var obtainRegion = (await page.Locator("获得", ScaleAssetRect(924, 279, 74, 38))
+                .WaitFor(5000)).First();
+            obtainRegion.Click();
+            await Delay(800, _ct);
+            return true;
+        }
+        catch (TimeoutException exception)
+        {
+            Logger.LogWarning(
+                "自动秘境：使用 {ResinName} 后未识别到获得界面，原因：{Reason}",
+                resinName,
+                exception.Message);
+            return false;
+        }
+    }
+
+    private int? TryRecognizeQuickUseQuantity()
+    {
+        using var capture = CaptureToRectArea(forceNew: true);
+        using var region = capture.DeriveCrop(ScaleAssetRect(915, 540, 93, 81));
+        var result = OcrFactory.Paddle.OcrResult(region.SrcMat);
+        var text = string.Concat(result.Regions
+            .OrderBy(item => item.Rect.Center.Y)
+            .ThenBy(item => item.Rect.Center.X)
+            .Select(item => item.Text));
+        text = Regex.Replace(StringUtils.ConvertFullWidthNumToHalfWidth(text), @"\s+", "");
+        var match = Regex.Match(text, @"使用数量\D*(\d+)");
+        if (!match.Success)
+        {
+            match = Regex.Match(text, @"\d+");
+        }
+
+        var quantityText = match.Groups.Count > 1 && match.Groups[1].Success
+            ? match.Groups[1].Value
+            : match.Value;
+        if (!match.Success
+            || !int.TryParse(quantityText, NumberStyles.None, CultureInfo.InvariantCulture, out var quantity))
+        {
+            Logger.LogWarning("自动秘境：无法确认快捷使用数量，OCR 文本：{Text}", text);
+            return null;
+        }
+
+        return quantity;
+    }
+
+    private async Task<bool> TryClaimRewardAfterSupplement(BvPage page)
+    {
+        for (var attempt = 1; attempt <= 12; attempt++)
+        {
+            using var capture = CaptureToRectArea(forceNew: true);
+            var textList = capture.FindMulti(RecognitionObject.Ocr(
+                capture.Width * 0.25,
+                capture.Height * 0.2,
+                capture.Width * 0.5,
+                capture.Height * 0.6));
+            var (success, _) = PressUseResin(textList, "原粹树脂");
+            if (success)
+            {
+                return true;
+            }
+
+            if (textList.Any(region =>
+                    region.Text.Contains("补充原粹树脂", StringComparison.Ordinal)
+                    || region.Text.Contains("快捷使用", StringComparison.Ordinal)
+                    || region.Text.Contains("获得", StringComparison.Ordinal)))
+            {
+                page.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_ESCAPE);
+            }
+
+            await Delay(500, _ct);
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryClickSupplementTextButton(BvPage page, string text, Rect rect, int timeout)
+    {
+        try
+        {
+            await page.Locator(text, rect).Click(timeout);
+            return true;
+        }
+        catch (TimeoutException exception)
+        {
+            Logger.LogWarning(
+                "自动秘境：未能点击补充树脂按钮 {Text}，原因：{Reason}",
+                text,
+                exception.Message);
+            return false;
+        }
+    }
+
+    private static RecognitionObject LoadAutoBossRecognitionObject(string objectName)
+    {
+        var captureRect = TaskContext.Instance().SystemInfo.ScaleMax1080PCaptureRect;
+        return RecognitionAssets.Get("AutoBoss", objectName, captureRect.Width, captureRect.Height);
+    }
+
+    private static Rect ScaleAssetRect(int x, int y, int width, int height)
+    {
+        var scale = TaskContext.Instance().SystemInfo.AssetScale;
+        return new Rect(
+            (int)Math.Round(x * scale),
+            (int)Math.Round(y * scale),
+            (int)Math.Round(width * scale),
+            (int)Math.Round(height * scale));
     }
 
     private async Task TryRecognizeRewardResult()
