@@ -1,6 +1,10 @@
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OCR;
+using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.Simulator;
+using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoArtifactSalvage;
+using BetterGenshinImpact.GameTask.CharacterDevelopment;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Job;
@@ -63,7 +67,7 @@ internal sealed class ArtifactNativePlanTask(
     ];
     private static readonly string[] SubstatKeys =
     ["hp", "atk", "def", "hp_", "atk_", "def_", "eleMas", "enerRech_", "critRate_", "critDMG_"];
-    public string Name => "重建原神圣遗物锁定方案";
+    public string Name => "同步原神圣遗物方案";
     public bool Completed { get; private set; }
     private IOcrService OcrService => _ocrService
         ?? throw new InvalidOperationException("Artifact OCR session is unavailable.");
@@ -92,22 +96,33 @@ internal sealed class ArtifactNativePlanTask(
         await new ReturnMainUiTask().Start(ct);
         await ArtifactGameIdentityVerifier.EnsureExpectedUidAsync(
             expectedUid, OcrService, ct);
-        if (!plan.ReplaceAll || !plan.RequiresPreMutationEvidence || plan.Plans.Count == 0)
+        ArtifactNativePlanValidator.Validate(plan);
+        if (!plan.RequiresPreMutationEvidence)
         {
             throw new InvalidDataException("Native artifact plan is not a complete replacement plan.");
         }
-        var grouped = plan.Plans.GroupBy(item => item.SetKey, StringComparer.Ordinal).ToArray();
+        var grouped = ArtifactNativePlanValidator.GroupLockSchemes(plan);
         // Read-only phase: prove every target editor and required control exists.
         foreach (var group in grouped)
         {
             await OpenLockAssistanceAsync(ct);
-            await SelectSetAsync(_catalog.LocalizedName(group.Key), ct);
-            await PreflightEditorAsync(group.ToArray(), ct);
+            await SelectSetAsync(_catalog.LocalizedName(group.SetKey), ct);
+            foreach (var scheme in group.Schemes)
+            {
+                await PreflightEditorAsync(scheme.Slots, ct);
+            }
         }
-        await OpenLockAssistanceAsync(ct);
-        if (!HasText("快速删除方案"))
+        if (plan.ReplaceLockPlans)
         {
-            throw new InvalidDataException("Lock Assistance does not expose quick plan deletion.");
+            await OpenLockAssistanceAsync(ct);
+            if (!HasText("快速删除方案"))
+            {
+                throw new InvalidDataException("Lock Assistance does not expose quick plan deletion.");
+            }
+        }
+        foreach (var quickPlan in plan.QuickEquipPlans)
+        {
+            await PreflightQuickEquipAsync(quickPlan, ct);
         }
         var recoveryRoot = WritePreMutationEvidence(plan);
         WriteRecoveryState(recoveryRoot, "PREPARED", []);
@@ -115,37 +130,69 @@ internal sealed class ArtifactNativePlanTask(
         var destructiveCommitStarted = false;
         try
         {
-            await ClickTextAsync("快速删除方案", ct);
-            await Delay(250, ct);
-            using (var confirm = CaptureToRectArea())
+            if (plan.ReplaceLockPlans)
             {
+                await ClickTextAsync("快速删除方案", ct);
+                await Delay(250, ct);
+                using var confirm = CaptureToRectArea();
                 if (!Bv.ClickBlackConfirmButton(confirm) && !TryClickText("确认"))
                 {
                     throw new InvalidDataException("Unable to confirm native plan deletion.");
                 }
+                destructiveCommitStarted = true;
+                // Confirmation is the destructive commit point. From here the reviewed
+                // target plan, not a caller cancellation, owns forward recovery.
+                WriteRecoveryState(recoveryRoot, "OLD_PLANS_DELETED", []);
+                await Delay(450, CancellationToken.None);
             }
-            destructiveCommitStarted = true;
-            // Confirmation is the destructive commit point. From here the reviewed
-            // target plan, not a caller cancellation, owns forward recovery.
-            var commitToken = CancellationToken.None;
-            WriteRecoveryState(recoveryRoot, "OLD_PLANS_DELETED", []);
-            await Delay(450, commitToken);
+            var commitToken = destructiveCommitStarted
+                ? CancellationToken.None
+                : ct;
 
             var configuredSets = new List<string>();
             foreach (var group in grouped)
             {
-                await OpenLockAssistanceAsync(commitToken);
-                await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
-                await ConfigureSetAsync(group.ToArray(), commitToken);
-                configuredSets.Add(group.Key);
+                foreach (var scheme in group.Schemes)
+                {
+                    await OpenLockAssistanceAsync(commitToken);
+                    await SelectSetAsync(_catalog.LocalizedName(group.SetKey), commitToken);
+                    await ConfigureSetAsync(scheme.Slots, commitToken);
+                    configuredSets.Add($"{group.SetKey}/{scheme.BuildId}");
+                    WriteRecoveryState(
+                        recoveryRoot, "CONFIGURING_TARGET", configuredSets);
+                }
+            }
+            foreach (var quickPlan in plan.QuickEquipPlans)
+            {
+                if (!destructiveCommitStarted)
+                {
+                    destructiveCommitStarted = true;
+                    WriteRecoveryState(
+                        recoveryRoot, "QUICK_EQUIP_COMMIT_STARTED", configuredSets);
+                }
+                var quickToken = CancellationToken.None;
+                await ConfigureQuickEquipAsync(quickPlan, quickToken);
+                commitToken = CancellationToken.None;
+                configuredSets.Add(
+                    $"quick/{quickPlan.CharacterKey}/{quickPlan.PresetIndex}/{quickPlan.BuildId}");
                 WriteRecoveryState(
-                    recoveryRoot, "CONFIGURING_TARGET", configuredSets);
+                    recoveryRoot, "CONFIGURING_QUICK_EQUIP", configuredSets);
             }
             foreach (var group in grouped)
             {
-                await OpenLockAssistanceAsync(commitToken);
-                await SelectSetAsync(_catalog.LocalizedName(group.Key), commitToken);
-                await VerifySetAsync(group.ToArray(), commitToken);
+                for (var schemeIndex = 0; schemeIndex < group.Schemes.Count; schemeIndex++)
+                {
+                    await OpenLockAssistanceAsync(commitToken);
+                    await SelectSetAsync(_catalog.LocalizedName(group.SetKey), commitToken);
+                    await VerifySetAsync(
+                        group.Schemes[schemeIndex].Slots,
+                        schemeIndex,
+                        commitToken);
+                }
+            }
+            foreach (var quickPlan in plan.QuickEquipPlans)
+            {
+                await VerifyQuickEquipAsync(quickPlan, commitToken);
             }
             WriteRecoveryState(recoveryRoot, "VERIFIED", configuredSets);
             Completed = true;
@@ -187,7 +234,7 @@ internal sealed class ArtifactNativePlanTask(
         IReadOnlyList<ArtifactNativeSetPlanDto> setPlans,
         CancellationToken ct)
     {
-        if (!TryClickText("编辑") && !TryClickText("添加方案"))
+        if (!TryClickText("添加方案") && !TryClickText("编辑"))
         {
             throw new InvalidDataException("Unable to open native artifact plan editor.");
         }
@@ -216,9 +263,10 @@ internal sealed class ArtifactNativePlanTask(
 
     private async Task VerifySetAsync(
         IReadOnlyList<ArtifactNativeSetPlanDto> setPlans,
+        int schemeIndex,
         CancellationToken ct)
     {
-        if (!TryClickText("编辑"))
+        if (!TryClickText("编辑", schemeIndex))
         {
             throw new InvalidDataException(
                 $"Native artifact plan '{setPlans[0].SetKey}' was not visible after apply.");
@@ -273,6 +321,240 @@ internal sealed class ArtifactNativePlanTask(
         RequireText("保存");
         await ClickTextAsync("取消", ct);
     }
+
+    private async Task PreflightQuickEquipAsync(
+        ArtifactNativeQuickEquipPlanDto quickPlan,
+        CancellationToken ct)
+    {
+        await OpenQuickEquipEditorAsync(quickPlan, ct);
+        var scope = QuickScope(quickPlan);
+        await OpenQuickSetSelectorAsync(quickPlan, ct);
+        await CalibrateLabeledControlsAsync(
+            scope,
+            "sets",
+            quickPlan.Sets.Select(rule => new KeyValuePair<string, string>(
+                rule.SetKey, _catalog.LocalizedName(rule.SetKey))),
+            quickPlan.Sets.Select(rule => rule.SetKey),
+            ct);
+        await ClickAnyTextAsync(["取消", "返回"], ct);
+
+        foreach (var (slotKey, mainStats) in quickPlan.MainStatsBySlot)
+        {
+            if (!IsConfigurableMainSlot(slotKey)) continue;
+            await ClickTextAsync(SlotLabel(slotKey), ct);
+            await CalibrateVisibleControlsAsync(
+                scope, slotKey, MainStatKeys, mainStats, ct);
+        }
+        await OpenQuickSubstatSectionAsync("priority", ct);
+        await CalibrateVisibleControlsAsync(
+            scope, "priority", SubstatKeys, quickPlan.PrioritySubstats, ct);
+        await OpenQuickSubstatSectionAsync("secondary", ct);
+        await CalibrateVisibleControlsAsync(
+            scope, "secondary", SubstatKeys, quickPlan.SecondarySubstats, ct);
+        RequireAnyText("保存", "生成方案");
+        await ClickAnyTextAsync(["取消", "返回"], ct);
+        await new ReturnMainUiTask().Start(ct);
+    }
+
+    private async Task ConfigureQuickEquipAsync(
+        ArtifactNativeQuickEquipPlanDto quickPlan,
+        CancellationToken ct)
+    {
+        await OpenQuickEquipEditorAsync(quickPlan, ct);
+        var scope = QuickScope(quickPlan);
+        await OpenQuickSetSelectorAsync(quickPlan, ct);
+        if (!TryClickText("清空") && !TryClickText("清除"))
+        {
+            throw new InvalidDataException(
+                "Quick-equip set selector does not expose a clear action.");
+        }
+        await Delay(120, ct);
+        await SetLabeledControlStatesAsync(
+            scope,
+            "sets",
+            quickPlan.Sets.Select(rule => new KeyValuePair<string, string>(
+                rule.SetKey, _catalog.LocalizedName(rule.SetKey))),
+            quickPlan.Sets.Select(rule => rule.SetKey).ToHashSet(StringComparer.Ordinal),
+            ct);
+        await ClickAnyTextAsync(["确认", "完成"], ct);
+
+        foreach (var (slotKey, mainStats) in quickPlan.MainStatsBySlot)
+        {
+            if (!IsConfigurableMainSlot(slotKey)) continue;
+            await ClickTextAsync(SlotLabel(slotKey), ct);
+            await SetVisibleControlStatesAsync(
+                scope,
+                slotKey,
+                MainStatKeys,
+                mainStats.ToHashSet(StringComparer.Ordinal),
+                ct);
+        }
+        await OpenQuickSubstatSectionAsync("priority", ct);
+        await SetVisibleControlStatesAsync(
+            scope,
+            "priority",
+            SubstatKeys,
+            quickPlan.PrioritySubstats.ToHashSet(StringComparer.Ordinal),
+            ct);
+        await OpenQuickSubstatSectionAsync("secondary", ct);
+        await SetVisibleControlStatesAsync(
+            scope,
+            "secondary",
+            SubstatKeys,
+            quickPlan.SecondarySubstats.ToHashSet(StringComparer.Ordinal),
+            ct);
+        await ClickAnyTextAsync(["保存", "生成方案"], ct);
+        if (HasText("生成方案"))
+        {
+            await ClickTextAsync("生成方案", ct);
+        }
+        await Delay(300, ct);
+        await new ReturnMainUiTask().Start(ct);
+    }
+
+    private async Task VerifyQuickEquipAsync(
+        ArtifactNativeQuickEquipPlanDto quickPlan,
+        CancellationToken ct)
+    {
+        await OpenQuickEquipEditorAsync(quickPlan, ct);
+        var scope = QuickScope(quickPlan);
+        await OpenQuickSetSelectorAsync(quickPlan, ct);
+        VerifyLabeledControlStates(
+            scope,
+            "sets",
+            quickPlan.Sets.Select(rule => new KeyValuePair<string, string>(
+                rule.SetKey, _catalog.LocalizedName(rule.SetKey))),
+            quickPlan.Sets.Select(rule => rule.SetKey).ToHashSet(StringComparer.Ordinal));
+        await ClickAnyTextAsync(["取消", "返回"], ct);
+        foreach (var (slotKey, mainStats) in quickPlan.MainStatsBySlot)
+        {
+            if (!IsConfigurableMainSlot(slotKey)) continue;
+            await ClickTextAsync(SlotLabel(slotKey), ct);
+            VerifyVisibleControlStates(
+                scope,
+                slotKey,
+                MainStatKeys,
+                mainStats.ToHashSet(StringComparer.Ordinal));
+        }
+        await OpenQuickSubstatSectionAsync("priority", ct);
+        VerifyVisibleControlStates(
+            scope,
+            "priority",
+            SubstatKeys,
+            quickPlan.PrioritySubstats.ToHashSet(StringComparer.Ordinal));
+        await OpenQuickSubstatSectionAsync("secondary", ct);
+        VerifyVisibleControlStates(
+            scope,
+            "secondary",
+            SubstatKeys,
+            quickPlan.SecondarySubstats.ToHashSet(StringComparer.Ordinal));
+        await ClickAnyTextAsync(["取消", "返回"], ct);
+        await new ReturnMainUiTask().Start(ct);
+    }
+
+    private async Task OpenQuickEquipEditorAsync(
+        ArtifactNativeQuickEquipPlanDto quickPlan,
+        CancellationToken ct)
+    {
+        await new ReturnMainUiTask().Start(ct);
+        Simulation.SendInput.SimulateAction(GIActions.OpenCharacterScreen);
+        await Delay(450, ct);
+        using (var capture = CaptureToRectArea())
+        {
+            var assets = CharacterDevelopmentAssets.Get(
+                capture.Width, capture.Height);
+            await OpenCharacterListAsync(assets, ct);
+        }
+        using var recognizer = new AvatarGridIconRecognizer();
+        await ResetCharacterListToTopAsync(ct);
+        var target = CharacterSelectionHelper.CreateTarget(
+            ArtifactCharacterCardReader.ToCharacterName(quickPlan.CharacterKey));
+        var assetScale = TaskContext.Instance().SystemInfo.AssetScale;
+        var candidate = await CharacterSelectionHelper.FindAndClickAvatar(
+            target, recognizer, assetScale, _logger, ct);
+        if (candidate is null)
+        {
+            throw new InvalidDataException(
+                $"Unable to find quick-equip character '{quickPlan.CharacterKey}'.");
+        }
+        await ClickAnyTextAsync(["圣遗物"], ct);
+        await ClickAnyTextAsync(["快速装备"], ct);
+        await ClickAnyTextAsync(["自定义方案", "自定义配置"], ct);
+        await ClickAnyTextAsync(
+            QuickPlanLabels(quickPlan.PresetIndex),
+            ct);
+        if (TryClickText("编辑") || TryClickText("添加方案"))
+        {
+            await Delay(180, ct);
+        }
+    }
+
+    private static async Task OpenCharacterListAsync(
+        CharacterDevelopmentAssets assets,
+        CancellationToken ct)
+    {
+        for (var attempt = 1; attempt <= 40; attempt++)
+        {
+            using var capture = CaptureToRectArea();
+            using var filter = capture.Find(assets.FilterRo);
+            if (filter.IsExist())
+            {
+                await Delay(300, ct);
+                return;
+            }
+            using var menu = capture.Find(assets.MenuRo);
+            if (menu.IsExist()) menu.Click();
+            await Delay(200, ct);
+        }
+        throw new InvalidDataException("Unable to open the character list for quick equip.");
+    }
+
+    private static async Task ResetCharacterListToTopAsync(CancellationToken ct)
+    {
+        using var capture = CaptureToRectArea();
+        var point = ArtifactUiCoordinateMapper.ToCapturePoint(
+            capture.SrcMat.Size(), 360, 520);
+        capture.MoveTo(point.X, point.Y);
+        for (var index = 0; index < 12; index++)
+        {
+            Simulation.SendInput.Mouse.VerticalScroll(10);
+            await Delay(30, ct);
+        }
+        await Delay(180, ct);
+    }
+
+    private async Task OpenQuickSetSelectorAsync(
+        ArtifactNativeQuickEquipPlanDto quickPlan,
+        CancellationToken ct)
+    {
+        await ClickAnyTextAsync(["套装类型", "套装"], ct);
+        foreach (var set in quickPlan.Sets)
+        {
+            RequireText(_catalog.LocalizedName(set.SetKey));
+        }
+    }
+
+    private Task OpenQuickSubstatSectionAsync(
+        string section,
+        CancellationToken ct) => section switch
+        {
+            "priority" => ClickAnyTextAsync(
+                ["优先追加属性", "优先属性", "优先词条"], ct),
+            "secondary" => ClickAnyTextAsync(
+                ["次级追加属性", "次级属性", "次级词条"], ct),
+            _ => throw new ArgumentOutOfRangeException(nameof(section), section, null)
+        };
+
+    private static string QuickScope(ArtifactNativeQuickEquipPlanDto plan) =>
+        $"quick|{plan.CharacterKey}|{plan.PresetIndex}|{plan.BuildId}";
+
+    private static string[] QuickPlanLabels(int presetIndex) => presetIndex switch
+    {
+        1 => ["方案 1", "方案1", "方案一"],
+        2 => ["方案 2", "方案2", "方案二"],
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(presetIndex), presetIndex, null)
+    };
 
     private string WritePreMutationEvidence(ArtifactNativeSyncPlanDto targetPlan)
     {
@@ -334,13 +616,23 @@ internal sealed class ArtifactNativePlanTask(
         }
     }
 
-    private bool TryClickText(string expected)
+    private void RequireAnyText(params string[] candidates)
+    {
+        if (candidates.Any(HasText)) return;
+        throw new InvalidDataException(
+            $"Unable to find any native plan control: {string.Join(",", candidates)}.");
+    }
+
+    private bool TryClickText(string expected, int occurrence = 0)
     {
         using var capture = CaptureToRectArea();
         var match = capture.FindMulti(
                 RecognitionObject.Ocr(capture.ToRect()),
                 ocrService: OcrService)
-            .FirstOrDefault(region => ExactText(region.Text, expected));
+            .Where(region => ExactText(region.Text, expected))
+            .OrderBy(region => region.Y)
+            .ThenBy(region => region.X)
+            .ElementAtOrDefault(occurrence);
         if (match is null) return false;
         match.Click();
         return true;
@@ -353,6 +645,20 @@ internal sealed class ArtifactNativePlanTask(
             throw new InvalidDataException($"Unable to find native plan control '{expected}'.");
         }
         await Delay(140, ct);
+    }
+
+    private async Task ClickAnyTextAsync(
+        IEnumerable<string> candidates,
+        CancellationToken ct)
+    {
+        foreach (var candidate in candidates)
+        {
+            if (!TryClickText(candidate)) continue;
+            await Delay(140, ct);
+            return;
+        }
+        throw new InvalidDataException(
+            $"Unable to find native plan control variants: {string.Join(",", candidates)}.");
     }
 
     private static string ControlKey(string setKey, string section, string statKey) =>
@@ -380,6 +686,31 @@ internal sealed class ArtifactNativePlanTask(
         {
             throw new InvalidDataException(
                 $"Native plan editor is missing required controls: {string.Join(",", missing)}.");
+        }
+    }
+
+    private async Task CalibrateLabeledControlsAsync(
+        string scope,
+        string section,
+        IEnumerable<KeyValuePair<string, string>> candidates,
+        IEnumerable<string> requiredKeys,
+        CancellationToken ct)
+    {
+        var visible = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (key, label) in candidates)
+        {
+            if (!HasText(label)) continue;
+            visible.Add(key);
+            _controlCalibrations[ControlKey(scope, section, key)] =
+                await CalibrateControlAsync(label, ct);
+        }
+        var missing = requiredKeys.Distinct(StringComparer.Ordinal)
+            .Where(key => !visible.Contains(key))
+            .ToArray();
+        if (missing.Length > 0)
+        {
+            throw new InvalidDataException(
+                $"Quick-equip editor is missing required controls: {string.Join(",", missing)}.");
         }
     }
 
@@ -434,6 +765,31 @@ internal sealed class ArtifactNativePlanTask(
         }
     }
 
+    private async Task SetLabeledControlStatesAsync(
+        string scope,
+        string section,
+        IEnumerable<KeyValuePair<string, string>> candidates,
+        IReadOnlySet<string> desiredKeys,
+        CancellationToken ct)
+    {
+        foreach (var (statKey, label) in candidates)
+        {
+            var key = ControlKey(scope, section, statKey);
+            if (!_controlCalibrations.TryGetValue(key, out var calibration)) continue;
+            await MovePointerAwayAsync(ct);
+            var selected = calibration.IsSelected(CaptureSelectionScore(label));
+            var desired = desiredKeys.Contains(statKey);
+            if (selected == desired) continue;
+            await ClickTextAsync(label, ct);
+            await MovePointerAwayAsync(ct);
+            if (calibration.IsSelected(CaptureSelectionScore(label)) != desired)
+            {
+                throw new InvalidDataException(
+                    $"Quick-equip control '{key}' did not reach its required state.");
+            }
+        }
+    }
+
     private void VerifyVisibleControlStates(
         string setKey,
         string section,
@@ -449,6 +805,25 @@ internal sealed class ArtifactNativePlanTask(
             {
                 throw new InvalidDataException(
                     $"Native artifact control '{key}' did not preserve its required state.");
+            }
+        }
+    }
+
+    private void VerifyLabeledControlStates(
+        string scope,
+        string section,
+        IEnumerable<KeyValuePair<string, string>> candidates,
+        IReadOnlySet<string> desiredKeys)
+    {
+        foreach (var (statKey, label) in candidates)
+        {
+            var key = ControlKey(scope, section, statKey);
+            if (!_controlCalibrations.TryGetValue(key, out var calibration)) continue;
+            var selected = calibration.IsSelected(CaptureSelectionScore(label));
+            if (selected != desiredKeys.Contains(statKey))
+            {
+                throw new InvalidDataException(
+                    $"Quick-equip control '{key}' did not preserve its required state.");
             }
         }
     }

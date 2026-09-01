@@ -37,18 +37,42 @@ public sealed record ArtifactLaunchTargetDto(
     bool ExpectedLocked);
 
 public sealed record ArtifactNativeSetPlanDto(
+    string BuildId,
+    string BuildName,
     string SetKey,
     string SlotKey,
     IReadOnlyList<string> MainStats,
     IReadOnlyList<string> Substats);
 
+public sealed record ArtifactNativeSetRuleDto(
+    string SetKey,
+    int Pieces);
+
+public sealed record ArtifactNativeQuickEquipPlanDto(
+    string BuildId,
+    string BuildName,
+    string CharacterKey,
+    int PresetIndex,
+    IReadOnlyList<ArtifactNativeSetRuleDto> Sets,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> MainStatsBySlot,
+    IReadOnlyList<string> PrioritySubstats,
+    IReadOnlyList<string> SecondarySubstats);
+
+public sealed record ArtifactNativePlanIssueDto(
+    string Code,
+    string SubjectKey,
+    IReadOnlyList<string> BuildIds,
+    string Message);
+
 public sealed record ArtifactNativeSyncPlanDto(
     string Status,
-    bool ReplaceAll,
+    bool ReplaceLockPlans,
     bool RequiresPreMutationEvidence,
     int Capacity,
     int SourceBuildCount,
-    IReadOnlyList<ArtifactNativeSetPlanDto> Plans,
+    IReadOnlyList<ArtifactNativeSetPlanDto> LockPlans,
+    IReadOnlyList<ArtifactNativeQuickEquipPlanDto> QuickEquipPlans,
+    IReadOnlyList<ArtifactNativePlanIssueDto> Issues,
     string PlanDigest,
     string TranslationMode,
     string Message);
@@ -231,15 +255,18 @@ public sealed class ArtifactHostCoordinator(
                     var plan = await client.GetNativeSyncPlanAsync(
                         request.JobId, requestToken, cancellationToken);
                     if (!string.Equals(plan.Status, "READY", StringComparison.Ordinal)
-                        || !plan.ReplaceAll
                         || !plan.RequiresPreMutationEvidence
                         || plan.Capacity != request.NativeCapacity
                         || !string.Equals(plan.PlanDigest, request.NativePlanDigest, StringComparison.Ordinal)
-                        || !string.Equals(plan.TranslationMode, "CONSERVATIVE_SET_UNION", StringComparison.Ordinal))
+                        || !string.Equals(
+                            plan.TranslationMode,
+                            "BUILD_SCOPED_LOCK_AND_QUICK_EQUIP_V1",
+                            StringComparison.Ordinal))
                     {
                         throw new InvalidOperationException(
                             $"Native artifact plan preflight rejected replacement: {plan.Status}");
                     }
+                    ArtifactNativePlanValidator.Validate(plan);
                     await nativePlanExecutor.ReplaceAllAsync(
                         plan, request.Uid, cancellationToken);
                     break;

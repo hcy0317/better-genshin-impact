@@ -3,6 +3,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Config;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
@@ -94,6 +95,17 @@ internal static partial class ArtifactCharacterCardReader
             throw new InvalidOperationException($"角色原型缺少标准英文键：{characterName}");
         }
         return ArtifactKeyAliases.GetValueOrDefault(avatar.NameEn, avatar.NameEn);
+    }
+
+    internal static string ToCharacterName(string characterKey)
+    {
+        var avatar = DefaultAutoFightConfig.CombatAvatarMap.Values.FirstOrDefault(candidate =>
+            string.Equals(
+                ArtifactKeyAliases.GetValueOrDefault(candidate.NameEn, candidate.NameEn),
+                characterKey,
+                StringComparison.Ordinal));
+        return avatar?.Name ?? throw new InvalidOperationException(
+            $"圣遗物 Build 角色键无法映射到游戏角色：{characterKey}");
     }
 
     [GeneratedRegex(@"\d{1,2}")]
