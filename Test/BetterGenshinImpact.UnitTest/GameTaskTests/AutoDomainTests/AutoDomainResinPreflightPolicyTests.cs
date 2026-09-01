@@ -35,6 +35,60 @@ public class AutoDomainResinPreflightPolicyTests
                 fragileResinUseCount));
     }
 
+    [Theory]
+    [InlineData(false, 1, 0, true)]
+    [InlineData(true, 0, 0, true)]
+    [InlineData(true, 1, 0, false)]
+    [InlineData(true, 0, 1, false)]
+    public void RewardPromptOnlyExitsWhenNoConfiguredSupplementalResinRemains(
+        bool specifyResinUse,
+        int transientResinRemainCount,
+        int fragileResinRemainCount,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AutoDomainResinPreflightPolicy.ShouldExitSupplementPrompt(
+                specifyResinUse,
+                transientResinRemainCount,
+                fragileResinRemainCount));
+    }
+
+    [Theory]
+    [InlineData(false, "须臾树脂", false)]
+    [InlineData(true, "浓缩树脂", false)]
+    [InlineData(true, "原粹树脂", false)]
+    [InlineData(true, "须臾树脂", true)]
+    [InlineData(true, "脆弱树脂", true)]
+    public void PreferredSupplementalResinIsPreparedBeforeEnteringDomain(
+        bool specifyResinUse,
+        string preferredResinName,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AutoDomainResinPreflightPolicy.ShouldPrepareSupplementalResinBeforeDomain(
+                specifyResinUse,
+                preferredResinName));
+    }
+
+    [Theory]
+    [InlineData(1, 0, true)]
+    [InlineData(1, 1, false)]
+    [InlineData(3, 2, true)]
+    [InlineData(3, 3, false)]
+    public void SupplementalPreparationNeverExceedsConfiguredDomainRounds(
+        int domainRoundNum,
+        int preparedCount,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            AutoDomainResinPreflightPolicy.CanPrepareAnotherSupplementalResin(
+                domainRoundNum,
+                preparedCount));
+    }
+
     [Fact]
     public void OriginalResinSearchCoversTheCurrentRightTopUiRegion()
     {

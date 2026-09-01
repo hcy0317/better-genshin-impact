@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using BetterGenshinImpact.GameTask.AutoStygianOnslaught;
 
 namespace BetterGenshinImpact.GameTask.AutoDomain.Model;
@@ -57,6 +58,8 @@ public class ResinUseRecord
             {
                 throw new Exception("你选择了指定树脂刷取次数，请至少配置一种树脂的刷取次数！");
             }
+
+            list = OrderByPriority(list, taskParam.ResinPriorityList);
         }
 
         return list;
@@ -88,8 +91,49 @@ public class ResinUseRecord
             {
                 throw new Exception("你选择了指定树脂刷取次数，请至少配置一种树脂的刷取次数！");
             }
+
+            list = OrderByPriority(list, taskParam.ResinPriorityList);
         }
 
         return list;
+    }
+
+    private static List<ResinUseRecord> OrderByPriority(
+        List<ResinUseRecord> records,
+        IReadOnlyList<string>? resinPriorityList)
+    {
+        if (resinPriorityList == null || resinPriorityList.Count == 0)
+        {
+            return records;
+        }
+
+        var priority = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var index = 0; index < resinPriorityList.Count; index++)
+        {
+            var name = resinPriorityList[index]?.Trim();
+            if (!string.IsNullOrEmpty(name))
+            {
+                priority.TryAdd(name, index);
+            }
+        }
+
+        return records
+            .Select((record, index) => new
+            {
+                Record = record,
+                OriginalIndex = index,
+                Priority = priority.GetValueOrDefault(GetPriorityName(record.Name), int.MaxValue)
+            })
+            .OrderBy(item => item.Priority)
+            .ThenBy(item => item.OriginalIndex)
+            .Select(item => item.Record)
+            .ToList();
+    }
+
+    private static string GetPriorityName(string resinName)
+    {
+        return resinName.StartsWith("原粹树脂", StringComparison.Ordinal)
+            ? "原粹树脂"
+            : resinName;
     }
 }
