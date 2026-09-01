@@ -34,4 +34,15 @@ public class ArtifactCharacterCardReaderTests
     {
         Assert.Equal(expected, ArtifactCharacterCardReader.ToCharacterKey(name));
     }
+
+    [Theory]
+    [InlineData("Furina", "芙宁娜")]
+    [InlineData("HuTao", "胡桃")]
+    [InlineData("RaidenShogun", "雷电将军")]
+    public void ArtifactCatalogKey_MapsBackToTheGameCharacterName(
+        string characterKey,
+        string expected)
+    {
+        Assert.Equal(expected, ArtifactCharacterCardReader.ToCharacterName(characterKey));
+    }
 }

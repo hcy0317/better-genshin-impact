@@ -182,13 +182,54 @@ public class ArtifactHostCoordinatorTests
         var client = new FakeClient
         {
             NativePlan = new ArtifactNativeSyncPlanDto(
-                "NO_GO_CAPACITY", false, false, 100, 0, [], "", "CONSERVATIVE_SET_UNION", "capacity")
+                "NO_GO_CAPACITY", false, false, 100, 0,
+                [], [], [new ArtifactNativePlanIssueDto("LOCK_SET_BUILD_LIMIT", "GoldenTroupe", [], "capacity")],
+                "", "BUILD_SCOPED_LOCK_AND_QUICK_EQUIP_V1", "capacity")
         };
         var executor = new FakeNativeExecutor();
         var coordinator = new ArtifactHostCoordinator(new FakeScanner(Snapshot()), client, new FakeLockExecutor(), executor);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             coordinator.RunAsync(Request(ArtifactHostOperation.RebuildNativePlans), "token", CancellationToken.None));
+
+        Assert.Equal(0, executor.Calls);
+    }
+
+    [Fact]
+    public async Task RebuildNativePlans_ReadyBuildScopedPlanCallsReplacer()
+    {
+        var client = new FakeClient();
+        var executor = new FakeNativeExecutor();
+        var coordinator = new ArtifactHostCoordinator(
+            new FakeScanner(Snapshot()), client, new FakeLockExecutor(), executor);
+
+        await coordinator.RunAsync(
+            Request(ArtifactHostOperation.RebuildNativePlans),
+            "token", CancellationToken.None);
+
+        Assert.Equal(1, executor.Calls);
+        Assert.True(client.CompletionSuccess);
+    }
+
+    [Fact]
+    public async Task RebuildNativePlans_OldTranslationNeverCallsReplacer()
+    {
+        var client = new FakeClient
+        {
+            NativePlan = new ArtifactNativeSyncPlanDto(
+                "READY", true, true, 100, 1,
+                [new ArtifactNativeSetPlanDto(
+                    "build", "Build", "GoldenTroupe", "circlet", ["critRate_"], ["critDMG_"])],
+                [], [], "digest", "CONSERVATIVE_SET_UNION", "old")
+        };
+        var executor = new FakeNativeExecutor();
+        var coordinator = new ArtifactHostCoordinator(
+            new FakeScanner(Snapshot()), client, new FakeLockExecutor(), executor);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            coordinator.RunAsync(
+                Request(ArtifactHostOperation.RebuildNativePlans),
+                "token", CancellationToken.None));
 
         Assert.Equal(0, executor.Calls);
     }
@@ -263,7 +304,10 @@ public class ArtifactHostCoordinatorTests
         public string? SubmittedJobId { get; private set; }
         public ArtifactPreflightResult Preflight { get; init; } = new(ArtifactPreflightStatus.Ready, [], []);
         public ArtifactNativeSyncPlanDto NativePlan { get; init; } = new(
-            "READY", true, true, 100, 158, [], "digest", "CONSERVATIVE_SET_UNION", "ready");
+            "READY", true, true, 100, 1,
+            [new ArtifactNativeSetPlanDto(
+                "build", "Build", "GoldenTroupe", "circlet", ["critRate_"], ["critDMG_"])],
+            [], [], "digest", "BUILD_SCOPED_LOCK_AND_QUICK_EQUIP_V1", "ready");
         public bool? CompletionSuccess { get; private set; }
         public string? CompletionMessage { get; private set; }
         public ArtifactExecutionObservationDto? PreflightObservation { get; private set; }
