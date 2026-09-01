@@ -293,7 +293,6 @@ public class Avatar
 
             using var region = CaptureToRectArea();
             ThrowWhenDefeated(region, Ct);
-
             var currentIndex = CombatScenes.GetActiveAvatarIndex(region, context);
             consecutiveTargetFrames = AvatarSwitchConfirmationPolicy.Observe(
                 consecutiveTargetFrames,

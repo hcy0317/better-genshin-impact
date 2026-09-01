@@ -13,9 +13,6 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
 {
     public class FightFinishDetectConfig
     {
-        public string BattleEndProgressBarColor { get; set; } = "";
-
-        public string BattleEndProgressBarColorTolerance { get; set; } = "";
         public bool FastCheckEnabled = false;
         public string FastCheckParams = "";
         public bool CheckAfterSwitchAvatar = false;
@@ -53,9 +50,6 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
         KazuhaPartyName = autoFightConfig.KazuhaPartyName;
         OnlyPickEliteDropsMode = autoFightConfig.OnlyPickEliteDropsMode;
         BattleThresholdForLoot = autoFightConfig.BattleThresholdForLoot ?? BattleThresholdForLoot;
-        //下面参数固定，只取自动战斗里面的
-        FinishDetectConfig.BattleEndProgressBarColor = TaskContext.Instance().Config.AutoFightConfig.FinishDetectConfig.BattleEndProgressBarColor;
-        FinishDetectConfig.BattleEndProgressBarColorTolerance = TaskContext.Instance().Config.AutoFightConfig.FinishDetectConfig.BattleEndProgressBarColorTolerance;
 
         GuardianAvatar = autoFightConfig.GuardianAvatar;
         GuardianCombatSkip = autoFightConfig.GuardianCombatSkip;
@@ -81,7 +75,7 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
     public string CombatStrategyPath { get; set; }
 
     public bool FightFinishDetectEnabled { get; set; } = false;
-    public bool PickDropsAfterFightEnabled { get; set; } = false;
+    public bool PickDropsAfterFightEnabled { get; set; } = true;
     public int PickDropsAfterFightSeconds { get; set; } = 15;
     public const int KazuhaGatheredDropsScanSeconds = 3;
     public int BattleThresholdForLoot { get; set; } = -1;
@@ -234,9 +228,6 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
         KazuhaPartyName = autoFightConfig.KazuhaPartyName;
         OnlyPickEliteDropsMode = autoFightConfig.OnlyPickEliteDropsMode;
         BattleThresholdForLoot = autoFightConfig.BattleThresholdForLoot ?? BattleThresholdForLoot;
-        //下面参数固定，只取自动战斗里面的
-        FinishDetectConfig.BattleEndProgressBarColor = autoFightConfig.FinishDetectConfig.BattleEndProgressBarColor;
-        FinishDetectConfig.BattleEndProgressBarColorTolerance = autoFightConfig.FinishDetectConfig.BattleEndProgressBarColorTolerance;
 
         GuardianAvatar = autoFightConfig.GuardianAvatar;
         GuardianCombatSkip = autoFightConfig.GuardianCombatSkip;

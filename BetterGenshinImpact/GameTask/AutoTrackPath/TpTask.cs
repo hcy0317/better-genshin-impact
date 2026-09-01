@@ -55,9 +55,9 @@ public class TpTask
     private const double DefaultDisplayTpPointZoomLevel = 4.4; // 传送点显示时的默认地图比例
     private const double MoonCanonDisplayTpPointZoomLevel = 3.0;
     private const double TeleportDisplayZoomMeasurementTolerance = 0.1;
-    private const int DefaultBigMapOpenTimeoutMs = 2400;
-    private const int MoonCanonBigMapOpenTimeoutMs = 7000;
-    private const int UiRecognitionPollIntervalMs = 40;
+    private const int DefaultBigMapOpenTimeoutMs = 5000;
+    private const int MoonCanonBigMapOpenTimeoutMs = 8000;
+    private const int UiRecognitionPollIntervalMs = 80;
     private const int BigMapOpenCheckIntervalMs = UiRecognitionPollIntervalMs;
     private const int BigMapFailureDetectionTimeoutMs = 300;
     private const int BigMapCloseTimeoutMs = 1000;
@@ -96,6 +96,7 @@ public class TpTask
     private const int MapChooseCandidateStableChecks = 2;
     private const int MapChooseCandidatePositionTolerancePx = 4;
     private const int MapChooseCandidateClickRetryCount = 2;
+    private const int MapChooseCandidateClickDelayMs = 150;  // 点击候选列表后，等待UI变化的时间
     private const int MapChooseCandidateClickVerificationDelayMs = 600;
     private const int MapChooseCandidateClickVerificationIntervalMs = 100;
     private const double TeleportFinalZoomMinNeighborScreenDistance = 96d;
@@ -105,7 +106,8 @@ public class TpTask
     private const int MapLayerVerificationPollIntervalMs = UiRecognitionPollIntervalMs;
     private const int MapGroundLayerSwitchTimeoutMs = 3000;
     private const int TeleportPanelMinimumTimeoutMs = 900;
-    private const int TeleportConfirmTimeoutMs = 4000;
+    private const int TeleportPanelInitialDelayMs = 200;
+    private const int TeleportConfirmTimeoutMs = 5000;
     private const int SwitchAreaCandidateTimeoutMs = 1500;
     private const int SwitchAreaSelectionTimeoutMs = 1000;
     private const int SwitchAreaSelectionMinimumWaitMs = 120;
@@ -182,6 +184,10 @@ public class TpTask
         public required double MeanError { get; init; }
     }
 
+    private sealed class TeleportPanelNotOpenedException(string message) : TpPointNotActivate(message)
+    {
+    }
+
     private sealed class TeleportTargetContext
     {
         public required string MapName { get; init; }
@@ -225,9 +231,9 @@ public class TpTask
 
     private enum TeleportPanelResult
     {
-        Waiting,
-        Confirmed,
-        RetryPoint
+        Waiting,    // 没传送按钮、也没有匹配候选：继续等
+        Confirmed,  // 已确认传送或已离开大地图
+        RetryPoint  // 未激活/标点/候选无效：需要重新点地图
     }
 
     private readonly record struct MapMoveState(
@@ -973,25 +979,18 @@ public class TpTask
 
     private async Task ClickTpPointAfterMapPointSelected(TeleportTargetContext target)
     {
-        for (var pointAttempt = 0; pointAttempt < 3; pointAttempt++)
+        if (await WaitForTeleportPanelAndConfirm(target.TargetTp))
         {
-            if (pointAttempt > 0)
-            {
-                await ClickTargetMapPoint(target);
-            }
-
-            if (await WaitForTeleportPanelAndConfirm(target.TargetTp))
-            {
-                return;
-            }
+            return;
         }
 
-        throw new TpPointNotActivate("等待传送点交互面板超时");
+        throw new TeleportPanelNotOpenedException("点击传送点后未出现交互面板，可能是传送点未激活");
     }
 
     private async Task<bool> WaitForTeleportPanelAndConfirm(GiTpPosition? targetTp)
     {
         var timeoutMilliseconds = GetTeleportPanelTimeoutMilliseconds();
+        await Delay(TeleportPanelInitialDelayMs, ct);
         var stopwatch = Stopwatch.StartNew();
         for (var i = 0; i == 0 || stopwatch.ElapsedMilliseconds < timeoutMilliseconds; i++)
         {
@@ -1007,7 +1006,11 @@ public class TpTask
                 case TeleportPanelResult.Confirmed:
                     return true;
                 case TeleportPanelResult.RetryPoint:
+                    // 点到未激活点/标点，或候选点击未生效，交给调用方换点。
                     return false;
+                case TeleportPanelResult.Waiting:
+                    // 本帧既没有传送按钮也没有有效候选，继续轮询。
+                    break;
             }
         }
 
@@ -1219,6 +1222,7 @@ public class TpTask
         }
 
         Simulation.SendInput.SimulateAction(GIActions.OpenMap);
+        await Delay(100, ct);
         return await WaitForBigMapUiAppear(GetBigMapOpenTimeoutMilliseconds(mapName));
     }
 
@@ -1317,6 +1321,11 @@ public class TpTask
             try
             {
                 return await TpOnce(tpX, tpY, mapContext, force);
+            }
+            catch (TeleportPanelNotOpenedException)
+            {
+                await CloseBigMapAfterTeleportFailure(forceClose: true);
+                throw;
             }
             catch (TpPointNotActivate e)
             {
@@ -1483,6 +1492,7 @@ public class TpTask
             int effectiveMoveMouseY = GetDisplayScaleAdjustedMouseDelta(moveMouseY);
 
             var mouseMoveResult = await MouseMoveMap(effectiveMoveMouseX, effectiveMoveMouseY);
+            await Delay(30, ct);
 
             // 推算理论上的移动后坐标 (惯性预测)
             Point2f predictedPoint = moveState.CenterPoint + new Point2f(
@@ -2513,6 +2523,7 @@ public class TpTask
     private async Task<bool> TrySwitchArea(string areaName)
     {
         GameCaptureRegion.GameRegionClick((rect, scale) => (rect.Width - 160 * scale, rect.Height - 60 * scale));
+        await Delay(50, ct);
         var minCountryLocalized = this.stringLocalizer.WithCultureGet(this.cultureInfo, areaName);
         var candidatesText = "";
         var stopwatch = Stopwatch.StartNew();
@@ -2553,6 +2564,7 @@ public class TpTask
                             retryMatch.Width,
                             retryMatch.Height);
                         retryMatch.Click();
+                        await Delay(50, ct);
                         var confirmed = await WaitForAreaSelectionApplied(
                             areaName,
                             minCountryLocalized,
@@ -2750,46 +2762,24 @@ public class TpTask
         throw new TimeoutException("切换到地表地图后校验超时");
     }
 
-    public Task ClickTpPoint(
-        ImageRegion imageRegion,
-        GiTpPosition? targetTp = null,
-        string mapName = "Teyvat",
-        Rect bigMapInAllMapRect = default,
-        double targetX = double.NaN,
-        double targetY = double.NaN)
-    {
-        return ClickTpPoint(imageRegion, targetTp);
-    }
-
-    private async Task ClickTpPoint(
-        ImageRegion imageRegion,
-        GiTpPosition? targetTp)
-    {
-        var result = await HandleTeleportPanel(imageRegion, targetTp);
-        if (result != TeleportPanelResult.Confirmed)
-        {
-            throw result == TeleportPanelResult.RetryPoint
-                ? new TpPointNotActivate("传送点未激活或不存在")
-                : new TpPointNotActivate("选项列表不存在传送点");
-        }
-    }
-
     private async Task<TeleportPanelResult> HandleTeleportPanel(
         ImageRegion imageRegion,
         GiTpPosition? targetTp)
     {
+        // 1. 判断是否在地图界面；已离开大地图视为传送已确认。
         var isInBigMapUi = Bv.IsInBigMapUi(imageRegion);
         if (!isInBigMapUi)
         {
             return TeleportPanelResult.Confirmed;
         }
 
+        // 2. 判断是否已经点出传送按钮。
         var teleportButton = imageRegion.Find(GetQuickTeleportRecognitionObject("TeleportButton", imageRegion));
         using var ownedTeleportButton = teleportButton;
         if (!teleportButton.IsEmpty())
         {
-            PressTeleportConfirmKey();
-            return TeleportPanelResult.Confirmed;
+            await PressTeleportConfirmKey();
+            return TeleportPanelResult.Confirmed; // 可以传送了，结束
         }
 
         var candidate = await CheckMapChooseIcon(imageRegion, targetTp, 1);
@@ -2798,6 +2788,7 @@ public class TpTask
             return TeleportPanelResult.Waiting;
         }
 
+        // 4. 已点选项列表中的传送点（未激活点位也会出现在列表里），等待传送按钮。
         for (var clickAttempt = 1; clickAttempt <= MapChooseCandidateClickRetryCount; clickAttempt++)
         {
             var result = await WaitAndPressTeleportConfirm(targetTp);
@@ -2820,6 +2811,7 @@ public class TpTask
             candidate = await CheckMapChooseIcon(retryCapture, targetTp, clickAttempt + 1);
             if (candidate == null)
             {
+                // 重试时列表已消失或不再有匹配项：当成未激活点/标点，换点重试。
                 return TeleportPanelResult.RetryPoint;
             }
         }
@@ -2834,10 +2826,7 @@ public class TpTask
         long nextCandidateVerificationAt = MapChooseCandidateClickVerificationDelayMs;
         for (var i = 0; i == 0 || stopwatch.ElapsedMilliseconds < TeleportConfirmTimeoutMs; i++)
         {
-            if (i > 0)
-            {
-                await Delay(UiRecognitionPollIntervalMs, ct);
-            }
+            await Delay(UiRecognitionPollIntervalMs, ct);
 
             var screen = CaptureToRectArea();
             using var ownedScreen = screen;
@@ -2848,11 +2837,12 @@ public class TpTask
                 return TeleportPanelResult.Confirmed;
             }
 
+            // 点完候选后出现传送按钮，或选项本身就是可传送点。
             var teleportButton = screen.Find(GetQuickTeleportRecognitionObject("TeleportButton", screen));
             using var ownedTeleportButton = teleportButton;
             if (!teleportButton.IsEmpty())
             {
-                PressTeleportConfirmKey();
+                await PressTeleportConfirmKey();
                 return TeleportPanelResult.Confirmed;
             }
 
@@ -2880,9 +2870,10 @@ public class TpTask
         return TeleportPanelResult.RetryPoint;
     }
 
-    private void PressTeleportConfirmKey()
+    private async Task PressTeleportConfirmKey()
     {
         Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_F);
+        await Delay(30, ct);
     }
 
     private List<NearbyMapIcon> GetMapIconsInRect(
@@ -3436,7 +3427,7 @@ public class TpTask
                 currentCandidate.ClickRect.X + currentCandidate.ClickRect.Width / 2,
                 currentCandidate.ClickRect.Y + currentCandidate.ClickRect.Height / 2,
                 stableChecks);
-            ClickMapChooseCandidate(stableImageRegion, currentCandidate);
+            await ClickMapChooseCandidate(stableImageRegion, currentCandidate);
             return currentCandidate;
         }
 
@@ -3495,11 +3486,12 @@ public class TpTask
             return null;
         }
 
+        // 图标匹配失败时的回退：候选列 220 宽范围内 OCR，必须唯一命中目标名称。
         var assetScale = imageRegion.Width / 1920d;
         var textSearchRect = new Rect(
             _assets.MapChooseIconRoi.Right - (int)Math.Round(12 * assetScale),
             _assets.MapChooseIconRoi.Y,
-            (int)Math.Round(460 * assetScale),
+            (int)Math.Round(220 * assetScale),
             _assets.MapChooseIconRoi.Height).ClampTo(imageRegion.SrcMat);
         if (textSearchRect.Width <= 0 || textSearchRect.Height <= 0)
         {
@@ -3554,11 +3546,15 @@ public class TpTask
         }
     }
 
+    /// <summary>
+    /// 在 MapChooseIconRoi 内全匹配一遍图标，并对每行做文字识别。
+    /// </summary>
     private List<MapChooseCandidate> GetMapChooseCandidates(ImageRegion imageRegion)
     {
         var candidates = new List<MapChooseCandidate>();
         const double threshold = 0.65;
 
+        // 在 MapChooseIconRoi 内全匹配一遍图标。
         var mapChooseIconRoi = imageRegion.CacheGreyMat[_assets.MapChooseIconRoi];
         using var ownedMapChooseIconRoi = mapChooseIconRoi;
         for (var i = 0; i < _assets.MapChooseIconGreyMatList.Count; i++)
@@ -3571,6 +3567,7 @@ public class TpTask
                 null,
                 threshold);
 
+            // 按高度排序，自上而下处理每一行。
             foreach (var relativeIconRect in iconRects.OrderBy(x => x.Y))
             {
                 var iconRect = new Rect(
@@ -3583,7 +3580,8 @@ public class TpTask
                     continue;
                 }
 
-                var textRect = new Rect(iconRect.X + iconRect.Width, iconRect.Y - 8, 320, iconRect.Height + 16).ClampTo(imageRegion.SrcMat);
+                // 图标右侧 220 宽度的文字区域。
+                var textRect = new Rect(iconRect.X + iconRect.Width, iconRect.Y - 8, 220, iconRect.Height + 16).ClampTo(imageRegion.SrcMat);
                 if (textRect.Width <= 0 || textRect.Height <= 0)
                 {
                     continue;
@@ -3594,10 +3592,9 @@ public class TpTask
                     using var textRa = imageRegion.DeriveCrop(textRect);
                     using var textRegion = textRa.Find(new RecognitionObject
                     {
-                        // RecognitionType = RecognitionTypes.Ocr,
                         RecognitionType = RecognitionTypes.ColorRangeAndOcr,
                         ColorConversionCode = ColorConversionCodes.BGR2HLS,
-                        LowerColor = new Scalar(0, 245, 0),
+                        LowerColor = new Scalar(0, 245, 0), // 只取高亮白色文字
                         UpperColor = new Scalar(180, 255, 15),
                     });
                     text = CleanCandidateText(textRegion.Text);
@@ -3835,9 +3832,10 @@ public class TpTask
         return Cv2.CountNonZero(brightMask);
     }
 
-    private static void ClickMapChooseCandidate(ImageRegion imageRegion, MapChooseCandidate candidate)
+    private async Task ClickMapChooseCandidate(ImageRegion imageRegion, MapChooseCandidate candidate)
     {
         imageRegion.ClickTo(candidate.ClickRect.X, candidate.ClickRect.Y, candidate.ClickRect.Width, candidate.ClickRect.Height);
+        await Delay(MapChooseCandidateClickDelayMs, ct);
     }
 
     private static double GetDistance(double x1, double y1, double x2, double y2)
