@@ -2,12 +2,14 @@ using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.Core.Simulator;
+using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.View.Drawable;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,6 +32,20 @@ public sealed record VisualRecognitionConfig(
 /// </summary>
 public static class AvatarRecognition
 {
+    private static readonly object PassiveObservationLock = new();
+    private static PassiveTargetObservation _latestPassiveObservation;
+
+    internal static PassiveTargetObservation LatestPassiveObservation
+    {
+        get
+        {
+            lock (PassiveObservationLock)
+            {
+                return _latestPassiveObservation;
+            }
+        }
+    }
+
     /// <summary>
     /// 当前战斗的 AutoFightParam（由 AutoFightTask/AutoFightJsonTask 在 Start 开头设置），
     /// 用于让 <see cref="GetVisualRecognitionConfig"/> 优先读取逐队伍配置而非全局配置。
@@ -65,11 +81,20 @@ public static class AvatarRecognition
         }
     }
 
+    internal static void ClearPassiveObservation()
+    {
+        lock (PassiveObservationLock)
+        {
+            _latestPassiveObservation = default;
+        }
+    }
+
     /// <summary>
-    /// 排他锁：保护持续索敌的"检查+MoveMouseBy"与独占操作的 BeginExclusiveOperation/Dispose 互斥，
-    /// 解决 volatile bool 的 check-then-act 竞态。
+    /// 排他锁：保护持续观察的检查与独占视角操作的 BeginExclusiveOperation/Dispose 互斥，
+    /// 避免独占动作期间额外截图和叠加层更新。
     /// </summary>
     private static readonly object _seekLock = new();
+    private static long _exclusiveEpoch;
 
     /// <summary>
     /// 持续索敌跳过引用计数：&gt;0 表示至少有一个独占视角操作正在进行，
@@ -87,6 +112,7 @@ public static class AvatarRecognition
         lock (_seekLock)
         {
             _skipSeekCount++;
+            _exclusiveEpoch++;
         }
         return new SkipSeekScope();
     }
@@ -405,12 +431,9 @@ public static class AvatarRecognition
         CancellationToken ct,
         Func<bool>? isFightEnd = null)
     {
-        var dpi = TaskContext.Instance().DpiScale;
         var visConfig = GetVisualRecognitionConfig();
         var frameIntervalMs = visConfig.TargetingDetectionInterval;
         var drawResults = visConfig.DrawRecognitionResults;
-        var lockLostWaitTime = visConfig.LockLostWaitTime;
-        DateTime? lastSeenTargetTime = null;  // 最后找到目标的时间（null = 从未找到）
 
         try
         {
@@ -423,14 +446,20 @@ public static class AvatarRecognition
                     continue;
                 }
 
+                var observationEpoch = Volatile.Read(ref _exclusiveEpoch);
+                var frameStopwatch = Stopwatch.StartNew();
                 using (var capture = CaptureToRectArea())
                 {
+                    var capturedAtUtc = DateTime.UtcNow;
                     int preAimX = (int)(capture.Width * 0.5);
                     int preAimY = (int)(capture.Height * (480.0 / 1080.0));
 
                     // 不在主界面时跳过本轮（避免菜单/地图/对话等界面下误操作）
                     if (!Bv.IsInMainUi(capture))
                     {
+                        CombatRuntimeMetrics.Shared.Record(
+                            "targeting.frame",
+                            frameStopwatch.Elapsed);
                         await Task.Delay(frameIntervalMs, ct);
                         continue;
                     }
@@ -443,21 +472,25 @@ public static class AvatarRecognition
 
                     bool hasLegendaryBar = valid.Any(b => IsLegendaryBar(b.x, b.y));
 
-                    // 2. 血条追踪：存在有效普通血条且无传奇时，朝最近血条方向移动鼠标
+                    // 2. 血条追踪：持续感知只发布观察，不直接发送战斗输入。
                     if (valid.Count > 0 && !hasLegendaryBar)
                     {
-                        lastSeenTargetTime = DateTime.UtcNow;
                         var nearest = valid.OrderBy(b =>
                             Math.Abs((b.x + b.width / 2) - preAimX) +
                             Math.Abs((b.y + b.height / 2) - preAimY)).First();
-                        var offsetX = (nearest.x + nearest.width / 2) - preAimX;
-                        var offsetY = (nearest.y + nearest.height / 2) - preAimY;
-                        lock (_seekLock)
-                        {
-                            if (_skipSeekCount > 0) continue;
-                            Simulation.SendInput.Mouse.MoveMouseBy(
-                                (int)(offsetX * 0.35 * dpi), (int)(offsetY * 0.25 * dpi));
-                        }
+                        PublishPassiveObservation(
+                            hasNormalHealthBar: true,
+                            hasDamageCue: false,
+                            new EnemySeekVisual(
+                                nearest.x,
+                                nearest.y,
+                                nearest.width,
+                                nearest.height,
+                                nearest.width * nearest.height),
+                            capture.Width,
+                            capture.Height,
+                            capturedAtUtc,
+                            observationEpoch);
 
                         // 叠加层：最近血条绿色粗框，其余红色细框
                         if (drawResults)
@@ -481,16 +514,15 @@ public static class AvatarRecognition
                         var damageResult = FindDamageNumber(capture);
                         if (damageResult.HasValue)
                         {
-                            var (dcx, dcy, _, dx, dy, dw, dh) = damageResult.Value;
-                            lastSeenTargetTime = DateTime.UtcNow;
-                            var offsetX = dcx - preAimX;
-                            var offsetY = dcy - preAimY;
-                            lock (_seekLock)
-                            {
-                                if (_skipSeekCount > 0) continue;
-                                Simulation.SendInput.Mouse.MoveMouseBy(
-                                    (int)(offsetX * 0.35 * dpi), (int)(offsetY * 0.25 * dpi));
-                            }
+                            var (_, _, _, dx, dy, dw, dh) = damageResult.Value;
+                            PublishPassiveObservation(
+                                hasNormalHealthBar: false,
+                                hasDamageCue: true,
+                                new EnemySeekVisual(dx, dy, dw, dh, dw * dh),
+                                capture.Width,
+                                capture.Height,
+                                capturedAtUtc,
+                                observationEpoch);
 
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
@@ -502,25 +534,26 @@ public static class AvatarRecognition
                             }
                         }
 
-                        // 4. 脱锁旋转：血条和伤害数字都找不到时，脱锁等待后旋转视角
                         if (!damageResult.HasValue)
                         {
-                            // 从未找到过目标，或距离上次找到已超过脱锁等待时间 → 开始旋转
-                            if (!lastSeenTargetTime.HasValue ||
-                                (DateTime.UtcNow - lastSeenTargetTime.Value).TotalSeconds >= lockLostWaitTime)
-                            {
-                                lock (_seekLock)
-                                {
-                                    if (_skipSeekCount > 0) continue;
-                                    Simulation.SendInput.Mouse.MoveMouseBy((int)(250 * dpi), 0);
-                                }
-                            }
+                            PublishPassiveObservation(
+                                hasNormalHealthBar: false,
+                                hasDamageCue: false,
+                                null,
+                                capture.Width,
+                                capture.Height,
+                                capturedAtUtc,
+                                observationEpoch);
                         }
                     }
 
                     // 提交叠加层
                     VisionContext.Instance().DrawContent.PutOrRemoveRectList("ContinuousTargeting", drawList);
                 }
+
+                CombatRuntimeMetrics.Shared.Record(
+                    "targeting.frame",
+                    frameStopwatch.Elapsed);
 
                 // 按配置的索敌识别间隔等待
                 await Task.Delay(frameIntervalMs, ct);
@@ -529,13 +562,54 @@ public static class AvatarRecognition
         catch (OperationCanceledException) { }
         finally
         {
-            // 退出时释放所有按键、点按中键回正视角、清除叠加层
-            // 注意：清理阶段使用 CancellationToken.None，因为 ct 可能在到此之前已被取消，
-            // 若使用已取消的 token 会导致 Task.Delay 抛出异常，跳过中键复位和叠加层清理。
-            Simulation.ReleaseAllKey();
-            await Task.Delay(50, CancellationToken.None);
-            Simulation.SendInput.Mouse.MiddleButtonClick();
             VisionContext.Instance().DrawContent.RemoveRect("ContinuousTargeting");
         }
     }
+
+    private static void PublishPassiveObservation(
+        bool hasNormalHealthBar,
+        bool hasDamageCue,
+        EnemySeekVisual? visual,
+        int imageWidth,
+        int imageHeight,
+        DateTime capturedAtUtc,
+        long captureEpoch)
+    {
+        lock (_seekLock)
+        {
+            if (!CanPublishPassiveObservation(
+                    captureEpoch,
+                    _exclusiveEpoch,
+                    _skipSeekCount))
+            {
+                return;
+            }
+            lock (PassiveObservationLock)
+            {
+                _latestPassiveObservation = new PassiveTargetObservation(
+                    hasNormalHealthBar,
+                    hasDamageCue,
+                    capturedAtUtc,
+                    visual,
+                    imageWidth,
+                    imageHeight);
+            }
+        }
+    }
+
+    internal static bool CanPublishPassiveObservation(
+        long captureEpoch,
+        long currentEpoch,
+        int activeExclusiveOperations)
+    {
+        return captureEpoch == currentEpoch && activeExclusiveOperations == 0;
+    }
 }
+
+internal readonly record struct PassiveTargetObservation(
+    bool HasNormalHealthBar,
+    bool HasDamageCue,
+    DateTime CapturedAtUtc,
+    EnemySeekVisual? Visual,
+    int ImageWidth,
+    int ImageHeight);

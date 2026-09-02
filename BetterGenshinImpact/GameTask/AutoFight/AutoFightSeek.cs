@@ -14,6 +14,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using System.Linq;
 using System.Collections.Generic;
 using System.IO;
+using System.Diagnostics;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -141,10 +142,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 await Task.Delay(180, ct);
             }
 
-            if (cameraOffset != 0)
+            if (!BoundedSeekPolicy.CanMoveAfterCameraPulse(
+                    cameraOffset,
+                    verticalCameraOffset))
             {
                 logger.LogInformation(
-                    "血条仍有横向误差，本轮只转向不前进，下一帧重新定位");
+                    "血条仍有镜头误差，本轮只转向不前进，下一帧重新定位");
                 return;
             }
 
@@ -191,6 +194,18 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
             }
         }
+
+        internal static Task MovePulseAsync(
+            TimeSpan duration,
+            CancellationToken ct,
+            params GIActions[] actions)
+        {
+            var normalized = BoundedSeekPolicy.NormalizeMovementDuration(duration);
+            return MoveWithKeysAsync(
+                ct,
+                (int)normalized.TotalMilliseconds,
+                actions);
+        }
     }
 
     internal enum AutoFightSeekAction
@@ -201,6 +216,17 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         ApproachVisibleEnemy,
         ApproachFixedTopHealthTarget,
         KeepFighting
+    }
+
+    public enum SeekOutcome
+    {
+        TargetUsable,
+        TargetVisibleButUnaligned,
+        NoTarget,
+        NoProgress,
+        MovementBlocked,
+        DeadlineReached,
+        Cancelled
     }
 
     internal enum EnemyIndicatorDirection
@@ -228,7 +254,108 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         AutoFightSeekAction Action,
         EnemyIndicatorDirection Direction,
         EnemySeekVisual? Visual = null,
-        int SignalCount = 0);
+        int SignalCount = 0,
+        SeekCueKind? Cue = null);
+
+    internal enum SeekCueKind
+    {
+        DirectionIndicator,
+        HealthBar,
+        DamageNumber,
+        FixedTopHealth
+    }
+
+    internal readonly record struct PendingCameraMotion(
+        int HorizontalPixels,
+        int VerticalPixels,
+        DateTime IssuedAtUtc);
+
+    internal readonly record struct TargetTrackState(
+        long TrackId,
+        SeekCueKind Cue,
+        EnemySeekVisual LastVisual,
+        double BearingDegrees,
+        double Confidence,
+        DateTime LastSeenAtUtc,
+        PendingCameraMotion? LastCameraMotion);
+
+    internal readonly record struct TargetTrackUpdate(
+        EnemySeekDecision? AcceptedDecision,
+        bool TargetProgress);
+
+    internal static class TargetTrackPolicy
+    {
+        private const double ImmediateSwitchScoreMargin = 0.20;
+        private const int RequiredWinningFrames = 3;
+        private static readonly TimeSpan ShortLossRetention = TimeSpan.FromMilliseconds(900);
+        private static readonly TimeSpan HandoffWindow = TimeSpan.FromMilliseconds(600);
+        private static readonly TimeSpan IndicatorOnlyMovementLimit = TimeSpan.FromMilliseconds(1200);
+        private const int IndicatorOnlyPulseLimit = 4;
+
+        internal static bool ShouldSwitch(
+            double currentScore,
+            double challengerScore,
+            int challengerWinningFrames)
+        {
+            return challengerScore - currentScore >= ImmediateSwitchScoreMargin ||
+                   challengerWinningFrames >= RequiredWinningFrames;
+        }
+
+        internal static bool ShouldRetainMissing(
+            DateTime lastSeenAtUtc,
+            DateTime nowUtc)
+        {
+            var missingFor = nowUtc - lastSeenAtUtc;
+            return missingFor >= TimeSpan.Zero && missingFor <= ShortLossRetention;
+        }
+
+        internal static bool CanHandoffIndicatorToHealth(
+            EnemySeekVisual healthBar,
+            int imageWidth,
+            int competingHealthBars,
+            PendingCameraMotion cameraMotion,
+            DateTime observedAtUtc)
+        {
+            var elapsed = observedAtUtc - cameraMotion.IssuedAtUtc;
+            if (elapsed < TimeSpan.Zero ||
+                elapsed > HandoffWindow ||
+                competingHealthBars != 1)
+            {
+                return false;
+            }
+
+            var compensatedCenterX = healthBar.CenterX + cameraMotion.HorizontalPixels;
+            var centralTolerance = imageWidth * 0.30;
+            return Math.Abs(compensatedCenterX - imageWidth / 2d) <= centralTolerance;
+        }
+
+        internal static bool HasTargetProgress(
+            bool bearingImproved,
+            bool healthBarImproved,
+            bool confidenceImproved,
+            bool handoffSucceeded,
+            bool actuationObserved)
+        {
+            _ = actuationObserved;
+            return bearingImproved ||
+                   healthBarImproved ||
+                   confidenceImproved ||
+                   handoffSucceeded;
+        }
+
+        internal static bool CanContinueIndicatorOnly(
+            TimeSpan cumulativeMovement,
+            int pulses)
+        {
+            return cumulativeMovement < IndicatorOnlyMovementLimit &&
+                   pulses < IndicatorOnlyPulseLimit;
+        }
+
+        internal static bool IsNoProgress(int consecutiveSlices)
+        {
+            return consecutiveSlices >= 3;
+        }
+    }
 
     internal readonly record struct DirectionIndicatorTemplateSpec(
         string FileName,
@@ -398,6 +525,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private static long _fixedTopHealthLastProgressTicks;
         private static int _fixedTopHealthAdvanceCount;
         private static int _seekSelectionScreenshotSequence;
+        private static readonly object TargetTrackLock = new();
+        private static TargetTrackState? _targetTrack;
+        private static TargetTrackState? _challengerTrack;
+        private static long _nextTrackId;
+        private static int _challengerWinningFrames;
+        private static int _consecutiveNoProgressSlices;
+        private static int _indicatorOnlyMovementMilliseconds;
+        private static int _indicatorOnlyPulses;
+        private static readonly CombatFailureTraceBuffer<string> FailureTrace = new(96);
 
         private static bool IsIndicatorRouteLocked => Volatile.Read(ref _indicatorRouteLocked) == 1;
 
@@ -412,6 +548,16 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             Interlocked.Exchange(ref _fixedTopHealthLowestWidth, 0);
             Interlocked.Exchange(ref _fixedTopHealthLastProgressTicks, 0);
             Interlocked.Exchange(ref _fixedTopHealthAdvanceCount, 0);
+            lock (TargetTrackLock)
+            {
+                _targetTrack = null;
+                _challengerTrack = null;
+                _challengerWinningFrames = 0;
+                _consecutiveNoProgressSlices = 0;
+                _indicatorOnlyMovementMilliseconds = 0;
+                _indicatorOnlyPulses = 0;
+            }
+            FailureTrace.Clear();
             VisibleHealthApproach.Reset();
         }
 
@@ -486,8 +632,507 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             { 1, 100 }, { 2, 90 }, { 3, 80}, { 4, 70 }, { 5, 60}, { 6,45 },
             { 7, 30 }, { 8, 15 }, { 9, 6 }, { 10, 1 }, { 11,-10 }, { 12,-50 }, { 13, -60 }
         };
+
+        public static async Task<SeekOutcome> RunBoundedSeekSliceAsync(
+            ILogger logger,
+            TimeSpan budget,
+            bool allowInput,
+            CancellationToken ct)
+        {
+            var sliceStopwatch = Stopwatch.StartNew();
+            var normalizedBudget = BoundedSeekPolicy.NormalizeBudget(budget);
+            using var budgetCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            budgetCts.CancelAfter(normalizedBudget);
+            var sliceCt = budgetCts.Token;
+
+            try
+            {
+                EnemySeekDecision observedDecision;
+                int imageWidth;
+                int imageHeight;
+                if (!TryCreatePassiveDecision(
+                        AvatarRecognition.LatestPassiveObservation,
+                        DateTime.UtcNow,
+                        out observedDecision,
+                        out imageWidth,
+                        out imageHeight))
+                {
+                    observedDecision = CaptureSeekDecision(
+                        new Scalar(255, 90, 90),
+                        null,
+                        out imageWidth,
+                        out imageHeight);
+                }
+                var trackUpdate = UpdateTargetTrack(
+                    observedDecision,
+                    imageWidth,
+                    imageHeight,
+                    DateTime.UtcNow);
+                FailureTrace.Add(
+                    DateTime.UtcNow,
+                    $"{observedDecision.Action}:{observedDecision.Direction}:{observedDecision.SignalCount}");
+
+                if (trackUpdate.AcceptedDecision is not { } decision)
+                {
+                    var continueTracking = RecordSliceProgress(targetProgress: false);
+                    if (!continueTracking)
+                    {
+                        LogFailureTrace(logger);
+                    }
+                    return continueTracking
+                        ? SeekOutcome.TargetVisibleButUnaligned
+                        : SeekOutcome.NoProgress;
+                }
+
+                var targetProgress = trackUpdate.TargetProgress;
+
+                switch (decision.Action)
+                {
+                    case AutoFightSeekAction.KeepFighting:
+                        RecordSliceProgress(targetProgress: true);
+                        return SeekOutcome.TargetUsable;
+                    case AutoFightSeekAction.ApproachFixedTopHealthTarget:
+                        logger.LogDebug("顶部固定血条仅作为战斗存在证据，本索敌片不移动");
+                        RecordSliceProgress(targetProgress: true);
+                        return SeekOutcome.TargetUsable;
+                    case AutoFightSeekAction.ApproachVisibleEnemy:
+                        if (!allowInput)
+                        {
+                            return SeekOutcome.TargetVisibleButUnaligned;
+                        }
+                        await MoveForwardTask.ApproachVisibleEnemyAsync(
+                            decision,
+                            imageWidth,
+                            imageHeight,
+                            logger,
+                            sliceCt);
+                        var continueVisible = RecordSliceProgress(targetProgress);
+                        if (!continueVisible)
+                        {
+                            LogFailureTrace(logger);
+                        }
+                        return continueVisible
+                            ? SeekOutcome.TargetVisibleButUnaligned
+                            : SeekOutcome.NoProgress;
+                    case AutoFightSeekAction.Approach:
+                        if (!allowInput)
+                        {
+                            return SeekOutcome.TargetVisibleButUnaligned;
+                        }
+                        var horizontalCameraOffset = decision.Visual is { } indicatorVisual
+                            ? GetIndicatorCameraOffset(
+                                decision.Direction,
+                                indicatorVisual,
+                                imageWidth,
+                                imageHeight)
+                            : 0;
+                        if (horizontalCameraOffset != 0)
+                        {
+                            Simulation.SendInput.Mouse.MoveMouseBy(
+                                horizontalCameraOffset,
+                                0);
+                            await Task.Delay(180, sliceCt);
+                            RecordCameraMotion(horizontalCameraOffset, 0);
+                        }
+                        else if (TargetTrackPolicy.CanContinueIndicatorOnly(
+                                     TimeSpan.FromMilliseconds(
+                                         Volatile.Read(ref _indicatorOnlyMovementMilliseconds)),
+                                     Volatile.Read(ref _indicatorOnlyPulses)))
+                        {
+                            var pulse = BoundedSeekPolicy.NormalizeMovementDuration(
+                                TimeSpan.FromMilliseconds(250));
+                            await MoveForwardTask.MovePulseAsync(
+                                pulse,
+                                sliceCt,
+                                GIActions.MoveForward);
+                            Interlocked.Add(
+                                ref _indicatorOnlyMovementMilliseconds,
+                                (int)pulse.TotalMilliseconds);
+                            Interlocked.Increment(ref _indicatorOnlyPulses);
+                        }
+                        else
+                        {
+                            return SeekOutcome.NoProgress;
+                        }
+                        var continueIndicator = RecordSliceProgress(targetProgress);
+                        if (!continueIndicator)
+                        {
+                            LogFailureTrace(logger);
+                        }
+                        return continueIndicator
+                            ? SeekOutcome.TargetVisibleButUnaligned
+                            : SeekOutcome.NoProgress;
+                    case AutoFightSeekAction.ContinueLockedRoute:
+                        UnlockIndicatorRoute();
+                        var continueRoute = RecordSliceProgress(targetProgress);
+                        if (!continueRoute)
+                        {
+                            LogFailureTrace(logger);
+                        }
+                        return continueRoute
+                            ? SeekOutcome.NoTarget
+                            : SeekOutcome.NoProgress;
+                    case AutoFightSeekAction.Scan:
+                    default:
+                        if (allowInput)
+                        {
+                            Simulation.SendInput.Mouse.MoveMouseBy(120, 0);
+                            await Task.Delay(80, sliceCt);
+                        }
+                        var continueScan = RecordSliceProgress(targetProgress);
+                        if (!continueScan)
+                        {
+                            LogFailureTrace(logger);
+                        }
+                        return continueScan
+                            ? SeekOutcome.NoTarget
+                            : SeekOutcome.NoProgress;
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return SeekOutcome.DeadlineReached;
+            }
+            catch (OperationCanceledException)
+            {
+                return SeekOutcome.Cancelled;
+            }
+            finally
+            {
+                CombatRuntimeMetrics.Shared.Record("seek.slice", sliceStopwatch.Elapsed);
+            }
+        }
+
+        internal static bool? ToLegacySeekResult(SeekOutcome outcome)
+        {
+            return outcome switch
+            {
+                SeekOutcome.TargetUsable or SeekOutcome.TargetVisibleButUnaligned => false,
+                SeekOutcome.NoTarget or SeekOutcome.NoProgress or
+                    SeekOutcome.MovementBlocked or SeekOutcome.DeadlineReached => null,
+                SeekOutcome.Cancelled => false,
+                _ => false
+            };
+        }
+
+        internal static TargetTrackState? GetTargetTrackSnapshot()
+        {
+            lock (TargetTrackLock)
+            {
+                return _targetTrack;
+            }
+        }
+
+        internal static bool TryCreatePassiveDecision(
+            PassiveTargetObservation observation,
+            DateTime observedAtUtc,
+            out EnemySeekDecision decision,
+            out int imageWidth,
+            out int imageHeight)
+        {
+            decision = default;
+            imageWidth = observation.ImageWidth;
+            imageHeight = observation.ImageHeight;
+            var age = observedAtUtc - observation.CapturedAtUtc;
+            if (age < TimeSpan.Zero ||
+                age > TimeSpan.FromMilliseconds(250) ||
+                imageWidth <= 0 ||
+                imageHeight <= 0 ||
+                observation.Visual is not { } visual)
+            {
+                return false;
+            }
+
+            if (observation.HasNormalHealthBar)
+            {
+                decision = new EnemySeekDecision(
+                    AutoFightSeekAction.ApproachVisibleEnemy,
+                    EnemyIndicatorDirection.None,
+                    visual,
+                    SignalCount: 1,
+                    Cue: SeekCueKind.HealthBar);
+                return true;
+            }
+            if (observation.HasDamageCue)
+            {
+                decision = new EnemySeekDecision(
+                    AutoFightSeekAction.KeepFighting,
+                    EnemyIndicatorDirection.None,
+                    visual,
+                    SignalCount: 1,
+                    Cue: SeekCueKind.DamageNumber);
+                return true;
+            }
+            return false;
+        }
+
+        internal static TargetTrackUpdate UpdateTargetTrack(
+            EnemySeekDecision decision,
+            int imageWidth,
+            int imageHeight,
+            DateTime observedAtUtc)
+        {
+            if (decision.Action == AutoFightSeekAction.ApproachFixedTopHealthTarget ||
+                decision.Cue == SeekCueKind.FixedTopHealth)
+            {
+                return new TargetTrackUpdate(decision, TargetProgress: true);
+            }
+
+            if (decision.Visual is not { } visual)
+            {
+                lock (TargetTrackLock)
+                {
+                    if (_targetTrack is { } missingTrack &&
+                        !TargetTrackPolicy.ShouldRetainMissing(
+                            missingTrack.LastSeenAtUtc,
+                            observedAtUtc))
+                    {
+                        _targetTrack = null;
+                    }
+                    ResetChallenger();
+                }
+                return default;
+            }
+
+            var cue = decision.Cue ??
+                      (decision.Action == AutoFightSeekAction.Approach
+                          ? SeekCueKind.DirectionIndicator
+                          : SeekCueKind.HealthBar);
+            var bearing = cue == SeekCueKind.DirectionIndicator
+                ? GetIndicatorBearingDegrees(visual, imageWidth, imageHeight)
+                : (visual.CenterX - imageWidth / 2d) / Math.Max(1, imageWidth / 2d) * 90d;
+            var confidence = cue switch
+            {
+                SeekCueKind.HealthBar => 0.80,
+                SeekCueKind.DamageNumber => 0.35,
+                _ => 0.60
+            };
+
+            lock (TargetTrackLock)
+            {
+                if (_targetTrack is not { } current)
+                {
+                    _targetTrack = new TargetTrackState(
+                        Interlocked.Increment(ref _nextTrackId),
+                        cue,
+                        visual,
+                        bearing,
+                        confidence,
+                        observedAtUtc,
+                        null);
+                    ResetChallenger();
+                    ResetIndicatorOnlyMovement();
+                    return new TargetTrackUpdate(decision, TargetProgress: true);
+                }
+
+                if (current.Cue == SeekCueKind.DirectionIndicator &&
+                    cue == SeekCueKind.HealthBar &&
+                    current.LastCameraMotion is { } cameraMotion &&
+                    TargetTrackPolicy.CanHandoffIndicatorToHealth(
+                        visual,
+                        imageWidth,
+                        competingHealthBars: decision.SignalCount,
+                        cameraMotion,
+                        observedAtUtc))
+                {
+                    _targetTrack = current with
+                    {
+                        Cue = SeekCueKind.HealthBar,
+                        LastVisual = visual,
+                        BearingDegrees = bearing,
+                        Confidence = Math.Max(current.Confidence, confidence),
+                        LastSeenAtUtc = observedAtUtc
+                    };
+                    ResetChallenger();
+                    ResetIndicatorOnlyMovement();
+                    return new TargetTrackUpdate(decision, TargetProgress: true);
+                }
+
+                var consistent = IsObservationConsistent(
+                    current,
+                    cue,
+                    visual,
+                    bearing,
+                    imageWidth,
+                    imageHeight);
+                if (consistent)
+                {
+                    var progress = TargetTrackPolicy.HasTargetProgress(
+                        Math.Abs(bearing) < Math.Abs(current.BearingDegrees),
+                        visual.Area > current.LastVisual.Area ||
+                        Math.Abs(visual.CenterX - imageWidth / 2) <
+                        Math.Abs(current.LastVisual.CenterX - imageWidth / 2),
+                        confidence > current.Confidence,
+                        handoffSucceeded: false,
+                        actuationObserved: false);
+                    _targetTrack = current with
+                    {
+                        LastVisual = visual,
+                        BearingDegrees = bearing,
+                        Confidence = Math.Max(current.Confidence, confidence),
+                        LastSeenAtUtc = observedAtUtc
+                    };
+                    ResetChallenger();
+                    return new TargetTrackUpdate(decision, progress);
+                }
+
+                if (_challengerTrack is not { } challenger ||
+                    !IsObservationConsistent(
+                        challenger,
+                        cue,
+                        visual,
+                        bearing,
+                        imageWidth,
+                        imageHeight))
+                {
+                    _challengerTrack = new TargetTrackState(
+                        0,
+                        cue,
+                        visual,
+                        bearing,
+                        confidence,
+                        observedAtUtc,
+                        null);
+                    _challengerWinningFrames = 1;
+                }
+                else
+                {
+                    _challengerTrack = challenger with
+                    {
+                        LastVisual = visual,
+                        BearingDegrees = bearing,
+                        Confidence = Math.Max(challenger.Confidence, confidence),
+                        LastSeenAtUtc = observedAtUtc
+                    };
+                    _challengerWinningFrames++;
+                }
+
+                var challengerScore = current.Cue == SeekCueKind.DirectionIndicator &&
+                                      cue == SeekCueKind.HealthBar
+                    ? current.Confidence
+                    : confidence;
+                if (!TargetTrackPolicy.ShouldSwitch(
+                        current.Confidence,
+                        challengerScore,
+                        _challengerWinningFrames))
+                {
+                    return default;
+                }
+
+                _targetTrack = new TargetTrackState(
+                    Interlocked.Increment(ref _nextTrackId),
+                    cue,
+                    visual,
+                    bearing,
+                    confidence,
+                    observedAtUtc,
+                    null);
+                ResetChallenger();
+                ResetIndicatorOnlyMovement();
+                return new TargetTrackUpdate(decision, TargetProgress: true);
+            }
+        }
+
+        private static bool IsObservationConsistent(
+            TargetTrackState track,
+            SeekCueKind cue,
+            EnemySeekVisual visual,
+            double bearing,
+            int imageWidth,
+            int imageHeight)
+        {
+            return cue == track.Cue &&
+                   (cue is SeekCueKind.HealthBar or SeekCueKind.DamageNumber
+                       ? IsVisibleHealthTargetConsistent(
+                           track.LastVisual,
+                           visual,
+                           imageWidth,
+                           imageHeight,
+                           0,
+                           0)
+                       : CircularBearingDeltaDegrees(
+                           track.BearingDegrees,
+                           bearing) <= 35);
+        }
+
+        private static void ResetChallenger()
+        {
+            _challengerTrack = null;
+            _challengerWinningFrames = 0;
+        }
+
+        private static void ResetIndicatorOnlyMovement()
+        {
+            _indicatorOnlyMovementMilliseconds = 0;
+            _indicatorOnlyPulses = 0;
+        }
+
+        private static void RecordCameraMotion(int horizontalPixels, int verticalPixels)
+        {
+            lock (TargetTrackLock)
+            {
+                if (_targetTrack is { } track)
+                {
+                    _targetTrack = track with
+                    {
+                        LastCameraMotion = new PendingCameraMotion(
+                            horizontalPixels,
+                            verticalPixels,
+                            DateTime.UtcNow)
+                    };
+                }
+            }
+        }
+
+        private static bool RecordSliceProgress(bool targetProgress)
+        {
+            lock (TargetTrackLock)
+            {
+                _consecutiveNoProgressSlices = targetProgress
+                    ? 0
+                    : _consecutiveNoProgressSlices + 1;
+                return !TargetTrackPolicy.IsNoProgress(_consecutiveNoProgressSlices);
+            }
+        }
+
+        private static void LogFailureTrace(ILogger logger)
+        {
+            var trace = FailureTrace.SnapshotWindow(
+                DateTime.UtcNow,
+                TimeSpan.FromSeconds(3),
+                TimeSpan.Zero);
+            logger.LogWarning(
+                "索敌连续无目标进展，派生失败轨迹共 {Count} 条，最近状态：{Last}",
+                trace.Count,
+                trace.Count == 0 ? "无" : trace[^1].Value);
+        }
         
-        public static async Task<bool?> SeekAndFightAsync(ILogger logger, int detectDelayTime,int delayTime,CancellationToken ct,bool isEndCheck = false,int rotaryFactor = 6)
+        public static async Task<bool?> SeekAndFightAsync(
+            ILogger logger,
+            int detectDelayTime,
+            int delayTime,
+            CancellationToken ct,
+            bool isEndCheck = false,
+            int rotaryFactor = 6)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                return await SeekAndFightCoreAsync(
+                    logger,
+                    detectDelayTime,
+                    delayTime,
+                    ct,
+                    isEndCheck,
+                    rotaryFactor);
+            }
+            finally
+            {
+                CombatRuntimeMetrics.Shared.Record("seek.legacy", stopwatch.Elapsed);
+            }
+        }
+
+        private static async Task<bool?> SeekAndFightCoreAsync(ILogger logger, int detectDelayTime,int delayTime,CancellationToken ct,bool isEndCheck = false,int rotaryFactor = 6)
         {
             Scalar bloodLower = new Scalar(255, 90, 90);
             
@@ -644,17 +1289,19 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         : AutoFightSeekAction.ApproachFixedTopHealthTarget,
                     EnemyIndicatorDirection.None,
                     fixedTopHealthBar == default ? null : fixedTopHealthBar,
-                    1);
+                    1,
+                    SeekCueKind.FixedTopHealth);
             }
 
-            var floatingHealthBar = visuals
+            var floatingHealthBars = visuals
                 .Where(visual => IsHealthBar(visual, imageHeight))
                 .Where(visual => !IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight))
                 .OrderByDescending(visual => visual.Height)
                 .ThenByDescending(visual => visual.Area)
                 .ThenByDescending(visual => visual.Width)
                 .ThenBy(visual => Math.Abs(visual.CenterX - imageWidth / 2))
-                .FirstOrDefault();
+                .ToList();
+            var floatingHealthBar = floatingHealthBars.FirstOrDefault();
             if (floatingHealthBar != default)
             {
                 return ShouldApproachVisibleEnemy(floatingHealthBar, imageWidth, imageHeight)
@@ -662,12 +1309,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         AutoFightSeekAction.ApproachVisibleEnemy,
                         GetVisibleEnemyDirection(floatingHealthBar, imageWidth),
                         floatingHealthBar,
-                        1)
+                        floatingHealthBars.Count,
+                        SeekCueKind.HealthBar)
                     : new EnemySeekDecision(
                         AutoFightSeekAction.KeepFighting,
                         EnemyIndicatorDirection.None,
                         floatingHealthBar,
-                        1);
+                        floatingHealthBars.Count,
+                        SeekCueKind.HealthBar);
             }
 
             return SelectDirectionIndicatorDecision(
@@ -711,7 +1360,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 AutoFightSeekAction.Approach,
                 GetIndicatorDirection(indicator, imageWidth, imageHeight),
                 indicator,
-                indicators.Count);
+                indicators.Count,
+                SeekCueKind.DirectionIndicator);
         }
 
         internal static int GetIndicatorCameraOffset(
@@ -1157,9 +1807,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 0,
                 1);
             return Math.Clamp(
-                (int)Math.Round(250 + distanceRatio * 250),
+                (int)Math.Round(250 + distanceRatio * 100),
                 250,
-                500);
+                350);
         }
 
         private static EnemyIndicatorDirection GetVisibleEnemyDirection(
@@ -2437,6 +3087,142 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
     public class AutoFightSkill
     {
+        public static async Task<GuardianBoundaryAction> EnsureGuardianBoundaryAsync(
+            Avatar guardianAvatar,
+            string guardianAvatarName,
+            bool guardianAvatarHold,
+            GuardianCoverageMode coverageMode,
+            double? shieldDurationSeconds,
+            CancellationToken ct,
+            bool guardianCombatSkip = false,
+            bool burstEnabled = false)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                var knownCoverageValid = GuardianSkillSwitchPolicy.IsKnownCoverageValid(
+                    guardianAvatar.LastConfirmedSkillCastAtUtc,
+                    shieldDurationSeconds,
+                    DateTime.UtcNow,
+                    GetGuardianRefreshReserve());
+                if (knownCoverageValid)
+                {
+                    return GuardianBoundaryAction.ProceedProtected;
+                }
+
+                if (!guardianAvatar.IsSkillReady())
+                {
+                    if (burstEnabled)
+                    {
+                        _ = await EnsureGuardianSkill(
+                            guardianAvatar,
+                            default,
+                            string.Empty,
+                            guardianAvatarName,
+                            guardianAvatarHold,
+                            retryCount: 1,
+                            ct,
+                            guardianCombatSkip,
+                            burstEnabled: true);
+                    }
+                    var cooldownAction = GuardianSkillSwitchPolicy.DecideBoundary(
+                        GuardianAttemptResult.UnavailableCooldown,
+                        coverageMode,
+                        knownCoverageValid: false,
+                        failedAttempts: 0);
+                    LogGuardianBoundaryDecision(guardianAvatar, cooldownAction);
+                    return cooldownAction;
+                }
+
+                for (var failedAttempts = 0;
+                     failedAttempts < GuardianSkillSwitchPolicy.NormalizeAttemptCount(2);
+                     failedAttempts++)
+                {
+                    var result = await TryUseGuardianSkillOnceAsync(
+                        guardianAvatar,
+                        guardianAvatarHold,
+                        guardianAvatarName,
+                        ct);
+                    var action = GuardianSkillSwitchPolicy.DecideBoundary(
+                        result,
+                        coverageMode,
+                        GuardianSkillSwitchPolicy.IsKnownCoverageValid(
+                            guardianAvatar.LastConfirmedSkillCastAtUtc,
+                            shieldDurationSeconds,
+                            DateTime.UtcNow,
+                            GetGuardianRefreshReserve()),
+                        failedAttempts + (result == GuardianAttemptResult.ConfirmedNewCast ? 0 : 1));
+                    if (action == GuardianBoundaryAction.Retry)
+                    {
+                        await Task.Delay(250, ct);
+                        continue;
+                    }
+
+                    LogGuardianBoundaryDecision(guardianAvatar, action);
+                    return action;
+                }
+
+                var exhausted = coverageMode == GuardianCoverageMode.RequireKnownCoverage
+                    ? GuardianBoundaryAction.FailCombat
+                    : GuardianBoundaryAction.ProceedUnprotected;
+                LogGuardianBoundaryDecision(guardianAvatar, exhausted);
+                return exhausted;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return GuardianBoundaryAction.Cancel;
+            }
+            finally
+            {
+                CombatRuntimeMetrics.Shared.Record(
+                    "guardian.boundary",
+                    stopwatch.Elapsed);
+            }
+        }
+
+        internal static TimeSpan GetSafeSeekBudget(
+            Avatar? guardianAvatar,
+            double? shieldDurationSeconds)
+        {
+            return guardianAvatar == null
+                ? BoundedSeekPolicy.MaximumBudget
+                : GuardianSkillSwitchPolicy.GetSafeSeekBudget(
+                    guardianAvatar.LastConfirmedSkillCastAtUtc,
+                    shieldDurationSeconds,
+                    DateTime.UtcNow,
+                    BoundedSeekPolicy.MaximumBudget,
+                    GetGuardianRefreshReserve());
+        }
+
+        private static TimeSpan GetGuardianRefreshReserve()
+        {
+            var observed = CombatRuntimeMetrics.Shared.Snapshot("guardian.boundary");
+            var observedWithMargin = TimeSpan.FromMilliseconds(
+                observed.P95Milliseconds + 400);
+            return observedWithMargin > GuardianSkillSwitchPolicy.DefaultRefreshReserve
+                ? observedWithMargin
+                : GuardianSkillSwitchPolicy.DefaultRefreshReserve;
+        }
+
+        private static void LogGuardianBoundaryDecision(
+            Avatar guardianAvatar,
+            GuardianBoundaryAction action)
+        {
+            if (action == GuardianBoundaryAction.ProceedUnprotected)
+            {
+                Logger.LogWarning(
+                    "盾奶位 {GuardianAvatar} 未能确认当前护盾覆盖，BestEffort 继续且标记 unprotected",
+                    guardianAvatar.Name);
+            }
+            else if (action == GuardianBoundaryAction.FailCombat)
+            {
+                Logger.LogError(
+                    "盾奶位 {GuardianAvatar} 未能确认当前护盾覆盖，RequireKnownCoverage 终止战斗任务",
+                    guardianAvatar.Name);
+            }
+        }
+
         public static async Task<bool> EnsureGuardianSkill(Avatar guardianAvatar, CombatCommand command, string lastFightName,
             string guardianAvatarName, bool guardianAvatarHold, int retryCount, CancellationToken ct,bool guardianCombatSkip = false,
             bool burstEnabled = false)
@@ -2448,11 +3234,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             {
                 while (attempt < maxAttempts)
                 {
-                    if (await TryUseGuardianSkillOnceAsync(
-                            guardianAvatar,
-                            guardianAvatarHold,
-                            guardianAvatarName,
-                            ct))
+                    var attemptResult = await TryUseGuardianSkillOnceAsync(
+                        guardianAvatar,
+                        guardianAvatarHold,
+                        guardianAvatarName,
+                        ct);
+                    if (attemptResult == GuardianAttemptResult.ConfirmedNewCast)
                     {
                         Logger.LogInformation(
                             "优先第 {Position} 盾奶位 {GuardianAvatar} 已确认切换成功且战技进入冷却",
@@ -2467,7 +3254,6 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         guardianAvatar.Name,
                         attempt + 1,
                         maxAttempts);
-                    Simulation.ReleaseAllKey();
                     Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
                     Simulation.SendInput.SimulateAction(GIActions.Drop);
                     await Task.Delay(250, ct);
@@ -2511,8 +3297,6 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         {
                             Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
                             Sleep(500, ct);
-                            Simulation.ReleaseAllKey();
-                        
                             //普攻一下，防止在纳塔飞天
                             Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
                             using (var imageAfterBurst = CaptureToRectArea())
@@ -2542,7 +3326,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 guardianAvatar.HasConfirmedSkillCooldown);
         }
 
-        private static async Task<bool> TryUseGuardianSkillOnceAsync(
+        private static async Task<GuardianAttemptResult> TryUseGuardianSkillOnceAsync(
             Avatar guardianAvatar,
             bool hold,
             string guardianAvatarName,
@@ -2554,7 +3338,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     "优先第 {Position} 盾奶位 {GuardianAvatar} 未确认切换成功，不发送战技按键",
                     guardianAvatarName,
                     guardianAvatar.Name);
-                return false;
+                return GuardianAttemptResult.SwitchRejected;
             }
 
             using (var activeCapture = CaptureToRectArea())
@@ -2564,7 +3348,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     Logger.LogWarning(
                         "盾奶位 {GuardianAvatar} 切换后二次身份确认失败，不发送战技按键",
                         guardianAvatar.Name);
-                    return false;
+                    return GuardianAttemptResult.SwitchRejected;
                 }
 
                 var baselineCd = guardianAvatar.ReadSkillCurrentCd(activeCapture);
@@ -2582,7 +3366,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     Logger.LogWarning(
                         "盾奶位 {GuardianAvatar} 动作前已显示战技冷却，但缺少本轮就绪到冷却转换证据，暂不提交成功",
                         guardianAvatar.Name);
-                    return false;
+                    return GuardianAttemptResult.UnavailableCooldown;
                 }
             }
 
@@ -2608,7 +3392,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     Logger.LogWarning(
                         "盾奶位 {GuardianAvatar} 释放战技确认期间失去出战身份，停止本次确认",
                         guardianAvatar.Name);
-                    return false;
+                    return GuardianAttemptResult.SkillRejected;
                 }
 
                 var detectedCd = guardianAvatar.ReadSkillCurrentCd(capture);
@@ -2635,7 +3419,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                             guardianAvatar.Name,
                             detectedCd);
                     }
-                    return true;
+                    return GuardianAttemptResult.ConfirmedNewCast;
                 }
 
                 if (checkAttempt + 1 < cooldownConfirmationAttempts)
@@ -2644,7 +3428,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
             }
 
-            return false;
+            return GuardianAttemptResult.SkillRejected;
         }
         
         //新方法，备用，非OCR识别，判断色块进行，速度更快
