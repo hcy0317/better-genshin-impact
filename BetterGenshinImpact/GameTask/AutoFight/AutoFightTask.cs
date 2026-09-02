@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
+using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Job;
 using OpenCvSharp;
 using BetterGenshinImpact.Helpers;
@@ -48,6 +49,45 @@ public class AutoFightTask : ISoloTask
     /// 重置"敌人可见时跳过战斗结束检查"的连续跳过计数（每场战斗开始时调用，TXT 与 JSON 策略共用）
     /// </summary>
     public static void ResetSkipCheckCounter() => _skipCheckCounter = 0;
+
+    internal static void ValidateAndLogCombatSafetyConfiguration(
+        ILogger logger,
+        AutoFightParam taskParam)
+    {
+        var guardianConfigured = !string.IsNullOrWhiteSpace(taskParam.GuardianAvatar);
+        logger.LogInformation(
+            "自动战斗生效安全配置：持续感知={ContinuousTargeting}，索敌模式={TargetingMode}，旋转寻敌入口={RotateSeek}，盾位={GuardianAvatar}，护盾策略={CoverageMode}，护盾时长={ShieldDurationSeconds}",
+            taskParam.EnableCombatTargeting,
+            taskParam.CombatTargetingMode,
+            taskParam.FinishDetectConfig.RotateFindEnemyEnabled,
+            guardianConfigured ? taskParam.GuardianAvatar : "未配置",
+            taskParam.GuardianCoverageMode,
+            taskParam.GuardianShieldDurationSeconds?.ToString("0.###", CultureInfo.InvariantCulture) ?? "未配置");
+
+        if (taskParam.CombatTargetingMode == CombatTargetingMode.Legacy)
+        {
+            logger.LogWarning("当前战斗仍使用 Legacy 索敌，可能执行旧的锁定路线长前进；建议切换为 ClosedLoop");
+        }
+
+        if (!taskParam.EnableCombatTargeting)
+        {
+            logger.LogWarning("当前战斗已关闭持续感知，后台不会发布血条、伤害数字与目标轨迹观测");
+        }
+
+        if (!GuardianSkillSwitchPolicy.IsCoverageConfigurationValid(
+                taskParam.GuardianCoverageMode,
+                guardianConfigured,
+                taskParam.GuardianShieldDurationSeconds))
+        {
+            throw new InvalidOperationException(
+                "RequireKnownCoverage 需要配置盾奶位和大于 0 的 guardianShieldDurationSeconds");
+        }
+
+        if (!guardianConfigured)
+        {
+            logger.LogWarning("当前战斗未配置盾奶位，护盾边界与索敌预算约束不会启用");
+        }
+    }
 
     private readonly double _dpi = TaskContext.Instance().DpiScale;
     
@@ -86,7 +126,7 @@ public class AutoFightTask : ISoloTask
         public double BlockCheckBeforeBattleSeconds = 0;
         public bool PaimonEndCheckEnabled = true;
         public int PaimonEndCheckDelayMs = 75;
-        public CombatTargetingMode CombatTargetingMode = CombatTargetingMode.Legacy;
+        public CombatTargetingMode CombatTargetingMode = CombatTargetingMode.ClosedLoop;
         public int RotaryFactor = 12;
         internal Func<TimeSpan>? SeekBudgetProvider;
 
@@ -97,10 +137,6 @@ public class AutoFightTask : ISoloTask
             CheckAfterSwitchAvatar = finishDetectConfig.CheckAfterSwitchAvatar;
             ParseCheckTimeString(finishDetectConfig.FastCheckParams, out CheckTime, CheckNames);
             ParseFastCheckEndDelayString(finishDetectConfig.CheckEndDelay, out DelayTime, DelayTimes);
-            BattleEndProgressBarColor =
-                ParseStringToTuple(finishDetectConfig.BattleEndProgressBarColor, (95, 235, 255));
-            BattleEndProgressBarColorTolerance =
-                ParseSingleOrCommaSeparated(finishDetectConfig.BattleEndProgressBarColorTolerance, (6, 6, 6));
             DetectDelayTime =
                 (int)((double.TryParse(finishDetectConfig.BeforeDetectDelay, out var result) ? result : 0.45) * 1000);
             RotateFindEnemyEnabled = finishDetectConfig.RotateFindEnemyEnabled;
@@ -121,9 +157,6 @@ public class AutoFightTask : ISoloTask
                 ? TimeSpan.Zero
                 : BoundedSeekPolicy.NormalizeBudget(requested);
         }
-
-        public (int, int, int) BattleEndProgressBarColor { get; }
-        public (int, int, int) BattleEndProgressBarColorTolerance { get; }
 
         public static void ParseCheckTimeString(
             string input,
@@ -201,39 +234,6 @@ public class AutoFightTask : ISoloTask
                 // 其他格式，跳过不处理
             }
         }
-
-
-        static bool IsSingleNumber(string input, out int result)
-        {
-            return int.TryParse(input, out result);
-        }
-
-        static (int, int, int) ParseSingleOrCommaSeparated(string input, (int, int, int) defaultValue)
-        {
-            // 如果是单个数字
-            if (IsSingleNumber(input, out var singleNumber))
-            {
-                return (singleNumber, singleNumber, singleNumber);
-            }
-
-            return ParseStringToTuple(input, defaultValue);
-        }
-
-        static (int, int, int) ParseStringToTuple(string input, (int, int, int) defaultValue)
-        {
-            // 尝试按逗号分割字符串
-            var parts = input.Split(',');
-            if (parts.Length == 3 &&
-                int.TryParse(parts[0], out var num1) &&
-                int.TryParse(parts[1], out var num2) &&
-                int.TryParse(parts[2], out var num3))
-            {
-                return (num1, num2, num3);
-            }
-
-            // 如果解析失败，返回默认值
-            return defaultValue;
-        }
     }
 
     private TaskFightFinishDetectConfig _finishDetectConfig;
@@ -287,6 +287,7 @@ public class AutoFightTask : ISoloTask
         ResetSkipCheckCounter();
         try
         {
+            ValidateAndLogCombatSafetyConfiguration(Logger, _taskParam);
             LogScreenResolution();
         var combatScenes = GetCombatScenesWithRetry();
         /*var combatScenes = new CombatScenes().InitializeTeam(CaptureToRectArea());
@@ -1062,14 +1063,6 @@ public class AutoFightTask : ISoloTask
         AssertUtils.CheckGameResolution("自动战斗");
     }
 
-    static bool AreDifferencesWithinBounds((int, int, int) a, (int, int, int) b, (int, int, int) c)
-    {
-        // 计算每个位置的差值绝对值并进行比较
-        return Math.Abs(a.Item1 - b.Item1) < c.Item1 &&
-               Math.Abs(a.Item2 - b.Item2) < c.Item2 &&
-               Math.Abs(a.Item3 - b.Item3) < c.Item3;
-    }
-
     public async Task<bool> CheckFightFinish(int delayTime = 1500, int detectDelayTime = 450)
     {
         return await CheckFightFinish(_finishDetectConfig, _ct, delayTime, detectDelayTime);
@@ -1159,11 +1152,12 @@ public class AutoFightTask : ISoloTask
             Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
             if (finishDetectConfig.PaimonEndCheckEnabled)
             {
-                // 派蒙辅助检测：按L后等待PaimonEndCheckDelayMs，检测(32,67)像素是否为派蒙头冠颜色
+                // 派蒙辅助检测：按L后等待PaimonEndCheckDelayMs，检测左上角派蒙头像是否可见
                 await Delay(finishDetectConfig.PaimonEndCheckDelayMs, ct);
                 using var paimonRa = CaptureToRectArea();
-                var paimonPixel = paimonRa.SrcMat.At<Vec3b>(32, 67);
-                var paimonVisible = IsPaimon(paimonPixel.Item2, paimonPixel.Item1, paimonPixel.Item0);
+                // 复用 Bv 的派蒙头像检测：左上四分之一 ROI 内模板匹配 PaimonMenu（派蒙头像），
+                // 命中即视为派蒙可见 → 按L未生效、编队界面未打开、战斗未结束
+                var paimonVisible = Bv.IsInMainUi(paimonRa);
                 if (paimonVisible)
                 {
                     // 派蒙头像可见 → 编队界面未打开（按L未生效），战斗未结束，按X取消后提前跳出战斗结束检查
@@ -1189,9 +1183,7 @@ public class AutoFightTask : ISoloTask
             var whiteTile = ra.SrcMat.At<Vec3b>(50, 768); //白块
             Simulation.SendInput.SimulateAction(GIActions.Drop);
             if (IsWhite(whiteTile.Item2, whiteTile.Item1, whiteTile.Item0) &&
-                IsYellow(b3.Item2, b3.Item1,
-                    b3.Item0) /* AreDifferencesWithinBounds(_finishDetectConfig.BattleEndProgressBarColor, (b3.Item0, b3.Item1, b3.Item2), _finishDetectConfig.BattleEndProgressBarColorTolerance)*/
-               )
+                IsYellow(b3.Item2, b3.Item1, b3.Item0))
             {
                 Logger.LogInformation("识别到战斗结束");
                 //取消正在进行的换队
@@ -1244,14 +1236,6 @@ public class AutoFightTask : ISoloTask
             finishDetectConfig.CombatTargetingMode == CombatTargetingMode.ClosedLoop,
             ct);
         return AutoFightSeek.ToLegacySeekResult(outcome);
-    }
-
-    static bool IsPaimon(int r, int g, int b)
-    {
-        // 派蒙头冠颜色：R高，G中，B低（BGR 143,196,233 转换后 R=233,G=196,B=143，容差±10）
-        return (r >= 223 && r <= 243) &&
-               (g >= 186 && g <= 206) &&
-               (b >= 133 && b <= 153);
     }
 
     static bool IsYellow(int r, int g, int b)

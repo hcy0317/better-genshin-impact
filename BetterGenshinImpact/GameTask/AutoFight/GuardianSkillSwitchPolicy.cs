@@ -49,6 +49,15 @@ internal static class GuardianSkillSwitchPolicy
         return !guardianSkillHandled && shouldSwitch;
     }
 
+    internal static bool IsCoverageConfigurationValid(
+        GuardianCoverageMode coverageMode,
+        bool guardianConfigured,
+        double? shieldDurationSeconds)
+    {
+        return coverageMode != GuardianCoverageMode.RequireKnownCoverage ||
+               guardianConfigured && shieldDurationSeconds is > 0;
+    }
+
     internal static bool ShouldRetryBlock(
         bool guardianSkillRequired,
         bool guardianSkillHandled)

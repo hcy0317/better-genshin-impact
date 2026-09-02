@@ -45,6 +45,24 @@ public class CombatSafetyIntegrationContractTests
     }
 
     [Fact]
+    public void TxtAndJsonCombat_LogTheEffectiveSafetyConfiguration()
+    {
+        var txt = ReadSource(
+            "BetterGenshinImpact",
+            "GameTask",
+            "AutoFight",
+            "AutoFightTask.cs");
+        var json = ReadSource(
+            "BetterGenshinImpact",
+            "GameTask",
+            "AutoFight",
+            "AutoFightJsonTask.cs");
+
+        Assert.Contains("ValidateAndLogCombatSafetyConfiguration(Logger, _taskParam)", txt);
+        Assert.Contains("ValidateAndLogCombatSafetyConfiguration(Logger, _taskParam)", json);
+    }
+
+    [Fact]
     public void BoundedSeek_IsSelectedOutsideLegacyMode()
     {
         var source = ReadSource(

@@ -132,6 +132,7 @@ public class AutoFightJsonTask : ISoloTask
         AvatarRecognition.ClearPassiveObservation();
         try
         {
+            AutoFightTask.ValidateAndLogCombatSafetyConfiguration(Logger, _taskParam);
             LogScreenResolution();
             var combatScenes = GetCombatScenesWithRetry();
 
