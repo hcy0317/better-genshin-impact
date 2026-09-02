@@ -20,6 +20,23 @@ public class CombatSafetyPolicyTests
     }
 
     [Theory]
+    [InlineData(75, 450, 450)]
+    [InlineData(600, 450, 600)]
+    [InlineData(-1, 450, 450)]
+    [InlineData(75, -1, 75)]
+    public void PaimonEndCheck_WaitsForTheCompletePartyScreenDetectionWindow(
+        int configuredDelayMs,
+        int detectDelayTimeMs,
+        int expectedDelayMs)
+    {
+        Assert.Equal(
+            expectedDelayMs,
+            AutoFightTask.GetPaimonEndCheckDelayMilliseconds(
+                configuredDelayMs,
+                detectDelayTimeMs));
+    }
+
+    [Theory]
     [InlineData(CombatTargetingMode.Legacy, true)]
     [InlineData(CombatTargetingMode.ObserveOnly, false)]
     [InlineData(CombatTargetingMode.ClosedLoop, false)]
