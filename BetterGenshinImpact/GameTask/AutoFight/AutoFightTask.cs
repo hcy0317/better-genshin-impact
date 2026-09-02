@@ -1152,8 +1152,11 @@ public class AutoFightTask : ISoloTask
             Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
             if (finishDetectConfig.PaimonEndCheckEnabled)
             {
-                // 派蒙辅助检测：按L后等待PaimonEndCheckDelayMs，检测左上角派蒙头像是否可见
-                await Delay(finishDetectConfig.PaimonEndCheckDelayMs, ct);
+                // 派蒙预检不能早于编队界面的完整检测窗口，否则会在界面动画完成前
+                // 把仍可见的派蒙头像误判为战斗未结束，并永远跳过后续黄条检查。
+                await Delay(GetPaimonEndCheckDelayMilliseconds(
+                    finishDetectConfig.PaimonEndCheckDelayMs,
+                    detectDelayTime), ct);
                 using var paimonRa = CaptureToRectArea();
                 // 复用 Bv 的派蒙头像检测：左上四分之一 ROI 内模板匹配 PaimonMenu（派蒙头像），
                 // 命中即视为派蒙可见 → 按L未生效、编队界面未打开、战斗未结束
@@ -1167,8 +1170,6 @@ public class AutoFightTask : ISoloTask
                     return false;
                 }
 
-                // 派蒙头像已消失 → 战斗可能结束，等待剩余时间后检查黄条
-                await Delay(Math.Max(0, detectDelayTime - finishDetectConfig.PaimonEndCheckDelayMs), ct);
             }
             else
             {
@@ -1245,6 +1246,11 @@ public class AutoFightTask : ISoloTask
         return (r >= 200 && r <= 255) &&
                (g >= 200 && g <= 255) &&
                (b >= 0 && b <= 100);
+    }
+
+    internal static int GetPaimonEndCheckDelayMilliseconds(int configuredDelayMs, int detectDelayTimeMs)
+    {
+        return Math.Max(Math.Max(0, configuredDelayMs), Math.Max(0, detectDelayTimeMs));
     }
 
     static bool IsWhite(int r, int g, int b)
