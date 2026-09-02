@@ -33,6 +33,25 @@ public class Dispatcher
 {
     private readonly ILogger<Dispatcher> _logger = App.GetLogger<Dispatcher>();
 
+    internal static CountInventoryItemParam ParseCountInventoryItemParam(ScriptObject config)
+    {
+        GridScreenName gridScreenName = ScriptObjectConverter.GetValue(
+            config, "gridScreenName", (GridScreenName?)null)
+            ?? throw new Exception("gridScreenName为空或错误");
+        string? itemName = ScriptObjectConverter.GetValue(config, "itemName", (string?)null);
+        IEnumerable<string>? itemNames = ScriptObjectConverter.GetValue<string>(config, "itemNames");
+        ItemIconRecognitionMode iconRecognitionMode = ScriptObjectConverter.GetValue(
+            config, "iconRecognitionMode", ItemIconRecognitionMode.GridIcon);
+
+        return new CountInventoryItemParam
+        {
+            GridScreenName = gridScreenName,
+            ItemName = itemName,
+            ItemNames = itemNames?.ToList() ?? [],
+            IconRecognitionMode = iconRecognitionMode
+        };
+    }
+
     internal static ExpandoObject ToScriptDictionary(IReadOnlyDictionary<string, int> values)
     {
         dynamic expando = new ExpandoObject();
@@ -292,15 +311,7 @@ public class Dispatcher
                     {
                         throw new NullReferenceException($"{nameof(soloTask.Config)}为空");
                     }
-                    GridScreenName gridScreenName = ScriptObjectConverter.GetValue((ScriptObject)soloTask.Config, "gridScreenName", (GridScreenName?)null) ?? throw new Exception("gridScreenName为空或错误");
-                    string? itemName = ScriptObjectConverter.GetValue((ScriptObject)soloTask.Config, "itemName", (string?)null);
-                    IEnumerable<string>? itemNames = ScriptObjectConverter.GetValue<string>((ScriptObject)soloTask.Config, "itemNames");
-                    CountInventoryItemParam param = new()
-                    {
-                        GridScreenName = gridScreenName,
-                        ItemName = itemName,
-                        ItemNames = itemNames?.ToList() ?? []
-                    };
+                    CountInventoryItemParam param = ParseCountInventoryItemParam((ScriptObject)soloTask.Config);
 
                     var result = await new CountInventoryItem(param).Start(cancellationToken);
                     if (param.ItemName != null)
