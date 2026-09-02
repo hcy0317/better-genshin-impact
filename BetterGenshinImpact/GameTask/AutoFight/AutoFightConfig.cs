@@ -223,6 +223,26 @@ public partial class AutoFightConfig : ObservableObject
     private bool _enableCombatTargeting = false;
 
     /// <summary>
+    /// 战斗索敌模式：Legacy 保留旧显式寻敌，ObserveOnly 只记录闭环决策，
+    /// ClosedLoop 启用有界索敌和目标轨迹。
+    /// </summary>
+    [ObservableProperty]
+    private CombatTargetingMode _combatTargetingMode = CombatTargetingMode.Legacy;
+
+    /// <summary>
+    /// 护盾覆盖策略。BestEffort 保持向后兼容；RequireKnownCoverage
+    /// 在无法证明覆盖时终止当前战斗任务。
+    /// </summary>
+    [ObservableProperty]
+    private GuardianCoverageMode _guardianCoverageMode = GuardianCoverageMode.BestEffort;
+
+    /// <summary>
+    /// 护盾持续时间（秒）。为空时不声称覆盖剩余时间。
+    /// </summary>
+    [ObservableProperty]
+    private double? _guardianShieldDurationSeconds;
+
+    /// <summary>
     /// 脱锁等待时间（秒）：敌人不可见时等待一定时间后开始旋转索敌
     /// </summary>
     [ObservableProperty]
@@ -256,4 +276,11 @@ public enum DamageNumberRecognitionMode
     Disabled,
     Ocr,
     Color
+}
+
+public enum CombatTargetingMode
+{
+    Legacy,
+    ObserveOnly,
+    ClosedLoop
 }
