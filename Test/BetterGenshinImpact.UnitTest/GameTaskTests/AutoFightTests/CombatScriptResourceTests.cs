@@ -1225,9 +1225,9 @@ public class CombatScriptResourceTests
 
     [Theory]
     [InlineData(6, 250)]
-    [InlineData(5, 292)]
-    [InlineData(3, 375)]
-    [InlineData(1, 458)]
+    [InlineData(5, 267)]
+    [InlineData(3, 300)]
+    [InlineData(1, 333)]
     public void VisibleEnemyApproach_UsesShortDistanceSensitivePulses(
         int healthBarHeight,
         int expectedMilliseconds)
@@ -1315,7 +1315,7 @@ public class CombatScriptResourceTests
             StringComparison.Ordinal);
         Assert.Contains("本轮返回扫描且不执行盲目前进", source,
             StringComparison.Ordinal);
-        Assert.Contains("血条仍有横向误差，本轮只转向不前进", source,
+        Assert.Contains("血条仍有镜头误差，本轮只转向不前进", source,
             StringComparison.Ordinal);
         Assert.Contains("? \"health\"", source,
             StringComparison.Ordinal);

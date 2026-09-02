@@ -90,7 +90,7 @@ public class AutoFightJsonTask : ISoloTask
             _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiWorld);
         }
 
-        _finishDetectConfig = new AutoFightTask.TaskFightFinishDetectConfig(_taskParam.FinishDetectConfig);
+        _finishDetectConfig = new AutoFightTask.TaskFightFinishDetectConfig(_taskParam);
     }
 
     /// <summary>
@@ -126,8 +126,10 @@ public class AutoFightJsonTask : ISoloTask
     public async Task Start(CancellationToken ct)
     {
         _ct = ct;
+        CombatRuntimeMetrics.Shared.Reset();
         AvatarRecognition.SetCurrentAutoFightParam(_taskParam);
         AvatarRecognition.ClearLegendaryBarTracker();
+        AvatarRecognition.ClearPassiveObservation();
         try
         {
             LogScreenResolution();
@@ -188,6 +190,12 @@ public class AutoFightJsonTask : ISoloTask
             combatScenes.BeforeTask(cts2.Token);
             // 设置初始当前角色名（用于无 Character 字段的通用 action 回退）
             _currentAvatarName = combatScenes.GetAvatars().FirstOrDefault()?.Name ?? _currentAvatarName;
+            var guardianAvatar = string.IsNullOrWhiteSpace(_taskParam.GuardianAvatar)
+                ? null
+                : combatScenes.SelectAvatar(int.Parse(_taskParam.GuardianAvatar));
+            _finishDetectConfig.SeekBudgetProvider = () => AutoFightSkill.GetSafeSeekBudget(
+                guardianAvatar,
+                _taskParam.GuardianShieldDurationSeconds);
             var fightTimeoutEnabled = AutoFightParam.IsTimeTimeoutEnabled(_taskParam.Timeout);
             TimeSpan fightTimeout = fightTimeoutEnabled ? TimeSpan.FromSeconds(_taskParam.Timeout) : TimeSpan.Zero;
             Stopwatch timeoutStopwatch = Stopwatch.StartNew();
@@ -221,7 +229,7 @@ public class AutoFightJsonTask : ISoloTask
             await RunPreActions(combatScenes, evaluator);
             Stopwatch periodicFinishCheckStopwatch = Stopwatch.StartNew();
 
-            async Task<bool> RunPendingFinishCheckAsync()
+            async Task<bool> RunPendingFinishCheckAsync(bool allowSeek = false)
             {
                 var shouldRunPeriodicCheck = _periodicFinishCheckRequested &&
                                              periodicFinishCheckStopwatch.Elapsed >= periodicFinishCheckInterval;
@@ -237,7 +245,8 @@ public class AutoFightJsonTask : ISoloTask
                     _finishDetectConfig,
                     _ct,
                     _finishDetectConfig.DelayTime,
-                    _finishDetectConfig.DetectDelayTime);
+                    _finishDetectConfig.DetectDelayTime,
+                    allowSeek);
                 _fightEndFlag = detected;
                 return detected;
             }
@@ -285,7 +294,9 @@ public class AutoFightJsonTask : ISoloTask
                             }
 
                             var endFlag = await AutoFightTask.CheckFightFinish(_finishDetectConfig, _ct,
-                                delayTime, _finishDetectConfig.DetectDelayTime);
+                                delayTime,
+                                _finishDetectConfig.DetectDelayTime,
+                                allowSeek: false);
                             periodicFinishCheckStopwatch.Restart();
                             _periodicFinishCheckRequested = false;
                             if (endFlag)
@@ -350,6 +361,31 @@ public class AutoFightJsonTask : ISoloTask
                                 continue;
                             }
 
+                            var guardianSkillHandledForAction = false;
+                            if (guardianAvatar != null)
+                            {
+                                var guardianAction = await AutoFightSkill.EnsureGuardianBoundaryAsync(
+                                    guardianAvatar,
+                                    _taskParam.GuardianAvatar,
+                                    _taskParam.GuardianAvatarHold,
+                                    _taskParam.GuardianCoverageMode,
+                                    _taskParam.GuardianShieldDurationSeconds,
+                                    cts2.Token,
+                                    _taskParam.GuardianCombatSkip,
+                                    _taskParam.BurstEnabled);
+                                if (guardianAction == GuardianBoundaryAction.Cancel)
+                                {
+                                    cts2.Token.ThrowIfCancellationRequested();
+                                }
+                                if (guardianAction == GuardianBoundaryAction.FailCombat)
+                                {
+                                    throw new InvalidOperationException(
+                                        $"盾奶位 {guardianAvatar.Name} 未能建立严格护盾覆盖");
+                                }
+                                guardianSkillHandledForAction =
+                                    guardianAction == GuardianBoundaryAction.ProceedProtected;
+                            }
+
                             var fightEndDetected = false;
                             if (!_finishDetectConfig.CheckAfterSwitchAvatar)
                             {
@@ -403,7 +439,9 @@ public class AutoFightJsonTask : ISoloTask
                             var actionExecuted = await ExecuteAction(
                                 combatScenes,
                                 action,
-                                RunPendingFinishCheckAsync);
+                                () => RunPendingFinishCheckAsync(),
+                                guardianAvatar,
+                                guardianSkillHandledForAction);
                             if (!actionExecuted)
                             {
                                 Logger.LogWarning(
@@ -444,7 +482,9 @@ public class AutoFightJsonTask : ISoloTask
                                             if (!await ExecuteAction(
                                                     combatScenes,
                                                     action,
-                                                    RunPendingFinishCheckAsync))
+                                                    () => RunPendingFinishCheckAsync(),
+                                                    guardianAvatar,
+                                                    guardianSkillHandledForAction))
                                             {
                                                 actionConfirmed = false;
                                                 break;
@@ -497,7 +537,9 @@ public class AutoFightJsonTask : ISoloTask
                             _periodicFinishCheckRequested = true;
                         }
 
-                        fightEndFlag = await RunPendingFinishCheckAsync();
+                        fightEndFlag = await RunPendingFinishCheckAsync(
+                            BoundedSeekPolicy.CanSeekAtJsonActionBoundary(
+                                actionCompleted: true));
 
                         if (fightEndFlag || _fightEndFlag) break;
 
@@ -646,7 +688,9 @@ public class AutoFightJsonTask : ISoloTask
     private async Task<bool> ExecuteAction(
         CombatScenes combatScenes,
         JsonAction action,
-        Func<Task<bool>> runPendingFinishCheckAsync)
+        Func<Task<bool>> runPendingFinishCheckAsync,
+        Avatar? guardianAvatar = null,
+        bool guardianSkillHandled = false)
     {
         try
         {
@@ -663,6 +707,17 @@ public class AutoFightJsonTask : ISoloTask
             foreach (var cmd in commands)
             {
                 if (_ct.IsCancellationRequested) return false;
+
+                if (GuardianSkillSwitchPolicy.ShouldSkipDuplicateSkill(
+                        guardianSkillHandled,
+                        cmd.Name == guardianAvatar?.Name,
+                        cmd.Method == Method.Skill))
+                {
+                    Logger.LogInformation(
+                        "盾奶位 {GuardianAvatar} 已在当前 JSON 动作边界确认覆盖，跳过重复 E 子命令",
+                        guardianAvatar!.Name);
+                    continue;
+                }
 
                 if (!cmd.Execute(combatScenes, lastSubCmd))
                 {

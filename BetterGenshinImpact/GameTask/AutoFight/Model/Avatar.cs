@@ -70,6 +70,8 @@ public class Avatar
     /// </summary>
     public DateTime LastSkillTime { get; set; }
 
+    internal DateTime LastConfirmedSkillCastAtUtc { get; private set; }
+
     private DateTime ConfirmedSkillCooldownUntil { get; set; }
 
     internal bool HasConfirmedSkillCooldown =>
@@ -342,6 +344,7 @@ public class Avatar
     {
         var now = DateTime.UtcNow;
         LastSkillTime = now;
+        LastConfirmedSkillCastAtUtc = now;
         ManualSkillCd = -1;
         var effectiveCd = detectedCd > 0
             ? detectedCd

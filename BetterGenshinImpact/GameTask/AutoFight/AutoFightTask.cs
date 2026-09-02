@@ -87,9 +87,13 @@ public class AutoFightTask : ISoloTask
         public double BlockCheckBeforeBattleSeconds = 0;
         public bool PaimonEndCheckEnabled = true;
         public int PaimonEndCheckDelayMs = 75;
+        public CombatTargetingMode CombatTargetingMode = CombatTargetingMode.Legacy;
+        public int RotaryFactor = 12;
+        internal Func<TimeSpan>? SeekBudgetProvider;
 
-        public TaskFightFinishDetectConfig(AutoFightParam.FightFinishDetectConfig finishDetectConfig)
+        public TaskFightFinishDetectConfig(AutoFightParam taskParam)
         {
+            var finishDetectConfig = taskParam.FinishDetectConfig;
             FastCheckEnabled = finishDetectConfig.FastCheckEnabled;
             CheckAfterSwitchAvatar = finishDetectConfig.CheckAfterSwitchAvatar;
             ParseCheckTimeString(finishDetectConfig.FastCheckParams, out CheckTime, CheckNames);
@@ -103,6 +107,16 @@ public class AutoFightTask : ISoloTask
             PaimonEndCheckEnabled = finishDetectConfig.PaimonEndCheckEnabled;
             // 派蒙检测延时（秒）限制在 0.05-0.4 之间，超出范围时修饰到对应上下限
             PaimonEndCheckDelayMs = (int)(Math.Clamp(finishDetectConfig.PaimonEndCheckDelay, 0.05, 0.4) * 1000);
+            CombatTargetingMode = taskParam.CombatTargetingMode;
+            RotaryFactor = taskParam.RotaryFactor;
+        }
+
+        internal TimeSpan GetSeekBudget()
+        {
+            var requested = SeekBudgetProvider?.Invoke() ?? BoundedSeekPolicy.MaximumBudget;
+            return requested <= TimeSpan.Zero
+                ? TimeSpan.Zero
+                : BoundedSeekPolicy.NormalizeBudget(requested);
         }
 
         public static void ParseCheckTimeString(
@@ -195,7 +209,7 @@ public class AutoFightTask : ISoloTask
             _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiWorld);
         }
 
-        _finishDetectConfig = new TaskFightFinishDetectConfig(_taskParam.FinishDetectConfig);
+        _finishDetectConfig = new TaskFightFinishDetectConfig(_taskParam);
     }
     public CombatScenes GetCombatScenesWithRetry()
     {
@@ -226,8 +240,10 @@ public class AutoFightTask : ISoloTask
     public async Task Start(CancellationToken ct)
     {
         _ct = ct;
+        CombatRuntimeMetrics.Shared.Reset();
         AvatarRecognition.SetCurrentAutoFightParam(_taskParam);
         AvatarRecognition.ClearLegendaryBarTracker();
+        AvatarRecognition.ClearPassiveObservation();
         // 每场新战斗重置"敌人可见时跳过战斗结束检查"的连续跳过计数，保证拥有完整的跳过次数
         ResetSkipCheckCounter();
         try
@@ -297,7 +313,7 @@ public class AutoFightTask : ISoloTask
         var delayTime = _finishDetectConfig.DelayTime;
         var detectDelayTime = _finishDetectConfig.DetectDelayTime;
 
-        async Task<bool> RunPendingFinishCheckAsync()
+        async Task<bool> RunPendingFinishCheckAsync(bool allowSeek)
         {
             var shouldRunPeriodicCheck = periodicFinishCheckRequested && checkFightFinishStopwatch.Elapsed >= checkFightFinishTime;
             if (!finishCheckRequested && !shouldRunPeriodicCheck)
@@ -308,11 +324,19 @@ public class AutoFightTask : ISoloTask
             finishCheckRequested = false;
             periodicFinishCheckRequested = false;
             checkFightFinishStopwatch.Restart();
-            return await CheckFightFinish(delayTime, detectDelayTime);
+            return await CheckFightFinish(
+                _finishDetectConfig,
+                ct,
+                delayTime,
+                detectDelayTime,
+                allowSeek);
         }
         
         //盾奶优先功能角色预处理
         var guardianAvatar = string.IsNullOrWhiteSpace(_taskParam.GuardianAvatar) ? null : combatScenes.SelectAvatar(int.Parse(_taskParam.GuardianAvatar));
+        _finishDetectConfig.SeekBudgetProvider = () => AutoFightSkill.GetSafeSeekBudget(
+            guardianAvatar,
+            _taskParam.GuardianShieldDurationSeconds);
         
         AutoFightSeek.ResetSeekState(); // 重置旋转次数与目标路线锁定
         
@@ -356,6 +380,7 @@ public class AutoFightTask : ISoloTask
 
                     var skipFightName = "";
                     var guardianSkillHandledForCurrentBlock = false;
+                    var guardianBoundaryResolvedForCurrentBlock = false;
 
                     #endregion
                     
@@ -368,18 +393,37 @@ public class AutoFightTask : ISoloTask
                         
                         var skipModel = guardianAvatar != null && lastFightName != command.Name;
                         var guardianSkillRequired = GuardianSkillSwitchPolicy.ShouldEnsureGuardianSkill(
-                            guardianSkillHandledForCurrentBlock,
+                            guardianBoundaryResolvedForCurrentBlock,
                             skipModel);
                         if (guardianSkillRequired)
                         {
-                            guardianSkillHandledForCurrentBlock = await AutoFightSkill.EnsureGuardianSkill(
-                                guardianAvatar,lastCommand,lastFightName,
-                                _taskParam.GuardianAvatar,_taskParam.GuardianAvatarHold,5,ct,
-                                _taskParam.GuardianCombatSkip,_taskParam.BurstEnabled);
+                            var guardianAction = await AutoFightSkill.EnsureGuardianBoundaryAsync(
+                                guardianAvatar,
+                                _taskParam.GuardianAvatar,
+                                _taskParam.GuardianAvatarHold,
+                                _taskParam.GuardianCoverageMode,
+                                _taskParam.GuardianShieldDurationSeconds,
+                                ct,
+                                _taskParam.GuardianCombatSkip,
+                                _taskParam.BurstEnabled);
+                            if (guardianAction == GuardianBoundaryAction.Cancel)
+                            {
+                                ct.ThrowIfCancellationRequested();
+                            }
+                            if (guardianAction == GuardianBoundaryAction.FailCombat)
+                            {
+                                throw new InvalidOperationException(
+                                    $"盾奶位 {guardianAvatar.Name} 未能建立严格护盾覆盖");
+                            }
+                            guardianBoundaryResolvedForCurrentBlock =
+                                guardianAction is GuardianBoundaryAction.ProceedProtected or
+                                    GuardianBoundaryAction.ProceedUnprotected;
+                            guardianSkillHandledForCurrentBlock =
+                                guardianAction == GuardianBoundaryAction.ProceedProtected;
                         }
                         if (GuardianSkillSwitchPolicy.ShouldRetryBlock(
                                 guardianSkillRequired,
-                                guardianSkillHandledForCurrentBlock))
+                                guardianBoundaryResolvedForCurrentBlock))
                         {
                             Logger.LogWarning(
                                 "盾奶位 {GuardianAvatar} 未确认切换并释放战技，后推本轮全部策略后重试",
@@ -413,7 +457,12 @@ public class AutoFightTask : ISoloTask
                             {
                                 try
                                 {
-                                    result = await AutoFightSeek.SeekAndFightAsync(Logger, detectDelayTime, delayTime, ct, true, _taskParam.RotaryFactor);
+                                    result = await RunConfiguredSeekAsync(
+                                        _finishDetectConfig,
+                                        detectDelayTime,
+                                        delayTime,
+                                        ct,
+                                        isEndCheck: true);
                                 }
                                 catch (Exception ex)
                                 {
@@ -434,7 +483,11 @@ public class AutoFightTask : ISoloTask
                         
                         #endregion
 
-                        fightEndFlag = await RunPendingFinishCheckAsync();
+                        fightEndFlag = await RunPendingFinishCheckAsync(
+                            BoundedSeekPolicy.CanSeekAtTxtRoundBoundary(
+                                i,
+                                combatCommands.Count,
+                                beforeCommand: true));
                         if (fightEndFlag)
                         {
                             break;
@@ -504,7 +557,11 @@ public class AutoFightTask : ISoloTask
                         {
                             finishCheckRequested = true;
                         }
-                        fightEndFlag = await RunPendingFinishCheckAsync();
+                        fightEndFlag = await RunPendingFinishCheckAsync(
+                            BoundedSeekPolicy.CanSeekAtTxtRoundBoundary(
+                                i,
+                                combatCommands.Count,
+                                beforeCommand: true));
                         if (fightEndFlag)
                         {
                             break;
@@ -566,7 +623,11 @@ public class AutoFightTask : ISoloTask
                             }
                         }
 
-                        fightEndFlag = await RunPendingFinishCheckAsync();
+                        fightEndFlag = await RunPendingFinishCheckAsync(
+                            BoundedSeekPolicy.CanSeekAtTxtRoundBoundary(
+                                i,
+                                combatCommands.Count,
+                                beforeCommand: false));
 
                         if (fightEndFlag)
                         {
@@ -971,7 +1032,10 @@ public class AutoFightTask : ISoloTask
     /// 战斗结束检测（统一实现，TXT 与 JSON 策略共用）
     /// </summary>
     public static async Task<bool> CheckFightFinish(TaskFightFinishDetectConfig finishDetectConfig,
-        CancellationToken ct, int delayTime = 1500, int detectDelayTime = 450)
+        CancellationToken ct,
+        int delayTime = 1500,
+        int detectDelayTime = 450,
+        bool allowSeek = true)
     {
         // 开战后一段时间阻断战斗结束检查：距离开战时间小于配置值时，提前返回并视为战斗未结束
         if (finishDetectConfig.BlockCheckBeforeBattleSeconds > 0 &&
@@ -990,7 +1054,9 @@ public class AutoFightTask : ISoloTask
         {
             // 所有即时敌人判断统一走 AutoFightSeek：红色方位三角和血条共用同一套
             // 转向、接近、重截图状态机，避免“检测到敌人”与“尝试靠近”分裂成两条逻辑。
-            if (finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || finishDetectConfig.RotateFindEnemyEnabled)
+            if (allowSeek &&
+                BoundedSeekPolicy.ShouldUseLegacySeekPath(finishDetectConfig.CombatTargetingMode) &&
+                (finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || finishDetectConfig.RotateFindEnemyEnabled))
             {
                 if (await AutoFightSeek.DetectAndApproachEnemyAsync(Logger, ct))
                 {
@@ -1007,12 +1073,17 @@ public class AutoFightTask : ISoloTask
                 _skipCheckCounter = 0;
             }
 
-            if (finishDetectConfig.RotateFindEnemyEnabled)
+            if (allowSeek && finishDetectConfig.RotateFindEnemyEnabled)
             {
                 bool? result = null;
                 try
                 {
-                    result = await AutoFightSeek.SeekAndFightAsync(Logger, detectDelayTime, delayTime, ct);
+                    result = await RunConfiguredSeekAsync(
+                        finishDetectConfig,
+                        detectDelayTime,
+                        delayTime,
+                        ct,
+                        isEndCheck: false);
                 }
                 catch (Exception ex)
                 {
@@ -1084,7 +1155,9 @@ public class AutoFightTask : ISoloTask
             // Logger.LogInformation($"未识别到战斗结束white{whiteTile.Item0},{whiteTile.Item1},{whiteTile.Item2}");
             Logger.LogInformation($"未识别到战斗结束: yellow{b3.Item0},{b3.Item1},{b3.Item2};white{whiteTile.Item0},{whiteTile.Item1},{whiteTile.Item2}");
 
-            if (finishDetectConfig.RotateFindEnemyEnabled)
+            if (allowSeek &&
+                finishDetectConfig.RotateFindEnemyEnabled &&
+                BoundedSeekPolicy.ShouldUseLegacySeekPath(finishDetectConfig.CombatTargetingMode))
             {
                 await AutoFightSeek.DetectAndApproachEnemyAsync(Logger, ct);
             }
@@ -1092,6 +1165,37 @@ public class AutoFightTask : ISoloTask
             _lastFightFlagTime = DateTime.Now;
             return false;
         }
+    }
+
+    private static async Task<bool?> RunConfiguredSeekAsync(
+        TaskFightFinishDetectConfig finishDetectConfig,
+        int detectDelayTime,
+        int delayTime,
+        CancellationToken ct,
+        bool isEndCheck)
+    {
+        if (finishDetectConfig.CombatTargetingMode == CombatTargetingMode.Legacy)
+        {
+            return await AutoFightSeek.SeekAndFightAsync(
+                Logger,
+                detectDelayTime,
+                delayTime,
+                ct,
+                isEndCheck,
+                finishDetectConfig.RotaryFactor);
+        }
+
+        var budget = finishDetectConfig.GetSeekBudget();
+        if (budget <= TimeSpan.Zero)
+        {
+            return null;
+        }
+        var outcome = await AutoFightSeek.RunBoundedSeekSliceAsync(
+            Logger,
+            budget,
+            finishDetectConfig.CombatTargetingMode == CombatTargetingMode.ClosedLoop,
+            ct);
+        return AutoFightSeek.ToLegacySeekResult(outcome);
     }
 
     static bool IsYellow(int r, int g, int b)

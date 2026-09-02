@@ -61,6 +61,9 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
         RotaryFactor = autoFightConfig.FinishDetectConfig.RotaryFactor;
         FinishDetectConfig.SkipFightEndCheckWhenEnemyVisible = autoFightConfig.FinishDetectConfig.SkipFightEndCheckWhenEnemyVisible;
         EnableCombatTargeting = autoFightConfig.EnableCombatTargeting;
+        CombatTargetingMode = autoFightConfig.CombatTargetingMode;
+        GuardianCoverageMode = autoFightConfig.GuardianCoverageMode;
+        GuardianShieldDurationSeconds = autoFightConfig.GuardianShieldDurationSeconds;
         TargetingDetectionInterval = autoFightConfig.TargetingDetectionInterval;
         DrawRecognitionResults = autoFightConfig.DrawRecognitionResults;
         LockLostWaitTime = autoFightConfig.LockLostWaitTime;
@@ -139,6 +142,9 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
     public bool QinDoublePickUp { get; set; } = false;
     public static bool SwimmingEnabled  { get; set; } = false;
     public bool EnableCombatTargeting { get; set; } = false;
+    public CombatTargetingMode CombatTargetingMode { get; set; } = CombatTargetingMode.Legacy;
+    public GuardianCoverageMode GuardianCoverageMode { get; set; } = GuardianCoverageMode.BestEffort;
+    public double? GuardianShieldDurationSeconds { get; set; }
     public int TargetingDetectionInterval { get; set; } = 50;
     public bool DrawRecognitionResults { get; set; } = true;
     public double LockLostWaitTime { get; set; } = 0.5;
@@ -235,6 +241,9 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
         SwimmingEnabled = autoFightConfig.SwimmingEnabled;
         QinDoublePickUp = autoFightConfig.QinDoublePickUp;
         EnableCombatTargeting = autoFightConfig.EnableCombatTargeting;
+        CombatTargetingMode = autoFightConfig.CombatTargetingMode;
+        GuardianCoverageMode = autoFightConfig.GuardianCoverageMode;
+        GuardianShieldDurationSeconds = autoFightConfig.GuardianShieldDurationSeconds;
         TargetingDetectionInterval = autoFightConfig.TargetingDetectionInterval;
         DrawRecognitionResults = autoFightConfig.DrawRecognitionResults;
         LockLostWaitTime = autoFightConfig.LockLostWaitTime;
