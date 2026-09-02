@@ -43,11 +43,17 @@ public static class ESkillCdTracker
     /// <summary>角色名 → E 技能就绪的时间戳（UTC）</summary>
     private static readonly ConcurrentDictionary<string, DateTime> EReadyAt = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>角色名 → 最近一次已确认释放 E 技能的时间戳（UTC）</summary>
+    private static readonly ConcurrentDictionary<string, DateTime> LastConfirmedCastAt = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>E 键检测防抖：短时间多次触发仅最后一次生效</summary>
     private static CancellationTokenSource? _debounceCts;
     private static readonly object _debounceLock = new();
 
-    private static readonly ILogger Logger = App.GetLogger<ConditionEvaluator>(); // ESkillCdTracker 是静态类，不能用作泛型参数
+    private static readonly Lazy<ILogger> LoggerLazy = new(
+        () => App.GetLogger<ConditionEvaluator>()); // ESkillCdTracker 是静态类，不能用作泛型参数
+
+    private static ILogger Logger => LoggerLazy.Value;
 
     /// <summary>
     /// 防抖触发 E 技能 CD 检测。
@@ -126,6 +132,34 @@ public static class ESkillCdTracker
         return cdSeconds;
     }
 
+    internal static double RecordConfirmedCast(
+        string characterName,
+        double cooldownSeconds,
+        DateTime confirmedAtUtc)
+    {
+        if (string.IsNullOrEmpty(characterName) ||
+            cooldownSeconds <= 0 ||
+            confirmedAtUtc == default)
+        {
+            return 0;
+        }
+
+        var normalizedConfirmedAt = confirmedAtUtc.Kind == DateTimeKind.Utc
+            ? confirmedAtUtc
+            : confirmedAtUtc.ToUniversalTime();
+        LastConfirmedCastAt[characterName] = normalizedConfirmedAt;
+        EReadyAt[characterName] = normalizedConfirmedAt.AddSeconds(cooldownSeconds);
+        return cooldownSeconds;
+    }
+
+    internal static DateTime GetLastConfirmedCastAtUtc(string characterName)
+    {
+        return !string.IsNullOrEmpty(characterName) &&
+               LastConfirmedCastAt.TryGetValue(characterName, out var confirmedAt)
+            ? confirmedAt
+            : default;
+    }
+
     /// <summary>
     /// 根据 <see cref="CdFallbackMap"/> 兜底设置 CD。
     /// 返回实际记录的 CD 值，无兜底或兜底失败时返回 0。
@@ -189,5 +223,6 @@ public static class ESkillCdTracker
     public static void Clear()
     {
         EReadyAt.Clear();
+        LastConfirmedCastAt.Clear();
     }
 }

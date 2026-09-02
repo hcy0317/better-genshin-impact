@@ -206,14 +206,14 @@ public partial class AutoFightConfig : ObservableObject
     /// 战斗中持续索敌：战斗过程中情况允许时持续尝试面朝敌人
     /// </summary>
     [ObservableProperty]
-    private bool _enableCombatTargeting = false;
+    private bool _enableCombatTargeting = true;
 
     /// <summary>
     /// 战斗索敌模式：Legacy 保留旧显式寻敌，ObserveOnly 只记录闭环决策，
     /// ClosedLoop 启用有界索敌和目标轨迹。
     /// </summary>
     [ObservableProperty]
-    private CombatTargetingMode _combatTargetingMode = CombatTargetingMode.Legacy;
+    private CombatTargetingMode _combatTargetingMode = CombatTargetingMode.ClosedLoop;
 
     /// <summary>
     /// 护盾覆盖策略。BestEffort 保持向后兼容；RequireKnownCoverage

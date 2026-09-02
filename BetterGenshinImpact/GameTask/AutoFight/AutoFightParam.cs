@@ -141,8 +141,8 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
     
     public bool QinDoublePickUp { get; set; } = false;
     public static bool SwimmingEnabled  { get; set; } = false;
-    public bool EnableCombatTargeting { get; set; } = false;
-    public CombatTargetingMode CombatTargetingMode { get; set; } = CombatTargetingMode.Legacy;
+    public bool EnableCombatTargeting { get; set; } = true;
+    public CombatTargetingMode CombatTargetingMode { get; set; } = CombatTargetingMode.ClosedLoop;
     public GuardianCoverageMode GuardianCoverageMode { get; set; } = GuardianCoverageMode.BestEffort;
     public double? GuardianShieldDurationSeconds { get; set; }
     public int TargetingDetectionInterval { get; set; } = 50;

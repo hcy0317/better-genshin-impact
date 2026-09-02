@@ -72,10 +72,9 @@ public class Avatar
 
     internal DateTime LastConfirmedSkillCastAtUtc { get; private set; }
 
-    private DateTime ConfirmedSkillCooldownUntil { get; set; }
-
     internal bool HasConfirmedSkillCooldown =>
-        DateTime.UtcNow < ConfirmedSkillCooldownUntil;
+        LastConfirmedSkillCastAtUtc != default &&
+        !ESkillCdTracker.IsReady(Name);
 
     /// <summary>
     /// 元素爆发是否就绪
@@ -127,6 +126,7 @@ public class Avatar
         NameRect = nameRect;
         CombatAvatar = DefaultAutoFightConfig.CombatAvatarMap[name];
         ManualSkillCd = manualSkillCd;
+        LastConfirmedSkillCastAtUtc = ESkillCdTracker.GetLastConfirmedCastAtUtc(name);
         AutoFightTask.FightStatusFlag = false;
     }
 
@@ -349,12 +349,11 @@ public class Avatar
         var effectiveCd = detectedCd > 0
             ? detectedCd
             : Math.Max(CombatAvatar.SkillHoldCd, CombatAvatar.SkillCd);
-        ConfirmedSkillCooldownUntil = now.AddSeconds(effectiveCd);
         if (detectedCd > 0)
         {
             OcrSkillCd = now.AddSeconds(detectedCd);
         }
-        ESkillCdTracker.Record(Name, effectiveCd);
+        ESkillCdTracker.RecordConfirmedCast(Name, effectiveCd, now);
     }
 
     private void SimulateSwitchAction(int index)

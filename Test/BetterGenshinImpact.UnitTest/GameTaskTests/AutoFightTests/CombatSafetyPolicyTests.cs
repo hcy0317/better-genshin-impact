@@ -1,6 +1,7 @@
 using System;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
+using BetterGenshinImpact.GameTask.AutoFight.Script;
 using Xunit;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
@@ -8,11 +9,14 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatSafetyPolicyTests
 {
     [Fact]
-    public void ExistingConfigurationDefaultsToLegacyTargeting()
+    public void NewConfigurationDefaultsToClosedLoopTargeting()
     {
+        var config = new AutoFightConfig();
+
+        Assert.True(config.EnableCombatTargeting);
         Assert.Equal(
-            CombatTargetingMode.Legacy,
-            new AutoFightConfig().CombatTargetingMode);
+            CombatTargetingMode.ClosedLoop,
+            config.CombatTargetingMode);
     }
 
     [Theory]
@@ -236,5 +240,51 @@ public class CombatSafetyPolicyTests
                 now,
                 requestedBudget: TimeSpan.FromMilliseconds(600),
                 refreshReserve: TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public void ConfirmedGuardianCast_PersistsInSharedTracker()
+    {
+        const string guardianName = "测试盾位";
+        var confirmedAt = DateTime.UtcNow;
+        ESkillCdTracker.Clear();
+        try
+        {
+            ESkillCdTracker.RecordConfirmedCast(
+                guardianName,
+                cooldownSeconds: 12,
+                confirmedAt);
+
+            Assert.Equal(
+                confirmedAt,
+                ESkillCdTracker.GetLastConfirmedCastAtUtc(guardianName));
+            Assert.False(ESkillCdTracker.IsReady(guardianName));
+        }
+        finally
+        {
+            ESkillCdTracker.Clear();
+        }
+
+        Assert.Equal(default, ESkillCdTracker.GetLastConfirmedCastAtUtc(guardianName));
+    }
+
+    [Theory]
+    [InlineData(GuardianCoverageMode.BestEffort, false, null, true)]
+    [InlineData(GuardianCoverageMode.RequireKnownCoverage, false, 20d, false)]
+    [InlineData(GuardianCoverageMode.RequireKnownCoverage, true, null, false)]
+    [InlineData(GuardianCoverageMode.RequireKnownCoverage, true, 0d, false)]
+    [InlineData(GuardianCoverageMode.RequireKnownCoverage, true, 20d, true)]
+    public void StrictGuardianCoverage_RequiresGuardianAndKnownDuration(
+        GuardianCoverageMode coverageMode,
+        bool guardianConfigured,
+        double? shieldDurationSeconds,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            GuardianSkillSwitchPolicy.IsCoverageConfigurationValid(
+                coverageMode,
+                guardianConfigured,
+                shieldDurationSeconds));
     }
 }

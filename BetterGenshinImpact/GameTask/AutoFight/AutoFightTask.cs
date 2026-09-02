@@ -50,6 +50,45 @@ public class AutoFightTask : ISoloTask
     /// </summary>
     public static void ResetSkipCheckCounter() => _skipCheckCounter = 0;
 
+    internal static void ValidateAndLogCombatSafetyConfiguration(
+        ILogger logger,
+        AutoFightParam taskParam)
+    {
+        var guardianConfigured = !string.IsNullOrWhiteSpace(taskParam.GuardianAvatar);
+        logger.LogInformation(
+            "自动战斗生效安全配置：持续感知={ContinuousTargeting}，索敌模式={TargetingMode}，旋转寻敌入口={RotateSeek}，盾位={GuardianAvatar}，护盾策略={CoverageMode}，护盾时长={ShieldDurationSeconds}",
+            taskParam.EnableCombatTargeting,
+            taskParam.CombatTargetingMode,
+            taskParam.FinishDetectConfig.RotateFindEnemyEnabled,
+            guardianConfigured ? taskParam.GuardianAvatar : "未配置",
+            taskParam.GuardianCoverageMode,
+            taskParam.GuardianShieldDurationSeconds?.ToString("0.###", CultureInfo.InvariantCulture) ?? "未配置");
+
+        if (taskParam.CombatTargetingMode == CombatTargetingMode.Legacy)
+        {
+            logger.LogWarning("当前战斗仍使用 Legacy 索敌，可能执行旧的锁定路线长前进；建议切换为 ClosedLoop");
+        }
+
+        if (!taskParam.EnableCombatTargeting)
+        {
+            logger.LogWarning("当前战斗已关闭持续感知，后台不会发布血条、伤害数字与目标轨迹观测");
+        }
+
+        if (!GuardianSkillSwitchPolicy.IsCoverageConfigurationValid(
+                taskParam.GuardianCoverageMode,
+                guardianConfigured,
+                taskParam.GuardianShieldDurationSeconds))
+        {
+            throw new InvalidOperationException(
+                "RequireKnownCoverage 需要配置盾奶位和大于 0 的 guardianShieldDurationSeconds");
+        }
+
+        if (!guardianConfigured)
+        {
+            logger.LogWarning("当前战斗未配置盾奶位，护盾边界与索敌预算约束不会启用");
+        }
+    }
+
     private readonly double _dpi = TaskContext.Instance().DpiScale;
     
     public static bool FightStatusFlag { get; set; } = false;
@@ -87,7 +126,7 @@ public class AutoFightTask : ISoloTask
         public double BlockCheckBeforeBattleSeconds = 0;
         public bool PaimonEndCheckEnabled = true;
         public int PaimonEndCheckDelayMs = 75;
-        public CombatTargetingMode CombatTargetingMode = CombatTargetingMode.Legacy;
+        public CombatTargetingMode CombatTargetingMode = CombatTargetingMode.ClosedLoop;
         public int RotaryFactor = 12;
         internal Func<TimeSpan>? SeekBudgetProvider;
 
@@ -248,6 +287,7 @@ public class AutoFightTask : ISoloTask
         ResetSkipCheckCounter();
         try
         {
+            ValidateAndLogCombatSafetyConfiguration(Logger, _taskParam);
             LogScreenResolution();
         var combatScenes = GetCombatScenesWithRetry();
         /*var combatScenes = new CombatScenes().InitializeTeam(CaptureToRectArea());
