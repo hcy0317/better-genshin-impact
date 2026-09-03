@@ -480,7 +480,7 @@ public class AutoFightTask : ISoloTask
                                 command.Method == Method.Skill))
                         {
                             Logger.LogInformation(
-                                "盾奶位 {GuardianAvatar} 本轮已优先释放战技，跳过同轮重复 E 命令并继续后续动作",
+                                "盾奶位 {GuardianAvatar} 已确认当前护盾覆盖，跳过同轮重复 E 命令并继续后续动作",
                                 guardianAvatar!.Name);
                             lastFightName = command.Name;
                             continue;
@@ -1152,24 +1152,35 @@ public class AutoFightTask : ISoloTask
             Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
             if (finishDetectConfig.PaimonEndCheckEnabled)
             {
-                // 派蒙预检不能早于编队界面的完整检测窗口，否则会在界面动画完成前
-                // 把仍可见的派蒙头像误判为战斗未结束，并永远跳过后续黄条检查。
+                // 先确认编队界面本身已经打开。IsInMainUi 只能证明主界面元素存在，
+                // 不能作为编队界面未打开的硬否决，否则会在编队界面动画期间持续跳过黄条检测。
                 await Delay(GetPaimonEndCheckDelayMilliseconds(
                     finishDetectConfig.PaimonEndCheckDelayMs,
                     detectDelayTime), ct);
-                using var paimonRa = CaptureToRectArea();
-                // 复用 Bv 的派蒙头像检测：左上四分之一 ROI 内模板匹配 PaimonMenu（派蒙头像），
-                // 命中即视为派蒙可见 → 按L未生效、编队界面未打开、战斗未结束
-                var paimonVisible = Bv.IsInMainUi(paimonRa);
-                if (paimonVisible)
+
+                var partyViewVisible = false;
+                for (var attempt = 0; attempt < 5; attempt++)
                 {
-                    // 派蒙头像可见 → 编队界面未打开（按L未生效），战斗未结束，按X取消后提前跳出战斗结束检查
-                    Logger.LogInformation("派蒙头像可见，提前跳出战斗结束检查");
-                    // 按X取消编队界面（走统一按键配置，默认X，支持用户改键）
+                    using var partyViewCapture = CaptureToRectArea();
+                    partyViewVisible = Bv.IsInPartyViewUi(partyViewCapture);
+                    if (partyViewVisible)
+                    {
+                        break;
+                    }
+
+                    if (attempt < 4)
+                    {
+                        await Delay(100, ct);
+                    }
+                }
+
+                if (!partyViewVisible)
+                {
+                    Logger.LogInformation("编队界面未确认打开，跳过本次战斗结束检查");
+                    // 按X取消可能未成功打开的编队界面（走统一按键配置，默认X，支持用户改键）
                     Simulation.SendInput.SimulateAction(GIActions.Drop);
                     return false;
                 }
-
             }
             else
             {

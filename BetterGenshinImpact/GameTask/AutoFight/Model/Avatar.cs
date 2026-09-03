@@ -538,6 +538,10 @@ public class Avatar
                 return;
             }
 
+            // 只有动作前技能处于就绪态，动作后又观察到有效 CD，才把普通策略的 E
+            // 计入“已确认护盾覆盖”。否则可能把本来就在冷却中的重复 E 错记为新护盾。
+            var skillReadyBeforeCast = IsSkillReady();
+
             if (hold)
             {
                 Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
@@ -553,6 +557,10 @@ public class Avatar
             ThrowWhenDefeated(region, Ct); // 检测是不是要跑神像
             var cd = AfterUseSkill(region);
             var recordedCd = ESkillCdTracker.Record(Name, cd);
+            if (skillReadyBeforeCast && cd > 0)
+            {
+                ConfirmSkillUsed(cd);
+            }
             if (recordedCd <= 0)
             {
                 recordedCd = ESkillCdTracker.ApplyFallback(Name);
