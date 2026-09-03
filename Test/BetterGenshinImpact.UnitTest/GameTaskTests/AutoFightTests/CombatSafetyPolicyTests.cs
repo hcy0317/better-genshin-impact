@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
@@ -34,6 +35,23 @@ public class CombatSafetyPolicyTests
             AutoFightTask.GetPaimonEndCheckDelayMilliseconds(
                 configuredDelayMs,
                 detectDelayTimeMs));
+    }
+
+    [Fact]
+    public void FightFinishCheck_UsesPartyViewAsThePositiveUiSignal()
+    {
+        var root = FindRepoRoot();
+        var source = File.ReadAllText(Path.Combine(
+            root,
+            "BetterGenshinImpact",
+            "GameTask",
+            "AutoFight",
+            "AutoFightTask.cs"));
+
+        Assert.Contains("Bv.IsInPartyViewUi(partyViewCapture)", source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("var paimonVisible = Bv.IsInMainUi(paimonRa)", source,
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -303,5 +321,21 @@ public class CombatSafetyPolicyTests
                 coverageMode,
                 guardianConfigured,
                 shieldDurationSeconds));
+    }
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory != null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "BetterGenshinImpact.sln")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException("BetterGenshinImpact.sln was not found");
     }
 }

@@ -128,6 +128,28 @@ public class CombatSafetyIntegrationContractTests
         Assert.DoesNotContain("guardianAvatar.LastSkillTime", guardianBoundary);
     }
 
+    [Fact]
+    public void OrdinarySkill_ConfirmsOnlyAReadyToCooldownTransition()
+    {
+        var avatar = ReadSource(
+            "BetterGenshinImpact",
+            "GameTask",
+            "AutoFight",
+            "Model",
+            "Avatar.cs");
+        var useSkill = Slice(
+            avatar,
+            "public void UseSkill",
+            "/// <summary>\r\n    /// 使用完元素战技的回调");
+
+        Assert.Contains("var skillReadyBeforeCast = IsSkillReady()", useSkill,
+            StringComparison.Ordinal);
+        Assert.Contains("if (skillReadyBeforeCast && cd > 0)", useSkill,
+            StringComparison.Ordinal);
+        Assert.Contains("ConfirmSkillUsed(cd)", useSkill,
+            StringComparison.Ordinal);
+    }
+
     private static string Slice(string source, string start, string end)
     {
         var startIndex = source.IndexOf(start, StringComparison.Ordinal);

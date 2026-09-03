@@ -1737,7 +1737,7 @@ function getRunnableMultiCheckboxMap(multiCheckboxMap) {
             !treeEntries.some(entry =>
                 entry.name !== name &&
                 entry.level > currentLevel &&
-                entry.labelParentName === option
+                hasRouteLabelOption(entry.config?.label, option)
             )
         );
 
@@ -1747,6 +1747,17 @@ function getRunnableMultiCheckboxMap(multiCheckboxMap) {
     }
 
     return runnableMap;
+}
+
+function hasRouteLabelOption(label, option) {
+    const normalizedLabel = String(label || "");
+    const normalizedOption = String(option || "").trim();
+    if (!normalizedOption) return false;
+
+    // 根节点使用《根目录》，子节点使用[父目录]；两种标记都表示该选项
+    // 已有更深层的具体路线选择，应由更深层选择覆盖。
+    return normalizedLabel.includes(`《${normalizedOption}》`) ||
+        normalizedLabel.includes(`[${normalizedOption}]`);
 }
 
 /**
