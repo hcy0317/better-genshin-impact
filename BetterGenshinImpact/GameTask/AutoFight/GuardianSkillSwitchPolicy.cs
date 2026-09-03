@@ -36,12 +36,31 @@ internal static class GuardianSkillSwitchPolicy
         return Math.Clamp(requestedAttemptCount, 1, MaxAttemptCount);
     }
 
-    internal static bool ShouldSkipDuplicateSkill(
+    internal static bool ShouldSkipCoveredGuardianSkill(
         bool guardianSkillHandled,
         bool commandTargetsGuardian,
-        bool isSkillCommand)
+        bool isSkillCommand,
+        DateTime lastConfirmedCastAtUtc,
+        double? shieldDurationSeconds,
+        DateTime nowUtc)
     {
-        return guardianSkillHandled && commandTargetsGuardian && isSkillCommand;
+        return guardianSkillHandled &&
+               commandTargetsGuardian &&
+               isSkillCommand &&
+               IsShieldCoverageActive(lastConfirmedCastAtUtc, shieldDurationSeconds, nowUtc);
+    }
+
+    internal static bool IsShieldCoverageActive(
+        DateTime lastConfirmedCastAtUtc,
+        double? shieldDurationSeconds,
+        DateTime nowUtc)
+    {
+        if (shieldDurationSeconds is not > 0 || lastConfirmedCastAtUtc == default)
+        {
+            return false;
+        }
+
+        return nowUtc < lastConfirmedCastAtUtc.AddSeconds(shieldDurationSeconds.Value);
     }
 
     internal static bool ShouldEnsureGuardianSkill(bool guardianSkillHandled, bool shouldSwitch)

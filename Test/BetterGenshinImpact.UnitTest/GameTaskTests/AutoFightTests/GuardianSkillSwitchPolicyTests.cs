@@ -1,3 +1,4 @@
+using System;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 
@@ -15,22 +16,29 @@ public class GuardianSkillSwitchPolicyTests
     }
 
     [Theory]
-    [InlineData(true, true, true, true)]
-    [InlineData(false, true, true, false)]
-    [InlineData(true, false, true, false)]
-    [InlineData(true, true, false, false)]
-    public void DuplicateGuardianSkill_ShouldBeSkippedOnlyAfterPrioritySkillHandled(
+    [InlineData(true, true, true, 10, 5, true)]
+    [InlineData(true, true, true, 5, 5, false)]
+    [InlineData(true, true, true, 0, 0, false)]
+    [InlineData(false, true, true, 10, 5, false)]
+    [InlineData(true, false, true, 10, 5, false)]
+    [InlineData(true, true, false, 10, 5, false)]
+    public void DuplicateGuardianSkill_IsSkippedOnlyWhileTheConfirmedShieldIsActive(
         bool guardianSkillHandled,
         bool commandTargetsGuardian,
         bool isSkillCommand,
+        int elapsedSeconds,
+        int durationSeconds,
         bool expected)
     {
         Assert.Equal(
             expected,
-            GuardianSkillSwitchPolicy.ShouldSkipDuplicateSkill(
+            GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill(
                 guardianSkillHandled,
                 commandTargetsGuardian,
-                isSkillCommand));
+                isSkillCommand,
+                DateTime.UnixEpoch.AddSeconds(elapsedSeconds),
+                durationSeconds,
+                DateTime.UnixEpoch.AddSeconds(10)));
     }
 
     [Fact]

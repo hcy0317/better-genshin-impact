@@ -41,7 +41,10 @@ public class CombatSafetyIntegrationContractTests
 
         Assert.Contains("AutoFightSkill.EnsureGuardianBoundaryAsync", txt);
         Assert.Contains("AutoFightSkill.EnsureGuardianBoundaryAsync", json);
-        Assert.Contains("GuardianSkillSwitchPolicy.ShouldSkipDuplicateSkill", json);
+        Assert.Contains("GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill", txt);
+        Assert.Contains("GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill", json);
+        Assert.Contains("FindNextGuardianSkillCommandIndex", txt);
+        Assert.Contains("护盾已到期，快进到策略中下一次 E 时机", txt);
     }
 
     [Fact]
