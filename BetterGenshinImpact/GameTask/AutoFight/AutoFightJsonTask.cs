@@ -709,13 +709,16 @@ public class AutoFightJsonTask : ISoloTask
             {
                 if (_ct.IsCancellationRequested) return false;
 
-                if (GuardianSkillSwitchPolicy.ShouldSkipDuplicateSkill(
+                if (GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill(
                         guardianSkillHandled,
                         cmd.Name == guardianAvatar?.Name,
-                        cmd.Method == Method.Skill))
+                        cmd.Method == Method.Skill,
+                        guardianAvatar?.LastConfirmedSkillCastAtUtc ?? default,
+                        _taskParam.GuardianShieldDurationSeconds,
+                        DateTime.UtcNow))
                 {
                     Logger.LogInformation(
-                        "盾奶位 {GuardianAvatar} 已在当前 JSON 动作边界确认覆盖，跳过重复 E 子命令",
+                        "盾奶位 {GuardianAvatar} 当前护盾仍在持续，跳过 JSON 策略中重复 E 子命令",
                         guardianAvatar!.Name);
                     continue;
                 }

@@ -474,13 +474,42 @@ public class AutoFightTask : ISoloTask
                         }
                         var avatar = combatScenes.SelectAvatar(command.Name);
 
-                        if (GuardianSkillSwitchPolicy.ShouldSkipDuplicateSkill(
+                        if (guardianSkillHandledForCurrentBlock &&
+                            guardianAvatar != null &&
+                            avatar?.Name != guardianAvatar.Name &&
+                            !GuardianSkillSwitchPolicy.IsShieldCoverageActive(
+                                guardianAvatar.LastConfirmedSkillCastAtUtc,
+                                _taskParam.GuardianShieldDurationSeconds,
+                                DateTime.UtcNow))
+                        {
+                            var nextGuardianSkillIndex = FindNextGuardianSkillCommandIndex(
+                                combatCommands,
+                                i,
+                                guardianAvatar.Name);
+                            if (nextGuardianSkillIndex > i)
+                            {
+                                Logger.LogInformation(
+                                    "盾奶位 {GuardianAvatar} 护盾已到期，快进到策略中下一次 E 时机",
+                                    guardianAvatar.Name);
+                                // 从下一次策略 E 重新走边界确认，避免把已过期的本轮状态带过去。
+                                guardianBoundaryResolvedForCurrentBlock = false;
+                                guardianSkillHandledForCurrentBlock = false;
+                                lastFightName = "";
+                                i = nextGuardianSkillIndex - 1;
+                                continue;
+                            }
+                        }
+
+                        if (GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill(
                                 guardianSkillHandledForCurrentBlock,
                                 avatar?.Name == guardianAvatar?.Name,
-                                command.Method == Method.Skill))
+                                command.Method == Method.Skill,
+                                guardianAvatar?.LastConfirmedSkillCastAtUtc ?? default,
+                                _taskParam.GuardianShieldDurationSeconds,
+                                DateTime.UtcNow))
                         {
                             Logger.LogInformation(
-                                "盾奶位 {GuardianAvatar} 已确认当前护盾覆盖，跳过同轮重复 E 命令并继续后续动作",
+                                "盾奶位 {GuardianAvatar} 当前护盾仍在持续，跳过策略中重复 E 命令并继续后续动作",
                                 guardianAvatar!.Name);
                             lastFightName = command.Name;
                             continue;
@@ -1152,34 +1181,26 @@ public class AutoFightTask : ISoloTask
             Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
             if (finishDetectConfig.PaimonEndCheckEnabled)
             {
-                // 先确认编队界面本身已经打开。IsInMainUi 只能证明主界面元素存在，
-                // 不能作为编队界面未打开的硬否决，否则会在编队界面动画期间持续跳过黄条检测。
-                await Delay(GetPaimonEndCheckDelayMilliseconds(
-                    finishDetectConfig.PaimonEndCheckDelayMs,
-                    detectDelayTime), ct);
-
-                var partyViewVisible = false;
-                for (var attempt = 0; attempt < 5; attempt++)
+                // 派蒙图标只作为“编队加载进度条”出现速度的提示，不再把它作为战斗未结束的否决条件。
+                var paimonProbeDelayMs = GetPaimonEndCheckDelayMilliseconds(
+                    finishDetectConfig.PaimonEndCheckDelayMs);
+                await Delay(paimonProbeDelayMs, ct);
+                using (var paimonRa = CaptureToRectArea())
                 {
-                    using var partyViewCapture = CaptureToRectArea();
-                    partyViewVisible = Bv.IsInPartyViewUi(partyViewCapture);
-                    if (partyViewVisible)
+                    var paimonVisible = Bv.IsInMainUi(paimonRa);
+                    if (paimonVisible)
                     {
-                        break;
+                        Logger.LogInformation("派蒙图标仍可见，不否决战斗结束，继续等待编队加载进度条");
+                        var remainingDelayMs = Math.Max(0, detectDelayTime - paimonProbeDelayMs);
+                        if (remainingDelayMs > 0)
+                        {
+                            await Delay(remainingDelayMs, ct);
+                        }
                     }
-
-                    if (attempt < 4)
+                    else
                     {
-                        await Delay(100, ct);
+                        Logger.LogInformation("派蒙图标已消失，提前检测编队加载进度条");
                     }
-                }
-
-                if (!partyViewVisible)
-                {
-                    Logger.LogInformation("编队界面未确认打开，跳过本次战斗结束检查");
-                    // 按X取消可能未成功打开的编队界面（走统一按键配置，默认X，支持用户改键）
-                    Simulation.SendInput.SimulateAction(GIActions.Drop);
-                    return false;
                 }
             }
             else
@@ -1187,25 +1208,31 @@ public class AutoFightTask : ISoloTask
                 await Delay(detectDelayTime, ct);
             }
 
-            using var ra = CaptureToRectArea();
-            //判断整个界面是否有红色色块，如果有，则战继续，否则战斗结束
-            // 只提取橙色
-
-            var b3 = ra.SrcMat.At<Vec3b>(50, 790); //进度条颜色
-            var whiteTile = ra.SrcMat.At<Vec3b>(50, 768); //白块
-            Simulation.SendInput.SimulateAction(GIActions.Drop);
-            if (IsWhite(whiteTile.Item2, whiteTile.Item1, whiteTile.Item0) &&
-                IsYellow(b3.Item2, b3.Item1, b3.Item0))
+            Vec3b lastProgressBar = default;
+            Vec3b lastWhiteTile = default;
+            var progressBarCheckCount = finishDetectConfig.PaimonEndCheckEnabled ? 5 : 1;
+            for (var attempt = 0; attempt < progressBarCheckCount; attempt++)
             {
-                Logger.LogInformation("识别到战斗结束");
-                //取消正在进行的换队
-                Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
-                return true;
+                using var ra = CaptureToRectArea();
+                lastProgressBar = ra.SrcMat.At<Vec3b>(50, 790); // 编队加载进度条颜色
+                lastWhiteTile = ra.SrcMat.At<Vec3b>(50, 768); // 进度条白块
+                if (IsPartySetupProgressBarVisible(ra))
+                {
+                    Simulation.SendInput.SimulateAction(GIActions.Drop);
+                    Logger.LogInformation("检测到编队加载进度条，识别到战斗结束");
+                    // 取消正在进行的换队
+                    Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+                    return true;
+                }
+
+                if (attempt + 1 < progressBarCheckCount)
+                {
+                    await Delay(100, ct);
+                }
             }
 
-            // Logger.LogInformation($"未识别到战斗结束yellow{b3.Item0},{b3.Item1},{b3.Item2}");
-            // Logger.LogInformation($"未识别到战斗结束white{whiteTile.Item0},{whiteTile.Item1},{whiteTile.Item2}");
-            Logger.LogInformation($"未识别到战斗结束: yellow{b3.Item0},{b3.Item1},{b3.Item2};white{whiteTile.Item0},{whiteTile.Item1},{whiteTile.Item2}");
+            Simulation.SendInput.SimulateAction(GIActions.Drop);
+            Logger.LogInformation($"未检测到编队加载进度条: yellow{lastProgressBar.Item0},{lastProgressBar.Item1},{lastProgressBar.Item2};white{lastWhiteTile.Item0},{lastWhiteTile.Item1},{lastWhiteTile.Item2}");
 
             if (allowSeek &&
                 finishDetectConfig.RotateFindEnemyEnabled &&
@@ -1259,9 +1286,35 @@ public class AutoFightTask : ISoloTask
                (b >= 0 && b <= 100);
     }
 
-    internal static int GetPaimonEndCheckDelayMilliseconds(int configuredDelayMs, int detectDelayTimeMs)
+    internal static bool IsPartySetupProgressBarVisible(ImageRegion captureRa)
     {
-        return Math.Max(Math.Max(0, configuredDelayMs), Math.Max(0, detectDelayTimeMs));
+        var progressBar = captureRa.SrcMat.At<Vec3b>(50, 790);
+        var whiteTile = captureRa.SrcMat.At<Vec3b>(50, 768);
+        return IsWhite(whiteTile.Item2, whiteTile.Item1, whiteTile.Item0) &&
+               IsYellow(progressBar.Item2, progressBar.Item1, progressBar.Item0);
+    }
+
+    internal static int FindNextGuardianSkillCommandIndex(
+        IReadOnlyList<CombatCommand> commands,
+        int currentIndex,
+        string guardianName)
+    {
+        for (var index = currentIndex + 1; index < commands.Count; index++)
+        {
+            var command = commands[index];
+            if (string.Equals(command.Name, guardianName, StringComparison.OrdinalIgnoreCase) &&
+                command.Method == Method.Skill)
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    internal static int GetPaimonEndCheckDelayMilliseconds(int configuredDelayMs)
+    {
+        return Math.Max(0, configuredDelayMs);
     }
 
     static bool IsWhite(int r, int g, int b)

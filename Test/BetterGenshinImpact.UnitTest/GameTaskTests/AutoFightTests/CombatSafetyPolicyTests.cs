@@ -21,24 +21,21 @@ public class CombatSafetyPolicyTests
     }
 
     [Theory]
-    [InlineData(75, 450, 450)]
-    [InlineData(600, 450, 600)]
-    [InlineData(-1, 450, 450)]
-    [InlineData(75, -1, 75)]
-    public void PaimonEndCheck_WaitsForTheCompletePartyScreenDetectionWindow(
+    [InlineData(75, 75)]
+    [InlineData(600, 600)]
+    [InlineData(-1, 0)]
+    public void PaimonEndCheck_UsesConfiguredProbeDelay(
         int configuredDelayMs,
-        int detectDelayTimeMs,
         int expectedDelayMs)
     {
         Assert.Equal(
             expectedDelayMs,
             AutoFightTask.GetPaimonEndCheckDelayMilliseconds(
-                configuredDelayMs,
-                detectDelayTimeMs));
+                configuredDelayMs));
     }
 
     [Fact]
-    public void FightFinishCheck_UsesPartyViewAsThePositiveUiSignal()
+    public void FightFinishCheck_UsesPartyLoadingProgressBarAsThePositiveSignal()
     {
         var root = FindRepoRoot();
         var source = File.ReadAllText(Path.Combine(
@@ -48,10 +45,37 @@ public class CombatSafetyPolicyTests
             "AutoFight",
             "AutoFightTask.cs"));
 
-        Assert.Contains("Bv.IsInPartyViewUi(partyViewCapture)", source,
+        Assert.Contains("Bv.IsInMainUi(paimonRa)", source,
             StringComparison.Ordinal);
-        Assert.DoesNotContain("var paimonVisible = Bv.IsInMainUi(paimonRa)", source,
+        Assert.Contains("IsPartySetupProgressBarVisible", source,
             StringComparison.Ordinal);
+        Assert.Contains("派蒙图标仍可见，不否决战斗结束", source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("Bv.IsInPartyViewUi(partyViewCapture)", source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("编队界面未确认打开，跳过本次战斗结束检查", source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("派蒙头像可见，提前跳出战斗结束检查", source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExpiredGuardianCoverage_FastForwardsToTheNextGuardianSkillCommand()
+    {
+        var commands = new[]
+        {
+            new CombatCommand("香菱", "skill"),
+            new CombatCommand("行秋", "burst"),
+            new CombatCommand("钟离", "skill"),
+            new CombatCommand("香菱", "attack")
+        };
+
+        Assert.Equal(
+            2,
+            AutoFightTask.FindNextGuardianSkillCommandIndex(commands, 0, "钟离"));
+        Assert.Equal(
+            -1,
+            AutoFightTask.FindNextGuardianSkillCommandIndex(commands, 2, "钟离"));
     }
 
     [Theory]
