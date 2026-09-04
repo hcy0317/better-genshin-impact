@@ -229,7 +229,8 @@ public partial class ScriptGroupProject : ObservableObject
             GroupName = GroupInfo?.Name ?? "",
             FolderName = FolderName,
             ProjectName = Name,
-            Type = Type
+            Type = Type,
+            SettingsFingerprint = ExecutionRecordStorage.ComputeSettingsFingerprint(this)
         };
         ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
         Exception? executionFailure = null;

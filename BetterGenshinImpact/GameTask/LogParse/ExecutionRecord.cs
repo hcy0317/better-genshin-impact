@@ -11,6 +11,8 @@ public class ExecutionRecord
     [JsonProperty("project_name")] public string ProjectName { get; set; } = string.Empty;
     [JsonProperty("folder_name")] public string FolderName { get; set; } = string.Empty;
     [JsonProperty("type")] public string Type = string.Empty;
+    [JsonProperty("settings_fingerprint", NullValueHandling = NullValueHandling.Ignore)]
+    public string? SettingsFingerprint { get; set; }
 
     /// <summary>
     /// 执行开始时间（服务器时间，包含时区信息）
