@@ -20,7 +20,7 @@ public class ResinStatus
     /// <summary>
     /// 脆弱树脂（60）
     /// </summary>
-    public int FragileResinCount { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    public int FragileResinCount { get; set; } = 0;
 
     /// <summary>
     /// 浓缩树脂（60）
@@ -30,7 +30,7 @@ public class ResinStatus
     /// <summary>
     /// 须臾树脂（60壶内购买）
     /// </summary>
-    public int TransientResinCount { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    public int TransientResinCount { get; set; } = 0;
 
     public static ResinStatus RecogniseFromRegion(ImageRegion region, ISystemInfo systemInfo, IOcrService ocrService)
     {
@@ -120,9 +120,7 @@ public class ResinStatus
 
     public void Print(ILogger logger)
     {
-        // logger.LogInformation("原粹树脂：{Cnt1}，浓缩树脂：{Cnt2}，须臾树脂：{Cnt3}，脆弱树脂：{Cnt4}", 
-        //     OriginalResinCount, CondensedResinCount, FragileResinCount, TransientResinCount);
-        logger.LogInformation("原粹树脂：{Cnt1}，浓缩树脂：{Cnt2}",
-            OriginalResinCount, CondensedResinCount);
+        logger.LogInformation("原粹树脂：{Cnt1}，浓缩树脂：{Cnt2}，须臾树脂：{Cnt3}，脆弱树脂：{Cnt4}",
+            OriginalResinCount, CondensedResinCount, TransientResinCount, FragileResinCount);
     }
 }
