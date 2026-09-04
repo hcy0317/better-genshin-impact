@@ -133,7 +133,7 @@ internal class GoToSereniteaPotTask
                 await Delay(100, ct);
                 Simulation.ReleaseAllKey();
                 await Delay(200, ct);
-                sereniteaPotHomeIcon.Click();
+                ClickCaptureRegion(sereniteaPotHomeIcon);
                 await Delay(500, ct);
                 break;
             }
@@ -177,7 +177,7 @@ internal class GoToSereniteaPotTask
             var teleportSereniteaPotHome = ra.Find(ElementRecognition.Get("TeleportSereniteaPotHome", ra));
             if (teleportSereniteaPotHome.IsExist())
             {
-                teleportSereniteaPotHome.Click();
+                ClickCaptureRegion(teleportSereniteaPotHome);
                 await Delay(800, ct);  
                 continue; // 找到并点击传送住宅按钮后再次点击传送按钮
             }
@@ -463,7 +463,14 @@ internal class GoToSereniteaPotTask
         // }
 
         // await Delay(600, ct);
-        ra.Find(ElementRecognition.Get("BtnWhiteConfirm", ra)).Click();
+        using var confirmButton = ra.Find(ElementRecognition.Get("BtnWhiteConfirm", ra));
+        if (!confirmButton.IsExist())
+        {
+            Logger.LogWarning("领取尘歌壶奖励: 未找到购买确认按钮，跳过本次购买。");
+            return;
+        }
+
+        ClickCaptureRegion(confirmButton);
         await Delay(600, ct);
         TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.OpenPaimonMenu); // ESC 
     }
@@ -505,7 +512,7 @@ internal class GoToSereniteaPotTask
             
             if (shouldClick)
             {
-                getAare.Find(ElementRecognition.Get("SereniteaPotLove", getAare), a => a.Click());
+                getAare.Find(ElementRecognition.Get("SereniteaPotLove", getAare), ClickCaptureRegion);
             }
             
             await Delay(500, ct);
@@ -518,24 +525,32 @@ internal class GoToSereniteaPotTask
             var tem = list.FirstOrDefault(a => a.Text.Contains("无法领取好感经验"));
             if (tem != null)
             {
-                tem.Click();
+                ClickCaptureRegion(tem);
                 await Delay(200, ct);
             }
 
             using var ra1 = CaptureToRectArea();
-            if (ra1.Find(ElementRecognition.Get("SereniteapotPageClose", ra1), a => a.Click()).IsExist())
+            if (ra1.Find(ElementRecognition.Get("SereniteapotPageClose", ra1), ClickCaptureRegion).IsExist())
             {
                 await Delay(500, ct);
             }
 
             using var ra2 = CaptureToRectArea();
-            ra2.Find(ElementRecognition.Get("SereniteaPotMoney", ra2), a => a.Click());
+            ra2.Find(ElementRecognition.Get("SereniteaPotMoney", ra2), ClickCaptureRegion);
             await Delay(500, ct);
             using var ra3 = CaptureToRectArea();
-            ra3.Find(ElementRecognition.Get("SereniteapotPageClose", ra3), a => a.Click());
+            ra3.Find(ElementRecognition.Get("SereniteapotPageClose", ra3), ClickCaptureRegion);
             await Delay(500, ct);
             using var ra4 = CaptureToRectArea();
-            ra4.Find(ElementRecognition.Get("PageCloseWhite", ra4)).Click();
+            using var pageClose = ra4.Find(ElementRecognition.Get("PageCloseWhite", ra4));
+            if (pageClose.IsExist())
+            {
+                ClickCaptureRegion(pageClose);
+            }
+            else
+            {
+                Logger.LogDebug("领取尘歌壶奖励: 好感页面已关闭或未显示关闭按钮。");
+            }
         }
         
         await Delay(900, ct);
@@ -610,7 +625,7 @@ internal class GoToSereniteaPotTask
                             {
                                 buyCount++;
                                 Logger.LogInformation("领取尘歌壶奖励:购买 {text} ", item.Name);
-                                itemRo.Click();
+                                ClickCaptureRegion(itemRo);
                                 await Delay(600, ct);
                                 await BuyMaxNumber(ct);
                                 await Delay(1000, ct);//等待购买动画结束
@@ -635,7 +650,7 @@ internal class GoToSereniteaPotTask
                     Logger.LogInformation("领取尘歌壶奖励:{text}", "购买商店物品完成");
                     // 购买完成 关闭page
                     using var ra5 = CaptureToRectArea();
-                    ra5.Find(ElementRecognition.Get("PageCloseWhite", ra5), a => a.Click());
+                    ra5.Find(ElementRecognition.Get("PageCloseWhite", ra5), ClickCaptureRegion);
                 }
             }
             else
@@ -730,7 +745,7 @@ internal class GoToSereniteaPotTask
         if (sereniteaClose.IsExist())
         {
             Logger.LogDebug("领取尘歌壶奖励: 关闭阿圆奖励或商店界面。");
-            sereniteaClose.Click();
+            ClickCaptureRegion(sereniteaClose);
             return;
         }
 
@@ -738,8 +753,22 @@ internal class GoToSereniteaPotTask
         if (pageClose.IsExist())
         {
             Logger.LogDebug("领取尘歌壶奖励: 关闭阿圆相关页面。");
-            pageClose.Click();
+            ClickCaptureRegion(pageClose);
         }
+    }
+
+    private static void ClickCaptureRegion(Region region)
+    {
+        if (!region.IsExist())
+        {
+            return;
+        }
+
+        // CaptureToRectArea 返回的顶层 ImageRegion 没有 PrevConverter，不能调用 Region.Click。
+        // 直接使用游戏捕获区域坐标点击，避免空转换器导致尘歌壶任务崩溃。
+        GameCaptureRegion.GameRegion1080PPosClick(
+            region.X + region.Width / 2d,
+            region.Y + region.Height / 2d);
     }
 
     private static void PressEscapeForAYuanExit()

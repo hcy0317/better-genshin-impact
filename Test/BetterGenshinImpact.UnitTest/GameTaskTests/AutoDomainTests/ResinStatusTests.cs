@@ -63,5 +63,18 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoDomainTests
             Assert.Throws<InvalidOperationException>(() =>
                 ResinStatus.ParseCondensedResinCount(string.Empty));
         }
+
+        [Fact]
+        public void InventoryResinCounts_AreStoredWithoutThrowing()
+        {
+            var status = new ResinStatus
+            {
+                FragileResinCount = 28,
+                TransientResinCount = 2
+            };
+
+            Assert.Equal(28, status.FragileResinCount);
+            Assert.Equal(2, status.TransientResinCount);
+        }
     }
 }
