@@ -68,7 +68,7 @@ internal sealed class GridIconRecognizer : IItemIconRecognizer
 internal sealed class ItemRecognizer : IItemIconRecognizer
 {
     private const int InputSize = 125;
-    private const double MatchThreshold = 0.75;
+    internal const double MatchThreshold = 0.70;
 
     private readonly InferenceSession _session;
     private readonly List<IconPrototype> _prototypes;
@@ -156,7 +156,11 @@ internal sealed class ItemRecognizer : IItemIconRecognizer
 
     public string? Recognize(Mat icon)
     {
-        var candidate = Match(icon);
+        return SelectRecognizedName(Match(icon));
+    }
+
+    internal static string? SelectRecognizedName(ItemIconCandidate candidate)
+    {
         return candidate.Score >= MatchThreshold ? candidate.Name : null;
     }
 
