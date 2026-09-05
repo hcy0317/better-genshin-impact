@@ -109,7 +109,7 @@ public class SwitchPartyTask
         currTeamName = tempName.Trim();
 
         Logger.LogInformation("切换队伍，当前队伍名称: {Text}，使用正则表达式规则进行模糊匹配", currTeamName);
-        if (Regex.IsMatch(currTeamName, partyName))
+        if (PartyNameAliases.IsMatch(currTeamName, partyName))
         {
             Logger.LogInformation("当前队伍[{Name}]即为目标队伍，无需切换", currTeamName);
             if (isInPartyViewUi)
@@ -187,7 +187,7 @@ public class SwitchPartyTask
                 // 当前页存在则直接点击
                 foreach (var textRegion in partySwitchNameRaList)
                 {
-                    if (Regex.IsMatch(textRegion.Text, partyName))
+                    if (PartyNameAliases.IsMatch(textRegion.Text, partyName))
                     {
                         page.ClickTo(textRegion.Right + textRegion.Width, textRegion.Bottom);
                         await Delay(200, ct);

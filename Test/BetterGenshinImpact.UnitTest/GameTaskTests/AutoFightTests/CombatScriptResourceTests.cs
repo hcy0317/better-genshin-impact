@@ -984,7 +984,7 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void FightFinishCheck_MustUseTheUnifiedArrowAndHealthBarApproachPipeline()
+    public void FightFinishCheck_MustConsumePassiveObservationsWithoutApproachWaits()
     {
         var source = File.ReadAllText(SourcePath(
             "BetterGenshinImpact", "GameTask", "AutoFight", "AutoFightTask.cs"));
@@ -993,7 +993,8 @@ public class CombatScriptResourceTests
             "public static async Task<bool> CheckFightFinish",
             "private static Dictionary<string, double> ParseStringToDictionary");
 
-        Assert.Contains("AutoFightSeek.DetectAndApproachEnemyAsync", section, StringComparison.Ordinal);
+        Assert.Contains("AutoFightSeek.TryCreatePassiveDecision", section, StringComparison.Ordinal);
+        Assert.DoesNotContain("await AutoFightSeek.DetectAndApproachEnemyAsync", section, StringComparison.Ordinal);
         Assert.DoesNotContain("AvatarRecognition.FindBloodBars", section, StringComparison.Ordinal);
         Assert.DoesNotContain("MoveForwardTask.MoveForwardAsync", section, StringComparison.Ordinal);
     }
@@ -1572,29 +1573,31 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void ZhongXinNaWanStrategy_ShouldParseAndRefreshKokomiBeforeShield()
+    public void HydroStrategy_ShouldHealWithJeanAndRefreshShieldBeforeLongBeams()
     {
-        var path = SourcePath("BetterGenshinImpact", "User", "AutoFight", "00-钟心那万.txt");
+        var path = SourcePath("BetterGenshinImpact", "User", "AutoFight", "00-水.txt");
         var text = File.ReadAllText(path);
         var lines = ReadScriptLines(path);
 
         var script = CombatScriptParser.Parse(path);
 
-        Assert.Contains("珊瑚宫心海", script.AvatarNames);
+        Assert.Contains("芙宁娜", script.AvatarNames);
+        Assert.Contains("琴", script.AvatarNames);
+        Assert.DoesNotContain("珊瑚宫心海", script.AvatarNames);
         Assert.Contains("那维莱特", script.AvatarNames);
         Assert.DoesNotContain("click(middle)", text, StringComparison.OrdinalIgnoreCase);
 
-        var kokomiSkill = lines.FindIndex(line => line.StartsWith("珊瑚宫心海 e", StringComparison.Ordinal));
-        var firstNeuvilletteBeam = lines.FindIndex(line => line.StartsWith("那维莱特", StringComparison.Ordinal) && line.Contains(" e, ") && line.Contains("keydown(VK_LBUTTON)"));
-        var kokomiBurst = lines.FindIndex(line => line.StartsWith("珊瑚宫心海 keypress(q)", StringComparison.Ordinal));
-        var shieldAfterBurst = lines.FindIndex(kokomiBurst + 1, line => line.StartsWith("钟离 ", StringComparison.Ordinal));
+        var furinaSetup = lines.FindIndex(line => line.StartsWith("芙宁娜 e(fast), q", StringComparison.Ordinal));
+        var jeanHealing = lines.FindIndex(line => line.StartsWith("琴 q", StringComparison.Ordinal));
+        var firstNeuvilletteBeam = lines.FindIndex(line => line.StartsWith("那维莱特 e(fast)", StringComparison.Ordinal) && line.Contains("keydown(VK_LBUTTON)"));
+        var shieldAfterFirstBeam = lines.FindIndex(firstNeuvilletteBeam + 1, line => line.StartsWith("钟离 ", StringComparison.Ordinal) && line.Contains("refresh"));
+        var neuvilletteBurst = lines.FindIndex(line => line.StartsWith("那维莱特 q", StringComparison.Ordinal));
 
-        Assert.True(kokomiSkill >= 0, "missing Kokomi E line");
+        Assert.True(furinaSetup >= 0, "missing Furina setup");
+        Assert.True(jeanHealing > furinaSetup, "Jean healing must follow Furina Q");
         Assert.True(firstNeuvilletteBeam >= 0, "missing first Neuvillette E beam line");
-        Assert.True(kokomiBurst >= 0, "missing Kokomi Q refresh line");
-        Assert.True(shieldAfterBurst >= 0, "missing Zhongli shield after Kokomi Q line");
-        Assert.True(kokomiSkill < firstNeuvilletteBeam && firstNeuvilletteBeam < kokomiBurst && kokomiBurst < shieldAfterBurst,
-            "expected Kokomi E -> Neuvillette E beam -> Kokomi Q -> Zhongli shield order");
+        Assert.True(jeanHealing < firstNeuvilletteBeam && firstNeuvilletteBeam < shieldAfterFirstBeam && shieldAfterFirstBeam < neuvilletteBurst,
+            "expected Furina Q -> Jean heal -> E beam -> confirmed Zhongli refresh -> Q beams");
 
         var neuvilletteBeamLines = lines
             .Where(line => line.StartsWith("那维莱特", StringComparison.Ordinal) && line.Contains("keydown(VK_LBUTTON)"))

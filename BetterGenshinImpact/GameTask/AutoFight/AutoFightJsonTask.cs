@@ -715,7 +715,8 @@ public class AutoFightJsonTask : ISoloTask
                         cmd.Method == Method.Skill,
                         guardianAvatar?.LastConfirmedSkillCastAtUtc ?? default,
                         _taskParam.GuardianShieldDurationSeconds,
-                        DateTime.UtcNow))
+                        DateTime.UtcNow,
+                        refreshRequested: cmd.Args?.Contains("refresh") == true))
                 {
                     Logger.LogInformation(
                         "盾奶位 {GuardianAvatar} 当前护盾仍在持续，跳过 JSON 策略中重复 E 子命令",

@@ -2,6 +2,8 @@ using System;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
 
+internal sealed class GuardianCoverageException(string message) : InvalidOperationException(message) { }
+
 public enum GuardianAttemptResult
 {
     ConfirmedNewCast,
@@ -29,7 +31,7 @@ public enum GuardianBoundaryAction
 internal static class GuardianSkillSwitchPolicy
 {
     private const int MaxAttemptCount = 2;
-    internal static readonly TimeSpan DefaultRefreshReserve = TimeSpan.FromSeconds(2);
+    internal static readonly TimeSpan DefaultRefreshReserve = TimeSpan.FromSeconds(4);
 
     internal static int NormalizeAttemptCount(int requestedAttemptCount)
     {
@@ -42,12 +44,15 @@ internal static class GuardianSkillSwitchPolicy
         bool isSkillCommand,
         DateTime lastConfirmedCastAtUtc,
         double? shieldDurationSeconds,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        bool refreshRequested = false)
     {
         return guardianSkillHandled &&
                commandTargetsGuardian &&
                isSkillCommand &&
-               IsShieldCoverageActive(lastConfirmedCastAtUtc, shieldDurationSeconds, nowUtc);
+               IsShieldCoverageActive(lastConfirmedCastAtUtc, shieldDurationSeconds, nowUtc) &&
+               (!refreshRequested ||
+                nowUtc >= lastConfirmedCastAtUtc && nowUtc - lastConfirmedCastAtUtc < TimeSpan.FromSeconds(2));
     }
 
     internal static bool IsShieldCoverageActive(

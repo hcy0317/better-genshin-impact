@@ -1,0 +1,14 @@
+// 草：钟离 / 芙宁娜 / 纳西妲 / 久岐忍。纳西妲站场、久岐忍超绽放；芙宁娜增伤不直接加成超绽放，轮转注意血线。
+// 生存优先：e(hold,wait,refresh) 在输出段前等待并确认续盾；普通 E 用单次检测，Q 不就绪即跳过。
+// 仅关键续盾允许等待冷却；护盾被伤害提前击破、网络延迟等不属于纯计时可保证范围。
+
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+芙宁娜 e(fast), q, check
+纳西妲 e(hold,fast), q, check
+久岐忍 e(fast), attack(1.5), check
+纳西妲 attack(2.0), check
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+久岐忍 e(fast), attack(1.5), check
+芙宁娜 attack(1.5), check
+纳西妲 attack(2.0), charge(0.4), check
+久岐忍 e(fast), attack(1.0), check

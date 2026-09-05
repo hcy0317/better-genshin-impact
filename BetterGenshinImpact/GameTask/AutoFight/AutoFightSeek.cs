@@ -863,6 +863,11 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     Cue: SeekCueKind.DamageNumber);
                 return true;
             }
+            if (observation.IndicatorDecision is { } indicator)
+            {
+                decision = indicator;
+                return true;
+            }
             return false;
         }
 
@@ -1897,6 +1902,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             bool indicatorOnly = false)
         {
             using var image = CaptureToRectArea();
+            return RecognizeSeekDecision(image, bloodLower, bloodHigher, out imageWidth,
+                out imageHeight, indicatorOnly);
+        }
+
+        internal static EnemySeekDecision RecognizeSeekDecision(
+            ImageRegion image, Scalar bloodLower, Scalar? bloodHigher,
+            out int imageWidth, out int imageHeight, bool indicatorOnly = false,
+            bool saveDiagnostics = true)
+        {
             var detectionRegion = GetSeekDetectionRegion(image.Width, image.Height);
             using var imageCrop = image.DeriveCrop(
                 detectionRegion.X,
@@ -1974,7 +1988,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     imageCrop.Width,
                     imageCrop.Height,
                     indicatorRouteLocked: false);
-                SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, indicatorDecision);
+                if (saveDiagnostics) SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, indicatorDecision);
                 return indicatorDecision;
             }
 
@@ -2000,7 +2014,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 fixedTopState.exhausted),
                 imageCrop.Width,
                 imageCrop.Height);
-            SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, decision);
+            if (saveDiagnostics) SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, decision);
             return decision;
         }
 
@@ -3095,7 +3109,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             double? shieldDurationSeconds,
             CancellationToken ct,
             bool guardianCombatSkip = false,
-            bool burstEnabled = false)
+            bool burstEnabled = false,
+            bool forceRefresh = false)
         {
             var stopwatch = Stopwatch.StartNew();
             try
@@ -3106,7 +3121,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     shieldDurationSeconds,
                     DateTime.UtcNow,
                     GetGuardianRefreshReserve());
-                if (knownCoverageValid)
+                if (knownCoverageValid && !forceRefresh)
                 {
                     return GuardianBoundaryAction.ProceedProtected;
                 }
@@ -3147,7 +3162,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     var action = GuardianSkillSwitchPolicy.DecideBoundary(
                         result,
                         coverageMode,
-                        GuardianSkillSwitchPolicy.IsKnownCoverageValid(
+                        !forceRefresh && GuardianSkillSwitchPolicy.IsKnownCoverageValid(
                             guardianAvatar.LastConfirmedSkillCastAtUtc,
                             shieldDurationSeconds,
                             DateTime.UtcNow,

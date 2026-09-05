@@ -1,0 +1,13 @@
+// 采集：钟离 / 纳西妲 / 枫原万叶 / 琴。双风采集，应急战斗；纳西妲采摘由路线处理，琴优先治疗。
+// 生存优先：e(hold,wait,refresh) 在输出段前等待并确认续盾；普通 E 用单次检测，Q 不就绪即跳过。
+// 仅关键续盾允许等待冷却；护盾被伤害提前击破、网络延迟等不属于纯计时可保证范围。
+
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+琴 q, e(fast), check
+纳西妲 e(hold,fast), check
+枫原万叶 e(hold,fast), attack(0.35), wait(0.4), q, check
+琴 attack(1.5), check
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+纳西妲 e(hold,fast), attack(1.2), check
+枫原万叶 e(hold,fast), attack(0.35), wait(0.4), check
+琴 e(fast), attack(2.0), check

@@ -112,6 +112,10 @@ public static class ESkillCdTracker
                 }
             }
             catch (OperationCanceledException) { }
+            catch (Exception exception)
+            {
+                Logger.LogDebug(exception, "后台战技冷却观察失败，保留既有冷却记录");
+            }
             finally
             {
                 capturedCts.Dispose();

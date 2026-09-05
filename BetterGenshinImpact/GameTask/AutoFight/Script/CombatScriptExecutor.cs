@@ -68,7 +68,7 @@ public static class CombatScriptExecutor
                 for (var i = 0; i < combatScript.CombatCommands.Count; i++)
                 {
                     var command = combatScript.CombatCommands[i];
-                    var lastCommand = i == 0 ? command : combatScript.CombatCommands[i - 1];
+                    var lastCommand = i == 0 ? null : combatScript.CombatCommands[i - 1];
                     ct.ThrowIfCancellationRequested();
                     if (!command.Execute(combatScenes, lastCommand))
                     {
@@ -78,6 +78,11 @@ public static class CombatScriptExecutor
                         break;
                     }
                 }
+            }
+            catch (GuardianCoverageException)
+            {
+                BetterGenshinImpact.Core.Simulator.Simulation.ReleaseAllKey();
+                throw;
             }
             catch (RetryException e)
             {

@@ -335,6 +335,23 @@ public class Avatar
         return false;
     }
 
+    internal void QueueSkillCooldownObservation()
+    {
+        // 只把不可变的编号框快照交给后台。观察结果不更改当前角色或护盾时间戳，
+        // 且切到其他角色后丢弃结果，防止把别人的 E 冷却记在本角色上。
+        var rects = CombatScenes.GetAvatars().Select(a => a.IndexRect).ToArray();
+        var index = Index;
+        var cancellationToken = Ct;
+        ESkillCdTracker.TriggerECheck(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var region = CaptureToRectArea();
+            var observed = PartyAvatarSideIndexHelper.GetAvatarIndexIsActiveWithContext(
+                region, rects, new AvatarActiveCheckContext());
+            return observed == index ? ReadSkillCurrentCd(region) : 0;
+        }, Name, cancellationToken);
+    }
+
     internal double ReadSkillCurrentCd(ImageRegion imageRegion)
     {
         return GetSkillCurrentCd(imageRegion, updateState: false);
@@ -527,9 +544,14 @@ public class Avatar
     /// <summary>
     /// 使用元素战技 E
     /// </summary>
-    public void UseSkill(bool hold = false)
+    public void UseSkill(bool hold = false, bool observeCooldown = true)
     {
-        if (AvatarSpecialAction.ExecuteSpecializedAction(this, "UseSkill", Name, new ActionArgs(Hold: hold))) return;
+        if (AvatarSpecialAction.ExecuteSpecializedAction(this, "UseSkill", Name, new ActionArgs(Hold: hold)))
+        {
+            LastSkillTime = DateTime.UtcNow;
+            QueueSkillCooldownObservation();
+            return;
+        }
 
         for (var i = 0; i < 1; i++)
         {
@@ -549,6 +571,13 @@ public class Avatar
             else
             {
                 Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+            }
+
+            if (!observeCooldown)
+            {
+                LastSkillTime = DateTime.UtcNow;
+                QueueSkillCooldownObservation();
+                return;
             }
 
             Sleep(200, Ct);
@@ -617,8 +646,22 @@ public class Avatar
     /// 使用元素爆发 Q
     /// Q释放等待 2s 超时认为没有Q技能
     /// </summary>
-    public void UseBurst()
+    public void UseBurst(bool waitForConfirmation = true)
     {
+        if (!waitForConfirmation)
+        {
+            Ct.ThrowIfCancellationRequested();
+            using (var capture = CaptureToRectArea())
+            {
+                // 单次检查能量/冷却；不就绪或识别不确定均跳过，不轮询等能量。
+                if (!IsActive(capture) || IsBurstReadyByClassify(capture) != BurstReadyState.Ready)
+                    return;
+            }
+            Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
+            // 只有实际发送了 Q 才保留动画时间。
+            Sleep(1700, Ct);
+            return;
+        }
         using (AvatarRecognition.BeginExclusiveOperation())
         {
             // CD 中立即返回，其余场景尝试释放
@@ -668,13 +711,14 @@ public class Avatar
         using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
         var result = QBurstClassifierLazy.Value.Predictor.Classify(qRa.CacheImage);
         var topClass = result.GetTopClass();
-        var topClassName = topClass.Name.Name;
-        // Logger.LogInformation("Q技能冷却分类：{ClassName}，置信度：{Confidence:F2}", topClassName, topClass.Confidence);
-        
+        return ClassifyBurstReadiness(topClass.Name.Name, topClass.Confidence);
+    }
+
+    internal static BurstReadyState ClassifyBurstReadiness(string? topClassName, double confidence)
+    {
         // 置信度不足时，直接返回未知，避免误判导致漏放/乱放
-        if (topClass.Confidence <= 0.7)
+        if (string.IsNullOrWhiteSpace(topClassName) || !double.IsFinite(confidence) || confidence <= 0.7)
         {
-            // Logger.LogInformation("Q技能冷却分类置信度不足：{Confidence:F2}，类别：{ClassName}", topClass.Confidence, topClassName);
             return BurstReadyState.Unknown;
         }
 
@@ -824,6 +868,22 @@ public class Avatar
         }
 
         return true;
+    }
+
+    internal bool IsSkillReadyFromCurrentFrame()
+    {
+        Ct.ThrowIfCancellationRequested();
+        using var capture = CaptureToRectArea();
+        if (!IsActive(capture)) return false;
+        var cooldown = ReadSkillCurrentCd(capture);
+        if (cooldown > 0)
+        {
+            ESkillCdTracker.Record(Name, cooldown);
+            return false;
+        }
+        // 复用现有 E 冷却色块检测；只检查一次，不等待也不重复切人。
+        return !AutoFightSkill.AvatarSkillAsync(Logger, this, false, 1, Ct,
+            capture, assumeActive: true).GetAwaiter().GetResult();
     }
 
     /// <summary>

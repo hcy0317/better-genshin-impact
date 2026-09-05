@@ -41,6 +41,12 @@ public class CombatCommand
         }
 
         // 校验参数
+        if (Args.Contains("refresh") &&
+            (Method != Method.Skill || Name != "钟离" || !Args.Contains("hold") ||
+             !Args.Contains("wait") || Args.Contains("fast")))
+        {
+            throw new ArgumentException("refresh 仅用于钟离 e(hold,wait,refresh)，必须等待冷却并确认长 E 成功");
+        }
         if (Method == Method.Walk)
         {
             AssertUtils.IsTrue(Args.Count == 2, "walk方法必须有两个入参，第一个参数是方向，第二个参数是行走时间。例：walk(s, 0.2)");
@@ -96,27 +102,10 @@ public class CombatCommand
                 return false;
             }
 
-            if (lastCommand != null && lastCommand.Name != Name)
+            if (lastCommand == null || lastCommand.Name != Name || combatScenes.LastActiveAvatarIndex != avatar.Index)
             {
-                // 上一个命令和当前命令不是同一个角色，直接切换角色
+                // 新角色块（包括首条宏指令）才确认切人；连续动作复用已确认结果。
                 if (!avatar.TrySwitch(10)) return false;
-            }
-            else
-            {
-                // 非宏类脚本，等待切换角色成功
-                if (Method != Method.Wait
-                    && Method != Method.MouseDown
-                    && Method != Method.MouseUp
-                    && Method != Method.Click
-                    && Method != Method.MoveBy
-                    && Method != Method.KeyDown
-                    && Method != Method.KeyUp
-                    && Method != Method.KeyPress
-                    && Method != Method.Scroll
-                    && Method != Method.Ready)
-                {
-                    if (!avatar.TrySwitch(10)) return false;
-                }
             }
         }
         Execute(avatar);
@@ -130,10 +119,25 @@ public class CombatCommand
             var hold = Args != null && Args.Contains("hold");
             var wait = Args != null && Args.Contains("wait");
             var fast = Args != null && Args.Contains("fast");
+            if (Args?.Contains("refresh") == true)
+            {
+                if (GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill(true, true, true,
+                        avatar.LastConfirmedSkillCastAtUtc, 20, DateTime.UtcNow, refreshRequested: true))
+                    return;
+
+                avatar.WaitSkillCd(avatar.Ct).GetAwaiter().GetResult();
+                var action = AutoFightSkill.EnsureGuardianBoundaryAsync(avatar,
+                    avatar.Index.ToString(), true, GuardianCoverageMode.RequireKnownCoverage,
+                    20, avatar.Ct, forceRefresh: true).GetAwaiter().GetResult();
+                avatar.Ct.ThrowIfCancellationRequested();
+                if (action != GuardianBoundaryAction.ProceedProtected)
+                    throw new GuardianCoverageException("钟离续盾未确认成功，停止本次战斗策略");
+                return;
+            }
             if (fast)
             {
                 // 快速跳过e
-                if (!avatar.IsSkillReady(true))
+                if (!avatar.IsSkillReadyFromCurrentFrame())
                 {
                     return;
                 }
@@ -141,14 +145,14 @@ public class CombatCommand
             else if (wait)
             {
                 // 等待e结束,同步等待
-                avatar.WaitSkillCd().Wait();
+                avatar.WaitSkillCd(avatar.Ct).GetAwaiter().GetResult();
             }
 
-            avatar.UseSkill(hold);
+            avatar.UseSkill(hold, observeCooldown: AvatarRecognition.IsConfiguredGuardian(avatar));
         }
         else if (Method == Method.Burst)
         {
-            avatar.UseBurst();
+            avatar.UseBurst(waitForConfirmation: false);
         }
         else if (Method == Method.Attack)
         {
@@ -322,28 +326,6 @@ public class CombatCommand
             return;
         }
 
-        ESkillCdTracker.TriggerECheck(() =>
-        {
-            try
-            {
-                double cd = 0;
-                for (var attempt = 0; attempt < 4; attempt++)
-                {
-                    using var region = TaskControl.CaptureToRectArea();
-                    cd = avatar.AfterUseSkill(region);
-                    if (cd > 0) break;
-                    if (attempt < 3) Thread.Sleep(100);
-                }
-                return cd;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                return 0;
-            }
-        }, avatar.Name, avatar.Ct);
+        avatar.QueueSkillCooldownObservation();
     }
 }

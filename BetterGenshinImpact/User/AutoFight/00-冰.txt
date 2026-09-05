@@ -1,0 +1,11 @@
+// 冰：钟离 / 珊瑚宫心海 / 神里绫华 / 芙宁娜。先芙宁娜 Q 和心海群疗，再补盾进入绫华爆发。
+// 生存优先：e(hold,wait,refresh) 在输出段前等待并确认续盾；普通 E 用单次检测，Q 不就绪即跳过。
+// 仅关键续盾允许等待冷却；护盾被伤害提前击破、网络延迟等不属于纯计时可保证范围。
+
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+芙宁娜 e(fast), q, check
+珊瑚宫心海 e(fast), wait(0.3), q, attack(1.5), check
+神里绫华 dash, wait(0.25), e(fast), wait(0.35), check
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+神里绫华 q, dash, wait(0.25), attack(1.0), charge(0.7), attack(1.0), charge(0.7), check
+珊瑚宫心海 e(fast), attack(1.5), check

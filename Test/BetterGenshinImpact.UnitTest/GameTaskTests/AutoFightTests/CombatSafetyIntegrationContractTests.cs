@@ -44,7 +44,7 @@ public class CombatSafetyIntegrationContractTests
         Assert.Contains("GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill", txt);
         Assert.Contains("GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill", json);
         Assert.Contains("FindNextGuardianSkillCommandIndex", txt);
-        Assert.Contains("护盾已到期，快进到策略中下一次 E 时机", txt);
+        Assert.Contains("护盾即将到期，快进到策略中下一次 E 时机", txt);
     }
 
     [Fact]
@@ -66,7 +66,7 @@ public class CombatSafetyIntegrationContractTests
     }
 
     [Fact]
-    public void BoundedSeek_IsSelectedOutsideLegacyMode()
+    public void CombatThread_OnlyConsumesPassiveSeekObservations()
     {
         var source = ReadSource(
             "BetterGenshinImpact",
@@ -74,9 +74,10 @@ public class CombatSafetyIntegrationContractTests
             "AutoFight",
             "AutoFightTask.cs");
 
-        Assert.Contains("CombatTargetingMode.Legacy", source);
-        Assert.Contains("RunBoundedSeekSliceAsync", source);
-        Assert.Contains("BoundedSeekPolicy.MaximumBudget", source);
+        Assert.Contains("RunPassiveSeek", source);
+        Assert.Contains("AvatarRecognition.LatestPassiveObservation", source);
+        Assert.DoesNotContain("await RunConfiguredSeekAsync", source);
+        Assert.DoesNotContain("await AutoFightSeek.RunBoundedSeekSliceAsync", source);
     }
 
     [Fact]
@@ -90,7 +91,7 @@ public class CombatSafetyIntegrationContractTests
         var finishCheck = Slice(
             source,
             "public static async Task<bool> CheckFightFinish",
-            "private static async Task<bool?> RunConfiguredSeekAsync");
+            "private static readonly AsyncLocal<DateTime> LastPassiveCameraFrame");
 
         Assert.DoesNotContain(
             "finishDetectConfig.GetSeekBudget() <= TimeSpan.Zero",

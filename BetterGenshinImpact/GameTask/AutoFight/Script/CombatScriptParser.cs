@@ -28,6 +28,13 @@ public class CombatScriptParser
         else if (Directory.Exists(path))
         {
             var files = Directory.GetFiles(path, "*.txt", SearchOption.AllDirectories);
+            // 文件系统枚举顺序不稳定；专属 00-* 策略必须先于通用策略参与四人匹配。
+            Array.Sort(files, (left, right) =>
+            {
+                var priority = (Path.GetFileName(left).StartsWith("00-", StringComparison.Ordinal) ? 0 : 1)
+                    .CompareTo(Path.GetFileName(right).StartsWith("00-", StringComparison.Ordinal) ? 0 : 1);
+                return priority != 0 ? priority : StringComparer.Ordinal.Compare(left, right);
+            });
             if (files.Length == 0)
             {
                 Logger.LogError("战斗脚本文件不存在：{Path}", path);

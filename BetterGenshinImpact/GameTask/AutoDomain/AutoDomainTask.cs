@@ -759,9 +759,14 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 {
                     // 通用化战斗策略
                     var strategyBlockSucceeded = true;
+                    CombatCommand? lastCommand = null;
                     foreach (var command in combatCommands)
                     {
-                        if (command.Execute(combatScenes)) continue;
+                        if (command.Execute(combatScenes, lastCommand))
+                        {
+                            lastCommand = command;
+                            continue;
+                        }
                         Logger.LogWarning(
                             "自动秘境角色 {Avatar} 未确认切换成功，后推当前策略块",
                             command.Name);

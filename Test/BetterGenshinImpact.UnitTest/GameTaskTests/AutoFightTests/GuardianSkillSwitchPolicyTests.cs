@@ -193,7 +193,7 @@ public class GuardianSkillSwitchPolicyTests
             StringComparison.Ordinal);
         Assert.Contains("catch (OperationCanceledException)", jsonTaskSource,
             StringComparison.Ordinal);
-        Assert.Contains("if (command.Execute(combatScenes)) continue;", domainSource,
+        Assert.Contains("if (command.Execute(combatScenes, lastCommand))", domainSource,
             StringComparison.Ordinal);
         Assert.Contains("if (command.Execute(combatScenes, lastCommand)) continue;", stygianSource,
             StringComparison.Ordinal);

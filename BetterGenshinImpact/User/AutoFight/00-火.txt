@@ -1,0 +1,14 @@
+// 火：钟离 / 班尼特 / 香菱 / 芙宁娜。先芙宁娜 Q，再班尼特治疗、香菱领域内 Q；前台轮转吃治疗。
+// 生存优先：e(hold,wait,refresh) 在输出段前等待并确认续盾；普通 E 用单次检测，Q 不就绪即跳过。
+// 仅关键续盾允许等待冷却；护盾被伤害提前击破、网络延迟等不属于纯计时可保证范围。
+
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+芙宁娜 e(fast), q, check
+班尼特 e(fast), wait(0.3), q, attack(0.7), check
+香菱 e(fast), q, attack(1.0), check
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+班尼特 e(fast), wait(0.25)
+香菱 attack(1.0), check
+芙宁娜 attack(1.5), check
+班尼特 attack(1.2), e(fast), wait(0.25)
+香菱 attack(1.5), check

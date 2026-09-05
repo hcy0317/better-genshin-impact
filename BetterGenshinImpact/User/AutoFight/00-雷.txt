@@ -1,0 +1,12 @@
+// 雷：钟离 / 纳西妲 / 菲谢尔 / 雷电将军。雷神 E 后铺草和奥兹；补盾确认后进入连续 Q 输出段，菲谢尔 Q 后置续奥兹。
+// 生存优先：e(hold,wait,refresh) 在输出段前等待并确认续盾；普通 E 用单次检测，Q 不就绪即跳过。
+// 仅关键续盾允许等待冷却；护盾被伤害提前击破、网络延迟等不属于纯计时可保证范围。
+
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+雷电将军 e(fast), wait(0.25), check
+纳西妲 e(hold,fast), q, check
+菲谢尔 e(fast), wait(0.3), check
+纳西妲 attack(2.0), check
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+雷电将军 q, attack(2.0), charge(0.5), attack(2.0), charge(0.5), attack(1.4), check
+菲谢尔 q, check

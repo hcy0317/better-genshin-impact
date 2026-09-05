@@ -176,15 +176,20 @@ public static class AvatarSpecialAction
                 using (AvatarRecognition.BeginExclusiveOperation())
                 {
                     Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
-                    Sleep(300, avatar.Ct);
-                    for (int j = 0; j < 10; j++)
+                    try
                     {
-                        Simulation.SendInput.Mouse.MoveMouseBy(1000, 0);
-                        Sleep(50);
+                        Sleep(300, avatar.Ct);
+                        for (int j = 0; j < 10; j++)
+                        {
+                            Simulation.SendInput.Mouse.MoveMouseBy(1000, 0);
+                            Sleep(50, avatar.Ct);
+                        }
+                        Sleep(300, avatar.Ct);
                     }
-
-                    Sleep(300);
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
+                    finally
+                    {
+                        Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
+                    }
                     return true;
                 }
             }

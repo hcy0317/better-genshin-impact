@@ -79,7 +79,7 @@
         "skipModel": false,
         "guardianAvatarHold": true,
         "burstEnabled": false,
-        "kazuhaPartyName": "钟心那万",
+        "kazuhaPartyName": "水",
         "swimmingEnabled": true,
         "expBasedPickupEnabled": false,
         "timeout": 200
@@ -140,7 +140,7 @@
         "weaponMaterialRequireCounts0": "3-9-9-4",
         "bossName0": "守望者·堕天",
         "bossRequireCounts0": "46",
-        "teamName": "钟班香万",
+        "teamName": "火",
         "talentBookRequireCounts1": "9-63-114",
         "talentBookName1": "公平",
         "bossName1": "水形幻人",
@@ -227,8 +227,8 @@
         "selectRoute_香辛果": [],
         "selectRoute_枣椰": [],
         "selectRoute_烛伞蘑菇": [],
-        "partyName": "钟班香万",
-        "partyName2nd": "钟纳久万"
+        "partyName": "采集",
+        "partyName2nd": "矿物"
       },
       "index": 4,
       "type": "Javascript",
@@ -311,8 +311,8 @@
         "selectRoute_香辛果": [],
         "selectRoute_枣椰": [],
         "selectRoute_烛伞蘑菇": [],
-        "partyName": "狗粮",
-        "partyName2nd": "狗粮"
+        "partyName": "采集",
+        "partyName2nd": "矿物"
       },
       "index": 5,
       "type": "Javascript",
@@ -327,7 +327,7 @@
       "folderName": "AAA-Artifacts-Bulk-Supply",
       "jsScriptSettingsObject": {
         "artifactPartyName": "狗粮",
-        "combatPartyName": "钟心那万",
+        "combatPartyName": "水",
         "setTimeMode": "不调节时间",
         "minIntervalTime": "1",
         "maxWaitingTime": "0",
@@ -374,9 +374,9 @@
         "auto_key": "F8",
         "open_limit_max": true,
         "limit_max_group": "锄地专区->精英400@汐=120",
-        "team_fight": "钟心那万",
-        "team_hoe_ground": "锄地专区->精英400@汐=钟心那万,锄地专区->小怪2000@mno=钟班香万,锄地专区->挪德卡莱锄地小怪=钟心那万,敌人与魔物->蕈兽=钟心那万,敌人与魔物->发条机关=钟心娜万,敌人与魔物->遗迹机兵=钟心娜万,敌人与魔物->浊水幻灵=钟班香万,敌人与魔物->深渊法师=钟班香万,敌人与魔物->飘浮灵=钟纳久万",
-        "team_seven_elements": "钟纳娜万,钟班香万,钟心那万,钟芙琴万,钟纳久万,钟纳久万,钟迪绫万,钟心娜万",
+        "team_fight": "水",
+        "team_hoe_ground": "锄地专区->精英400@汐=水,锄地专区->小怪2000@mno=火,锄地专区->挪德卡莱锄地小怪=水,敌人与魔物->蕈兽=水,敌人与魔物->发条机关=岩,敌人与魔物->遗迹机兵=岩,敌人与魔物->浊水幻灵=火,敌人与魔物->深渊法师=火,敌人与魔物->飘浮灵=雷",
+        "team_seven_elements": "矿物,火,水,风,雷,草,冰,岩",
         "is_debug": false,
         "treeLevel_0_0": [
           "锄地专区"

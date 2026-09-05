@@ -404,19 +404,8 @@ public class AutoFightTask : ISoloTask
 
                     #region 本次战斗的跳过战斗判定
 
-                    //如果所有角色都可以被跳过，且没有任何一个cd大于0的(技能都还没好)
-                    //则强制等待，因为不等待的话什么都不能做，而且会造成刷屏
-                    if (allCanBeSkipped)
-                    {
-                        //获取最低cd
-                        var minCoolDown = commandAvatarNames.Select(a => combatScenes.SelectAvatar(a)).WhereNotNull()
-                            .Select(a => a.GetSkillCdSeconds()).Min();
-                        if (minCoolDown > 0)
-                        {
-                            Logger.LogInformation("队伍中所有角色的技能都在冷却中,等待{MinCoolDown}秒后继续。", Math.Round(minCoolDown, 2));
-                            await Delay((int)Math.Ceiling(minCoolDown * 1000), ct);
-                        }
-                    }
+                    // CD 只用于脚本显式 fast/wait 指令。不能因全队 E 冷却挂起
+                    // 整轮策略，否则普攻、Q 和移动也会一同被阻塞。
 
                     var skipFightName = "";
                     var guardianSkillHandledForCurrentBlock = false;
@@ -427,7 +416,7 @@ public class AutoFightTask : ISoloTask
                     for (var i = 0; i < combatCommands.Count; i++)
                     {
                         var command = combatCommands[i];
-                        var lastCommand = i == 0 ? command : combatCommands[i - 1];
+                        var lastCommand = i == 0 ? null : combatCommands[i - 1];
                         
                         #region 盾奶位技能优先功能
                         
@@ -477,7 +466,7 @@ public class AutoFightTask : ISoloTask
                         if (guardianSkillHandledForCurrentBlock &&
                             guardianAvatar != null &&
                             avatar?.Name != guardianAvatar.Name &&
-                            !GuardianSkillSwitchPolicy.IsShieldCoverageActive(
+                            !GuardianSkillSwitchPolicy.IsKnownCoverageValid(
                                 guardianAvatar.LastConfirmedSkillCastAtUtc,
                                 _taskParam.GuardianShieldDurationSeconds,
                                 DateTime.UtcNow))
@@ -489,15 +478,20 @@ public class AutoFightTask : ISoloTask
                             if (nextGuardianSkillIndex > i)
                             {
                                 Logger.LogInformation(
-                                    "盾奶位 {GuardianAvatar} 护盾已到期，快进到策略中下一次 E 时机",
+                                    "盾奶位 {GuardianAvatar} 护盾即将到期，快进到策略中下一次 E 时机",
                                     guardianAvatar.Name);
                                 // 从下一次策略 E 重新走边界确认，避免把已过期的本轮状态带过去。
                                 guardianBoundaryResolvedForCurrentBlock = false;
                                 guardianSkillHandledForCurrentBlock = false;
                                 lastFightName = "";
+                                Simulation.ReleaseAllKey();
                                 i = nextGuardianSkillIndex - 1;
                                 continue;
                             }
+                            // 本轮已无补盾点时从下一轮重新建盾，不带着即将到期的覆盖继续输出。
+                            Simulation.ReleaseAllKey();
+                            lastFightName = "";
+                            break;
                         }
 
                         if (GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill(
@@ -506,7 +500,8 @@ public class AutoFightTask : ISoloTask
                                 command.Method == Method.Skill,
                                 guardianAvatar?.LastConfirmedSkillCastAtUtc ?? default,
                                 _taskParam.GuardianShieldDurationSeconds,
-                                DateTime.UtcNow))
+                                DateTime.UtcNow,
+                                refreshRequested: command.Args?.Contains("refresh") == true))
                         {
                             Logger.LogInformation(
                                 "盾奶位 {GuardianAvatar} 当前护盾仍在持续，跳过策略中重复 E 命令并继续后续动作",
@@ -526,12 +521,9 @@ public class AutoFightTask : ISoloTask
                             {
                                 try
                                 {
-                                    result = await RunConfiguredSeekAsync(
+                                    result = RunPassiveSeek(
                                         _finishDetectConfig,
-                                        detectDelayTime,
-                                        delayTime,
-                                        ct,
-                                        isEndCheck: true);
+                                        ct);
                                 }
                                 catch (Exception ex)
                                 {
@@ -579,7 +571,7 @@ public class AutoFightTask : ISoloTask
                                  skipFightName == "")
                             &&
                             // 且这次执行的角色包含在可跳过的角色列表中
-                            (allCanBeSkipped || canBeSkippedAvatarNames.Contains(command.Name))
+                            (!allCanBeSkipped && canBeSkippedAvatarNames.Contains(command.Name))
                            )
                         {
                             var cd = avatar.GetSkillCdSeconds();
@@ -1121,53 +1113,14 @@ public class AutoFightTask : ISoloTask
         LastFightFinishCheckTime = DateTime.Now;
         using (AvatarRecognition.BeginExclusiveOperation())
         {
-            // 所有即时敌人判断统一走 AutoFightSeek：红色方位三角和血条共用同一套
-            // 转向、接近、重截图状态机，避免“检测到敌人”与“尝试靠近”分裂成两条逻辑。
-            if (allowSeek &&
-                BoundedSeekPolicy.ShouldUseLegacySeekPath(finishDetectConfig.CombatTargetingMode) &&
-                (finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || finishDetectConfig.RotateFindEnemyEnabled))
+            // 辅助识别只读取后台快照。没有新结果时直接继续退出判断，
+            // 不在出招线程等待转向、接近、截图复核或索敌预算。
+            if ((finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || finishDetectConfig.RotateFindEnemyEnabled) &&
+                AutoFightSeek.TryCreatePassiveDecision(AvatarRecognition.LatestPassiveObservation,
+                    DateTime.UtcNow, out _, out _, out _))
             {
-                if (await AutoFightSeek.DetectAndApproachEnemyAsync(Logger, ct))
-                {
-                    _skipCheckCounter++;
-                    Logger.LogInformation(
-                        "统一寻敌链路检测到敌人并完成本轮转向/接近，跳过战斗结束检查（连续{Count}次）",
-                        _skipCheckCounter);
-                    return false;
-                }
-                _skipCheckCounter = 0;
-            }
-            else
-            {
-                _skipCheckCounter = 0;
-            }
-
-            if (allowSeek && finishDetectConfig.RotateFindEnemyEnabled)
-            {
-                bool? result = null;
-                try
-                {
-                    result = await RunConfiguredSeekAsync(
-                        finishDetectConfig,
-                        detectDelayTime,
-                        delayTime,
-                        ct,
-                        isEndCheck: false);
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError(ex, "SeekAndFightAsync 方法发生异常");
-                    result = false;
-                }
-
-                AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
-                    AutoFightSeek.RotationCount,
-                    result);
-
-                if (result != null)
-                {
-                    return result.Value;
-                }
+                if (allowSeek) RunPassiveSeek(finishDetectConfig, ct);
+                return false;
             }
 
             if (!finishDetectConfig.RotateFindEnemyEnabled)
@@ -1234,47 +1187,38 @@ public class AutoFightTask : ISoloTask
             Simulation.SendInput.SimulateAction(GIActions.Drop);
             Logger.LogInformation($"未检测到编队加载进度条: yellow{lastProgressBar.Item0},{lastProgressBar.Item1},{lastProgressBar.Item2};white{lastWhiteTile.Item0},{lastWhiteTile.Item1},{lastWhiteTile.Item2}");
 
-            if (allowSeek &&
-                finishDetectConfig.RotateFindEnemyEnabled &&
-                BoundedSeekPolicy.ShouldUseLegacySeekPath(finishDetectConfig.CombatTargetingMode))
-            {
-                await AutoFightSeek.DetectAndApproachEnemyAsync(Logger, ct);
-            }
-
             _lastFightFlagTime = DateTime.Now;
             return false;
         }
     }
 
-    private static async Task<bool?> RunConfiguredSeekAsync(
-        TaskFightFinishDetectConfig finishDetectConfig,
-        int detectDelayTime,
-        int delayTime,
-        CancellationToken ct,
-        bool isEndCheck)
-    {
-        if (finishDetectConfig.CombatTargetingMode == CombatTargetingMode.Legacy)
-        {
-            return await AutoFightSeek.SeekAndFightAsync(
-                Logger,
-                detectDelayTime,
-                delayTime,
-                ct,
-                isEndCheck,
-                finishDetectConfig.RotaryFactor);
-        }
+    private static readonly AsyncLocal<DateTime> LastPassiveCameraFrame = new();
 
-        var budget = finishDetectConfig.GetSeekBudget();
-        if (budget <= TimeSpan.Zero)
-        {
+    private static bool? RunPassiveSeek(
+        TaskFightFinishDetectConfig finishDetectConfig,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var observation = AvatarRecognition.LatestPassiveObservation;
+        if (!AutoFightSeek.TryCreatePassiveDecision(observation, DateTime.UtcNow,
+                out _, out var width, out _))
             return null;
+
+        if (finishDetectConfig.RotateFindEnemyEnabled &&
+            finishDetectConfig.CombatTargetingMode != CombatTargetingMode.ObserveOnly &&
+            observation.CapturedAtUtc > LastPassiveCameraFrame.Value &&
+            observation.Visual is { } visual)
+        {
+            LastPassiveCameraFrame.Value = observation.CapturedAtUtc;
+            var pulse = observation.IndicatorDecision is { } indicator
+                ? Math.Clamp(AutoFightSeek.GetIndicatorCameraOffset(indicator.Direction,
+                    visual, width, observation.ImageHeight), -120, 120)
+                : observation.HasNormalHealthBar
+                    ? CombatContinuityPolicy.CameraPulse(visual.X + visual.Width / 2, width)
+                    : 0;
+            if (pulse != 0) Simulation.SendInput.Mouse.MoveMouseBy(pulse, 0);
         }
-        var outcome = await AutoFightSeek.RunBoundedSeekSliceAsync(
-            Logger,
-            budget,
-            finishDetectConfig.CombatTargetingMode == CombatTargetingMode.ClosedLoop,
-            ct);
-        return AutoFightSeek.ToLegacySeekResult(outcome);
+        return false;
     }
 
     static bool IsYellow(int r, int g, int b)

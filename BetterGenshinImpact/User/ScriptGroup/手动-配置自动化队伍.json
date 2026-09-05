@@ -5,7 +5,7 @@
     "pathingConfig": {
       "enabled": true,
       "autoPickEnabled": true,
-      "partyName": "钟心那万",
+      "partyName": "水",
       "isVisitStatueBeforeSwitchParty": false,
       "mainAvatarIndex": "",
       "guardianAvatarIndex": "",
@@ -79,7 +79,7 @@
         "skipModel": false,
         "guardianAvatarHold": false,
         "burstEnabled": false,
-        "kazuhaPartyName": "钟心那万",
+        "kazuhaPartyName": "水",
         "swimmingEnabled": true,
         "expBasedPickupEnabled": false,
         "timeout": 200
@@ -95,15 +95,15 @@
   },
   "projects": [
     {
-      "name": "配置钟纳娜万",
+      "name": "配置火",
       "folderName": "AutoSwitchRoles",
       "jsScriptSettingsObject": {
-        "switchPartyName": "钟纳娜万",
+        "switchPartyName": "火",
         "option": "推荐-非快速配对模式 @Tool_tingsu",
         "position1": "钟离",
-        "position2": "纳西妲",
-        "position3": "娜维娅",
-        "position4": "枫原万叶"
+        "position2": "班尼特",
+        "position3": "香菱",
+        "position4": "芙宁娜"
       },
       "index": 1,
       "type": "Javascript",
@@ -114,15 +114,15 @@
       "allowJsHTTPHash": ""
     },
     {
-      "name": "配置钟班香万",
+      "name": "配置水",
       "folderName": "AutoSwitchRoles",
       "jsScriptSettingsObject": {
-        "switchPartyName": "钟班香万",
+        "switchPartyName": "水",
         "option": "推荐-非快速配对模式 @Tool_tingsu",
         "position1": "钟离",
-        "position2": "班尼特",
-        "position3": "香菱",
-        "position4": "枫原万叶"
+        "position2": "芙宁娜",
+        "position3": "那维莱特",
+        "position4": "琴"
       },
       "index": 2,
       "type": "Javascript",
@@ -133,14 +133,14 @@
       "allowJsHTTPHash": ""
     },
     {
-      "name": "配置钟心那万",
+      "name": "配置风",
       "folderName": "AutoSwitchRoles",
       "jsScriptSettingsObject": {
-        "switchPartyName": "钟心那万",
+        "switchPartyName": "风",
         "option": "推荐-非快速配对模式 @Tool_tingsu",
         "position1": "钟离",
-        "position2": "珊瑚宫心海",
-        "position3": "那维莱特",
+        "position2": "芙宁娜",
+        "position3": "琴",
         "position4": "枫原万叶"
       },
       "index": 3,
@@ -152,15 +152,15 @@
       "allowJsHTTPHash": ""
     },
     {
-      "name": "配置钟芙琴万",
+      "name": "配置雷",
       "folderName": "AutoSwitchRoles",
       "jsScriptSettingsObject": {
-        "switchPartyName": "钟芙琴万",
+        "switchPartyName": "雷",
         "option": "推荐-非快速配对模式 @Tool_tingsu",
         "position1": "钟离",
-        "position2": "芙宁娜",
-        "position3": "琴",
-        "position4": "枫原万叶"
+        "position2": "纳西妲",
+        "position3": "菲谢尔",
+        "position4": "雷电将军"
       },
       "index": 4,
       "type": "Javascript",
@@ -171,15 +171,15 @@
       "allowJsHTTPHash": ""
     },
     {
-      "name": "配置钟纳久万",
+      "name": "配置草",
       "folderName": "AutoSwitchRoles",
       "jsScriptSettingsObject": {
-        "switchPartyName": "钟纳久万",
+        "switchPartyName": "草",
         "option": "推荐-非快速配对模式 @Tool_tingsu",
         "position1": "钟离",
-        "position2": "纳西妲",
-        "position3": "久岐忍",
-        "position4": "枫原万叶"
+        "position2": "芙宁娜",
+        "position3": "纳西妲",
+        "position4": "久岐忍"
       },
       "index": 5,
       "type": "Javascript",
@@ -190,15 +190,15 @@
       "allowJsHTTPHash": ""
     },
     {
-      "name": "配置钟迪绫万",
+      "name": "配置冰",
       "folderName": "AutoSwitchRoles",
       "jsScriptSettingsObject": {
-        "switchPartyName": "钟迪绫万",
+        "switchPartyName": "冰",
         "option": "推荐-非快速配对模式 @Tool_tingsu",
         "position1": "钟离",
-        "position2": "迪奥娜",
+        "position2": "珊瑚宫心海",
         "position3": "神里绫华",
-        "position4": "枫原万叶"
+        "position4": "芙宁娜"
       },
       "index": 6,
       "type": "Javascript",
@@ -209,17 +209,55 @@
       "allowJsHTTPHash": ""
     },
     {
-      "name": "配置钟心娜万",
+      "name": "配置岩",
       "folderName": "AutoSwitchRoles",
       "jsScriptSettingsObject": {
-        "switchPartyName": "钟心娜万",
+        "switchPartyName": "岩",
         "option": "推荐-非快速配对模式 @Tool_tingsu",
         "position1": "钟离",
-        "position2": "珊瑚宫心海",
+        "position2": "班尼特",
         "position3": "娜维娅",
-        "position4": "枫原万叶"
+        "position4": "香菱"
       },
       "index": 7,
+      "type": "Javascript",
+      "status": "Enabled",
+      "schedule": "None",
+      "runNum": 1,
+      "allowJsNotification": true,
+      "allowJsHTTPHash": ""
+    },
+    {
+      "name": "配置矿物",
+      "folderName": "AutoSwitchRoles",
+      "jsScriptSettingsObject": {
+        "switchPartyName": "矿物",
+        "option": "推荐-非快速配对模式 @Tool_tingsu",
+        "position1": "钟离",
+        "position2": "娜维娅",
+        "position3": "枫原万叶",
+        "position4": "琴"
+      },
+      "index": 8,
+      "type": "Javascript",
+      "status": "Enabled",
+      "schedule": "None",
+      "runNum": 1,
+      "allowJsNotification": true,
+      "allowJsHTTPHash": ""
+    },
+    {
+      "name": "配置采集",
+      "folderName": "AutoSwitchRoles",
+      "jsScriptSettingsObject": {
+        "switchPartyName": "采集",
+        "option": "推荐-非快速配对模式 @Tool_tingsu",
+        "position1": "钟离",
+        "position2": "纳西妲",
+        "position3": "枫原万叶",
+        "position4": "琴"
+      },
+      "index": 9,
       "type": "Javascript",
       "status": "Enabled",
       "schedule": "None",

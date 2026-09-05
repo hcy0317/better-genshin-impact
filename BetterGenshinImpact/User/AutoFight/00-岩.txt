@@ -1,0 +1,13 @@
+// 岩：钟离 / 班尼特 / 娜维娅 / 香菱。双岩双火，火后台提供结晶；娜维娅可用长 E 吸晶，不盲按冷却中的技能。
+// 生存优先：e(hold,wait,refresh) 在输出段前等待并确认续盾；普通 E 用单次检测，Q 不就绪即跳过。
+// 仅关键续盾允许等待冷却；护盾被伤害提前击破、网络延迟等不属于纯计时可保证范围。
+
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+班尼特 e(fast), wait(0.3), q, check
+香菱 e(fast), q, check
+娜维娅 q, e(hold,fast), attack(1.2), check
+钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
+娜维娅 e(hold,fast), attack(2.0), check
+班尼特 e(fast), wait(0.25)
+香菱 e(fast), attack(0.7), check
+娜维娅 attack(1.5), check
