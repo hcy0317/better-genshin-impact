@@ -454,6 +454,32 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         return true;
     }
 
+    private async Task<IReadOnlyList<string>> ReadRecommendedElements()
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            _ct.ThrowIfCancellationRequested();
+            try
+            {
+                using var screen = CaptureToRectArea();
+                var elements = DomainRecommendedParty.Recognize(screen.SrcMat, OcrFactory.Paddle.OcrResult(screen.SrcMat));
+                if (elements.Count > 0)
+                {
+                    Logger.LogInformation("自动秘境：识别到推荐元素 {Elements}", string.Join("、", elements));
+                    return elements;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _ct.ThrowIfCancellationRequested();
+                Logger.LogWarning(ex, "自动秘境：推荐元素识别失败，将使用原配置队伍");
+                return [];
+            }
+            if (attempt < 2) await Delay(300, _ct);
+        }
+        return [];
+    }
+
     private async Task EnterDomain()
     {
         AutoFightAssets fightAssets;
@@ -559,6 +585,10 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             await Delay(300, _ct);
         }
 
+        // 在选好周日奖励后读取；每次进入秘境重新识别，避免复苏/不同秘境间复用旧元素。
+        IReadOnlyList<string> recommendedElements = _taskParam.AutoSelectPartyByRecommendedElements
+            ? await ReadRecommendedElements() : [];
+
         // 点击单人挑战确认并等待队伍界面--使用图像模版匹配的方法，也可以使用文字OCR的方法识别“单人挑战”直到消失
         await NewRetry.WaitForElementAppear(
             ElementRecognition.Get("PartyBtnChooseView"),
@@ -596,7 +626,24 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         );
         if (!teamUiFound)
         {
+            if (_taskParam.AutoSelectPartyByRecommendedElements)
+                throw new PartySetupFailedException("队伍选择界面未出现，无法选择推荐或默认队伍");
             Logger.LogWarning("队伍选择界面未出现，跳过切换队伍。");
+        }
+        else if (_taskParam.AutoSelectPartyByRecommendedElements)
+        {
+            // 部分界面在队伍页才显示推荐元素；无可靠结果时继续使用原本的 PartyName。
+            if (recommendedElements.Count == 0) recommendedElements = await ReadRecommendedElements();
+            if (recommendedElements.Count == 0)
+                Logger.LogWarning("自动秘境：未识别到推荐元素，回退默认队伍 {Party}", _taskParam.PartyName);
+            var switched = await DomainRecommendedParty.SwitchAsync(recommendedElements, _taskParam.PartyName,
+                (names, ct) => new SwitchPartyTask().StartAny(names, ct),
+                async (name, _) =>
+                {
+                    Logger.LogInformation("自动秘境：使用默认配置队伍 {Party}", name);
+                    return await SwitchParty(name);
+                }, _ct);
+            if (!switched) throw new PartySetupFailedException("推荐队伍和默认配置队伍均未能切换，停止秘境任务");
         }
         else
         {

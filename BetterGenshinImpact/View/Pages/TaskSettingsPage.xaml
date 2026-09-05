@@ -1455,6 +1455,22 @@
                 </Grid>
 
                 <Grid Margin="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <ui:TextBlock FontTypography="Body"
+                                      Text="{i18n:T 根据秘境推荐元素选择配队}" />
+                        <ui:TextBlock Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}"
+                                      Text="{i18n:T 优先使用火、水、雷、冰、草、风、岩同名队伍；识别失败或无匹配队伍时使用原配置队伍。此设置也适用于自动体力计划。}"
+                                      TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1" Margin="16,0,36,0"
+                                     IsChecked="{Binding Config.AutoDomainConfig.AutoSelectPartyByRecommendedElements, Mode=TwoWay}" />
+                </Grid>
+
+                <Grid Margin="16">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="Auto" />

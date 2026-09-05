@@ -9,6 +9,7 @@ using BetterGenshinImpact.View.Drawable;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -26,7 +27,22 @@ public class SwitchPartyTask
 
     private readonly ReturnMainUiTask _returnMainUiTask = new();
 
-    public async Task<bool> Start(string partyName, CancellationToken ct)
+    public Task<bool> Start(string partyName, CancellationToken ct)
+        => StartCore(partyName, name => PartyNameAliases.IsMatch(name, partyName), false, ct);
+
+    /// <summary>当前队伍满足候选时保留，否则查找首个可用候选；未找到时留在队伍页供默认队伍回退。</summary>
+    public Task<bool> StartAny(IReadOnlyList<string> partyNames, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(partyNames);
+        if (partyNames.Count == 0 || partyNames.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("候选队伍名称不能为空", nameof(partyNames));
+        var names = partyNames.ToArray();
+        return StartCore(string.Join("、", names),
+            name => names.Any(candidate => PartyNameAliases.IsMatch(name, candidate)), true, ct);
+    }
+
+    private async Task<bool> StartCore(string partyName, Func<string, bool> matches,
+        bool stayInPartyViewOnFailure, CancellationToken ct)
     {
         bool isInPartyViewUi = false;
 
@@ -83,15 +99,16 @@ public class SwitchPartyTask
         await Delay(500, ct);
 
         using var ra = CaptureToRectArea();
-        var partyViewBtn = ra.Find(ElementRecognition.Get("PartyBtnChooseView", ra));
+        using var partyViewBtn = ra.Find(ElementRecognition.Get("PartyBtnChooseView", ra));
 
         // OCR 当前队伍名称（无法单字，中间禁止空格）
-        var currTeamName = ra.Find(new RecognitionObject
+        using var currTeamNameRegion = ra.Find(new RecognitionObject
         {
             RecognitionType = RecognitionTypes.Ocr,
             RegionOfInterest = new Rect(partyViewBtn.Right, partyViewBtn.Top, (int)(350 * _assetScale),
                 partyViewBtn.Height)
-        }).Text;
+        });
+        var currTeamName = currTeamNameRegion.Text;
         
         var tempName = currTeamName
             .Replace("\"", "")        // 移除所有双引号（核心新增，解决日志里的""问题）
@@ -109,7 +126,7 @@ public class SwitchPartyTask
         currTeamName = tempName.Trim();
 
         Logger.LogInformation("切换队伍，当前队伍名称: {Text}，使用正则表达式规则进行模糊匹配", currTeamName);
-        if (PartyNameAliases.IsMatch(currTeamName, partyName))
+        if (matches(currTeamName))
         {
             Logger.LogInformation("当前队伍[{Name}]即为目标队伍，无需切换", currTeamName);
             if (isInPartyViewUi)
@@ -187,7 +204,7 @@ public class SwitchPartyTask
                 // 当前页存在则直接点击
                 foreach (var textRegion in partySwitchNameRaList)
                 {
-                    if (PartyNameAliases.IsMatch(textRegion.Text, partyName))
+                    if (matches(textRegion.Text))
                     {
                         page.ClickTo(textRegion.Right + textRegion.Width, textRegion.Bottom);
                         await Delay(200, ct);
@@ -199,7 +216,12 @@ public class SwitchPartyTask
                     }
                 }
 
-                Region lowest = partySwitchNameRaList.Where(r => r.X > 35 * _assetScale && r.X < 100 * _assetScale).OrderBy(r => r.Y).Last();
+                Region? lowest = partySwitchNameRaList.Where(r => r.X > 35 * _assetScale && r.X < 100 * _assetScale).OrderBy(r => r.Y).LastOrDefault();
+                if (lowest == null)
+                {
+                    Logger.LogWarning("未识别到队伍列表的行序号，停止翻页");
+                    break;
+                }
                 lowest.DrawSelf("底部的队伍");
 
                 if (lowest.Y < 777 * _assetScale)   // 如果最底下是空队伍则不会有队伍名，以此判断是否已遍历完成
@@ -226,6 +248,24 @@ public class SwitchPartyTask
         }
 
         // 未找到
+        if (stayInPartyViewOnFailure && !isInPartyViewUi)
+        {
+            Logger.LogWarning("未找到推荐队伍: {Name}，关闭队伍列表并回退默认队伍", partyName);
+            // 只退出列表，不返回主界面，否则会丢失秘境的开始挑战页面。
+            using (var current = CaptureToRectArea())
+            using (var deleteButton = current.Find(ElementRecognition.Get("PartyBtnDelete", current)))
+            {
+                if (deleteButton.IsExist()) Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
+            }
+            var closed = await NewRetry.WaitForAction(() =>
+            {
+                using var current = CaptureToRectArea();
+                using var deleteButton = current.Find(ElementRecognition.Get("PartyBtnDelete", current));
+                return deleteButton.IsEmpty() && Bv.IsInPartyViewUi(current);
+            }, ct, 5);
+            if (!closed) throw new PartySetupFailedException("未能关闭推荐队伍列表，无法安全回退默认队伍");
+            return false;
+        }
         Logger.LogError("未找到队伍: {Name}，返回主界面", partyName);
         Logger.LogInformation("如果找不到设定的队伍名，有可能是文字识别效果不佳，请尝试正则表达式");
         await _returnMainUiTask.Start(ct);
