@@ -5,6 +5,15 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoTrackPathTests;
 public class TpTaskMapDragTests
 {
     [Theory]
+    [InlineData(2, 100)]
+    [InlineData(20, 100)]
+    [InlineData(100, 500)]
+    public void MapDragSettlingDelay_ShouldNotBeShortenedByFastInputSettings(int configuredDelay, int expected)
+    {
+        Assert.Equal(expected, TpTask.GetMapDragSettlingDelay(configuredDelay));
+    }
+
+    [Theory]
     [InlineData(100, -200, 100, -200)]
     [InlineData(600, 800, 180, 240)]
     [InlineData(-600, -800, -180, -240)]

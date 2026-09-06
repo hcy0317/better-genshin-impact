@@ -1,0 +1,40 @@
+// 岩：钟离 / 班尼特 / 娜维娅 / 香菱。一枪后按本次附魔实际剩余时间选择短打，不预设两枪满层。
+// 未知被动条件只走普通短打；静态两次充能不当作当前还有两次可用。E 确认不等于结晶层数/命中。
+// 班尼特给香菱的接球关系显式声明，只有明确缺能且非 CD 时执行供能。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+班尼特 q(if=q-ready(班尼特))
+call(供能,if=q-energy-low(香菱) && !q-cd(香菱) && e-ready(班尼特))
+香菱 e(fast), q(if=q-ready(香菱))
+娜维娅 q(if=q-ready(娜维娅))
+call(一枪短打,if=e-ready(娜维娅))
+娜维娅 attack(0.4,keep=护盾), check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(供能,define) {
+    班尼特 e(fast,required,feed=香菱)
+}
+segment(一枪短打,define,atomic,requires=record-active(护盾)) {
+    娜维娅 e(hold,fast,required,record=岩附魔,keep=护盾)
+    branch(if=record-remaining(岩附魔)>3,then=附魔长打,else=附魔短选,unknown=普通短打,required)
+}
+segment(附魔长打,define) {
+    娜维娅 attack(1.4,keep=岩附魔,required)
+}
+segment(附魔短选,define) {
+    branch(if=record-remaining(岩附魔)>1.8,then=附魔短打,else=普通短打,unknown=普通短打,required)
+}
+segment(附魔短打,define) {
+    娜维娅 attack(0.5,keep=岩附魔,required)
+}
+segment(普通短打,define) {
+    娜维娅 attack(0.4,keep=护盾)
+}

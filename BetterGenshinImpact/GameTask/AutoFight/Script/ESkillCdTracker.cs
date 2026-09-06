@@ -112,6 +112,10 @@ public static class ESkillCdTracker
                 }
             }
             catch (OperationCanceledException) { }
+            catch (Exception exception)
+            {
+                Logger.LogDebug(exception, "后台战技冷却观察失败，保留既有冷却记录");
+            }
             finally
             {
                 capturedCts.Dispose();
@@ -224,5 +228,16 @@ public static class ESkillCdTracker
     {
         EReadyAt.Clear();
         LastConfirmedCastAt.Clear();
+    }
+
+    public static bool TryGetKnownRemainingCd(string characterName, out double seconds)
+    {
+        if (EReadyAt.TryGetValue(characterName, out var readyAt))
+        {
+            seconds = Math.Max(0, (readyAt - DateTime.UtcNow).TotalSeconds);
+            return true;
+        }
+        seconds = 0;
+        return false;
     }
 }

@@ -1,0 +1,29 @@
+// 风：钟离 / 芙宁娜 / 琴 / 枫原万叶。琴治疗优先，沙龙独立维护；普通索敌不插入 E 到落地。
+// 就绪未知不盲放 Q；补能只使用明确缺能观测，接球等待不等于实测到账。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+call(群疗,if=low-hp(琴) || low-hp(芙宁娜) || q-ready(琴))
+芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+call(琴补能,if=q-energy-low(琴) && !q-cd(琴) && e-ready(琴))
+call(聚怪落地)
+枫原万叶 q(if=q-ready(枫原万叶))
+琴 attack(0.6,keep=护盾), check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(群疗,define) {
+    琴 q(if=q-ready(琴))
+}
+segment(琴补能,define) {
+    琴 e(fast,required,feed=琴)
+}
+segment(聚怪落地,define,atomic,requires=record-active(护盾),record=落地完成) {
+    枫原万叶 e(hold,fast,required,keep=护盾), attack(0.35), wait(0.5), attack(0.8,keep=护盾)
+}

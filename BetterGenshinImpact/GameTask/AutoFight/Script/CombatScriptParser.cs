@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.AutoFight.Config;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
@@ -8,26 +9,29 @@ using static BetterGenshinImpact.GameTask.Common.TaskControl;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 
-public class CombatScriptParser
+public partial class CombatScriptParser
 {
+    private static readonly ILogger Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     public static string CurrentAvatarName = "当前角色";
     
     public static CombatScriptBag ReadAndParse(string path)
     {
         if (File.Exists(path))
         {
-            // 防护性代码：防止 .json 策略文件被错误传入旧的 .txt 解析器
-            if (path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-            {
-                Logger.LogError("当前任务暂不支持使用json策略，请使用txt策略");
-                throw new Exception("当前任务暂不支持使用json策略，请使用txt策略");
-            }
-
             return new CombatScriptBag(Parse(path));
         }
         else if (Directory.Exists(path))
         {
-            var files = Directory.GetFiles(path, "*.txt", SearchOption.AllDirectories);
+            var files = Directory.GetFiles(path, "*", SearchOption.AllDirectories)
+                .Where(file => file.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)).ToArray();
+            // 文件系统枚举顺序不稳定；专属 00-* 策略必须先于通用策略参与四人匹配。
+            Array.Sort(files, (left, right) =>
+            {
+                var priority = (Path.GetFileName(left).StartsWith("00-", StringComparison.Ordinal) ? 0 : 1)
+                    .CompareTo(Path.GetFileName(right).StartsWith("00-", StringComparison.Ordinal) ? 0 : 1);
+                if (priority != 0) return priority;
+                return StringComparer.Ordinal.Compare(left, right);
+            });
             if (files.Length == 0)
             {
                 Logger.LogError("战斗脚本文件不存在：{Path}", path);
@@ -59,57 +63,25 @@ public class CombatScriptParser
     public static CombatScript Parse(string path)
     {
         var script = File.ReadAllText(path);
-        var combatScript = ParseContext(script);
+        CombatScript combatScript;
+        try { combatScript = ParseContext(script); }
+        catch (FormatException exception)
+        {
+            var located = new FormatException($"{path}: {exception.Message}", exception);
+            located.Data["CombatSourceLocated"] = true;
+            throw located;
+        }
         combatScript.Path = path;
         combatScript.Name = Path.GetFileNameWithoutExtension(path);
+        foreach (var command in combatScript.CombatCommands) command.SourceFile = path;
         return combatScript;
     }
 
     public static CombatScript ParseContext(string context, bool validate = true, string? defaultAvatarName = null)
-    {
-        var lines = context.Split(["\r\n", "\r", "\n"], StringSplitOptions.RemoveEmptyEntries);
-        var result = new List<string>();
-        foreach (var line in lines)
-        {
-            var l = line.Trim()
-                .Replace("（", "(")
-                .Replace(")", ")")
-                .Replace("，", ",");
-            if (l.StartsWith("//") || l.StartsWith('#') || string.IsNullOrEmpty(l))
-            {
-                continue;
-            }
+        => ParseContextCore(context, validate, defaultAvatarName, 1, 1);
 
-            if (l.Contains(";"))
-            {
-                result.AddRange(l.Split(";", StringSplitOptions.RemoveEmptyEntries));
-            }
-            else
-            {
-                result.Add(l);
-            }
-        }
-
-        return ParseLines(result, validate, defaultAvatarName);
-    }
-
-    private static CombatScript ParseLines(List<string> lines, bool validate = true, string? defaultAvatarName = null)
-    {
-        List<CombatCommand> combatCommands = [];
-        HashSet<string> combatAvatarNames = [];
-        foreach (var line in lines)
-        {
-            var oneLineCombatCommands = ParseLine(line, combatAvatarNames, validate, defaultAvatarName);
-            combatCommands.AddRange(oneLineCombatCommands);
-        }
-
-        var names = string.Join(",", combatAvatarNames);
-        // Logger.LogDebug("战斗脚本解析完成，共{Cnt}条指令，涉及角色：{Str}", combatCommands.Count, names);
-
-        return new CombatScript(combatAvatarNames, combatCommands);
-    }
-
-    private static List<CombatCommand> ParseLine(string line, HashSet<string> combatAvatarNames, bool validate = true, string? defaultAvatarName = null)
+    private static List<CombatCommand> ParseLine(string line, HashSet<string> combatAvatarNames, bool validate = true,
+        string? defaultAvatarName = null, int sourceLine = 1, int sourceColumn = 1)
     {
         line = line.Trim();
         var oneLineCombatCommands = new List<CombatCommand>();
@@ -132,11 +104,15 @@ public class CombatScriptParser
 
         var character = defaultAvatarName ?? CurrentAvatarName;
         var commands = line;
+        var firstToken = line.Split('(', ' ', ',')[0];
+        var controlLine = Method.Values.Any(method => method.IsFlowControl && method.Alias.Contains(firstToken));
+        if (controlLine) separatorIndex = -1;
         if (separatorIndex > 0)
         {
             character = line[..separatorIndex];
             character = DefaultAutoFightConfig.AvatarAliasToStandardName(character);
             commands = line[(separatorIndex + 1)..];
+            sourceColumn += separatorIndex + 1;
         }
         else
         {
@@ -145,15 +121,15 @@ public class CombatScriptParser
             {
                 character = DefaultAutoFightConfig.AvatarAliasToStandardName(defaultAvatarName);
             }
-            else if (validate)
+            else if (validate && !controlLine)
             {
                 Logger.LogError("战斗脚本格式错误，必须以空格分隔角色和指令");
                 throw new Exception("战斗脚本格式错误，必须以空格分隔角色和指令");
             }
         }
 
-        oneLineCombatCommands.AddRange(ParseLineCommands(commands, character));
-        combatAvatarNames.Add(character);
+        oneLineCombatCommands.AddRange(ParseLineCommands(commands, character, sourceLine, sourceColumn));
+        if (oneLineCombatCommands.Any(command => !command.Method.IsFlowControl)) combatAvatarNames.Add(character);
         return oneLineCombatCommands;
     }
 
@@ -195,24 +171,46 @@ public class CombatScriptParser
         return activatingRounds;
     }
 
-    public static List<CombatCommand> ParseLineCommands(string lineWithoutAvatar, string avatarName) {
-        var parts = lineWithoutAvatar.Split("|", StringSplitOptions.RemoveEmptyEntries);
+    public static List<CombatCommand> ParseLineCommands(string lineWithoutAvatar, string avatarName, int sourceLine = 1, int sourceColumn = 1) {
+        lineWithoutAvatar = NormalizePunctuation(lineWithoutAvatar);
+        if (CombatSyntax.HasBlockSyntax(lineWithoutAvatar))
+            return ParseContextCore(lineWithoutAvatar, false, avatarName, sourceLine, sourceColumn).CombatCommands;
+        var parts = CombatSyntax.SplitLocated(lineWithoutAvatar, '|').Where(part => part.Text.Length != 0);
         var fullCombatCommands = new List<CombatCommand>();
+        (List<int> Rounds, int? Parity, CombatCommand Command)? pendingRound = null;
         foreach (var part in parts)
         {
-            var combatCommands = ParseLinePart(part, avatarName);
-            if (combatCommands.Count > 0 && combatCommands[0].Method == Method.Round) {
+            var combatCommands = ParseLinePart(part.Text, avatarName, sourceLine, sourceColumn + part.Offset);
+            var declarations = combatCommands.TakeWhile(command => command.Method == Method.Strategy || command.Method == Method.Timing).Count();
+            if (combatCommands.Count > declarations && combatCommands[declarations].Method == Method.Round) {
                 // 遇到round指令，作为回合分隔符使用，不加入最终指令列表
-                var roundCommand = combatCommands[0];
-                var activatingRounds = ParseRoundCommand(roundCommand);
-                combatCommands.RemoveAt(0);
-                foreach (var combatCommand in combatCommands) {
+                var roundCommand = combatCommands[declarations];
+                var parity = roundCommand.Args is { Count: 1 } && roundCommand.Args[0] is "odd" or "even"
+                    ? (int?)(roundCommand.Args[0] == "odd" ? 1 : 0) : null;
+                var activatingRounds = parity == null ? ParseRoundCommand(roundCommand) : [];
+                combatCommands.RemoveAt(declarations);
+                if (combatCommands.Count == declarations)
+                {
+                    fullCombatCommands.AddRange(combatCommands);
+                    pendingRound = (activatingRounds, parity, roundCommand);
+                    continue;
+                }
+                foreach (var combatCommand in combatCommands.Skip(declarations)) {
                     
                     combatCommand.ActivatingRound = activatingRounds;
+                    combatCommand.RoundParity = parity;
                 }
             }
+            else if (pendingRound is { } filter)
+                foreach (var command in combatCommands.Skip(declarations))
+                {
+                    command.ActivatingRound = filter.Rounds;
+                    command.RoundParity = filter.Parity;
+                }
+            pendingRound = null;
             fullCombatCommands.AddRange(combatCommands);
         }
+        if (pendingRound is { } dangling) throw dangling.Command.Error("round 过滤器后需要动作或 call");
         // foreach (var combatCommand in fullCombatCommands)
         // {
         //     Logger.LogDebug("解析战斗脚本命令：{cmd}", combatCommand.ToString());
@@ -220,52 +218,20 @@ public class CombatScriptParser
         return fullCombatCommands;
     }
 
-    public static List<CombatCommand> ParseLinePart(string lineWithoutAvatar, string avatarName)
+    public static List<CombatCommand> ParseLinePart(string lineWithoutAvatar, string avatarName, int sourceLine = 1, int sourceColumn = 1)
     {
-        var oneLineCombatCommands = new List<CombatCommand>();
-        var commandArray = lineWithoutAvatar.Split(",", StringSplitOptions.RemoveEmptyEntries);
-
-        for (var i = 0; i < commandArray.Length; i++)
+        List<CombatCommand> result = [];
+        foreach (var part in CombatSyntax.SplitLocated(lineWithoutAvatar, ',').Where(part => part.Text.Length != 0))
         {
-            var command = commandArray[i];
-            if (string.IsNullOrEmpty(command))
+            try
             {
-                continue;
+                result.Add(new(avatarName, part.Text) { SourceLine = sourceLine, SourceColumn = sourceColumn + part.Offset });
             }
-
-            if (command.Contains('(') && !command.Contains(')'))
+            catch (Exception exception) when (exception.Data["CombatSourceLocated"] is not true)
             {
-                var j = i + 1;
-                // 括号被逗号分隔，需要合并
-                while (j < commandArray.Length)
-                {
-                    command += "," + commandArray[j];
-                    if (command.Count("(".Contains) > 1)
-                    {
-                        Logger.LogError("战斗脚本格式错误，指令 {Cmd} 括号无法配对", command);
-                        throw new Exception("战斗脚本格式错误，指令括号无法配对");
-                    }
-
-                    if (command.Contains(')'))
-                    {
-                        i = j;
-                        break;
-                    }
-
-                    j++;
-                }
-
-                if (!(command.Contains('(') && command.Contains(')')))
-                {
-                    Logger.LogError("战斗脚本格式错误，指令 {Cmd} 括号不完整", command);
-                    throw new Exception("战斗脚本格式错误，指令括号不完整");
-                }
+                throw CombatCommand.SyntaxError(exception.Message, sourceLine, sourceColumn + part.Offset, exception);
             }
-
-            var combatCommand = new CombatCommand(avatarName, command);
-            oneLineCombatCommands.Add(combatCommand);
         }
-
-        return oneLineCombatCommands;
+        return result;
     }
 }

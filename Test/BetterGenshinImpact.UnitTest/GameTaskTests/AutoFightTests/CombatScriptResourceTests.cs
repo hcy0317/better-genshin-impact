@@ -984,7 +984,7 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void FightFinishCheck_MustUseTheUnifiedArrowAndHealthBarApproachPipeline()
+    public void FightFinishCheck_MustConsumePassiveObservationsWithoutApproachWaits()
     {
         var source = File.ReadAllText(SourcePath(
             "BetterGenshinImpact", "GameTask", "AutoFight", "AutoFightTask.cs"));
@@ -993,7 +993,8 @@ public class CombatScriptResourceTests
             "public static async Task<bool> CheckFightFinish",
             "private static Dictionary<string, double> ParseStringToDictionary");
 
-        Assert.Contains("AutoFightSeek.DetectAndApproachEnemyAsync", section, StringComparison.Ordinal);
+        Assert.Contains("AutoFightSeek.TryCreatePassiveDecision", section, StringComparison.Ordinal);
+        Assert.DoesNotContain("await AutoFightSeek.DetectAndApproachEnemyAsync", section, StringComparison.Ordinal);
         Assert.DoesNotContain("AvatarRecognition.FindBloodBars", section, StringComparison.Ordinal);
         Assert.DoesNotContain("MoveForwardTask.MoveForwardAsync", section, StringComparison.Ordinal);
     }
@@ -1572,38 +1573,44 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void ZhongXinNaWanStrategy_ShouldParseAndRefreshKokomiBeforeShield()
+    public void HydroStrategy_ShouldHealWithJeanAndRefreshShieldBeforeLongBeams()
     {
-        var path = SourcePath("BetterGenshinImpact", "User", "AutoFight", "00-钟心那万.txt");
+        var path = SourcePath("BetterGenshinImpact", "User", "AutoFight", "00-水.txt");
         var text = File.ReadAllText(path);
         var lines = ReadScriptLines(path);
 
         var script = CombatScriptParser.Parse(path);
 
-        Assert.Contains("珊瑚宫心海", script.AvatarNames);
+        Assert.Contains("芙宁娜", script.AvatarNames);
+        Assert.Contains("琴", script.AvatarNames);
+        Assert.DoesNotContain("珊瑚宫心海", script.AvatarNames);
         Assert.Contains("那维莱特", script.AvatarNames);
         Assert.DoesNotContain("click(middle)", text, StringComparison.OrdinalIgnoreCase);
 
-        var kokomiSkill = lines.FindIndex(line => line.StartsWith("珊瑚宫心海 e", StringComparison.Ordinal));
-        var firstNeuvilletteBeam = lines.FindIndex(line => line.StartsWith("那维莱特", StringComparison.Ordinal) && line.Contains(" e, ") && line.Contains("keydown(VK_LBUTTON)"));
-        var kokomiBurst = lines.FindIndex(line => line.StartsWith("珊瑚宫心海 keypress(q)", StringComparison.Ordinal));
-        var shieldAfterBurst = lines.FindIndex(kokomiBurst + 1, line => line.StartsWith("钟离 ", StringComparison.Ordinal));
-
-        Assert.True(kokomiSkill >= 0, "missing Kokomi E line");
-        Assert.True(firstNeuvilletteBeam >= 0, "missing first Neuvillette E beam line");
-        Assert.True(kokomiBurst >= 0, "missing Kokomi Q refresh line");
-        Assert.True(shieldAfterBurst >= 0, "missing Zhongli shield after Kokomi Q line");
-        Assert.True(kokomiSkill < firstNeuvilletteBeam && firstNeuvilletteBeam < kokomiBurst && kokomiBurst < shieldAfterBurst,
-            "expected Kokomi E -> Neuvillette E beam -> Kokomi Q -> Zhongli shield order");
+        var commands = script.CombatCommands;
+        var furinaSetup = commands.FindIndex(command => command.Name == "芙宁娜" && command.Method == Method.Skill);
+        var jeanHealing = commands.FindIndex(command => command.Method == Method.Call && command.Args![0] == "群疗");
+        var outputChoice = commands.FindIndex(command => command.Method == Method.Branch &&
+            command.Options.GetValueOrDefault("then") == "Q双喷" && command.Options.GetValueOrDefault("else") == "E单喷");
+        Assert.True(furinaSetup >= 0 && jeanHealing > furinaSetup && outputChoice > jeanHealing);
+        Assert.Equal("q-ready(那维莱特)", commands[outputChoice].Options["if"]);
+        Assert.Equal("E单喷", commands[outputChoice].Options["unknown"]);
+        Assert.DoesNotContain(commands.Take(outputChoice), command => command.Name == "那维莱特" &&
+            (command.Method == Method.Skill || command.Method == Method.Burst || command.Method == Method.KeyDown));
+        Assert.Contains(commands.Take(outputChoice), command => command.Name == "钟离" &&
+            command.Options.GetValueOrDefault("watch") == "护盾" && command.Options.GetValueOrDefault("watch-target") == "补盾");
+        Assert.Contains(commands, command => command.Name == "那维莱特" && command.Method == Method.Burst && command.HasFlag("required"));
+        Assert.Equal(3, commands.Count(command => command.Method == Method.Call && command.Args![0] == "喷射宏"));
+        Assert.Contains(commands, command => command.Method == Method.KeyDown && command.Options.GetValueOrDefault("keep") == "护盾");
 
         var neuvilletteBeamLines = lines
-            .Where(line => line.StartsWith("那维莱特", StringComparison.Ordinal) && line.Contains("keydown(VK_LBUTTON)"))
+            .Where(line => line.StartsWith("那维莱特", StringComparison.Ordinal) && line.Contains("keydown(VK_LBUTTON"))
             .ToList();
 
-        Assert.Equal(3, neuvilletteBeamLines.Count);
+        Assert.Single(neuvilletteBeamLines); // 三个有条件调用复用同一完整宏；实际次数由动态合同测试验证。
         foreach (var line in neuvilletteBeamLines)
         {
-            var keydownMatches = Regex.Matches(line, @"keydown\(VK_LBUTTON\)").Cast<Match>().ToList();
+            var keydownMatches = Regex.Matches(line, @"keydown\(VK_LBUTTON(?:,[^)]*)?\)").Cast<Match>().ToList();
             var keyupMatches = Regex.Matches(line, @"keyup\(VK_LBUTTON\)").Cast<Match>().ToList();
             var firstMoveByIndex = line.IndexOf("moveby(", StringComparison.Ordinal);
 

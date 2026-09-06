@@ -488,6 +488,24 @@
                                 Text="{Binding Config.AutoFightConfig.ActionSchedulerByCd, Mode=TwoWay}"
                                 TextWrapping="Wrap" />
                 </Grid>
+                <ui:CardExpander Margin="16,0,52,12" Header="技能知识库（离线与同步）" IsExpanded="False">
+                    <StackPanel DataContext="{Binding AutoFightViewModel}">
+                        <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
+                                   Text="原始数值与机制规则独立保存。规则需复核或个人被动未知时安全降级；施放推算的时间窗不等于实测护盾、命中或粒子到账。" />
+                        <TextBlock Text="角色英文键（逗号分隔；留空同步全部，例如 zhongli,navia）" TextWrapping="Wrap" />
+                        <ui:TextBox Margin="0,6,0,8" Text="{Binding SkillCharacterKeys, UpdateSourceTrigger=PropertyChanged}" />
+                        <WrapPanel>
+                            <ui:Button Margin="0,0,8,8" Content="同步数值" Command="{Binding SyncCombatSkillsCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="取消同步" Command="{Binding SyncCombatSkillsCancelCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="状态与来源" Command="{Binding ReadCombatSkillSourcesCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="导入规则包" Command="{Binding ImportCombatSkillRulesCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="导入个人覆盖" Command="{Binding ImportCombatSkillProfileCommand}" />
+                        </WrapPanel>
+                        <TextBlock Text="{Binding SkillCatalogStatus}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                        <TextBox Text="{Binding SkillCatalogDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                                 AcceptsReturn="True" VerticalScrollBarVisibility="Auto" MaxHeight="220" />
+                    </StackPanel>
+                </ui:CardExpander>
                 <!--内嵌的设置-->
                 <Separator Margin="-18,0" BorderThickness="0,1,0,0" />
                 <Grid Margin="16,10,52,0">
@@ -1452,6 +1470,22 @@
                                 MinWidth="180"
                                 Margin="0,0,36,0"
                                 Text="{Binding Config.AutoDomainConfig.PartyName, Mode=TwoWay}" />
+                </Grid>
+
+                <Grid Margin="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <ui:TextBlock FontTypography="Body"
+                                      Text="{i18n:T 根据秘境推荐元素选择配队}" />
+                        <ui:TextBlock Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}"
+                                      Text="{i18n:T 优先使用火、水、雷、冰、草、风、岩同名队伍；识别失败或无匹配队伍时使用原配置队伍。此设置也适用于自动体力计划。}"
+                                      TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ui:ToggleSwitch Grid.Column="1" Margin="16,0,36,0"
+                                     IsChecked="{Binding Config.AutoDomainConfig.AutoSelectPartyByRecommendedElements, Mode=TwoWay}" />
                 </Grid>
 
                 <Grid Margin="16">
@@ -3296,54 +3330,6 @@
                                   Minimum="1"
                                   ValidationMode="InvalidInputOverwritten"
                                   Value="{Binding Config.AutoLeyLineOutcropConfig.FightConfig.Timeout, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                </Grid>
-                <Grid Margin="16">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <ui:TextBlock Grid.Row="0"
-                                  Grid.Column="0"
-                                  FontTypography="Body"
-                                  Text="{i18n:T 不使用冒险之证寻路}"
-                                  TextWrapping="Wrap" />
-                    <ui:TextBlock Grid.Row="1"
-                                  Grid.Column="0"
-                                  Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}"
-                                  TextWrapping="Wrap" Text="{i18n:T 勾选后改用内置路线，不通过冒险之证定位地脉花。}" />
-                    <ui:ToggleSwitch Grid.Row="0"
-                                     Grid.RowSpan="2"
-                                     Grid.Column="1"
-                                     Margin="0,0,36,0"
-                                     IsChecked="{Binding Config.AutoLeyLineOutcropConfig.UseAdventurerHandbook, Mode=TwoWay}" />
-                </Grid>
-                <Grid Margin="16">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <ui:TextBlock Grid.Row="0"
-                                  Grid.Column="0"
-                                  FontTypography="Body"
-                                  Text="{i18n:T 发送通知}"
-                                  TextWrapping="Wrap" />
-                    <ui:TextBlock Grid.Row="1"
-                                  Grid.Column="0"
-                                  Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}"
-                                  TextWrapping="Wrap" Text="{i18n:T 任务完成或失败时通过通知系统发送提醒。}" />
-                    <ui:ToggleSwitch Grid.Row="0"
-                                     Grid.RowSpan="2"
-                                     Grid.Column="1"
-                                     Margin="0,0,36,0"
-                                     IsChecked="{Binding Config.AutoLeyLineOutcropConfig.IsNotification, Mode=TwoWay}" />
                 </Grid>
             </StackPanel>
         </ui:CardExpander>

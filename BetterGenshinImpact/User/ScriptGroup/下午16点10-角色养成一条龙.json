@@ -79,7 +79,7 @@
         "skipModel": false,
         "guardianAvatarHold": true,
         "burstEnabled": true,
-        "kazuhaPartyName": "钟心那万",
+        "kazuhaPartyName": "水",
         "swimmingEnabled": true,
         "expBasedPickupEnabled": false,
         "timeout": 200
@@ -106,7 +106,7 @@
         "weaponMaterialRequireCounts0": "3-9-9-4",
         "bossName0": "守望者·堕天",
         "bossRequireCounts0": "46",
-        "teamName": "钟班香万",
+        "teamName": "火",
         "talentBookRequireCounts1": "9-63-114",
         "talentBookName1": "公平",
         "bossName1": "水形幻人",

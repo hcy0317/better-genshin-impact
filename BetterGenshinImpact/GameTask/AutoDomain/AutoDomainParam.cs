@@ -13,6 +13,9 @@ public class AutoDomainParam : BaseTaskParam<AutoDomainTask>
     // 刷副本使用的队伍名称
     public string PartyName { get; set; } = string.Empty;
 
+    // 从全局自动秘境设置继承，JS 可单次覆盖。PartyName 始终保留为默认/兜底队伍。
+    public bool AutoSelectPartyByRecommendedElements { get; set; }
+
     // 需要刷取的副本名称
     public string DomainName { get; set; } = string.Empty;
 
@@ -72,6 +75,7 @@ public class AutoDomainParam : BaseTaskParam<AutoDomainTask>
     {
         var config = TaskContext.Instance().Config.AutoDomainConfig;
         PartyName = config.PartyName;
+        AutoSelectPartyByRecommendedElements = config.AutoSelectPartyByRecommendedElements;
         DomainName = config.DomainName;
         SundaySelectedValue = config.SundaySelectedValue;
         AutoArtifactSalvage = config.AutoArtifactSalvage;

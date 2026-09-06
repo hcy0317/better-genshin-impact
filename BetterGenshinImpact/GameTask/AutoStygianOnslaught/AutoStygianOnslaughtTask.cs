@@ -962,19 +962,20 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
         page.Click(pos.x, pos.y);
     }
 
-    private Task StartFight(CombatScenes combatScenes, List<CombatCommand> combatCommands)
+    private async Task StartFight(CombatScenes combatScenes, List<CombatCommand> combatCommands)
     {
-        CancellationTokenSource cts = new();
-        _ct.Register(cts.Cancel);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
         combatScenes.BeforeTask(cts.Token);
+        using var flow = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
 
-        var combatTask = new Task(() =>
+        Task CombatAsync()
         {
             try
             {
                 AutoFightTask.FightStatusFlag = true;
                 while (!cts.Token.IsCancellationRequested)
                 {
+                    if (flow != null) { flow.Step(cts.Token); continue; }
                     var strategyBlockSucceeded = true;
                     for (var i = 0; i < combatCommands.Count; i++)
                     {
@@ -1005,16 +1006,15 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
             finally
             {
                 Logger.LogInformation("自动战斗线程结束");
+                cts.Cancel();
                 Simulation.ReleaseAllKey();
                 Simulation.SendInput.Mouse.LeftButtonUp();
                 AutoFightTask.FightStatusFlag = false;
             }
-        }, cts.Token);
+            return Task.CompletedTask;
+        }
 
-        var domainEndTask = DomainEndDetectionTask(cts);
-        combatTask.Start();
-        domainEndTask.Start();
-        return Task.WhenAll(combatTask, domainEndTask);
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts));
     }
 
     /// <summary>
@@ -1023,8 +1023,7 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
     /// </summary>
     private async Task StartJsonFight()
     {
-        CancellationTokenSource cts = new();
-        _ct.Register(cts.Cancel);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
 
         var jsonParam = new AutoFightParam
         {
@@ -1038,9 +1037,7 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
 
         var jsonTask = new AutoFightJsonTask(jsonParam);
 
-        var domainEndTask = DomainEndDetectionTask(cts);
-
-        var combatTask = Task.Run(async () =>
+        async Task CombatAsync()
         {
             try
             {
@@ -1049,16 +1046,17 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
             catch (Exception e)
             {
                 Logger.LogWarning("JSON战斗任务异常：{Msg}", e.Message);
+                throw;
             }
-        }, cts.Token);
+            finally { await cts.CancelAsync(); }
+        }
 
-        domainEndTask.Start();
-        await Task.WhenAll(combatTask, domainEndTask);
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts));
     }
 
     private Task DomainEndDetectionTask(CancellationTokenSource cts)
     {
-        return new Task(async void () =>
+        return Task.Run(async () =>
         {
             try
             {
@@ -1073,7 +1071,7 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
                     Use3Channels = true
                 }.InitTemplate();
 
-                await NewRetry.WaitForAction(() =>
+                var completed = await NewRetry.WaitForAction(() =>
                 {
                     using var ra = CaptureToRectArea();
                     using var ret = ra.Find(whiteCancelRo);
@@ -1087,13 +1085,19 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
                     }
                     return false;
                 }, cts.Token, 300, 1000);
+                if (!completed) throw new TimeoutException("幽境结束信号检测超时，不能报告战斗成功");
                 Logger.LogInformation("检测到战斗结束，结束战斗操作线程");
                 await cts.CancelAsync();
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
             }
             catch (Exception e)
             {
                 Logger.LogInformation("对局结束检测线程异常结束：{Msg}", e.Message);
                 Logger.LogDebug(e, "对局结束检测线程异常结束");
+                await cts.CancelAsync();
+                throw;
             }
         }, cts.Token);
     }

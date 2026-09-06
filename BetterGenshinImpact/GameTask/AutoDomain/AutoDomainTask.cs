@@ -176,7 +176,8 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         Notify.Event(NotificationEvent.DomainStart).Success("自动秘境启动");
 
         // 复活重试
-        for (var i = 0; i < _config.ReviveRetryCount; i++)
+        var maximumAttempts = Math.Max(1, _config.ReviveRetryCount);
+        for (var i = 0; i < maximumAttempts; i++)
         {
             try
             {
@@ -186,11 +187,17 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             }
             catch (RetryException e)
             {
+                if (i == maximumAttempts - 1) throw;
                 // 只有选择了秘境的时候才会重试
                 if (!string.IsNullOrEmpty(_taskParam.DomainName))
                 {
                     var msg = e.Message;
-                    if (IsDomainReviveRetry(e))
+                    if (e is BetterGenshinImpact.GameTask.AutoFight.Script.Flow.CombatFlowRecoveryException)
+                    {
+                        if (!await TryExitDomainForRetry()) throw;
+                        msg = "自适应战斗需要恢复，已退出秘境后重新准备；不在秘境内直接传送";
+                    }
+                    else if (IsDomainReviveRetry(e))
                     {
                         var recovered = await TryRecoverAfterDomainReviveRetry(_ct, TryExitDomainForRetry, Avatar.RecoverAtStatueOfTheSeven);
                         msg = recovered
@@ -454,6 +461,32 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         return true;
     }
 
+    private async Task<IReadOnlyList<string>> ReadRecommendedElements()
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            _ct.ThrowIfCancellationRequested();
+            try
+            {
+                using var screen = CaptureToRectArea();
+                var elements = DomainRecommendedParty.Recognize(screen.SrcMat, OcrFactory.Paddle.OcrResult(screen.SrcMat));
+                if (elements.Count > 0)
+                {
+                    Logger.LogInformation("自动秘境：识别到推荐元素 {Elements}", string.Join("、", elements));
+                    return elements;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _ct.ThrowIfCancellationRequested();
+                Logger.LogWarning(ex, "自动秘境：推荐元素识别失败，将使用原配置队伍");
+                return [];
+            }
+            if (attempt < 2) await Delay(300, _ct);
+        }
+        return [];
+    }
+
     private async Task EnterDomain()
     {
         AutoFightAssets fightAssets;
@@ -559,6 +592,10 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             await Delay(300, _ct);
         }
 
+        // 在选好周日奖励后读取；每次进入秘境重新识别，避免复苏/不同秘境间复用旧元素。
+        IReadOnlyList<string> recommendedElements = _taskParam.AutoSelectPartyByRecommendedElements
+            ? await ReadRecommendedElements() : [];
+
         // 点击单人挑战确认并等待队伍界面--使用图像模版匹配的方法，也可以使用文字OCR的方法识别“单人挑战”直到消失
         await NewRetry.WaitForElementAppear(
             ElementRecognition.Get("PartyBtnChooseView"),
@@ -596,7 +633,24 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         );
         if (!teamUiFound)
         {
+            if (_taskParam.AutoSelectPartyByRecommendedElements)
+                throw new PartySetupFailedException("队伍选择界面未出现，无法选择推荐或默认队伍");
             Logger.LogWarning("队伍选择界面未出现，跳过切换队伍。");
+        }
+        else if (_taskParam.AutoSelectPartyByRecommendedElements)
+        {
+            // 部分界面在队伍页才显示推荐元素；无可靠结果时继续使用原本的 PartyName。
+            if (recommendedElements.Count == 0) recommendedElements = await ReadRecommendedElements();
+            if (recommendedElements.Count == 0)
+                Logger.LogWarning("自动秘境：未识别到推荐元素，回退默认队伍 {Party}", _taskParam.PartyName);
+            var switched = await DomainRecommendedParty.SwitchAsync(recommendedElements, _taskParam.PartyName,
+                (names, ct) => new SwitchPartyTask().StartAny(names, ct),
+                async (name, _) =>
+                {
+                    Logger.LogInformation("自动秘境：使用默认配置队伍 {Party}", name);
+                    return await SwitchParty(name);
+                }, _ct);
+            if (!switched) throw new PartySetupFailedException("推荐队伍和默认配置队伍均未能切换，停止秘境任务");
         }
         else
         {
@@ -744,24 +798,34 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }), _ct);
     }
 
-    private Task StartFight(CombatScenes combatScenes, List<CombatCommand> combatCommands)
+    private async Task StartFight(CombatScenes combatScenes, List<CombatCommand> combatCommands)
     {
-        CancellationTokenSource cts = new();
-        _ct.Register(cts.Cancel);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
         combatScenes.BeforeTask(cts.Token);
+        using var flow = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
         // 战斗操作
-        var combatTask = new Task(() =>
+        Task CombatAsync()
         {
             try
             {
                 AutoFightTask.FightStatusFlag = true;
                 while (!cts.Token.IsCancellationRequested)
                 {
+                    if (flow != null)
+                    {
+                        flow.Step(cts.Token);
+                        continue;
+                    }
                     // 通用化战斗策略
                     var strategyBlockSucceeded = true;
+                    CombatCommand? lastCommand = null;
                     foreach (var command in combatCommands)
                     {
-                        if (command.Execute(combatScenes)) continue;
+                        if (command.Execute(combatScenes, lastCommand))
+                        {
+                            lastCommand = command;
+                            continue;
+                        }
                         Logger.LogWarning(
                             "自动秘境角色 {Avatar} 未确认切换成功，后推当前策略块",
                             command.Name);
@@ -787,21 +851,17 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             finally
             {
                 Logger.LogInformation("自动战斗线程结束");
+                cts.Cancel();
                 Simulation.ReleaseAllKey();
                 AutoFightTask.FightStatusFlag = false;
             }
-        }, cts.Token);
+            return Task.CompletedTask;
+        }
 
-        // 对局结束检测
-        var domainEndTask = DomainEndDetectionTask(cts);
         // 秘境战斗不用自动战斗的结束检测，但可以复用其寻敌/靠近辅助。
-        var fightSeekAssistTask = StartFightSeekAssistTask(cts);
-        // 自动吃药
-        // var autoEatRecoveryHpTask = AutoEatRecoveryHpTask(cts.Token);
-        combatTask.Start();
-        domainEndTask.Start();
-        // autoEatRecoveryHpTask.Start();
-        return Task.WhenAll(combatTask, domainEndTask, fightSeekAssistTask);
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync,
+            () => DomainEndDetectionTask(cts),
+            flow == null ? () => StartFightSeekAssistTask(cts) : null);
     }
 
     private Task StartFightSeekAssistTask(CancellationTokenSource cts)
@@ -866,8 +926,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     /// </summary>
     private async Task StartJsonFight()
     {
-        CancellationTokenSource cts = new();
-        _ct.Register(cts.Cancel);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
 
         var jsonParam = new AutoFightParam
         {
@@ -881,9 +940,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         var jsonTask = new AutoFightJsonTask(jsonParam);
 
-        var domainEndTask = DomainEndDetectionTask(cts);
-
-        var combatTask = Task.Run(async () =>
+        async Task CombatAsync()
         {
             try
             {
@@ -892,11 +949,12 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             catch (Exception e)
             {
                 Logger.LogWarning("JSON战斗任务异常：{Msg}", e.Message);
+                throw;
             }
-        }, cts.Token);
+            finally { await cts.CancelAsync(); }
+        }
 
-        domainEndTask.Start();
-        await Task.WhenAll(combatTask, domainEndTask);
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts));
     }
 
     private void EndFightWait()
@@ -919,11 +977,11 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     /// </summary>
     private Task DomainEndDetectionTask(CancellationTokenSource cts)
     {
-        return new Task(async () =>
+        return Task.Run(async () =>
         {
             try
             {
-                while (!_ct.IsCancellationRequested)
+                while (!cts.IsCancellationRequested)
                 {
                     if (IsDomainEnd())
                     {
@@ -934,8 +992,13 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                     await Delay(1000, cts.Token);
                 }
             }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+            }
             catch
             {
+                await cts.CancelAsync();
+                throw;
             }
         }, cts.Token);
     }
@@ -945,16 +1008,18 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         using var ra = CaptureToRectArea();
 
         var fightAssets = AutoFightAssets.Get(ra);
-        var endTipsRect = ra.DeriveCrop(fightAssets.EndTipsUpperRect);
-        var text = OcrFactory.Paddle.Ocr(endTipsRect.SrcMat);
-        if (Regex.IsMatch(text, this.challengeCompletedLocalizedString))
+        using (var upperTips = ra.DeriveCrop(fightAssets.EndTipsUpperRect))
         {
-            Logger.LogInformation("检测到秘境结束提示(挑战达成)，结束秘境");
-            return true;
+            var upperText = OcrFactory.Paddle.Ocr(upperTips.SrcMat);
+            if (Regex.IsMatch(upperText, this.challengeCompletedLocalizedString))
+            {
+                Logger.LogInformation("检测到秘境结束提示(挑战达成)，结束秘境");
+                return true;
+            }
         }
 
-        endTipsRect = ra.DeriveCrop(fightAssets.EndTipsRect);
-        text = OcrFactory.Paddle.Ocr(endTipsRect.SrcMat);
+        using var endTipsRect = ra.DeriveCrop(fightAssets.EndTipsRect);
+        var text = OcrFactory.Paddle.Ocr(endTipsRect.SrcMat);
         if (Regex.IsMatch(text, this.autoLeavingLocalizedString))
         {
             Logger.LogInformation("检测到秘境结束提示(xxx秒后自动退出)，结束秘境");
@@ -1667,7 +1732,9 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             return true;
         }
 
-        var preferredRecord = _resinPriorityListWhenSpecifyUse.FirstOrDefault(record => record.RemainCount > 0);
+        var unavailableResinNames = new HashSet<string>(StringComparer.Ordinal);
+        var preferredRecord = AutoDomainResinPreflightPolicy.SelectNextAvailableResin(
+            _resinPriorityListWhenSpecifyUse, unavailableResinNames);
         if (!AutoDomainResinPreflightPolicy.ShouldPrepareSupplementalResinBeforeDomain(
                 _taskParam.SpecifyResinUse,
                 preferredRecord?.Name))
@@ -1693,18 +1760,24 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             {
                 if (!await TryUseSupplementalResinRecord(page, preferredRecord))
                 {
-                    if (_pendingSupplementalResinRecords.Count == 0)
+                    unavailableResinNames.Add(preferredRecord.Name);
+                    var nextRecord = AutoDomainResinPreflightPolicy.SelectNextAvailableResin(
+                        _resinPriorityListWhenSpecifyUse, unavailableResinNames);
+                    if (nextRecord != null)
                     {
-                        return false;
+                        Logger.LogWarning("自动秘境：本轮无法使用 {UnavailableResin}，继续尝试已配置的 {NextResin}",
+                            preferredRecord.Name, nextRecord.Name);
+                        preferredRecord = nextRecord;
+                        continue;
                     }
 
-                    _stopAfterPreparedSupplementalResins = true;
-                    return true;
+                    _stopAfterPreparedSupplementalResins = _pendingSupplementalResinRecords.Count > 0;
+                    return _stopAfterPreparedSupplementalResins;
                 }
 
                 _pendingSupplementalResinRecords.Enqueue(preferredRecord);
-                preferredRecord = _resinPriorityListWhenSpecifyUse
-                    .FirstOrDefault(record => record.RemainCount > 0);
+                preferredRecord = AutoDomainResinPreflightPolicy.SelectNextAvailableResin(
+                    _resinPriorityListWhenSpecifyUse, unavailableResinNames);
                 if (preferredRecord == null)
                 {
                     break;

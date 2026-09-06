@@ -6,6 +6,19 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoDomainTests;
 
 public class AutoDomainResinPreflightPolicyTests
 {
+    [Fact]
+    public void MissingSupplementalResinFallsBackWithoutRecordingItAsConsumed()
+    {
+        var transient = new ResinUseRecord("须臾树脂", 1);
+        var original = new ResinUseRecord("原粹树脂", 1);
+        var next = AutoDomainResinPreflightPolicy.SelectNextAvailableResin(
+            [transient, original], new HashSet<string> { "须臾树脂" });
+
+        Assert.Same(original, next);
+        Assert.Equal(1, transient.RemainCount);
+        Assert.Equal(1, transient.MaxCount);
+    }
+
     [Theory]
     [InlineData(6, 0, false)]
     [InlineData(19, 0, false)]

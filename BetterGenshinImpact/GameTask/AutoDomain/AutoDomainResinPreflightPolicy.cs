@@ -1,9 +1,20 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using BetterGenshinImpact.GameTask.AutoDomain.Model;
 
 namespace BetterGenshinImpact.GameTask.AutoDomain;
 
 internal static class AutoDomainResinPreflightPolicy
 {
+    internal static ResinUseRecord? SelectNextAvailableResin(
+        IEnumerable<ResinUseRecord> records,
+        IReadOnlySet<string> unavailableResinNames)
+    {
+        return records.FirstOrDefault(record => record.RemainCount > 0
+            && !unavailableResinNames.Contains(record.Name));
+    }
+
     internal static bool ShouldCheckMapResin(
         bool specifyResinUse,
         int transientResinUseCount,

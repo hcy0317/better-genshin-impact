@@ -1,0 +1,40 @@
+// 水：钟离 / 芙宁娜 / 那维莱特 / 琴。每场开场必须重新确认；后台按各自窗口维护。
+// Q 就绪走双喷尝试；Q 未就绪或未知走 E 单喷，两个主轴互斥。Q 未确认则降级到 E 分支。
+// 水滴仍是来源事件后的保守估计，不声称 E 命中、吸收数量或真实护盾耐久已被识别。
+// 保留原横扫宏的按键顺序；单喷 atomic 不阻止结束/取消，两喷之间可插入必要补盾。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+call(群疗,if=low-hp(琴) || q-ready(琴))
+琴 e(fast,feed=琴,if=q-energy-low(琴) && !q-cd(琴))
+branch(if=q-ready(那维莱特),then=Q双喷,else=E单喷,unknown=E单喷)
+那维莱特 check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+segment(群疗,define) {
+    琴 q(if=q-ready(琴))
+}
+segment(E单喷,define,onfail=普通短打,requires=record-active(护盾)) {
+    那维莱特 e(fast,required,keep=护盾), wait(0.65)
+    call(喷射宏,required)
+}
+segment(Q双喷,define,onfail=E单喷,requires=record-active(护盾)) {
+    那维莱特 q(required,keep=护盾), wait(0.35)
+    call(喷射宏,required)
+    那维莱特 check
+    call(喷射宏,required)
+}
+segment(普通短打,define) {
+    那维莱特 attack(0.5,keep=护盾)
+}
+// 完成记录只证明宏输入结束，不冒充命中、水滴吸收或实测完整喷射。
+segment(喷射宏,define,atomic,timeout=16,requires=record-active(护盾),record=喷射宏完成) {
+    那维莱特 keydown(VK_LBUTTON,keep=护盾,required), wait(1.6), moveby(1800, 0), wait(0.08), moveby(1800, -1400), wait(0.08), moveby(1800, 1000), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, 1200), wait(0.08), moveby(1800, -1200), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, 1300), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, -1500), wait(0.08), moveby(1800, 900), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, 1200), wait(0.08), moveby(1800, -1200), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, 1300), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, -1500), wait(0.08), moveby(1800, 900), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, 1200), wait(0.08), moveby(1800, -1200), wait(0.08), moveby(1800, 0), wait(0.08), moveby(1800, 1300), wait(0.08), keyup(VK_LBUTTON)
+}

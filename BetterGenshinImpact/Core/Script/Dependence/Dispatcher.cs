@@ -23,6 +23,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight.SkillData;
 using BetterGenshinImpact.GameTask.AutoLeyLineOutcrop;
 using BetterGenshinImpact.GameTask.AutoStygianOnslaught;
 using BetterGenshinImpact.GameTask.Common;
@@ -31,7 +32,32 @@ namespace BetterGenshinImpact.Core.Script.Dependence;
 
 public class Dispatcher
 {
-    private readonly ILogger<Dispatcher> _logger = App.GetLogger<Dispatcher>();
+    private readonly ILogger<Dispatcher> _logger;
+    private readonly CombatSkillCatalog? _skillCatalog;
+    private CombatSkillCatalog SkillCatalog => _skillCatalog ?? CombatSkillCatalog.Default;
+
+    /// <summary>同步公共技能数值；角色使用英文键，逗号分隔。不会启动战斗或热改当前快照。</summary>
+    public async Task<string> SyncCombatSkills(string? characterKeys = null, CancellationToken? customCt = null)
+    {
+        var keys = string.IsNullOrWhiteSpace(characterKeys) ? null
+            : characterKeys.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        await SkillCatalog.SyncAsync(keys, ct: customCt ?? CancellationContext.Instance.Cts.Token);
+        return ReadCombatSkillStatus();
+    }
+
+    public string ReadCombatSkillStatus() => Newtonsoft.Json.JsonConvert.SerializeObject(SkillCatalog.ReadStatus());
+
+    public string ReadCombatSkillFacts(string? characterKey = null) => Newtonsoft.Json.JsonConvert.SerializeObject(
+        SkillCatalog.Store.ReadSnapshot().Skills.Values.Where(skill => characterKey == null || skill.CharacterKey == characterKey));
+
+    public string ReadCombatSkillProfiles() => Newtonsoft.Json.JsonConvert.SerializeObject(SkillCatalog.Store.ReadSnapshot().Profiles);
+
+    public string ImportCombatSkillRules(string json) => Newtonsoft.Json.JsonConvert.SerializeObject(SkillCatalog.ImportRules(json));
+
+    public string ImportCombatSkillProfile(string json) => Newtonsoft.Json.JsonConvert.SerializeObject(SkillCatalog.ImportProfile(json));
+
+    public string SetCombatSkillMetricOverride(string skillId, string metric, string valueJson, string reason) =>
+        Newtonsoft.Json.JsonConvert.SerializeObject(SkillCatalog.SetMetricOverride(skillId, metric, valueJson, reason));
 
     internal static CountInventoryItemParam ParseCountInventoryItemParam(ScriptObject config)
     {
@@ -69,6 +95,14 @@ public class Dispatcher
     public Dispatcher(object config)
     {
         _config = config;
+        _logger = App.GetLogger<Dispatcher>();
+    }
+
+    internal Dispatcher(object config, CombatSkillCatalog skillCatalog, ILogger<Dispatcher> logger)
+    {
+        _config = config;
+        _skillCatalog = skillCatalog;
+        _logger = logger;
     }
 
     public void RunTask()

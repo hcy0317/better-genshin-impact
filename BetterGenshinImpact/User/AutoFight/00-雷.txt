@@ -1,0 +1,28 @@
+// 雷：钟离 / 纳西妲 / 菲谢尔 / 雷电将军。护盾、草标记、奥兹和雷神 E 各自维护。
+// 雷神 Q 本次确认后才进入站场；整段先检查盾预算，切人或姿态失效停止依赖普攻。
+// 没有治疗，不将估计盾窗当作实测盾耐久；菲谢尔 Q 不凭空延长 E 的奥兹记录。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+雷电将军 e(fast,record=雷罚,maintain=雷罚,before=3)
+纳西妲 e(hold,fast,record=草标记,maintain=草标记,before=3), q(if=q-ready(纳西妲))
+菲谢尔 e(fast,record=奥兹,maintain=奥兹,before=2)
+branch(if=q-ready(雷电将军),then=雷神站场,else=普通短轴,unknown=普通短轴)
+菲谢尔 q(if=q-ready(菲谢尔) && !record-active(奥兹))
+纳西妲 check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(普通短轴,define) {
+    纳西妲 attack(0.6,keep=护盾)
+}
+segment(雷神站场,define,atomic,timeout=10,onfail=普通短轴,requires=record-active(护盾),record=本次拔刀完成) {
+    雷电将军 q(required,record=梦想一心,keep=护盾)
+    雷电将军 attack(1.8,keep=梦想一心,required), charge(0.3,keep=梦想一心,required), attack(1.8,keep=梦想一心,required), charge(0.3,keep=梦想一心,required), attack(0.6,keep=梦想一心,required)
+}

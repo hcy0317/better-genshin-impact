@@ -1,8 +1,10 @@
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.Helpers;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using TimeSpan = System.TimeSpan;
 using Vanara.PInvoke;
@@ -17,22 +19,79 @@ public class CombatCommand
 
     public List<string>? Args { get; set; }
 
+    public Dictionary<string, string> Options { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> Flags { get; } = new(StringComparer.OrdinalIgnoreCase);
+    public bool HasFlag(string flag) => Flags.Contains(flag) || Args?.Contains(flag) == true;
+    public bool RequiresFlow => Method.IsFlowControl || Options.Count != 0 || RoundParity != null || Flags.Count != 0 || HasFlag("refresh");
+
     public List<int> ActivatingRound { get; set; }
+    public int? RoundParity { get; set; }
+    public string? SourceFile { get; set; }
+    public int SourceLine { get; set; } = 1;
+    public int SourceColumn { get; set; } = 1;
+    internal bool IsCompilerGenerated { get; init; }
+    internal FormatException Error(string message, Exception? inner = null) =>
+        SyntaxError(message, SourceLine, SourceColumn, inner, SourceFile);
+
+    internal static FormatException SyntaxError(string message, int line, int column, Exception? inner = null, string? file = null)
+    {
+        var error = new FormatException($"{file ?? "策略"} 第{line}行，第{column}列：{message}", inner);
+        error.Data["CombatSourceLocated"] = true;
+        return error;
+    }
+    public bool IsActiveInRound(int round) =>
+        (RoundParity == null || round % 2 == RoundParity) &&
+        (ActivatingRound == null || ActivatingRound.Count == 0 || ActivatingRound.Contains(round));
+
+    public BurstCastResult? LastBurstResult { get; private set; }
+
+    internal CombatCommand(CombatCommand source)
+    {
+        Name = source.Name;
+        Method = source.Method;
+        Args = new(source.Args ?? []);
+        ActivatingRound = new(source.ActivatingRound ?? []);
+        RoundParity = source.RoundParity;
+        SourceFile = source.SourceFile;
+        SourceLine = source.SourceLine;
+        SourceColumn = source.SourceColumn;
+        IsCompilerGenerated = source.IsCompilerGenerated;
+        foreach (var (key, value) in source.Options) Options.Add(key, value);
+        Flags.UnionWith(source.Flags);
+    }
 
     public CombatCommand(string name, string command)
     {
-        Name = name.Trim();
+        Name = name.Trim().Normalize();
         command = command.Trim();
         var startIndex = command.IndexOf('(');
         if (startIndex > 0)
         {
-            var endIndex = command.IndexOf(')');
+            var endIndex = command.LastIndexOf(')');
+            if (endIndex != command.Length - 1) throw new FormatException("命令括号不完整或结尾有多余内容");
             var method = command[..startIndex];
             method = method.Trim();
             Method = Method.GetEnumByCode(method);
 
             var parameters = command.Substring(startIndex + 1, endIndex - startIndex - 1);
-            Args = [..parameters.Split(',', StringSplitOptions.TrimEntries)];
+            Args = [];
+            foreach (var parameter in CombatSyntax.Split(parameters, ','))
+            {
+                if (parameter.Length == 0) continue;
+                var equals = CombatSyntax.FindAssignment(parameter);
+                if (equals > 0)
+                {
+                    var key = parameter[..equals].Trim();
+                    var value = CombatSyntax.Unquote(parameter[(equals + 1)..].Trim());
+                    if (value.Length == 0 || !Options.TryAdd(key, value))
+                        throw new FormatException("参数为空或重复：" + key);
+                }
+                else if (CombatParameterRegistry.IsCommandFlag(parameter))
+                {
+                    if (!Flags.Add(parameter.ToLowerInvariant())) throw new FormatException("重复参数：" + parameter);
+                }
+                else Args.Add(CombatSyntax.Unquote(parameter));
+            }
         }
         else
         {
@@ -40,7 +99,18 @@ public class CombatCommand
             Args = [];
         }
 
+        // 保留原 jump/j 的物理跳跃；jump(片段名) 才是具名控制流转移。
+        if (Method == Method.Jump && startIndex > 0 && command[..startIndex].Trim() == "jump" &&
+            Args.Count == 1 && !double.TryParse(Args[0], NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+            Method = Method.JumpTo;
+
         // 校验参数
+        if (Args.Contains("refresh") &&
+            (Method != Method.Skill || !Args.Contains("hold") ||
+             !Args.Contains("wait") || Args.Contains("fast")))
+        {
+            throw new ArgumentException("裸 refresh 使用 e(hold,wait,refresh)，必须等待冷却并确认长 E 成功，不能与 fast 组合");
+        }
         if (Method == Method.Walk)
         {
             AssertUtils.IsTrue(Args.Count == 2, "walk方法必须有两个入参，第一个参数是方向，第二个参数是行走时间。例：walk(s, 0.2)");
@@ -81,6 +151,7 @@ public class CombatCommand
 
     public bool Execute(CombatScenes combatScenes, CombatCommand? lastCommand = null)
     {
+        LastBurstResult = null;
         Avatar? avatar;
         if (Name == CombatScriptParser.CurrentAvatarName)
         {
@@ -96,35 +167,20 @@ public class CombatCommand
                 return false;
             }
 
-            if (lastCommand != null && lastCommand.Name != Name)
+            if (lastCommand == null || lastCommand.Name != Name || combatScenes.LastActiveAvatarIndex != avatar.Index)
             {
-                // 上一个命令和当前命令不是同一个角色，直接切换角色
+                // 新角色块（包括首条宏指令）才确认切人；连续动作复用已确认结果。
                 if (!avatar.TrySwitch(10)) return false;
-            }
-            else
-            {
-                // 非宏类脚本，等待切换角色成功
-                if (Method != Method.Wait
-                    && Method != Method.MouseDown
-                    && Method != Method.MouseUp
-                    && Method != Method.Click
-                    && Method != Method.MoveBy
-                    && Method != Method.KeyDown
-                    && Method != Method.KeyUp
-                    && Method != Method.KeyPress
-                    && Method != Method.Scroll
-                    && Method != Method.Ready)
-                {
-                    if (!avatar.TrySwitch(10)) return false;
-                }
             }
         }
         Execute(avatar);
-        return true;
+        return Method != Method.Burst || !HasFlag("required") || LastBurstResult == BurstCastResult.Confirmed;
     }
 
     public void Execute(Avatar avatar)
     {
+        if (Method.IsFlowControl || Options.Count != 0 || RoundParity != null || HasFlag("refresh") || Flags.Count != 0 && Method != Method.Burst)
+            throw new InvalidOperationException("增强策略必须通过统一流程执行器运行");
         if (Method == Method.Skill)
         {
             var hold = Args != null && Args.Contains("hold");
@@ -133,7 +189,7 @@ public class CombatCommand
             if (fast)
             {
                 // 快速跳过e
-                if (!avatar.IsSkillReady(true))
+                if (!avatar.IsSkillReadyFromCurrentFrame())
                 {
                     return;
                 }
@@ -141,14 +197,14 @@ public class CombatCommand
             else if (wait)
             {
                 // 等待e结束,同步等待
-                avatar.WaitSkillCd().Wait();
+                avatar.WaitSkillCd(avatar.Ct).GetAwaiter().GetResult();
             }
 
-            avatar.UseSkill(hold);
+            avatar.UseSkill(hold, observeCooldown: AvatarRecognition.IsConfiguredGuardian(avatar));
         }
         else if (Method == Method.Burst)
         {
-            avatar.UseBurst();
+            LastBurstResult = avatar.TryUseBurst();
         }
         else if (Method == Method.Attack)
         {
@@ -322,28 +378,6 @@ public class CombatCommand
             return;
         }
 
-        ESkillCdTracker.TriggerECheck(() =>
-        {
-            try
-            {
-                double cd = 0;
-                for (var attempt = 0; attempt < 4; attempt++)
-                {
-                    using var region = TaskControl.CaptureToRectArea();
-                    cd = avatar.AfterUseSkill(region);
-                    if (cd > 0) break;
-                    if (attempt < 3) Thread.Sleep(100);
-                }
-                return cd;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
-            {
-                return 0;
-            }
-        }, avatar.Name, avatar.Ct);
+        avatar.QueueSkillCooldownObservation();
     }
 }

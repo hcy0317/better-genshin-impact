@@ -49,26 +49,27 @@ public static class CombatScriptExecutor
                 combatScenes.BeforeTask(ct);
             }
 
-            // 提前校验是否存在策略要求的角色
-            // 若脚本中有无前缀的命令（如 a(0.5)），解析后 AvatarNames 会包含 "当前角色" 占位符，
-            // 此时跳过队伍校验是刻意设计：无前缀命令使用当前屏幕上角色，不要求特定角色在队伍中。
-            if (!combatScript.AvatarNames.Contains(CombatScriptParser.CurrentAvatarName))
+            // 增强流程使用完整校验，不把无角色 record/call 当成缺队伍而静默返回。
+            if (!combatScript.IsAvailableForParty(combatScenes.GetAvatars().Select(avatar => avatar.Name)))
             {
-                bool hasAvatar = combatScenes.GetAvatars().Any(avatar => combatScript.AvatarNames.Contains(avatar.Name));
-                if (!hasAvatar)
-                {
-                    logger.LogError("简易策略脚本要求的角色不存在！队伍中需要存在下面角色中的一个或多个：{AvatarNames}", string.Join(", ", combatScript.AvatarNames));
-                    return;
-                }
+                logger.LogError("简易策略脚本要求的角色不存在！队伍中需要存在下面角色中的一个或多个：{AvatarNames}", string.Join(", ", combatScript.AvatarNames));
+                return;
             }
 
             try
             {
+                using var flow = Flow.NativeCombatFlowRunner.Create(combatScript.CombatCommands, combatScenes, loop: false);
+                if (flow != null)
+                {
+                    var result = await flow.RunRoundAsync(ct);
+                    if (result == Flow.CombatFlowResult.Failed) throw new InvalidOperationException("增强策略关键要求未满足，单次流程已停止");
+                    return;
+                }
                 // 通用化战斗策略
                 for (var i = 0; i < combatScript.CombatCommands.Count; i++)
                 {
                     var command = combatScript.CombatCommands[i];
-                    var lastCommand = i == 0 ? command : combatScript.CombatCommands[i - 1];
+                    var lastCommand = i == 0 ? null : combatScript.CombatCommands[i - 1];
                     ct.ThrowIfCancellationRequested();
                     if (!command.Execute(combatScenes, lastCommand))
                     {
@@ -79,6 +80,15 @@ public static class CombatScriptExecutor
                     }
                 }
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (GuardianCoverageException)
+            {
+                BetterGenshinImpact.Core.Simulator.Simulation.ReleaseAllKey();
+                throw;
+            }
             catch (RetryException e)
             {
                 logger.LogWarning("简易策略脚本执行时出现重试异常，原因：{Msg}，重试中...", e.Message);
@@ -87,6 +97,7 @@ public static class CombatScriptExecutor
             catch (Exception e)
             {
                 logger.LogError(e, "执行简易策略脚本时发生错误！");
+                if (combatScript.HasFlowCommands) throw;
             }
         }
         finally

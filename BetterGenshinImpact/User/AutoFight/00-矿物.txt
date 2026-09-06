@@ -1,0 +1,23 @@
+// 矿物：钟离 / 娜维娅 / 枫原万叶 / 琴。仅应急短遭遇战；挖矿由路线处理。
+// 奇偶轮交替短轴，不强制四人每轮出招；不假定娜维娅当前次数、结晶满层或必有附魔。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+琴 q(if=q-ready(琴))
+branch(if=round-odd(),then=岩短轴,else=聚怪落地)
+娜维娅 attack(0.4,keep=护盾), check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(岩短轴,define,atomic,requires=record-active(护盾)) {
+    娜维娅 e(hold,fast,required,keep=护盾), attack(0.6,keep=护盾)
+}
+segment(聚怪落地,define,atomic,requires=record-active(护盾)) {
+    枫原万叶 e(hold,fast,required,keep=护盾), attack(0.35), wait(0.5)
+}

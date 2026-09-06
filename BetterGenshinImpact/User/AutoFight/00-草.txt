@@ -1,0 +1,31 @@
+// 草：钟离 / 芙宁娜 / 纳西妲 / 久岐忍。草标记、沙龙、雷环和护盾分别计时。
+// 雷环可能有空档，过期不假装续上；已知低血先尝试雷环照护，Unknown 不反向授权。
+// 芙宁娜增伤不作为超绽放加成依据；治疗前台不声称等同全队群疗。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+call(雷环照护,if=low-hp(久岐忍) || low-hp(纳西妲) || low-hp(芙宁娜))
+久岐忍 e(fast,record=雷环,maintain=雷环,before=2)
+纳西妲 e(hold,fast,record=草标记,maintain=草标记,before=3), q(if=q-ready(纳西妲))
+芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+branch(if=record-active(雷环),then=环内短轴,else=空档短轴,unknown=空档短轴)
+纳西妲 check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(雷环照护,define) {
+    久岐忍 e(fast,record=雷环,maintain=雷环)
+    纳西妲 attack(0.5,keep=护盾)
+}
+segment(环内短轴,define,atomic,requires=record-active(护盾)) {
+    纳西妲 attack(1,keep=雷环,required), charge(0.3,keep=雷环,required)
+}
+segment(空档短轴,define) {
+    纳西妲 attack(0.5,keep=护盾)
+}

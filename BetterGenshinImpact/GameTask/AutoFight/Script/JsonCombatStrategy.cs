@@ -8,6 +8,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 /// </summary>
 public class JsonCombatStrategy
 {
+    public int FormatVersion { get; set; } = 1;
     public JsonInfo Info { get; set; } = new();
     public List<JsonAction> Actions { get; set; } = [];
 
@@ -40,6 +41,9 @@ public class JsonInfo
 
     /// <summary>战斗前动作列表</summary>
     public List<string> PreActions { get; set; } = [];
+
+    /// <summary>统一语法的静态 timing 和 define 片段；不按根动作调度顺序执行声明。</summary>
+    public List<string> Declarations { get; set; } = [];
 }
 
 /// <summary>

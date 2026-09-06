@@ -1,0 +1,41 @@
+// 冰：钟离 / 珊瑚宫心海 / 神里绫华 / 芙宁娜。水母仅在有效窗口及已核验被动条件下由 Q 刷新。
+// 错过窗口或缺少刷新能力走 E 重建；E 未好保留空档，不创建虚假水母。
+// 绫华先冲刺与站位准备，再用本次确认 Q 解锁短输出；位置准备不等于命中/冻结识别。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+call(心海治疗,if=low-hp(珊瑚宫心海) || low-hp(神里绫华) || low-hp(芙宁娜))
+芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+call(水母续期,if=record-active(水母) && record-remaining(水母)<6 && q-ready(珊瑚宫心海))
+珊瑚宫心海 e(fast,record=水母,maintain=水母,before=3)
+call(绫华自充,if=q-energy-low(神里绫华) && !q-cd(神里绫华) && e-ready(神里绫华))
+branch(if=q-ready(神里绫华),then=绫华爆发,else=普通短轴,unknown=普通短轴)
+神里绫华 check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(水母续期,define,onfail=重建水母) {
+    珊瑚宫心海 q(required,keep=水母,refresh=水母,record=仪来羽衣)
+}
+segment(重建水母,define) {
+    珊瑚宫心海 e(fast,required,record=水母,maintain=水母)
+}
+segment(心海治疗,define) {
+    珊瑚宫心海 q(required,record=仪来羽衣)
+    珊瑚宫心海 attack(1,keep=仪来羽衣,required), attack(1,keep=仪来羽衣,required)
+}
+segment(绫华自充,define) {
+    神里绫华 e(fast,required,feed=神里绫华)
+}
+segment(普通短轴,define) {
+    神里绫华 attack(0.5,keep=护盾)
+}
+segment(绫华爆发,define,atomic,timeout=8,onfail=普通短轴,requires=record-active(护盾),record=本次霜灭完成) {
+    神里绫华 dash(0.2), wait(0.15), q(required,keep=护盾,record=霜灭), attack(1,keep=护盾)
+}

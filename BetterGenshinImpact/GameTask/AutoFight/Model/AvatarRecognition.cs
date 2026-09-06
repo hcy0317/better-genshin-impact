@@ -69,6 +69,13 @@ public static class AvatarRecognition
     /// </summary>
     public static void ClearCurrentAutoFightParam() => _currentAutoFightParam.Value = null;
 
+    internal static bool IsConfiguredGuardian(Avatar avatar)
+    {
+        var index = _currentAutoFightParam.Value?.GuardianAvatar
+            ?? TaskContext.Instance().Config.AutoFightConfig.GuardianAvatar;
+        return int.TryParse(index, out var guardianIndex) && guardianIndex == avatar.Index;
+    }
+
     /// <summary>
     /// 清除传奇血条追踪状态。每次新战斗开始时应调用，避免上一场战斗
     /// 已累积的阈值在新战斗的普通血条上被误判为传奇血条。
@@ -434,6 +441,9 @@ public static class AvatarRecognition
         var visConfig = GetVisualRecognitionConfig();
         var frameIntervalMs = visConfig.TargetingDetectionInterval;
         var drawResults = visConfig.DrawRecognitionResults;
+        EnemySeekVisual? indicatorCandidate = null;
+        DateTime indicatorCandidateSince = default;
+        long indicatorEpoch = -1;
 
         try
         {
@@ -447,6 +457,11 @@ public static class AvatarRecognition
                 }
 
                 var observationEpoch = Volatile.Read(ref _exclusiveEpoch);
+                if (indicatorEpoch != observationEpoch)
+                {
+                    indicatorCandidate = null;
+                    indicatorEpoch = observationEpoch;
+                }
                 var frameStopwatch = Stopwatch.StartNew();
                 using (var capture = CaptureToRectArea())
                 {
@@ -475,6 +490,7 @@ public static class AvatarRecognition
                     // 2. 血条追踪：持续感知只发布观察，不直接发送战斗输入。
                     if (valid.Count > 0 && !hasLegendaryBar)
                     {
+                        indicatorCandidate = null;
                         var nearest = valid.OrderBy(b =>
                             Math.Abs((b.x + b.width / 2) - preAimX) +
                             Math.Abs((b.y + b.height / 2) - preAimY)).First();
@@ -514,6 +530,7 @@ public static class AvatarRecognition
                         var damageResult = FindDamageNumber(capture);
                         if (damageResult.HasValue)
                         {
+                            indicatorCandidate = null;
                             var (_, _, _, dx, dy, dw, dh) = damageResult.Value;
                             PublishPassiveObservation(
                                 hasNormalHealthBar: false,
@@ -536,14 +553,35 @@ public static class AvatarRecognition
 
                         if (!damageResult.HasValue)
                         {
+                            // 箭头静止复核在后台跨帧完成，不让策略等待 120ms。
+                            var indicator = AutoFightSeek.RecognizeSeekDecision(capture,
+                                new Scalar(255, 90, 90), null, out _, out _,
+                                indicatorOnly: true, saveDiagnostics: false);
+                            EnemySeekDecision? confirmedIndicator = null;
+                            if (indicator.Action == AutoFightSeekAction.Approach && indicator.Visual is { } candidate)
+                            {
+                                if (indicatorCandidate is { } previous &&
+                                    AutoFightSeek.AreDirectionIndicatorsStable(previous, candidate, capture.Width, capture.Height))
+                                {
+                                    if (capturedAtUtc - indicatorCandidateSince >= TimeSpan.FromMilliseconds(120))
+                                        confirmedIndicator = indicator;
+                                }
+                                else
+                                {
+                                    indicatorCandidate = candidate;
+                                    indicatorCandidateSince = capturedAtUtc;
+                                }
+                            }
+                            else indicatorCandidate = null;
                             PublishPassiveObservation(
                                 hasNormalHealthBar: false,
                                 hasDamageCue: false,
-                                null,
+                                confirmedIndicator?.Visual,
                                 capture.Width,
                                 capture.Height,
                                 capturedAtUtc,
-                                observationEpoch);
+                                observationEpoch,
+                                confirmedIndicator);
                         }
                     }
 
@@ -573,7 +611,8 @@ public static class AvatarRecognition
         int imageWidth,
         int imageHeight,
         DateTime capturedAtUtc,
-        long captureEpoch)
+        long captureEpoch,
+        EnemySeekDecision? indicatorDecision = null)
     {
         lock (_seekLock)
         {
@@ -592,7 +631,8 @@ public static class AvatarRecognition
                     capturedAtUtc,
                     visual,
                     imageWidth,
-                    imageHeight);
+                    imageHeight,
+                    indicatorDecision);
             }
         }
     }
@@ -612,4 +652,5 @@ internal readonly record struct PassiveTargetObservation(
     DateTime CapturedAtUtc,
     EnemySeekVisual? Visual,
     int ImageWidth,
-    int ImageHeight);
+    int ImageHeight,
+    EnemySeekDecision? IndicatorDecision = null);

@@ -47,6 +47,10 @@ public partial class AutoDomainConfig : ObservableObject
     [ObservableProperty]
     private string _partyName = string.Empty;
 
+    /// <summary>优先使用秘境界面推荐元素的同名队伍；识别失败或没有候选队伍时使用 PartyName。</summary>
+    [ObservableProperty]
+    private bool _autoSelectPartyByRecommendedElements = false;
+
     // 需要刷取的副本名称
     [ObservableProperty]
     private string _domainName = string.Empty;

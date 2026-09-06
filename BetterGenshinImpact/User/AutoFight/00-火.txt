@@ -1,0 +1,39 @@
+// 火：钟离 / 班尼特 / 香菱 / 芙宁娜。先按新观测准备能量，再进入短增益与关键 Q 顺序。
+// 供能只接受明确缺能且非 CD 的结果；E 确认与站位等待不冒充命中、实际产球或接球。
+// 班尼特领域只作时间窗口；移动是位置准备，不声称已观测到全员在圈内。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+call(急救,if=low-hp(班尼特) || low-hp(香菱) || low-hp(芙宁娜))
+芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+call(班尼特供能,if=q-energy-low(香菱) && !q-cd(香菱) && e-ready(班尼特))
+call(班尼特自充,if=q-energy-low(班尼特) && !q-cd(班尼特) && e-ready(班尼特))
+香菱 e(fast)
+branch(if=q-ready(班尼特) && q-ready(香菱),then=双火爆发,else=普通短轴,unknown=普通短轴)
+班尼特 check
+
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(班尼特供能,define) {
+    班尼特 e(fast,required,feed=香菱)
+}
+segment(班尼特自充,define) {
+    班尼特 e(fast,required,feed=班尼特)
+}
+segment(普通短轴,define) {
+    班尼特 attack(0.6,keep=护盾)
+}
+segment(双火爆发,define,atomic,timeout=8,onfail=普通短轴,requires=record-active(护盾),record=本次双火完成) {
+    班尼特 q(required,record=鼓舞,keep=护盾)
+    香菱 walk(w,0.15), q(required,keep=鼓舞,record=旋火轮), attack(0.5,keep=护盾)
+}
+segment(急救,define) {
+    班尼特 q(if=q-ready(班尼特))
+    香菱 attack(0.5,keep=护盾)
+}
