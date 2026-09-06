@@ -28,15 +28,8 @@ public class PickUpCollectHandler : IActionHandler
         "枫原万叶-长E attack(0.08),keydown(E),wait(0.8),keyup(E),attack(0.5)",
         "枫原万叶-短E attack(0.08),keydown(E),wait(0.47),keyup(E),attack(0.5)",
         "琴-短E wait(0.1),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle)",
-        "琴-长E wait(0.1),click(middle),keydown(E),click(middle),wait(0.4),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),wait(0.1)," +
-        "moveby(500,0),wait(0.1),moveby(500,0),wait(0.1),moveby(500,0),moveby(1000,3500),wait(1.8),keyup(E),wait(0.3),click(middle),wait(0.3)",
+        // 战后只扫转一轮，沿用短 E 的 2.8 秒持有预算，避免技能结束后仍执行长串转镜。
+        "琴-长E wait(0.1),click(middle),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,3500),wait(1.8),keyup(E),wait(0.3),click(middle),wait(0.3)",
     ];
     
     // 预解析所有角色名
