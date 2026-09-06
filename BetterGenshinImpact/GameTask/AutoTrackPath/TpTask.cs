@@ -1879,6 +1879,15 @@ public class TpTask
         return Math.Max(1, (int)Math.Round(scaledDelay));
     }
 
+    internal static int GetMapDragSettlingDelay(int configuredOperationDelayMilliseconds)
+    {
+        var configuredDelay = Math.Clamp(configuredOperationDelayMilliseconds,
+            TpConfig.MinTeleportOperationDelayMilliseconds, TpConfig.MaxTeleportOperationDelayMilliseconds);
+        // 鼠标步进可以加速，松键后的地图惯性/渲染稳定时间不能同比压缩。
+        return Math.Max(MapDragSettlingDelayMs,
+            MapDragSettlingDelayMs * configuredDelay / TpConfig.DefaultTeleportOperationDelayMilliseconds);
+    }
+
     private void UpdateMapZoomWheelCalibration(int wheelNotches, double zoomDelta)
     {
         if (wheelNotches == 0 || Math.Abs(zoomDelta) < _tpConfig.PrecisionThreshold / 2d)
@@ -2115,7 +2124,7 @@ public class TpTask
             Simulation.SendInput.Mouse.LeftButtonUp();
         }
 
-        await Delay(GetTeleportOperationDelay(MapDragSettlingDelayMs), ct);
+        await Delay(GetMapDragSettlingDelay(_tpConfig.TeleportOperationDelayMilliseconds), ct);
         var endCursor = GetCursorPositionInCapture();
         return (sentDeltaX, sentDeltaY, steps, startX, startY, endX, endY, endCursor.X - startCursor.X, endCursor.Y - startCursor.Y);
     }

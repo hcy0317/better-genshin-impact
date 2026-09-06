@@ -1719,7 +1719,9 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             return true;
         }
 
-        var preferredRecord = _resinPriorityListWhenSpecifyUse.FirstOrDefault(record => record.RemainCount > 0);
+        var unavailableResinNames = new HashSet<string>(StringComparer.Ordinal);
+        var preferredRecord = AutoDomainResinPreflightPolicy.SelectNextAvailableResin(
+            _resinPriorityListWhenSpecifyUse, unavailableResinNames);
         if (!AutoDomainResinPreflightPolicy.ShouldPrepareSupplementalResinBeforeDomain(
                 _taskParam.SpecifyResinUse,
                 preferredRecord?.Name))
@@ -1745,18 +1747,24 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             {
                 if (!await TryUseSupplementalResinRecord(page, preferredRecord))
                 {
-                    if (_pendingSupplementalResinRecords.Count == 0)
+                    unavailableResinNames.Add(preferredRecord.Name);
+                    var nextRecord = AutoDomainResinPreflightPolicy.SelectNextAvailableResin(
+                        _resinPriorityListWhenSpecifyUse, unavailableResinNames);
+                    if (nextRecord != null)
                     {
-                        return false;
+                        Logger.LogWarning("自动秘境：本轮无法使用 {UnavailableResin}，继续尝试已配置的 {NextResin}",
+                            preferredRecord.Name, nextRecord.Name);
+                        preferredRecord = nextRecord;
+                        continue;
                     }
 
-                    _stopAfterPreparedSupplementalResins = true;
-                    return true;
+                    _stopAfterPreparedSupplementalResins = _pendingSupplementalResinRecords.Count > 0;
+                    return _stopAfterPreparedSupplementalResins;
                 }
 
                 _pendingSupplementalResinRecords.Enqueue(preferredRecord);
-                preferredRecord = _resinPriorityListWhenSpecifyUse
-                    .FirstOrDefault(record => record.RemainCount > 0);
+                preferredRecord = AutoDomainResinPreflightPolicy.SelectNextAvailableResin(
+                    _resinPriorityListWhenSpecifyUse, unavailableResinNames);
                 if (preferredRecord == null)
                 {
                     break;
