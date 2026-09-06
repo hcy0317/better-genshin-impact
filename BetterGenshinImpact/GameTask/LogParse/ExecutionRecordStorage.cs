@@ -1,16 +1,46 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Script.Group;
 using BetterGenshinImpact.Helpers;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace BetterGenshinImpact.GameTask.LogParse;
 
 public class ExecutionRecordStorage
 {
     private static readonly string StorageDirectory = Path.Combine(Global.Absolute(@"log"), "ExecutionRecords");
+
+    public static string? ComputeSettingsFingerprint(ScriptGroupProject project)
+    {
+        if (project.Type != "Javascript")
+        {
+            return null;
+        }
+
+        JToken settings = project.JsScriptSettingsObject is null
+            ? new JObject()
+            : JToken.FromObject(project.JsScriptSettingsObject);
+        string canonicalJson = Canonicalize(settings).ToString(Formatting.None);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalJson)));
+    }
+
+    private static JToken Canonicalize(JToken token)
+    {
+        return token switch
+        {
+            JObject obj => new JObject(obj.Properties()
+                .OrderBy(property => property.Name, StringComparer.Ordinal)
+                .Select(property => new JProperty(property.Name, Canonicalize(property.Value)))),
+            JArray array => new JArray(array.Select(Canonicalize)),
+            _ => token.DeepClone()
+        };
+    }
 
     /// <summary>
     /// 保存执行记录到对应日期的文件中
@@ -199,6 +229,7 @@ public class ExecutionRecordStorage
         var folderName = project.FolderName;
         var projectName = project.Name;
         var projectType = project.Type;
+        var settingsFingerprint = ComputeSettingsFingerprint(project);
 
         // 获取最近指定天数的执行记录
         dailyRecords ??= GetRecentExecutionRecordsByConfig(config);
@@ -221,6 +252,11 @@ public class ExecutionRecordStorage
 
                 // 跳过类型或项目名称不匹配的记录
                 if (record.Type != projectType || record.ProjectName != projectName) continue;
+
+                // 旧记录没有设置指纹时维持原有行为；新记录仅匹配同一版 JS 设置。
+                if (!string.IsNullOrEmpty(record.SettingsFingerprint)
+                    && !string.Equals(record.SettingsFingerprint, settingsFingerprint,
+                        StringComparison.Ordinal)) continue;
 
                 var calcTime = record.EndTime;
                 if (config.ReferencePoint == "StartTime")
