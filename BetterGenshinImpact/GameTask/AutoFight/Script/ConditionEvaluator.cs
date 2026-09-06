@@ -16,13 +16,10 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 /// 支持语法：||, &&, !, (), +, -, *, /, >, <, =, 函数调用
 /// 支持函数：last-exec, q-ready, e-ready, e-cd, low-hp, battle-time, in-party, onfield, t, since, count, min, max, last-check
 /// </summary>
-public class ConditionEvaluator
+public partial class ConditionEvaluator
 {
     /// <summary>内置条件函数名（词法解析时优先按函数名合并连字符）</summary>
-    public static readonly HashSet<string> FunctionNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "last-exec", "q-ready", "e-ready", "e-cd", "low-hp", "battle-time", "in-party", "onfield", "t", "since", "count", "min", "max", "last-check"
-    };
+    public static readonly HashSet<string> FunctionNames = new(ConditionFunctionRegistry.Names, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 校验动作名能否作为条件表达式中的单个标识符解析：
@@ -153,7 +150,7 @@ public class ConditionEvaluator
 
     // ========== 词法分析 ==========
 
-    private enum TokenType { Identifier, Number, Bool, And, Or, Not, Plus, Minus, Mul, Div, Greater, Less, Equal, LParen, RParen, Comma, End }
+    private enum TokenType { Identifier, String, Number, Bool, And, Or, Not, Plus, Minus, Mul, Div, Greater, Less, Equal, LParen, RParen, Comma, End }
 
     private readonly struct Token(TokenType type, string value)
     {
@@ -177,6 +174,19 @@ public class ConditionEvaluator
             }
 
             var c = expr[i];
+            if (c is '\'' or '"')
+            {
+                var start = i++;
+                while (i < expr.Length && expr[i] != c)
+                {
+                    if (expr[i] == '\\' && i + 1 < expr.Length) i++;
+                    i++;
+                }
+                if (i == expr.Length) throw new FormatException("条件中的字符串引号未配对");
+                i++;
+                tokens.Add(new Token(TokenType.String, Flow.CombatSyntax.Unquote(expr[start..i])));
+                continue;
+            }
             if (c == '(') { tokens.Add(new Token(TokenType.LParen, "(")); i++; continue; }
             if (c == ')') { tokens.Add(new Token(TokenType.RParen, ")")); i++; continue; }
             if (c == ',') { tokens.Add(new Token(TokenType.Comma, ",")); i++; continue; }
@@ -236,10 +246,12 @@ public class ConditionEvaluator
 
     private class NumberNode(double value) : AstNode { public double Value { get; } = value; }
 
-    private class FuncCallNode(string name, List<AstNode> args) : AstNode
+    private class FuncCallNode(string name, List<AstNode> args, bool isInvocation = true, bool isLiteral = false) : AstNode
     {
         public string Name { get; } = name;
         public List<AstNode> Args { get; } = args;
+        public bool IsInvocation { get; } = isInvocation;
+        public bool IsLiteral { get; } = isLiteral;
     }
 
     private class UnaryOpNode(string op, AstNode operand) : AstNode
@@ -343,6 +355,10 @@ public class ConditionEvaluator
             return node;
         }
 
+        if (tokens[pos].Type == TokenType.String)
+        {
+            return new FuncCallNode(tokens[pos++].Value, [], false, true);
+        }
         if (tokens[pos].Type == TokenType.Identifier)
         {
             var name = tokens[pos].Value; pos++;
@@ -363,7 +379,7 @@ public class ConditionEvaluator
                 pos++;
                 return new FuncCallNode(name, args);
             }
-            return new FuncCallNode(name, []);
+            return new FuncCallNode(name, [], false);
         }
 
         if (tokens[pos].Type == TokenType.Number)
@@ -390,6 +406,7 @@ public class ConditionEvaluator
         {
             BoolNode b => b.Value,
             NumberNode n => n.Value,
+            FuncCallNode { IsLiteral: true } literal => literal.Name,
             UnaryOpNode u => EvalUnary(u, currentIndex),
             BinaryOpNode b => EvalBinary(b, currentIndex),
             FuncCallNode f => EvalFunc(f.Name, f.Args, currentIndex),
@@ -441,6 +458,8 @@ public class ConditionEvaluator
         {
             "last-exec" => EvalLastExec(args, currentIndex),
             "q-ready" => EvalQReady(args),
+            "q-energy-low" => EvalObservedBurst(args).EnergyFull == false,
+            "q-cd" => EvalObservedBurst(args).CoolingDown == true,
             "e-ready" => EvalEReady(args),
             "e-cd" => EvalECd(args),
             "low-hp" => EvalLowHp(),
@@ -568,6 +587,16 @@ public class ConditionEvaluator
     /// q-ready() 检查本动作所属角色；q-ready(角色名) 检查指定角色。
     /// 检测采用两路独立检测后合并：侧边栏检测后台角色 + 中央检测场上角色，OR 合并。
     /// </summary>
+    private BurstObservation EvalObservedBurst(List<AstNode> args)
+    {
+        var name = args.Count > 0 && args[0] is FuncCallNode f && f.Args.Count == 0 ? f.Name : _currentCharacterName;
+        var avatar = name == null ? null : _combatScenes.SelectAvatar(name);
+        if (avatar == null) return default;
+        var capture = GetCapture();
+        try { return avatar.IsActive(capture) ? Avatar.ObserveBurst(capture) : default; }
+        finally { if (_cachedCapture == null) capture.Dispose(); }
+    }
+
     private bool EvalQReady(List<AstNode> args)
     {
         string? targetName;

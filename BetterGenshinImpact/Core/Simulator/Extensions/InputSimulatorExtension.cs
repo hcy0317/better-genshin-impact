@@ -44,8 +44,12 @@ public static class InputSimulatorExtension
     private static void HoldKeyPress(InputSimulator self, KeyId key)
     {
         KeyDown(self, key);
-        Thread.Sleep(1000);
-        KeyUp(self, key);
+        try
+        {
+            if (GameTask.AutoFight.Script.Flow.CombatActionScope.Current is { } scope) scope.Sleep(1000);
+            else Thread.Sleep(1000);
+        }
+        finally { KeyUp(self, key); }
     }
 
     private static void KeyPress(InputSimulator self, KeyId key)

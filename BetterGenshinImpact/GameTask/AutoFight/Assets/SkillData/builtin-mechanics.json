@@ -1,0 +1,571 @@
+{
+  "SchemaVersion": 1,
+  "Version": "bettergi-core-20260906.2",
+  "Rules": [
+    {
+      "SkillId": "zhongli.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Dependencies": {
+        "zhongli.e": "92526a856ccb94f103da841097b1acb550d5fb9f2a8fa065397731ba317a26e8"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "press-cd",
+          "Effects": []
+        },
+        "hold": {
+          "CooldownMetric": "hold-cd",
+          "Effects": [
+            {
+              "Id": "jade-shield",
+              "Capability": "shield",
+              "DurationMetric": "shield-duration",
+              "Scope": "party"
+            }
+          ],
+          "DefaultEffect": "jade-shield"
+        }
+      }
+    },
+    {
+      "SkillId": "zhongli.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Dependencies": {
+        "zhongli.q": "1366f3fd52334491a1997111870113e20a0e3951ee0e0bd3ba75612f1d393dc2"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "bennett.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Dependencies": {
+        "bennett.e": "54a86cab285da422d9b282918af6afb13b03d8f4a61befb3e52be30a9b568dbf"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd-param7",
+          "Effects": []
+        },
+        "hold": {
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "bennett.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Dependencies": {
+        "bennett.q": "20d5245261f3a4f38bffa4e6b387efacfa8959cc14ddf2e0682e1f70811a2fa8"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "inspiration-field",
+              "Capability": "field",
+              "DurationMetric": "duration",
+              "Scope": "range"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "xiangling.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Dependencies": {
+        "xiangling.e": "f0c9f9679b23e6a5aa120dbbb5792766853661efe960bc2865122f0541797a5c"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "xiangling.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Dependencies": {
+        "xiangling.q": "d5133b46a5f1fd24180c2cb4a0b42dfcc4193ced2077eff825d1bbd130cba92b"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "pyronado",
+              "Capability": "off-field-damage",
+              "DurationMetric": "duration",
+              "Scope": "actor"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "furina.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Dependencies": {
+        "furina.e": "17c5deb6da806e21dc6dcebe7de6e5a35fbf63518f55ac6c2ed173c2947f40bd"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "salon-guests",
+              "Capability": "summon",
+              "DurationMetric": "duration",
+              "Scope": "party"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "furina.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Dependencies": {
+        "furina.q": "b9d75beba50036d16032327686ae6ac8a3fd1f032bb4c7dfaeb434d5be496849"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "universal-revelry",
+              "Capability": "party-buff",
+              "DurationMetric": "duration",
+              "Scope": "party"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "neuvillette.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Dependencies": {
+        "neuvillette.e": "50501982aeb88876e26ba385dc7d53304f62af53fa9f29dc521159e2d0b09ca9"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [],
+          "ResourceProduction": [
+            {
+              "Resource": "sourcewater-droplet",
+              "Condition": "after-hitting-an-opponent",
+              "Count": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "neuvillette.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Dependencies": {
+        "neuvillette.q": "511bddc34f611d7b270d78dcd4c16be99e5299ba11f4ad85424ed608aa40a48f"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [],
+          "ResourceProduction": [
+            {
+              "Resource": "sourcewater-droplet",
+              "Condition": "after-the-delayed-waterfalls",
+              "Count": 6
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "jean.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Dependencies": {
+        "jean.e": "d6800f14cad64d5226c4c2c55cc6384ea59defbe5badcb7f32c4df9f51e9e7d5"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        },
+        "hold": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "jean.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Dependencies": {
+        "jean.q": "d354f4d01ef58c431d92db8980858b2d0e866afce2774dc88fc9ee61880d6530"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "kaedeharakazuha.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Dependencies": {
+        "kaedeharakazuha.e": "83c19a157c095d97eb15673033c8dfdd7ec100a0c77e2bea46c89a3b29160b33"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "press-cd",
+          "Effects": []
+        },
+        "hold": {
+          "CooldownMetric": "hold-cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "kaedeharakazuha.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Dependencies": {
+        "kaedeharakazuha.q": "683b3781362179375e12e5b2f8a6f660e0cc9328f186297dd8bd14814d264d01"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "autumn-whirlwind",
+              "Capability": "field",
+              "DurationMetric": "duration",
+              "Scope": "actor"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "nahida.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Dependencies": {
+        "nahida.e": "3c618dc33eacb60e46caa376d7edd309684847a3deb84becfbefbd3cabd1787c"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "press-cd",
+          "Effects": [
+            {
+              "Id": "seed-of-skandha",
+              "Capability": "target-mark",
+              "DurationMetric": "seed-of-skandha-duration",
+              "Scope": "target"
+            }
+          ]
+        },
+        "hold": {
+          "CooldownMetric": "hold-cd",
+          "Effects": [
+            {
+              "Id": "seed-of-skandha",
+              "Capability": "target-mark",
+              "DurationMetric": "seed-of-skandha-duration",
+              "Scope": "target"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "nahida.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Dependencies": {
+        "nahida.q": "57152ef985b84afae9b4cb0e1b2041e5e908251eb8e9d822c9c7cee06f6ff331"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "shrine-of-maya",
+              "Capability": "field",
+              "DurationMetric": "base-duration",
+              "Scope": "range"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "fischl.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Dependencies": {
+        "fischl.e": "f8b557a27c83898dee7d3ac51af4c6ed4744d536278260ee9d9565956468c937"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "oz",
+              "Capability": "summon",
+              "DurationMetric": "oz-s-duration",
+              "Scope": "actor"
+            }
+          ]
+        },
+        "hold": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "oz",
+              "Capability": "summon",
+              "DurationMetric": "oz-s-duration",
+              "Scope": "actor"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "fischl.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Dependencies": {
+        "fischl.q": "2e04a80a8a4bb236a2e9f5467182fd9f878bd0f66b6c15a276f0ef3861bbe83b"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "raidenshogun.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Dependencies": {
+        "raidenshogun.e": "989f879a7ece3b8b9db65fce31d4281d3af275f7671a6e7c7e7f2c3ce01736ec"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "eye-of-stormy-judgment",
+              "Capability": "party-buff",
+              "DurationMetric": "duration",
+              "Scope": "party"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "raidenshogun.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Dependencies": {
+        "raidenshogun.q": "723669d3aa0217c63807d4c4c7ede2d8b189dfb80c486ccb60940b272d882cb7"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "musou-isshin",
+              "Capability": "stance",
+              "DurationMetric": "musou-isshin-duration",
+              "EndsOnSwitch": true,
+              "Scope": "actor"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "kukishinobu.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Dependencies": {
+        "kukishinobu.e": "c8584d80f109a478f7edc8149dc777d47bb5845572e739aeba02769d4de41c2a"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "grass-ring",
+              "Capability": "healing",
+              "DurationMetric": "duration",
+              "Scope": "party"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "kukishinobu.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Dependencies": {
+        "kukishinobu.q": "b531f5db25487fb33ea374651a08afac1710ec8168d45b0e33f038273ac657eb"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "sangonomiyakokomi.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Dependencies": {
+        "sangonomiyakokomi.e": "de2c09428c026ecee72bff1a64c063f9f9456de4cd15a24e4b50bd3b64473853"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "bake-kurage",
+              "Capability": "summon",
+              "DurationMetric": "duration",
+              "Scope": "actor"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "sangonomiyakokomi.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Dependencies": {
+        "sangonomiyakokomi.q": "90bbab18cd771a6c672d98074b1c4a5eebde4b3fb07951533c06c7b5256214d9",
+        "sangonomiyakokomi.e": "de2c09428c026ecee72bff1a64c063f9f9456de4cd15a24e4b50bd3b64473853",
+        "sangonomiyakokomi.passive1": "b117262859698cfac79eaf1ea9552184723a03ca2e1d52095ddaa16ebc1266a2"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "ceremonial-garment",
+              "Capability": "stance",
+              "DurationMetric": "duration",
+              "EndsOnSwitch": true,
+              "Scope": "actor"
+            }
+          ],
+          "Refreshes": [
+            {
+              "EffectId": "bake-kurage",
+              "ProducerSkillId": "sangonomiyakokomi.e",
+              "Verified": true,
+              "RequiredPassiveSkillId": "sangonomiyakokomi.passive1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "kamisatoayaka.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Dependencies": {
+        "kamisatoayaka.e": "8c160aaf494736fa67727b8edac63c41bb69867fe88ab5e6d59683636289438f"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": []
+        }
+      }
+    },
+    {
+      "SkillId": "kamisatoayaka.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Dependencies": {
+        "kamisatoayaka.q": "d253fc90999ad84526c0832b1f4c379b1f6a7db6033a8e5731ca7fc0faa6a82a"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "frostflake-seki-no-to",
+              "Capability": "off-field-damage",
+              "DurationMetric": "duration",
+              "Scope": "actor"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "SkillId": "navia.e",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Dependencies": {
+        "navia.e": "71f665e6281a64a6974f38ea6cb8566816f3986a2d41e2d2a5be1a14cb2784f4",
+        "navia.passive1": "b12effff48d4f33c3bdfdd5baf3efe4552375fbc39010a745608adb6b5041c24"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "crystalshot-infusion",
+              "Capability": "infusion",
+              "DurationMetric": "description-duration",
+              "DurationSkillId": "navia.passive1",
+              "RequiredPassiveSkillId": "navia.passive1",
+              "Scope": "actor"
+            }
+          ],
+          "MaximumCharges": 2
+        },
+        "hold": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "crystalshot-infusion",
+              "Capability": "infusion",
+              "DurationMetric": "description-duration",
+              "DurationSkillId": "navia.passive1",
+              "RequiredPassiveSkillId": "navia.passive1",
+              "Scope": "actor"
+            }
+          ],
+          "MaximumCharges": 2
+        }
+      }
+    },
+    {
+      "SkillId": "navia.q",
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Dependencies": {
+        "navia.q": "3b836af43b8c14fd4af20c550a0cf564ff6f125590077fd2e92f5a44f276a9f9"
+      },
+      "Forms": {
+        "press": {
+          "CooldownMetric": "cd",
+          "Effects": [
+            {
+              "Id": "cannon-fire-support",
+              "Capability": "off-field-damage",
+              "DurationMetric": "cannon-fire-support-duration",
+              "Scope": "actor"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

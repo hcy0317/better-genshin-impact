@@ -4,6 +4,7 @@ using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Helpers;
@@ -142,6 +143,8 @@ public class AutoFightJsonTask : ISoloTask
                 _teamCharacterNames.Add(avatar.Name);
             }
             Logger.LogInformation("JSON 策略：当前队伍角色：{Names}", string.Join(", ", _teamCharacterNames));
+            // 增强 JSON 一次编译全部根，缺角色或不合法依赖不能经旧过滤器静默裁剪。
+            using var flow = NativeCombatFlowRunner.Create(_strategy, combatScenes);
 
             // 过滤可用动作：Character 为空（通用）或在当前队伍中
             var filteredActions = _strategy.Actions
@@ -178,15 +181,14 @@ public class AutoFightJsonTask : ISoloTask
             Logger.LogInformation("JSON 策略：共 {Total} 个动作，展开为 {Expanded} 个优先级条目",
                 _strategy.Actions.Count, validActions.Count);
 
-            if (validActions.Count == 0)
+            if (flow == null && validActions.Count == 0)
             {
                 Logger.LogWarning("JSON 策略：没有可用的动作节点，跳过战斗");
                 return;
             }
 
             // 新的取消token
-            var cts2 = new CancellationTokenSource();
-            ct.Register(cts2.Cancel);
+            using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
             combatScenes.BeforeTask(cts2.Token);
             // 设置初始当前角色名（用于无 Character 字段的通用 action 回退）
@@ -328,6 +330,19 @@ public class AutoFightJsonTask : ISoloTask
                                 fightTimeout,
                                 AutoFightSeek.RotationCount);
                             break;
+                        }
+
+                        if (flow != null)
+                        {
+                            await flow.StepAsync(cts2.Token);
+                            if (flow.TakeFinishCheckRequest() && _taskParam.FightFinishDetectEnabled) _finishCheckRequested = true;
+                            if (AutoFightParam.ShouldRunPeriodicFinishCheck(fightTimeoutEnabled,
+                                    _taskParam.FightFinishDetectEnabled, periodicFinishCheckStopwatch.Elapsed,
+                                    periodicFinishCheckInterval)) _periodicFinishCheckRequested = true;
+                            if (!flow.IsAtomic && (!_finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || !flow.HasVisibleTarget))
+                                fightEndFlag = await RunPendingFinishCheckAsync(allowSeek: flow.IsAtRootBoundary);
+                            if (fightEndFlag || _fightEndFlag) break;
+                            continue;
                         }
 
                         fightEndFlag = await RunPendingFinishCheckAsync();
@@ -599,6 +614,7 @@ public class AutoFightJsonTask : ISoloTask
                     await targetingCts.CancelAsync();
                     try { await targetingTask; } catch (OperationCanceledException) { }
                 }
+                flow?.Dispose();
                 AutoFightTask.FightStatusFlag = false;
             }
 
@@ -732,6 +748,10 @@ public class AutoFightJsonTask : ISoloTask
                     return false;
                 }
                 lastSubCmd = cmd;
+
+                // 条件执行历史只能记录确认的 Q，不能让 since/count 把漏放当成已施放。
+                if (cmd.Method == Method.Burst && cmd.LastBurstResult != BurstCastResult.Confirmed)
+                    return false;
 
                 if (_fightEndFlag) break;
 

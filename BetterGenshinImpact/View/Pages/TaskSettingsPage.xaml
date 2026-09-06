@@ -488,6 +488,24 @@
                                 Text="{Binding Config.AutoFightConfig.ActionSchedulerByCd, Mode=TwoWay}"
                                 TextWrapping="Wrap" />
                 </Grid>
+                <ui:CardExpander Margin="16,0,52,12" Header="技能知识库（离线与同步）" IsExpanded="False">
+                    <StackPanel DataContext="{Binding AutoFightViewModel}">
+                        <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
+                                   Text="原始数值与机制规则独立保存。规则需复核或个人被动未知时安全降级；施放推算的时间窗不等于实测护盾、命中或粒子到账。" />
+                        <TextBlock Text="角色英文键（逗号分隔；留空同步全部，例如 zhongli,navia）" TextWrapping="Wrap" />
+                        <ui:TextBox Margin="0,6,0,8" Text="{Binding SkillCharacterKeys, UpdateSourceTrigger=PropertyChanged}" />
+                        <WrapPanel>
+                            <ui:Button Margin="0,0,8,8" Content="同步数值" Command="{Binding SyncCombatSkillsCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="取消同步" Command="{Binding SyncCombatSkillsCancelCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="状态与来源" Command="{Binding ReadCombatSkillSourcesCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="导入规则包" Command="{Binding ImportCombatSkillRulesCommand}" />
+                            <ui:Button Margin="0,0,8,8" Content="导入个人覆盖" Command="{Binding ImportCombatSkillProfileCommand}" />
+                        </WrapPanel>
+                        <TextBlock Text="{Binding SkillCatalogStatus}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                        <TextBox Text="{Binding SkillCatalogDetails, Mode=OneWay}" IsReadOnly="True" TextWrapping="Wrap"
+                                 AcceptsReturn="True" VerticalScrollBarVisibility="Auto" MaxHeight="220" />
+                    </StackPanel>
+                </ui:CardExpander>
                 <!--内嵌的设置-->
                 <Separator Margin="-18,0" BorderThickness="0,1,0,0" />
                 <Grid Margin="16,10,52,0">

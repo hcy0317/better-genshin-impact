@@ -7,6 +7,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 
 public class Method
 {
+    private static readonly ILogger Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     public static readonly Method Skill = new(["skill", "e"]);
     public static readonly Method Burst = new(["burst", "q"]);
     public static readonly Method Attack = new(["attack", "普攻", "普通攻击"]);
@@ -35,6 +36,17 @@ public class Method
     public static readonly Method KeyPress = new(["keypress"]);
     public static readonly Method Scroll = new(["scroll", "verticalscroll"]);
     public static readonly Method Round = new(["round"]);
+    public static readonly Method Record = new(["record"]);
+    public static readonly Method Timing = new(["timing"]);
+    public static readonly Method Segment = new(["segment"]);
+    public static readonly Method Call = new(["call"]);
+    public static readonly Method Branch = new(["branch"]);
+    public static readonly Method Return = new(["return"]);
+    public static readonly Method JumpTo = new(["jump"]);
+    public static readonly Method Strategy = new(["strategy"]);
+
+    public bool IsFlowControl => this == Record || this == Timing || this == Segment || this == Call ||
+        this == Branch || this == Return || this == JumpTo || this == Strategy || this == Round;
 
     public static IEnumerable<Method> Values
     {
@@ -68,6 +80,14 @@ public class Method
             yield return KeyPress;
             yield return Scroll;
             yield return Round;
+            yield return Record;
+            yield return Timing;
+            yield return Segment;
+            yield return Call;
+            yield return Branch;
+            yield return Return;
+            yield return JumpTo;
+            yield return Strategy;
         }
     }
 

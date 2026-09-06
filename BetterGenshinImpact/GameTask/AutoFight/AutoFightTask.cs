@@ -303,20 +303,18 @@ public class AutoFightTask : ISoloTask
         var commandAvatarNames = combatCommands.Select(c => c.Name).Distinct()
             .Select(n => combatScenes.SelectAvatar(n)?.Name)
             .WhereNotNull().ToList();
-        // 过滤不可执行的脚本，Task里并不支持"当前角色"。
-        combatCommands = combatCommands
-            .Where(c => commandAvatarNames.Contains(c.Name))
-            .ToList();
-        if (commandAvatarNames.Count <= 0)
+        var selectedScript = new CombatScript(new(commandAvatarNames), combatCommands);
+        combatCommands = selectedScript.SelectForParty(combatScenes.GetAvatars().Select(avatar => avatar.Name));
+        if (commandAvatarNames.Count <= 0 && !selectedScript.HasFlowCommands)
         {
             throw new Exception("没有可用战斗脚本");
         }
 
         // 新的取消token
-        var cts2 = new CancellationTokenSource();
-        ct.Register(cts2.Cancel);
+        using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         combatScenes.BeforeTask(cts2.Token);
+        using var flow = Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
         var fightTimeoutEnabled = AutoFightParam.IsTimeTimeoutEnabled(_taskParam.Timeout);
         TimeSpan fightTimeout = fightTimeoutEnabled ? TimeSpan.FromSeconds(_taskParam.Timeout) : TimeSpan.Zero; // 战斗超时时间
         Stopwatch timeoutStopwatch = Stopwatch.StartNew();
@@ -400,6 +398,20 @@ public class AutoFightTask : ISoloTask
                 
                 while (!cts2.Token.IsCancellationRequested)
                 {
+                    if (flow != null)
+                    {
+                        if (AutoFightParam.ShouldStopForCombatTimeout(fightTimeoutEnabled, timeoutStopwatch.Elapsed, fightTimeout, AutoFightSeek.RotationCount))
+                        {
+                            skipPostFightPickupFlag = true;
+                            break;
+                        }
+                        await flow.StepAsync(cts2.Token);
+                        if (flow.TakeFinishCheckRequest() && _taskParam.FightFinishDetectEnabled) finishCheckRequested = true;
+                        periodicFinishCheckRequested = _taskParam.FightFinishDetectEnabled;
+                        if (!flow.IsAtomic && (!_finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || !flow.HasVisibleTarget)
+                            && await RunPendingFinishCheckAsync(allowSeek: flow.IsAtRootBoundary)) break;
+                        continue;
+                    }
                     // 所有战斗角色都可以被取消
 
                     #region 本次战斗的跳过战斗判定
@@ -752,6 +764,7 @@ public class AutoFightTask : ISoloTask
                 await targetingCts.CancelAsync();
                 try { await targetingTask; } catch (OperationCanceledException) { }
             }
+            flow?.Dispose();
             FightStatusFlag = false;
         }
 

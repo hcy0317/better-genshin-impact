@@ -100,7 +100,7 @@ function sync(root, sourceRoot, apply = false) {
     const processes = cp.execFileSync('tasklist', ['/FI', 'IMAGENAME eq BetterGI.exe', '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true });
     if (/BetterGI\.exe/i.test(processes)) throw Error('BetterGI is running; no configuration was changed.');
   }
-  if (apply && !sourceMode && updates.some(u => u.file.endsWith('.txt') && u.after.includes('refresh'))) {
+  if (apply && !sourceMode && updates.some(u => /00-[^/\\]+\.txt$/u.test(u.file))) {
     assertRefreshRuntime(root, sourceRoot);
   }
   for (const update of updates) {
@@ -126,16 +126,40 @@ function sync(root, sourceRoot, apply = false) {
   return { applied: apply, backup, files: updates.map(u => path.relative(root, u.file)) };
 }
 function assertRefreshRuntime(root, sourceRoot) {
-  // Older engines silently ignore the refresh argument. Never install the new scripts alone.
+  // All managed strategies now use the shared flow compiler, even without a literal refresh parameter.
   const published = path.join(sourceRoot, 'bin/x64/Release/net8.0-windows10.0.22621.0/publish/win-x64/BetterGI.exe');
   const installed = path.join(root, 'BetterGI.exe');
   const codeFiles = ['GuardianSkillSwitchPolicy.cs', 'AutoFightTask.cs', 'AutoFightJsonTask.cs',
     'AutoFightSeek.cs', 'Script/CombatCommand.cs', 'Script/CombatScriptExecutor.cs', 'Model/Avatar.cs'];
+  function sourceInputs(directory) {
+    if (!fs.existsSync(directory)) return [];
+    return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+      const file = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw Error('Refusing linked source input: ' + file);
+      return entry.isDirectory() ? sourceInputs(file) : /\.(cs|xaml|json)$/i.test(entry.name) ? [file] : [];
+    });
+  }
+  const sources = [...codeFiles.map(f => path.join(sourceRoot, 'GameTask/AutoFight', f)),
+    ...sourceInputs(path.join(sourceRoot, 'GameTask/AutoFight')),
+    ...['GameTask/AutoDomain/AutoDomainTask.cs', 'GameTask/AutoStygianOnslaught/AutoStygianOnslaughtTask.cs',
+      'GameTask/Common/TaskControl.cs', 'Core/Simulator/Extensions/InputSimulatorExtension.cs']
+      .map(f => path.join(sourceRoot, f)).filter(f => fs.existsSync(f))];
   if (!fs.existsSync(published) || !fs.existsSync(installed) ||
-      codeFiles.some(f => fs.statSync(path.join(sourceRoot, 'GameTask/AutoFight', f)).mtimeMs > fs.statSync(published).mtimeMs))
-    throw Error('Publish and install the current refresh-capable BetterGI runtime before syncing these strategies.');
+      sources.some(f => !fs.existsSync(f) || fs.statSync(f).mtimeMs > fs.statSync(published).mtimeMs))
+    throw Error('Publish and install the current enhanced-combat BetterGI runtime before syncing these strategies.');
   const hash = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-  if (hash(published) !== hash(installed)) throw Error('Installed BetterGI does not match the refresh-capable publish output; no scripts were changed.');
+  const artifacts = ['BetterGI.exe'];
+  if (fs.existsSync(path.join(path.dirname(published), 'BetterGI.dll'))) artifacts.push('BetterGI.dll');
+  for (const file of ['builtin-skills.json', 'builtin-mechanics.json']) {
+    const relative = path.join('GameTask/AutoFight/Assets/SkillData', file);
+    if (fs.existsSync(path.join(sourceRoot, relative))) artifacts.push(relative);
+  }
+  if (artifacts.some(relative => {
+    const output = path.join(path.dirname(published), relative);
+    const target = path.join(root, relative);
+    return !fs.existsSync(output) || !fs.existsSync(target) || hash(output) !== hash(target) ||
+      relative.endsWith('.json') && hash(output) !== hash(path.join(sourceRoot, relative));
+  })) throw Error('Installed BetterGI does not match the enhanced-combat publish output and skill assets; no scripts were changed.');
 }
 
 module.exports = { updateGroup, guardSetupScript, presets, sync, assertRefreshRuntime };

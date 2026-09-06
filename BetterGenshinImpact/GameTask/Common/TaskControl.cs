@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using Vanara.PInvoke;
 using BetterGenshinImpact.Core.Simulator.Extensions;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 namespace BetterGenshinImpact.GameTask.Common;
 
@@ -22,6 +23,7 @@ public class TaskControl
 
     public static void CheckAndSleep(int millisecondsTimeout)
     {
+        if (TryCombatSleep(millisecondsTimeout)) return;
         TrySuspend();
         CheckAndActivateGameWindow();
 
@@ -30,12 +32,23 @@ public class TaskControl
 
     public static void Sleep(int millisecondsTimeout)
     {
+        if (TryCombatSleep(millisecondsTimeout)) return;
         NewRetry.Do(() =>
         {
             TrySuspend();
             CheckAndActivateGameWindow();
         }, TimeSpan.FromSeconds(1), 100);
         Thread.Sleep(millisecondsTimeout);
+    }
+
+    private static bool TryCombatSleep(int milliseconds)
+    {
+        if (CombatActionScope.Current is not { } scope) return false;
+        scope.Check();
+        TrySuspend();
+        CheckAndActivateGameWindow();
+        scope.Sleep(Math.Max(0, milliseconds));
+        return true;
     }
 
     private static bool IsKeyPressed(User32.VK key)
@@ -55,6 +68,7 @@ public class TaskControl
         var isSuspend = RunnerContext.Instance.IsSuspend;
         while (RunnerContext.Instance.IsSuspend)
         {
+            CombatActionScope.Current?.Check();
             if (first)
             {
                 RunnerContext.Instance.StopAutoPick();
@@ -79,7 +93,7 @@ public class TaskControl
                 first = false;
             }
 
-            Thread.Sleep(1000);
+            Thread.Sleep(CombatActionScope.Current == null ? 1000 : 50);
         }
 
         //从暂停中解除
@@ -119,6 +133,7 @@ public class TaskControl
         //未激活则尝试恢复窗口
         while (!SystemControl.IsGenshinImpactActiveByProcess())
         {
+            CombatActionScope.Current?.Check();
             ThrowIfGameProcessExited();
             var name = SystemControl.GetActiveByProcess();
             if (RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
@@ -142,7 +157,7 @@ public class TaskControl
             }
 
             count++;
-            Thread.Sleep(1000);
+            Thread.Sleep(CombatActionScope.Current == null ? 1000 : 50);
         }
     }
 
@@ -182,6 +197,8 @@ public class TaskControl
 
     public static void Sleep(int millisecondsTimeout, CancellationToken ct)
     {
+        if (CombatActionScope.Current != null) ct.ThrowIfCancellationRequested();
+        if (TryCombatSleep(millisecondsTimeout)) return;
         if (ct.IsCancellationRequested)
         {
             throw new NormalEndException("取消自动任务");
@@ -211,6 +228,15 @@ public class TaskControl
 
     public static async Task Delay(int millisecondsTimeout, CancellationToken ct)
     {
+        if (CombatActionScope.Current is { } scope)
+        {
+            ct.ThrowIfCancellationRequested();
+            scope.Check();
+            TrySuspend();
+            CheckAndActivateGameWindow();
+            await scope.WaitAsync(Math.Max(0, millisecondsTimeout));
+            return;
+        }
         if (ct is { IsCancellationRequested: true })
         {
             throw new NormalEndException("取消自动任务");

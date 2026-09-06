@@ -176,7 +176,8 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         Notify.Event(NotificationEvent.DomainStart).Success("自动秘境启动");
 
         // 复活重试
-        for (var i = 0; i < _config.ReviveRetryCount; i++)
+        var maximumAttempts = Math.Max(1, _config.ReviveRetryCount);
+        for (var i = 0; i < maximumAttempts; i++)
         {
             try
             {
@@ -186,11 +187,17 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             }
             catch (RetryException e)
             {
+                if (i == maximumAttempts - 1) throw;
                 // 只有选择了秘境的时候才会重试
                 if (!string.IsNullOrEmpty(_taskParam.DomainName))
                 {
                     var msg = e.Message;
-                    if (IsDomainReviveRetry(e))
+                    if (e is BetterGenshinImpact.GameTask.AutoFight.Script.Flow.CombatFlowRecoveryException)
+                    {
+                        if (!await TryExitDomainForRetry()) throw;
+                        msg = "自适应战斗需要恢复，已退出秘境后重新准备；不在秘境内直接传送";
+                    }
+                    else if (IsDomainReviveRetry(e))
                     {
                         var recovered = await TryRecoverAfterDomainReviveRetry(_ct, TryExitDomainForRetry, Avatar.RecoverAtStatueOfTheSeven);
                         msg = recovered
@@ -791,19 +798,24 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }), _ct);
     }
 
-    private Task StartFight(CombatScenes combatScenes, List<CombatCommand> combatCommands)
+    private async Task StartFight(CombatScenes combatScenes, List<CombatCommand> combatCommands)
     {
-        CancellationTokenSource cts = new();
-        _ct.Register(cts.Cancel);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
         combatScenes.BeforeTask(cts.Token);
+        using var flow = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
         // 战斗操作
-        var combatTask = new Task(() =>
+        Task CombatAsync()
         {
             try
             {
                 AutoFightTask.FightStatusFlag = true;
                 while (!cts.Token.IsCancellationRequested)
                 {
+                    if (flow != null)
+                    {
+                        flow.Step(cts.Token);
+                        continue;
+                    }
                     // 通用化战斗策略
                     var strategyBlockSucceeded = true;
                     CombatCommand? lastCommand = null;
@@ -839,21 +851,17 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             finally
             {
                 Logger.LogInformation("自动战斗线程结束");
+                cts.Cancel();
                 Simulation.ReleaseAllKey();
                 AutoFightTask.FightStatusFlag = false;
             }
-        }, cts.Token);
+            return Task.CompletedTask;
+        }
 
-        // 对局结束检测
-        var domainEndTask = DomainEndDetectionTask(cts);
         // 秘境战斗不用自动战斗的结束检测，但可以复用其寻敌/靠近辅助。
-        var fightSeekAssistTask = StartFightSeekAssistTask(cts);
-        // 自动吃药
-        // var autoEatRecoveryHpTask = AutoEatRecoveryHpTask(cts.Token);
-        combatTask.Start();
-        domainEndTask.Start();
-        // autoEatRecoveryHpTask.Start();
-        return Task.WhenAll(combatTask, domainEndTask, fightSeekAssistTask);
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync,
+            () => DomainEndDetectionTask(cts),
+            flow == null ? () => StartFightSeekAssistTask(cts) : null);
     }
 
     private Task StartFightSeekAssistTask(CancellationTokenSource cts)
@@ -918,8 +926,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     /// </summary>
     private async Task StartJsonFight()
     {
-        CancellationTokenSource cts = new();
-        _ct.Register(cts.Cancel);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
 
         var jsonParam = new AutoFightParam
         {
@@ -933,9 +940,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         var jsonTask = new AutoFightJsonTask(jsonParam);
 
-        var domainEndTask = DomainEndDetectionTask(cts);
-
-        var combatTask = Task.Run(async () =>
+        async Task CombatAsync()
         {
             try
             {
@@ -944,11 +949,12 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             catch (Exception e)
             {
                 Logger.LogWarning("JSON战斗任务异常：{Msg}", e.Message);
+                throw;
             }
-        }, cts.Token);
+            finally { await cts.CancelAsync(); }
+        }
 
-        domainEndTask.Start();
-        await Task.WhenAll(combatTask, domainEndTask);
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts));
     }
 
     private void EndFightWait()
@@ -971,11 +977,11 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     /// </summary>
     private Task DomainEndDetectionTask(CancellationTokenSource cts)
     {
-        return new Task(async () =>
+        return Task.Run(async () =>
         {
             try
             {
-                while (!_ct.IsCancellationRequested)
+                while (!cts.IsCancellationRequested)
                 {
                     if (IsDomainEnd())
                     {
@@ -986,8 +992,13 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                     await Delay(1000, cts.Token);
                 }
             }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+            }
             catch
             {
+                await cts.CancelAsync();
+                throw;
             }
         }, cts.Token);
     }
@@ -997,16 +1008,18 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         using var ra = CaptureToRectArea();
 
         var fightAssets = AutoFightAssets.Get(ra);
-        var endTipsRect = ra.DeriveCrop(fightAssets.EndTipsUpperRect);
-        var text = OcrFactory.Paddle.Ocr(endTipsRect.SrcMat);
-        if (Regex.IsMatch(text, this.challengeCompletedLocalizedString))
+        using (var upperTips = ra.DeriveCrop(fightAssets.EndTipsUpperRect))
         {
-            Logger.LogInformation("检测到秘境结束提示(挑战达成)，结束秘境");
-            return true;
+            var upperText = OcrFactory.Paddle.Ocr(upperTips.SrcMat);
+            if (Regex.IsMatch(upperText, this.challengeCompletedLocalizedString))
+            {
+                Logger.LogInformation("检测到秘境结束提示(挑战达成)，结束秘境");
+                return true;
+            }
         }
 
-        endTipsRect = ra.DeriveCrop(fightAssets.EndTipsRect);
-        text = OcrFactory.Paddle.Ocr(endTipsRect.SrcMat);
+        using var endTipsRect = ra.DeriveCrop(fightAssets.EndTipsRect);
+        var text = OcrFactory.Paddle.Ocr(endTipsRect.SrcMat);
         if (Regex.IsMatch(text, this.autoLeavingLocalizedString))
         {
             Logger.LogInformation("检测到秘境结束提示(xxx秒后自动退出)，结束秘境");

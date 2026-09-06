@@ -1,13 +1,21 @@
-// 采集：钟离 / 纳西妲 / 枫原万叶 / 琴。双风采集，应急战斗；纳西妲采摘由路线处理，琴优先治疗。
-// 生存优先：e(hold,wait,refresh) 在输出段前等待并确认续盾；普通 E 用单次检测，Q 不就绪即跳过。
-// 仅关键续盾允许等待冷却；护盾被伤害提前击破、网络延迟等不属于纯计时可保证范围。
+// 采集：钟离 / 纳西妲 / 枫原万叶 / 琴。仅遇敌应急；纳西妲采摘与万叶位移由采集路线处理。
+// 无水雷队友，不把草标记描述成稳定反应收益。治疗按可用 Q，未知血量不当低血结论。
+strategy(loop=battle)
+timing(离线护盾,cd=12,duration=20)
+call(开场,once=battle,required)
+钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
+琴 q(if=q-ready(琴))
+纳西妲 e(hold,fast,record=草标记,maintain=草标记,before=2)
+call(轻聚怪,if=e-ready(枫原万叶))
+琴 attack(0.6,keep=护盾), check
 
-钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
-琴 q, e(fast), check
-纳西妲 e(hold,fast), check
-枫原万叶 e(hold,fast), attack(0.35), wait(0.4), q, check
-琴 attack(1.5), check
-钟离 s(0.2), e(hold,wait,refresh), wait(0.2), w(0.2), check
-纳西妲 e(hold,fast), attack(1.2), check
-枫原万叶 e(hold,fast), attack(0.35), wait(0.4), check
-琴 e(fast), attack(2.0), check
+segment(开场,define,record=开场完成) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾)
+}
+segment(补盾,define) {
+    钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
+}
+
+segment(轻聚怪,define,atomic,requires=record-active(护盾)) {
+    枫原万叶 e(hold,fast,required,keep=护盾), attack(0.35), wait(0.4)
+}

@@ -197,8 +197,8 @@ public static class AvatarSpecialAction
             case "坎蒂丝":
             {
                 Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
-                Thread.Sleep(3000);
-                Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
+                try { Sleep(3000, avatar.Ct); }
+                finally { Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp); }
                 return true;
             }
             default:

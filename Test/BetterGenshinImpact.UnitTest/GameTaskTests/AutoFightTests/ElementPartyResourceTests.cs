@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using Newtonsoft.Json.Linq;
 using Xunit;
 
@@ -35,34 +35,23 @@ public class ElementPartyResourceTests
         Assert.Equal(expected, Enumerable.Range(1, 4).Select(i => (string)preset["position" + i]!));
         var strategy = CombatScriptParser.Parse(UserPath("AutoFight", "00-" + name + ".txt"));
         Assert.Equal(expected.OrderBy(n => n), strategy.AvatarNames.OrderBy(n => n));
-        Assert.Equal("钟离", strategy.CombatCommands[0].Name);
+        var entry = strategy.CombatCommands.First(command => command.Method != Method.Strategy && command.Method != Method.Timing);
+        Assert.Equal(Method.Call, entry.Method);
+        Assert.Equal("battle", entry.Options["once"]);
+        Assert.True(entry.HasFlag("required"));
         Assert.Contains(strategy.CombatCommands, c => c.Name == "钟离" && c.Method == Method.Skill && c.Args!.Contains("hold"));
         Assert.DoesNotContain(strategy.CombatCommands, c => c.Method == Method.KeyPress &&
             c.Args!.Any(arg => arg.Equals("q", StringComparison.OrdinalIgnoreCase)));
         Assert.DoesNotContain(strategy.CombatCommands, c => c.Method == Method.Ready);
         Assert.All(strategy.CombatCommands.Where(c => c.Method == Method.Skill && c.Name == "钟离"),
-            c => Assert.Contains("refresh", c.Args!));
+            c => { Assert.True(c.HasFlag("hold") && c.HasFlag("wait") && c.HasFlag("required")); Assert.Equal("护盾", c.Options["record"]); });
         Assert.All(strategy.CombatCommands.Where(c => c.Method == Method.Skill && c.Name != "钟离"),
             c => Assert.Contains("fast", c.Args!));
-        // Static action-time budget only; capture/network/switch overhead is protected by runtime refresh reserve.
-        var budget = 0d;
-        var refreshCount = 0;
-        foreach (var command in strategy.CombatCommands)
-        {
-            if (command.Name == "钟离" && command.Method == Method.Skill)
-            {
-                Assert.True(budget <= 12, $"{name} static segment exceeds refresh budget: {budget:F2}s");
-                budget = 0;
-                refreshCount++;
-            }
-            else if (command.Method == Method.Burst) budget += 1.7;
-            else if (command.Method == Method.Skill) budget += command.Args!.Contains("hold") ? 1.1 : 0.25;
-            else if (command.Method == Method.Wait || command.Method == Method.Attack || command.Method == Method.Charge ||
-                     command.Method == Method.W || command.Method == Method.A || command.Method == Method.S || command.Method == Method.D)
-                budget += command.Args!.Count > 0 ? double.Parse(command.Args[0], CultureInfo.InvariantCulture) : 1;
-        }
-        Assert.True(refreshCount >= 2);
-        Assert.True(budget <= 12, $"{name} final segment exceeds refresh budget: {budget:F2}s");
+        // 统一编译器检查分支、原子片段与恢复预算；不再对 define 区的平铺文本累加旧固定 12 秒轴。
+        var program = CombatFlowProgram.Compile(strategy);
+        Assert.True(program.Loop);
+        Assert.Contains(strategy.CombatCommands, command => command.Options.GetValueOrDefault("watch") == "护盾" &&
+            command.Options.GetValueOrDefault("maintain") == "护盾" && command.Options.GetValueOrDefault("watch-mode") == "call");
         if (name is "矿物" or "采集")
             Assert.Equal(2, expected.Count(n => n is "琴" or "枫原万叶"));
     }

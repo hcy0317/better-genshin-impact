@@ -1,0 +1,2906 @@
+{
+  "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588",
+  "RetrievedAt": "2026-09-05T08:39:49.2781541+00:00",
+  "Skills": [
+    {
+      "Id": "zhongli.a",
+      "CharacterKey": "zhongli",
+      "Character": "钟离",
+      "Slot": "a",
+      "Name": "岩雨",
+      "Description": "普通攻击\n进行至多六段的连续枪击。\n\n重击\n消耗一定体力，向前方疾行，在行动路径上和终点投下如雨的岩枪。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 6 consecutive spear strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to lunge forward, causing stone spears to fall along his path.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "zhongli.e",
+      "CharacterKey": "zhongli",
+      "Character": "钟离",
+      "Slot": "e",
+      "Name": "地心",
+      "Description": "山脉中、大地上、磐石间，都遍布着岩之力。能自如驱动这股力量的人却少之又少。\n\n点按\n命令大地上岩元素积聚而起，创造岩脊。\n\n长按\n令附近的岩元素爆发，造成以下效果：\n·如果岩脊数量没有达到上限，则创造岩脊；\n·形成玉璋护盾，伤害吸收量受益于钟离的生命值上限；\n·造成岩元素范围伤害；\n·身边如果有附带有岩元素的目标，则大量消耗至多两个目标的岩元素。这个效果不会造成伤害。\n\n岩脊\n创造时，造成岩元素范围伤害。\n此外，存在期间会与周围的其他岩元素创造物间歇进行原岩共鸣，对周围的敌人造成岩元素伤害。\n岩脊视为岩元素创造物，可以阻拦攻击，可以攀爬。\n由钟离自己创造的岩脊，初始同时只能存在一个。\n\n玉璋护盾\n对所有元素伤害与物理伤害有150%的吸收效果。\n处于玉璋护盾庇护下的角色，会使附近小范围内敌人的所有元素抗性与物理抗性降低20%，该效果不可叠加。",
+      "EnglishDescription": "Every mountain, rock and inch of land is filled with the power of Geo, but those who can wield such powers freely are few and far between.\n\nPress\nCommands the power of earth to create a Stone Stele.\n\nHold\nCauses nearby Geo energy to explode, causing the following effects:\n·If their maximum number hasn't been reached, creates a Stone Stele.\n·Creates a shield of jade. The shield's DMG Absorption scales based on Zhongli's Max HP.\n·Deals AoE Geo DMG.\n·If there are nearby targets with the Geo element, it will drain a large amount of Geo element from a maximum of 2 such targets. This effect does not cause DMG.\n\nStone Stele\nWhen created, deals AoE Geo DMG.\nAdditionally, it will intermittently resonate with other nearby Geo constructs, dealing Geo DMG to nearby opponents.\nThe Stone Stele is considered a Geo construct that can both be climbed and used to block attacks.\nOnly one Stele created by Zhongli himself may initially exist at any one time.\n\nJade Shield\nPossesses 150% DMG Absorption against all Elemental and Physical DMG.\nCharacters protected by the Jade Shield will decrease the Elemental RES and Physical RES of opponents in a small AoE by 20%. This effect cannot be stacked.",
+      "Metrics": {
+        "press-cd": {
+          "Unit": "seconds",
+          "Label": "Press CD",
+          "SourceParameter": "param3",
+          "Values": [
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4
+          ]
+        },
+        "shield-duration": {
+          "Unit": "seconds",
+          "Label": "Shield Duration",
+          "SourceParameter": "param7",
+          "Values": [
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20
+          ]
+        },
+        "hold-cd": {
+          "Unit": "seconds",
+          "Label": "Hold CD",
+          "SourceParameter": "param8",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "zhongli.q",
+      "CharacterKey": "zhongli",
+      "Character": "钟离",
+      "Slot": "q",
+      "Name": "天星",
+      "Description": "降下巨大的星岩，对坠落范围内的敌人造成巨额岩元素伤害，并使其石化。\n\n石化\n处于石化状态下的敌人无法行动。",
+      "EnglishDescription": "Brings a falling meteor down to earth, dealing massive Geo DMG to opponents caught in its AoE and applying the Petrification status to them.\n\nPetrification\nOpponents affected by the Petrification status cannot move.",
+      "Metrics": {
+        "petrification-duration": {
+          "Unit": "seconds",
+          "Label": "Petrification Duration",
+          "SourceParameter": "param2",
+          "Values": [
+            3.1,
+            3.2,
+            3.3,
+            3.4,
+            3.5,
+            3.6,
+            3.7,
+            3.8,
+            3.9,
+            4,
+            4,
+            4,
+            4,
+            4,
+            4
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param3",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param4",
+          "Values": [
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40,
+            40
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "zhongli.passive1",
+      "CharacterKey": "zhongli",
+      "Character": "钟离",
+      "Slot": "passive1",
+      "Name": "悬岩宸断",
+      "Description": "玉璋护盾受到伤害时，会产生坚璧效果：\n·处于玉璋护盾庇护下的角色，护盾强效提升5%；\n·该效果至多叠加5次，持续直到玉璋护盾消失。",
+      "EnglishDescription": "When the Jade Shield takes DMG, it will Fortify:\n·Fortified characters have 5% increased Shield Strength.\nCan stack up to 5 times, and lasts until the Jade Shield disappears.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "zhongli.passive2",
+      "CharacterKey": "zhongli",
+      "Character": "钟离",
+      "Slot": "passive2",
+      "Name": "炊金馔玉",
+      "Description": "基于生命值上限，钟离的以下攻击造成的伤害提高：\n·普通攻击、重击与下落攻击伤害提高值：生命值上限的1.39%\n·地心的岩脊、共鸣伤害与长按伤害提高值：生命值上限的1.9%\n·天星伤害提高值：生命值上限的33%",
+      "EnglishDescription": "Zhongli deals bonus DMG based on his Max HP:\n·Normal Attack, Charged Attack, and Plunging Attack DMG is increased by 1.39% of Max HP.\n·Dominus Lapidis' Stone Stele, resonance, and hold DMG is increased by 1.9% of Max HP.\n·Planet Befall's DMG is increased by 33% of Max HP.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "zhongli.passive3",
+      "CharacterKey": "zhongli",
+      "Character": "钟离",
+      "Slot": "passive3",
+      "Name": "晶石命理",
+      "Description": "锻造长柄武器时，返还15%消耗的矿石。",
+      "EnglishDescription": "Refunds 15% of the ore used when crafting Polearm-type weapons.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/zhongli.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "bennett.a",
+      "CharacterKey": "bennett",
+      "Character": "班尼特",
+      "Slot": "a",
+      "Name": "好运剑",
+      "Description": "普通攻击\n进行至多五段的连续剑击。\n\n重击\n消耗一定体力，瞬间向前方挥出两剑。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 5 rapid strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to unleash 2 rapid sword strikes.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "bennett.e",
+      "CharacterKey": "bennett",
+      "Character": "班尼特",
+      "Slot": "e",
+      "Name": "热情过载",
+      "Description": "班尼特将火元素与冒险的热情凝聚在剑上。根据热情凝聚的程度，可能会发生不同的事情…\n\n点按\n快速向前挥出火焰一击，造成火元素伤害。\n\n长按\n根据长按时间进行蓄力，释放时依照蓄力段数造成不同的效果。\n·一段蓄力：发动二段攻击，造成火元素伤害并将敌人击飞；\n·二段蓄力：发动三段连续攻击，造成可观的火元素伤害。最后一击会发生爆炸，将班尼特与敌人同时击飞。被击飞时，班尼特不会受到伤害。",
+      "EnglishDescription": "Bennett puts all his fire and passion for adventuring into his sword. Results may vary based on how fired up he is...\n\nPress\nA single, swift flame strike that deals Pyro DMG.\n\nHold (Short)\nCharges up, resulting in different effects when unleashed based on the Charge Level.\n·Level 1: Strikes twice, dealing Pyro DMG and launching opponents.\n·Level 2: Unleashes 3 consecutive attacks that deal impressive Pyro DMG, but the last attack triggers an explosion that launches both Bennett and the enemy.\nBennett takes no damage from being launched.",
+      "Metrics": {
+        "cd-param7": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param7",
+          "Values": [
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5
+          ]
+        },
+        "cd-param8": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param8",
+          "Values": [
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5,
+            7.5
+          ]
+        },
+        "cd-param9": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param9",
+          "Values": [
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "bennett.q",
+      "CharacterKey": "bennett",
+      "Character": "班尼特",
+      "Slot": "q",
+      "Name": "美妙旅程",
+      "Description": "班尼特进行腾跃轰击，造成火元素伤害，并生成鼓舞领域。\n\n鼓舞领域\n·领域内的角色如果生命值低于或等于70%，会持续恢复生命值，回复量受益于班尼特的最大生命值；\n·领域内的角色如果生命值高于70%，会基于班尼特的基础攻击力，以一定比例获得攻击力加成；\n·为其中的角色施加火元素附着。",
+      "EnglishDescription": "Bennett performs a jumping attack that deals Pyro DMG, creating an Inspiration Field.\n\nInspiration Field\n·If the health of a character within the AoE is equal to or falls below 70%, their health will continuously regenerate. The amount of HP restored scales off Bennett's Max HP.\n·If the health of a character within the AoE is higher than 70%, they gain an ATK Bonus that is based on Bennett's Base ATK.\n·Imbues characters within the AoE with Pyro.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param5",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param6",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param7",
+          "Values": [
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "bennett.passive1",
+      "CharacterKey": "bennett",
+      "Character": "班尼特",
+      "Slot": "passive1",
+      "Name": "热情复燃",
+      "Description": "热情过载的冷却时间减少20%。",
+      "EnglishDescription": "Decreases Passion Overload's CD by 20%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "bennett.passive2",
+      "CharacterKey": "bennett",
+      "Character": "班尼特",
+      "Slot": "passive2",
+      "Name": "无畏的热血",
+      "Description": "在美妙旅程领域内，热情过载具有如下效果：\n·冷却时间减少50%；\n·二段蓄力不会将班尼特自身击飞。",
+      "EnglishDescription": "Within the area created by Fantastic Voyage, Passion Overload takes on the following effects:\n·CD is reduced by 50%.\n·Bennett will not be launched by the effects of Charge Level 2.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "bennett.passive3",
+      "CharacterKey": "bennett",
+      "Character": "班尼特",
+      "Slot": "passive3",
+      "Name": "应该安全",
+      "Description": "在蒙德执行探索派遣任务时，消耗的时间缩短25%。",
+      "EnglishDescription": "When dispatched on an expedition in Mondstadt, time consumed is reduced by 25%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/bennett.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "xiangling.a",
+      "CharacterKey": "xiangling",
+      "Character": "香菱",
+      "Slot": "a",
+      "Name": "白案功夫",
+      "Description": "普通攻击\n进行至多五段的连续枪击。\n\n重击\n消耗一定体力，向前方突进，对路径上的敌人造成伤害。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 5 consecutive spear strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to lunge forward, dealing damage to opponents along the way.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "xiangling.e",
+      "CharacterKey": "xiangling",
+      "Character": "香菱",
+      "Slot": "e",
+      "Name": "锅巴出击",
+      "Description": "唤出喷火的锅巴，存在期间内，不断对敌人喷火，造成火元素范围伤害。",
+      "EnglishDescription": "Summons Guoba, who will continuously breathe fire at opponents, dealing AoE Pyro DMG.",
+      "Metrics": {
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param2",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "xiangling.q",
+      "CharacterKey": "xiangling",
+      "Character": "香菱",
+      "Slot": "q",
+      "Name": "旋火轮",
+      "Description": "以控制火候与枪术的精湛技巧，甩出围绕自己快速旋转的旋火轮。\n存在期间内，旋火轮会跟随角色运动，对路径上的敌人造成火元素伤害。",
+      "EnglishDescription": "Displaying her mastery over both fire and polearms, Xiangling sends a Pyronado whirling around her.\nThe Pyronado will move with your character for the ability's duration, dealing Pyro DMG to all opponents in its path.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param5",
+          "Values": [
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param6",
+          "Values": [
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param7",
+          "Values": [
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "xiangling.passive1",
+      "CharacterKey": "xiangling",
+      "Character": "香菱",
+      "Slot": "passive1",
+      "Name": "交叉火力",
+      "Description": "锅巴的喷火距离提高20%。",
+      "EnglishDescription": "Increases the flame range of Guoba by 20%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "xiangling.passive2",
+      "CharacterKey": "xiangling",
+      "Character": "香菱",
+      "Slot": "passive2",
+      "Name": "绝云朝天椒",
+      "Description": "锅巴出击效果结束时，锅巴会在消失的位置留下辣椒。拾取辣椒会提高10%攻击力，持续10秒。",
+      "EnglishDescription": "When Guoba Attack's effect ends, Guoba leaves a chili pepper on the spot where it disappeared. Picking up a chili pepper increases ATK by 10% for 10s.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            10
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "xiangling.passive3",
+      "CharacterKey": "xiangling",
+      "Character": "香菱",
+      "Slot": "passive3",
+      "Name": "万民堂大厨",
+      "Description": "完美烹饪攻击类食物时，有12%概率获得2倍产出。",
+      "EnglishDescription": "When Xiangling cooks an ATK-boosting dish perfectly, she has a 12% chance to receive double the product.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/xiangling.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "furina.a",
+      "CharacterKey": "furina",
+      "Character": "芙宁娜",
+      "Slot": "a",
+      "Name": "独舞之邀",
+      "Description": "普通攻击\n进行至多四段的连续攻击。\n\n重击\n消耗一定体力，释放独舞的气场，对附近的敌人造成物理伤害，并切换自身的始基力属性。如果场上存在元素战技「孤心沙龙」召唤的「沙龙成员」或「众水的歌者」，「沙龙成员」或「众水的歌者」也会更换为对应的阵容。\n\n始基力：圣俗杂座\n每隔一段时间，芙宁娜的普通攻击命中时，将根据芙宁娜当前的始基力属性，在命中的位置降下灵息之刺或流涌之刃，造成具有芒性或荒性的水元素伤害。\n芙宁娜登场时，始基力属性为荒性。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 4 consecutive strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to unleash a solo dance, dealing Physical DMG to nearby opponents and changing her Arkhe alignment. If Salon Members or the Singer of Many Waters summoned by her Elemental Skill \"Salon Solitaire\" is present, their lineup will switch in response.\n\nArkhe: Seats Sacred and Secular\nAt intervals, when Furina's Normal Attacks hit, a Spiritbreath Thorn or a Surging Blade will descend based on her current Arkhe alignment, dealing Pneuma- or Ousia-aligned Hydro DMG.\nWhen Furina takes the field, her starting Arkhe alignment will be Ousia.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {
+        "spiritbreath-thorn-surging-blade-dmg-interval-param11": {
+          "Unit": "seconds",
+          "Label": "Spiritbreath Thorn/Surging Blade DMG Interval",
+          "SourceParameter": "param11",
+          "Values": [
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6
+          ]
+        },
+        "spiritbreath-thorn-surging-blade-dmg-interval-param12": {
+          "Unit": "seconds",
+          "Label": "Spiritbreath Thorn/Surging Blade DMG Interval",
+          "SourceParameter": "param12",
+          "Values": [
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "furina.e",
+      "CharacterKey": "furina",
+      "Character": "芙宁娜",
+      "Slot": "e",
+      "Name": "孤心沙龙",
+      "Description": "邀请孤心沙龙的客人们上阵，为芙宁娜的演出助兴。根据芙宁娜当前的始基力属性，邀请的客人分为「沙龙成员」与「众水的歌者」。\n\n荒性\n挥洒欢庆的泡沫，基于芙宁娜的生命值上限，造成水元素范围伤害，并召唤三位「沙龙成员」：球球章鱼形态的「乌瑟勋爵」、泡泡海马形态的「海薇玛夫人」和重甲蟹形态的「谢贝蕾妲小姐」。\n「沙龙成员」将间歇性攻击附近的敌人，并优先攻击当前场上角色的目标，基于生命值上限，造成水元素伤害。\n「沙龙成员」进行攻击时，根据附近的队伍中生命值高于50%的角色数量，提升此次攻击的威力，并消耗这些角色的生命值：满足条件的角色数量为1/2/3/4名或更多时，攻击造成的伤害为原本的110%/120%/130%/140%。\n\n芒性\n召唤「众水的歌者」，每隔一段时间，受益于生命值上限，为周围的当前场上角色恢复生命值。\n\n「沙龙成员」与「众水的歌者」共享持续时间，芙宁娜通过重击更换客人的阵容时，将继承持续时间。\n「沙龙成员」或「众水的歌者」存在期间，芙宁娜能够在水面上移动。",
+      "EnglishDescription": "Invites the guests of the Salon Solitaire to come forth and aid in Furina's performance. Will summon either the Salon Members or the Singer of Many Waters based on Furina's current Arkhe alignment.\n\nOusia\nFoaming bubbles like celebrants shall dance, dealing AoE Hydro DMG based on Furina's Max HP and summoning 3 Salon Members: the Ball Octopus-shaped Gentilhomme Usher, the Bubbly Seahorse-shaped Surintendante Chevalmarin, and the Armored Crab-shaped Mademoiselle Crabaletta.\nThey will attack nearby opponents at intervals, prioritizing the target of the active character, dealing Hydro DMG based on Max HP.\nWhen they attack, if character(s) with more than 50% HP are nearby, the Members will increase their current attack's power based on the number of such characters, and consume said characters' HP. If 1/2/3/4 (or more) characters meet these requirements, the Members' attacks will deal 110%/120%/130%/140% of their original DMG.\n\nPneuma\nSummons the Singer of Many Waters, who will heal nearby active character(s) based on Max HP at intervals.\n\nThe Salon Members and Singer of Many Waters share a duration, and when Furina uses her Charged Attack to change the guest type, the new guests will inherit the remaining duration.\nWhile the Salon Members or the Singer of Many Waters is on the field, Furina can move on the water's surface.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param2",
+          "Values": [
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30,
+            30
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param11",
+          "Values": [
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "furina.q",
+      "CharacterKey": "furina",
+      "Character": "芙宁娜",
+      "Slot": "q",
+      "Name": "万众狂欢",
+      "Description": "凝聚狂欢之意，构筑水沫的舞台，基于芙宁娜的生命值上限，造成水元素范围伤害，并使队伍中附近的角色进入「普世欢腾」状态：持续期间，角色的当前生命值提升或降低时，基于提升或降低数值相对于生命值上限的比例，每1%都将使芙宁娜获得1点「气氛值」。\n同时，基于芙宁娜持有的「气氛值」，附近的队伍中所有角色造成的伤害提升，受治疗加成提升。\n持续时间结束时，芙宁娜持有的「气氛值」将被移除。",
+      "EnglishDescription": "Rouses the impulse to revel, creating a stage of foam that will deal AoE Hydro DMG based on Furina's Max HP and cause nearby party members to enter the Universal Revelry state: During this time, when nearby party members' HP increases or decreases, 1 Fanfare point will be granted to Furina for each percentage point of their Max HP by which their HP changes.\nAt the same time, Furina will increase the DMG dealt by and Incoming Healing Bonus of all nearby party members based on the amount of Fanfare she has.\nWhen the duration ends, Furina's Fanfare points will be cleared.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param2",
+          "Values": [
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param7",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param8",
+          "Values": [
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "furina.passive1",
+      "CharacterKey": "furina",
+      "Character": "芙宁娜",
+      "Slot": "passive1",
+      "Name": "停不了的圆舞",
+      "Description": "队伍中当前场上的角色受到治疗时，若这次治疗的来源不是芙宁娜自己并且治疗回复量溢出，在接下来的4秒内，芙宁娜每2秒将为队伍中附近的角色恢复一次生命值，回复量相当于角色各自生命值上限的2%。",
+      "EnglishDescription": "When the active character in your party receives healing, if the source of the healing is not Furina herself and the healing overflows, then Furina will heal nearby party members for 2% of their Max HP once every 2s for the next 4s.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "furina.passive2",
+      "CharacterKey": "furina",
+      "Character": "芙宁娜",
+      "Slot": "passive2",
+      "Name": "无人听的自白",
+      "Description": "每1000点生命值上限都将使处于不同始基力属性下的芙宁娜的孤心沙龙获得相应的增益效果：\n「沙龙成员」造成的伤害提升0.7%，通过这种方式至多使「沙龙成员」造成的伤害提升28%；\n「众水的歌者」为周围的当前场上角色恢复生命值的间隔降低0.4%，通过这种方式至多使「众水的歌者」为周围的当前场上角色恢复生命值的间隔降低16%。",
+      "EnglishDescription": "Every 1,000 points of Furina's Max HP can buff the different Arkhe-aligned Salon Solitaire in the following ways:\nWill increase Salon Members' DMG dealt by 0.7%, up to a maximum of 28%.\nWill decrease the Singer of Many Waters' healing interval for nearby active characters by 0.4%, up to a maximum of 16%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "furina.passive3",
+      "CharacterKey": "furina",
+      "Character": "芙宁娜",
+      "Slot": "passive3",
+      "Name": "瀚海亦舞台",
+      "Description": "异色原海异种能力的冷却时间降低30%。",
+      "EnglishDescription": "Xenochromatic Fontemer Aberrant ability CD decreased by 30%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/furina.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "neuvillette.a",
+      "CharacterKey": "neuvillette",
+      "Character": "那维莱特",
+      "Slot": "a",
+      "Name": "如水从平",
+      "Description": "普通攻击\n轻挥权杖，驱动浪涛进行至多三段的攻击，造成水元素伤害。\n\n重击蓄力·诉论心证\n蓄力时，那维莱特汇聚源水之力，逐渐构成仲裁的徽记。在这种状态下，那维莱特能够进行移动与改变朝向，并吸收一定范围内的源水之滴。\n每吸收一枚源水之滴，都会加快徽记形成的速度，并为那维莱特恢复生命值。\n停止蓄力时，若徽记尚不完满，将进行重击；若已经完满，则将转为进行重击·衡平推裁。\n\n重击\n消耗一定体力，以迸发的水环猛击敌人，造成水元素范围伤害。\n\n重击·衡平推裁\n释放汹涌的洪流，对前方直线区域内的敌人持续造成水元素范围伤害。\n重击·衡平推裁不消耗体力，持续3秒。\n若生命值高于50%，那维莱特在施放时将持续消耗生命值。\n\n下落攻击\n凝聚水元素的力量，从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成水元素范围伤害。",
+      "EnglishDescription": "Normal Attack\nWith light flourishes, Neuvillette commands the tides to unleash a maximum of 3 attacks, dealing Hydro DMG.\n\nCharged Attack Empowerment: Legal Evaluation\nWhile charging up, Neuvillette will gather the power of water, forming it into a Seal of Arbitration. In this state, Neuvillette can move and change facing, and also absorb any Sourcewater Droplets in a certain AoE.\nEvery Droplet he absorbs will increase the formation speed of the Seal, and will heal Neuvillette.\nWhen the charging is stopped, if the Symbol has yet to be formed, then a Charged Attack will be unleashed. If it has been formed, then a Charged Attack: Equitable Judgment will be unleashed.\n\nCharged Attack\nConsumes a fixed amount of Stamina to attack opponents with a rupturing blast of water, dealing AoE Hydro DMG.\n\nCharged Attack: Equitable Judgment\nUnleashes surging torrents, dealing continuous AoE Hydro DMG to all opponents in a straight-line area in front of him.\nEquitable Judgment will not consume any Stamina and lasts 3s.\nIf Neuvillette's HP is above 50%, he will continuously lose HP while using this attack.\n\nPlunging Attack\nGathering the might of Hydro, Neuvillette plunges towards the ground from mid-air, damaging all opponents in his path. Deals AoE Hydro DMG upon impact with the ground.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            3
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "neuvillette.e",
+      "CharacterKey": "neuvillette",
+      "Character": "那维莱特",
+      "Slot": "e",
+      "Name": "泪水啊，我必偿还",
+      "Description": "降下汹涌的水瀑，基于那维莱特的生命值上限，对前方的敌人造成水元素范围伤害，命中敌人后，将在敌人附近产生3枚源水之滴。\n\n始基力：芒性\n每隔一段时间，在降下汹涌的水瀑后，将降下穿透敌人的灵息之刺，造成具有芒性的水元素伤害。",
+      "EnglishDescription": "Summons a Raging Waterfall that will deal AoE Hydro DMG to opponents in front of Neuvillette based on his Max HP. After hitting an opponent, this skill will generate 3 Sourcewater Droplets near that opponent.\n\nArkhe: Pneuma\nAt certain intervals, when the Raging Waterfall descends, a Spiritbreath Thorn will descend that will pierce opponents, dealing Pneuma-aligned Hydro DMG.",
+      "Metrics": {
+        "spiritbreath-thorn-interval": {
+          "Unit": "seconds",
+          "Label": "Spiritbreath Thorn Interval",
+          "SourceParameter": "param5",
+          "Values": [
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10
+          ]
+        },
+        "sourcewater-droplet-duration": {
+          "Unit": "seconds",
+          "Label": "Sourcewater Droplet Duration",
+          "SourceParameter": "param3",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param4",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "neuvillette.q",
+      "CharacterKey": "neuvillette",
+      "Character": "那维莱特",
+      "Slot": "q",
+      "Name": "潮水啊，我已归来",
+      "Description": "释放迸发的骇浪，基于那维莱特的生命值上限，造成水元素范围伤害，短暂间隔后，在附近降下2道水瀑，造成范围较小的水元素伤害，并在前方一定范围内产生6枚源水之滴。",
+      "EnglishDescription": "Unleashes waves that will deal AoE Hydro DMG based on Neuvillette's Max HP. After a short interval, 2 waterfalls will descend and deal Hydro DMG in a somewhat smaller AoE, and will generate 6 Sourcewater Droplets within an area in front.",
+      "Metrics": {
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param3",
+          "Values": [
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param4",
+          "Values": [
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "neuvillette.passive1",
+      "CharacterKey": "neuvillette",
+      "Character": "那维莱特",
+      "Slot": "passive1",
+      "Name": "古海孑遗的权柄",
+      "Description": "队伍中的角色对敌人触发蒸发、冻结、感电、月感电、绽放、月绽放、水元素扩散、水元素结晶或月结晶反应时，将为那维莱特产生持续30秒，至多叠加3层的「遗龙之荣」效果，使重击·衡平推裁造成原本110%/125%/160%的伤害。\n每种元素反应产生的「遗龙之荣」分别独立存在。",
+      "EnglishDescription": "When a party member triggers a Vaporize, Frozen, Electro-Charged, Lunar-Charged, Bloom, Lunar-Bloom, Hydro Swirl, Hydro Crystallize or a Lunar-Crystallize reaction on opponents, 1 stack of Past Draconic Glories will be granted to Neuvillette for 30s. Max 3 stacks. Past Draconic Glories causes Charged Attack: Equitable Judgment to deal 110%/125%/160% of its original DMG.\nThe stacks of Past Draconic Glories created by each kind of Elemental Reaction exist independently.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            30
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "neuvillette.passive2",
+      "CharacterKey": "neuvillette",
+      "Character": "那维莱特",
+      "Slot": "passive2",
+      "Name": "至高仲裁的纪律",
+      "Description": "基于当前生命值超出生命值上限30%的部分，每1%使那维莱特获得0.6%水元素伤害加成，通过这种方式，至多提升30%。",
+      "EnglishDescription": "For each 1% of Neuvillette's current HP greater than 30% of Max HP, he will gain 0.6% Hydro DMG Bonus. A maximum bonus of 30% can be obtained this way.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "neuvillette.passive3",
+      "CharacterKey": "neuvillette",
+      "Character": "那维莱特",
+      "Slot": "passive3",
+      "Name": "汇聚如浪潮一般",
+      "Description": "队伍中自己的角色进行水下冲刺时，移动速度提升15%。\n无法与效果完全相同的固有天赋叠加。",
+      "EnglishDescription": "Increases underwater Sprint SPD for your own party members by 15%.\nNot stackable with Passive Talents that provide the exact same effects.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/neuvillette.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "jean.a",
+      "CharacterKey": "jean",
+      "Character": "琴",
+      "Slot": "a",
+      "Name": "西风剑术",
+      "Description": "普通攻击\n进行至多五段的连续剑击。\n\n重击\n消耗一定体力，进行饱含风之力的挑击。\n被挑飞的敌人，在短时间内会缓慢坠落。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 5 consecutive strikes.\n\nCharged Attack\nConsumes a certain amount of stamina to launch an opponent using the power of wind.\nLaunched opponents will slowly fall to the ground.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "jean.e",
+      "CharacterKey": "jean",
+      "Character": "琴",
+      "Slot": "e",
+      "Name": "风压剑",
+      "Description": "将无形的风之力汇聚在剑上，释放微型的风暴，将敌人向瞄准的方向击飞，造成大量风元素伤害。\n\n长按\n以持续消耗体力为代价，令旋风将周围的敌人与物体牵引至面前。\n可以调整方向。\n期间无法移动。",
+      "EnglishDescription": "Focusing the might of the formless wind around her blade, Jean releases a miniature storm, launching opponents in the direction she aims at, dealing massive Anemo DMG.\n\nHold\nAt the cost of continued stamina consumption, Jean can command the whirlwind to pull surrounding opponents and objects towards her front.\nDirection can be adjusted.\nCharacter is immobile during skill duration.",
+      "Metrics": {
+        "max-duration": {
+          "Unit": "seconds",
+          "Label": "Max Duration",
+          "SourceParameter": "param3",
+          "Values": [
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param4",
+          "Values": [
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "jean.q",
+      "CharacterKey": "jean",
+      "Character": "琴",
+      "Slot": "q",
+      "Name": "蒲公英之风",
+      "Description": "呼唤风的护佑，创造千风涌动的蒲公英领域，击退周围的敌人并造成风元素伤害。\n同时，为队伍中的所有角色瞬间恢复大量生命值，回复量受益于琴的攻击力。\n\n蒲公英领域\n·为其中的角色持续恢复生命值；\n·令其中的角色持续受到风元素影响；\n·对出入领域的敌人造成风元素伤害。",
+      "EnglishDescription": "Calling upon the wind's protection, Jean creates a swirling Dandelion Field, launching surrounding opponents and dealing Anemo DMG.\nAt the same time, she instantly regenerates a large amount of HP for all party members. The amount of HP restored scales off Jean's ATK.\n\nDandelion Field\n·Continuously regenerates HP of characters within the AoE and continuously imbues them with Anemo.\n·Deals Anemo DMG to opponents entering or exiting the Dandelion Field.",
+      "Metrics": {
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param7",
+          "Values": [
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param8",
+          "Values": [
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "jean.passive1",
+      "CharacterKey": "jean",
+      "Character": "琴",
+      "Slot": "passive1",
+      "Name": "顺风而行",
+      "Description": "琴的普通攻击命中时，有50%的几率为队伍中所有角色恢复等同于琴攻击力15%的生命值。",
+      "EnglishDescription": "On hit, Jean's Normal Attacks have a 50% chance to regenerate HP equal to 15% of Jean's ATK for all party members.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "jean.passive2",
+      "CharacterKey": "jean",
+      "Character": "琴",
+      "Slot": "passive2",
+      "Name": "听凭风引",
+      "Description": "使用蒲公英之风后，恢复20%元素能量。",
+      "EnglishDescription": "Using Dandelion Breeze will regenerate 20% of its Energy.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "jean.passive3",
+      "CharacterKey": "jean",
+      "Character": "琴",
+      "Slot": "passive3",
+      "Name": "引领之风",
+      "Description": "完美烹饪恢复类食物时，有12%概率获得2倍产出。",
+      "EnglishDescription": "When a Perfect Cooking is achieved on a dish with restorative effects, there is a 12% chance to obtain double the product.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/jean.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kaedeharakazuha.a",
+      "CharacterKey": "kaedeharakazuha",
+      "Character": "枫原万叶",
+      "Slot": "a",
+      "Name": "我流剑术",
+      "Description": "普通攻击\n进行至多五段的连续剑击。\n\n重击\n消耗一定体力，瞬间向前方挥出两剑。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。若这次下落攻击经由千早振施放，则会转为施放下落攻击·乱岚拨止。\n\n下落攻击·乱岚拨止\n通过元素战技·千早振施放的下落攻击，造成的伤害将转化为风元素伤害，并在落地时施展秘剑产生小型的风穴，牵引附近的物体与敌人。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 5 rapid strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to unleash 2 rapid sword strikes.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact. If this Plunging Attack is triggered by Chihayaburu, it will be converted to Plunging Attack: Midare Ranzan.\n\nPlunging Attack: Midare Ranzan\nWhen a Plunging Attack is performed using the effects of the Elemental Skill Chihayaburu, Plunging Attack DMG is converted to Anemo DMG and will create a small wind tunnel via a secret blade technique that pulls in nearby objects and opponents.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kaedeharakazuha.e",
+      "CharacterKey": "kaedeharakazuha",
+      "Character": "枫原万叶",
+      "Slot": "e",
+      "Name": "千早振",
+      "Description": "施展如同冲风般激昂的秘剑，将敌人与物体牵引至所在位置，击飞范围内的敌人，造成风元素伤害，并借由喷薄的气流如登泷般腾空而起。\n枫原万叶因元素战技·千早振而升空后的10秒内并持续处于空中时，若进行下落攻击，则会施展格外强劲的下落攻击·乱岚拨止。\n\n点按\n可以在空中施放。\n\n长按\n积蓄力量后施展，相对于点按，在更大的范围内造成更高的风元素伤害。\n\n下落攻击·乱岚拨止\n通过元素战技·千早振施放的下落攻击，造成的伤害将转化为风元素伤害，并在落地时施展秘剑产生小型的风穴，牵引附近的物体与敌人。\n乱岚拨止造成的伤害视为下落攻击伤害。",
+      "EnglishDescription": "Unleashes a secret technique as fierce as the rushing wind that pulls objects and opponents towards Kazuha's current position before launching opponents within the AoE, dealing Anemo DMG and lifting Kazuha into the air on a rushing gust of wind.\nWithin 10s of remaining airborne after casting Chihayaburu, Kazuha can unleash a powerful Plunging Attack known as Midare Ranzan.\n\nPress\nCan be used in mid-air.\n\nHold\nCharges up before unleashing greater Anemo DMG over a larger AoE than Press Mode.\n\nPlunging Attack: Midare Ranzan\nWhen a Plunging Attack is performed using the effects of the Elemental Skill Chihayaburu, Plunging Attack DMG is converted to Anemo DMG. On landing, Kazuha creates a small wind tunnel via a secret blade technique that pulls in nearby objects and opponents.\nMidare Ranzan's DMG is considered Plunging Attack DMG.",
+      "Metrics": {
+        "press-cd": {
+          "Unit": "seconds",
+          "Label": "Press CD",
+          "SourceParameter": "param2",
+          "Values": [
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6
+          ]
+        },
+        "hold-cd": {
+          "Unit": "seconds",
+          "Label": "Hold CD",
+          "SourceParameter": "param4",
+          "Values": [
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9
+          ]
+        },
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            10
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kaedeharakazuha.q",
+      "CharacterKey": "kaedeharakazuha",
+      "Character": "枫原万叶",
+      "Slot": "q",
+      "Name": "万叶之一刀",
+      "Description": "施展我流的奥义，斩出初岚般的一刀，造成风元素范围伤害。\n刀风会留下名为「流风秋野」的领域，对其中的敌人造成间歇的风元素伤害。\n\n元素转化\n若流风秋野在持续期间接触了水元素/火元素/冰元素/雷元素，则会获得对应元素属性，额外造成该元素附加伤害。\n这种转化在技能持续期间仅会发生一次。",
+      "EnglishDescription": "The signature technique of Kazuha's self-styled bladework — a single slash that strikes with the force of the first winds of autumn, dealing AoE Anemo DMG.\nThe blade's passage will leave behind a field named \"Autumn Whirlwind\" that periodically deals AoE Anemo DMG to opponents within its range.\n\nElemental Absorption\nIf Autumn Whirlwind comes into contact with Hydro/Pyro/Cryo/Electro, it will deal additional elemental DMG of that type.\nElemental Absorption may only occur once per use.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param4",
+          "Values": [
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8,
+            8
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param5",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param6",
+          "Values": [
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kaedeharakazuha.passive1",
+      "CharacterKey": "kaedeharakazuha",
+      "Character": "枫原万叶",
+      "Slot": "passive1",
+      "Name": "相闻之剑法",
+      "Description": "千早振在施放时，如果接触了水元素/火元素/冰元素/雷元素，则会使这次千早振的下落攻击·乱岚拨止，发生元素转化，将附加200%攻击力的对应元素伤害，该伤害视为下落攻击伤害。每次千早振的技能效果中，元素转化仅会发生一次。",
+      "EnglishDescription": "If Chihayaburu comes into contact with Hydro/Pyro/Cryo/Electro when cast, this Chihayaburu will absorb that element and if Plunging Attack: Midare Ranzan is used before the effect expires, it will deal an additional 200% ATK of the absorbed elemental type as DMG. This will be considered Plunging Attack DMG.\nElemental Absorption may only occur once per use of Chihayaburu.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kaedeharakazuha.passive2",
+      "CharacterKey": "kaedeharakazuha",
+      "Character": "枫原万叶",
+      "Slot": "passive2",
+      "Name": "风物之诗咏",
+      "Description": "枫原万叶触发扩散或星扩散反应后，枫原万叶的每点元素精通，会为队伍中所有角色提供0.04%对应元素伤害加成，持续8秒。通过这种方式获得的不同元素伤害加成可以共存。",
+      "EnglishDescription": "Upon triggering a Swirl or Stellar Swirl reaction, Kaedehara Kazuha will grant all party members a 0.04% Elemental DMG Bonus to the element absorbed by Swirl for every point of Elemental Mastery he has for 8s. Bonuses for different elements obtained through this method can co-exist.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            8
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kaedeharakazuha.passive3",
+      "CharacterKey": "kaedeharakazuha",
+      "Character": "枫原万叶",
+      "Slot": "passive3",
+      "Name": "松风霞立",
+      "Description": "队伍中自己的角色冲刺消耗的体力降低20%。\n无法与效果完全相同的固有天赋叠加。",
+      "EnglishDescription": "Decreases sprinting Stamina consumption for your own party members by 20%.\nNot stackable with Passive Talents that provide the exact same effects.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kaedeharakazuha.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "nahida.a",
+      "CharacterKey": "nahida",
+      "Character": "纳西妲",
+      "Slot": "a",
+      "Name": "行相",
+      "Description": "普通攻击\n对前方进行至多四段的攻击，造成草元素伤害。\n\n重击\n消耗一定体力，短暂咏唱后，对前方区域造成草元素范围伤害。\n\n下落攻击\n凝聚草元素的力量，从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成草元素范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 4 attacks that deal Dendro DMG to opponents in front of her.\n\nCharged Attack\nConsumes a certain amount of Stamina to deal AoE Dendro DMG to opponents in front of her after a short casting time.\n\nPlunging Attack\nCalling upon the might of Dendro, Nahida plunges towards the ground from mid-air, damaging all opponents in her path. Deals AoE Dendro DMG upon impact with the ground.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "nahida.e",
+      "CharacterKey": "nahida",
+      "Character": "纳西妲",
+      "Slot": "e",
+      "Name": "所闻遍计",
+      "Description": "在身边施以草木之业缚，造成草元素范围伤害，并对命中的至多8名敌人施加蕴种印。\n长按时将以不同的方式施放。\n\n长按\n进入瞄准状态，以选定一定范围内一定数量的敌人，并在该状态下提高纳西妲的抗打断能力。\n长按结束时，对选定的敌人造成草元素伤害，并为其施加蕴种印。\n瞄准状态至多持续5秒，至多选定8名敌人。\n\n蕴种印\n处于蕴种印状态下的敌人将在一定距离内互相连结。\n对处于蕴种印状态下的敌人触发元素反应，以及在该敌人受到草原核（包含烈绽放、超绽放）造成的伤害后，纳西妲将基于攻击力与元素精通，对该敌人及其所处连结中的所有敌人释放灭净三业，造成草元素伤害。\n短时间内至多触发一次灭净三业。",
+      "EnglishDescription": "Sends forth karmic bonds of wood and tree from her side, dealing AoE Dendro DMG and marking up to 8 opponents hit with the Seed of Skandha.\nWhen held, this skill will trigger differently.\n\nHold\nEnters Aiming Mode, which will allow you to select a limited number of opponents within a limited area. During this time, Nahida's resistance to interruption will be increased.\nWhen released, this skill deals Dendro DMG to these opponents and marks them with the Seed of Skandha.\nAiming Mode will last up to 5s and can select a maximum of 8 opponents.\n\nSeed of Skandha\nOpponents who have been marked by the Seed of Skandha will be linked to one another up till a certain distance.\nAfter you trigger Elemental Reactions on opponents who are affected by the Seeds of Skandha or when they take DMG from Dendro Cores (including Burgeon and Hyperbloom DMG), Nahida will unleash Tri-Karma Purification on the opponents and all connected opponents, dealing Dendro DMG based on her ATK and Elemental Mastery.\nYou can trigger at most 1 Tri-Karma Purification within a short period of time.",
+      "Metrics": {
+        "tri-karma-purification-trigger-interval": {
+          "Unit": "seconds",
+          "Label": "Tri-Karma Purification Trigger Interval",
+          "SourceParameter": "param5",
+          "Values": [
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5,
+            2.5
+          ]
+        },
+        "seed-of-skandha-duration": {
+          "Unit": "seconds",
+          "Label": "Seed of Skandha Duration",
+          "SourceParameter": "param6",
+          "Values": [
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25
+          ]
+        },
+        "press-cd": {
+          "Unit": "seconds",
+          "Label": "Press CD",
+          "SourceParameter": "param7",
+          "Values": [
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5
+          ]
+        },
+        "hold-cd": {
+          "Unit": "seconds",
+          "Label": "Hold CD",
+          "SourceParameter": "param8",
+          "Values": [
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6,
+            6
+          ]
+        },
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            5
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "nahida.q",
+      "CharacterKey": "nahida",
+      "Character": "纳西妲",
+      "Slot": "q",
+      "Name": "心景幻成",
+      "Description": "将梦想的殿堂具现，展开「摩耶之殿」领域。\n\n领域展开时，队伍中若存在以下元素类型的角色，将分别产生对应的效果：\n·火元素：当纳西妲处于摩耶之殿当中时，提升元素战技「所闻遍计」的灭净三业造成的伤害；\n·雷元素：当纳西妲处于摩耶之殿当中时，降低元素战技「所闻遍计」的灭净三业触发的间隔时间；\n·水元素：延长摩耶之殿的持续时间。\n\n展开领域时，若上述元素类型的角色数量有至少2名，产生的对应效果将进一步增强。\n\n纳西妲即使处于队伍后台，只要该队伍处于摩耶之殿当中，依旧能获得上述效果的提升。",
+      "EnglishDescription": "Manifests the Court of Dreams and expands the Shrine of Maya.\n\nWhen the Shrine of Maya field is unleashed, the following effects will be separately unleashed based on the Elemental Types present within the party.\n·Pyro: While Nahida remains within the Shrine of Maya, the DMG dealt by Tri-Karma Purification from \"All Schemes to Know\" is increased.\n·Electro: While Nahida remains within the Shrine of Maya, the interval between each Tri-Karma Purification from \"All Schemes to Know\" is decreased.\n·Hydro: The Shrine of Maya's duration is increased.\n\nIf there are at least 2 party members of the aforementioned Elemental Types present when the field is deployed, the aforementioned effects will be increased further.\n\nEven if Nahida is not on the field, these bonuses will still take effect so long as party members are within the Shrine of Maya.",
+      "Metrics": {
+        "electro-trigger-interval-decrease-param3": {
+          "Unit": "seconds",
+          "Label": "Electro: Trigger Interval Decrease",
+          "SourceParameter": "param3",
+          "Values": [
+            0.248,
+            0.2666,
+            0.2852,
+            0.31,
+            0.3286,
+            0.3472,
+            0.372,
+            0.3968,
+            0.4216,
+            0.4464,
+            0.4712,
+            0.496,
+            0.527,
+            0.558,
+            0.589
+          ]
+        },
+        "electro-trigger-interval-decrease-param4": {
+          "Unit": "seconds",
+          "Label": "Electro: Trigger Interval Decrease",
+          "SourceParameter": "param4",
+          "Values": [
+            0.372,
+            0.3999,
+            0.4278,
+            0.465,
+            0.4929,
+            0.5208,
+            0.558,
+            0.5952,
+            0.6324,
+            0.6696,
+            0.7068,
+            0.744,
+            0.7905,
+            0.837,
+            0.8835
+          ]
+        },
+        "hydro-duration-extension-param5": {
+          "Unit": "seconds",
+          "Label": "Hydro: Duration Extension",
+          "SourceParameter": "param5",
+          "Values": [
+            3.344,
+            3.5948,
+            3.8456,
+            4.18,
+            4.4308,
+            4.6816,
+            5.016,
+            5.3504,
+            5.6848,
+            6.0192,
+            6.3536,
+            6.688,
+            7.106,
+            7.524,
+            7.942
+          ]
+        },
+        "hydro-duration-extension-param6": {
+          "Unit": "seconds",
+          "Label": "Hydro: Duration Extension",
+          "SourceParameter": "param6",
+          "Values": [
+            5.016,
+            5.3922,
+            5.7684,
+            6.27,
+            6.6462,
+            7.0224,
+            7.524,
+            8.0256,
+            8.5272,
+            9.0288,
+            9.5304,
+            10.032,
+            10.659,
+            11.286,
+            11.913
+          ]
+        },
+        "base-duration": {
+          "Unit": "seconds",
+          "Label": "Base Duration",
+          "SourceParameter": "param7",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param8",
+          "Values": [
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5,
+            13.5
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param9",
+          "Values": [
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50,
+            50
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "nahida.passive1",
+      "CharacterKey": "nahida",
+      "Character": "纳西妲",
+      "Slot": "passive1",
+      "Name": "净善摄受明论",
+      "Description": "施放心景幻成时，摩耶之殿将获得以下效果：\n依据队伍中元素精通最高的角色的元素精通数值的25%，提高领域内当前场上角色的元素精通。\n通过这种方式，至多提升250点元素精通。",
+      "EnglishDescription": "When unleashing Illusory Heart, the Shrine of Maya will gain the following effects:\nThe Elemental Mastery of the active character within the field will be increased by 25% of the Elemental Mastery of the party member with the highest Elemental Mastery.\nYou can gain a maximum of 250 Elemental Mastery in this manner.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "nahida.passive2",
+      "CharacterKey": "nahida",
+      "Character": "纳西妲",
+      "Slot": "passive2",
+      "Name": "慧明缘觉智论",
+      "Description": "基于纳西妲元素精通超过200点的部分，每1点元素精通能使所闻遍计的灭净三业造成的伤害提升0.1%，暴击率提升0.03%。\n通过这种方式，至多使灭净三业造成的伤害提升80%，暴击率提升24%。",
+      "EnglishDescription": "Each point of Nahida's Elemental Mastery beyond 200 will grant 0.1% Bonus DMG and 0.03% CRIT Rate to Tri-Karma Purification from All Schemes to Know.\nA maximum of 80% Bonus DMG and 24% CRIT Rate can be granted to Tri-Karma Purification in this manner.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "nahida.passive3",
+      "CharacterKey": "nahida",
+      "Character": "纳西妲",
+      "Slot": "passive3",
+      "Name": "诸相随念净行",
+      "Description": "纳西妲能够通过所闻遍计，与一定范围内的部分采集物进行交互。\n或许还有其他的效果…",
+      "EnglishDescription": "Nahida can use All Schemes to Know to interact with some harvestable items within a fixed AoE.\nThis skill may even have some other effects...",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/nahida.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "fischl.a",
+      "CharacterKey": "fischl",
+      "Character": "菲谢尔",
+      "Slot": "a",
+      "Name": "罪灭之矢",
+      "Description": "普通攻击\n进行至多五段的连续弓箭射击。\n\n重击\n进行伤害更高、更为精准的瞄准射击。\n瞄准时，幽夜净土的黯雷精灵会听从皇女的号令，凭附在她的雷影魔箭上。聚满了断罪之雷的魔箭会造成高额的雷元素伤害。\n\n下落攻击\n从空中射出箭雨，并迅速下坠冲击地面，在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 5 consecutive shots with a bow.\n\nCharged Attack\nPerforms a more precise Aimed Shot with increased DMG.\nWhile aiming, the dark lightning spirits of Immernachtreich shall heed the call of their Prinzessin and indwell the enchanted arrowhead. When fully indwelt, the Rachsüchtig Blitz shall deal immense Electro DMG.\n\nPlunging Attack\nFires off a shower of arrows in mid-air before falling and striking the ground, dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "fischl.e",
+      "CharacterKey": "fischl",
+      "Character": "菲谢尔",
+      "Slot": "e",
+      "Name": "夜巡影翼",
+      "Description": "召唤奥兹。暗影与雷电构成的夜鸦降生尘世时，会在小范围内造成雷元素伤害。\n存在期间内，奥兹会持续发射雷之魔弹攻击附近的敌人。\n\n长按以调整技能生效位置。\n奥兹存在期间内再次点按可以将其召唤至身旁。",
+      "EnglishDescription": "Summons Oz. The night raven forged of darkness and lightning descends upon the land, dealing Electro DMG in a small AoE.\nFor the ability's duration, Oz will continuously attack nearby opponents with Freikugel.\n\nHold to adjust the location Oz will be summoned to.\nPress again any time during the ability's duration to once again summon him to Fischl's side.",
+      "Metrics": {
+        "oz-s-duration": {
+          "Unit": "seconds",
+          "Label": "Oz's Duration",
+          "SourceParameter": "param4",
+          "Values": [
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param5",
+          "Values": [
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "fischl.q",
+      "CharacterKey": "fischl",
+      "Character": "菲谢尔",
+      "Slot": "q",
+      "Name": "至夜幻现",
+      "Description": "呼唤奥兹，张开纯粹的夜色编织成的双翼，守护菲谢尔。\n持续期间，具有如下效果：\n·以奥兹的形态进行高速移动；\n·对附近的敌人降下落雷，造成雷元素伤害。每个敌人只能受到一次落雷伤害；\n·效果结束时，奥兹将会停留在战场上，攻击皇女的敌人。若奥兹已经在场，则重置奥兹的存在时间。",
+      "EnglishDescription": "Summons Oz to spread his twin wings of twilight and defend Fischl.\nHas the following properties during the ability's duration:\n·Fischl takes on Oz's form, greatly increasing her Movement Speed.\n·Strikes nearby opponents with lightning, dealing Electro DMG to opponents she comes into contact with. Each opponent can only be struck once.\n·Once this ability's effects end, Oz will remain on the battlefield and attack his Prinzessin's foes. If Oz is already on the field, then this will reset the duration of his presence.",
+      "Metrics": {
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param5",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param6",
+          "Values": [
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "fischl.passive1",
+      "CharacterKey": "fischl",
+      "Character": "菲谢尔",
+      "Slot": "passive1",
+      "Name": "噬星魔鸦",
+      "Description": "菲谢尔以蓄力完成的瞄准射击命中奥兹时，奥兹会对附近敌人降下圣裁之雷，造成等同射击伤害152.7%的雷元素范围伤害。",
+      "EnglishDescription": "When Fischl hits Oz with a fully-charged Aimed Shot, Oz brings down Thundering Retribution, dealing AoE Electro DMG equal to 152.7% of the arrow's DMG.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "fischl.passive2",
+      "CharacterKey": "fischl",
+      "Character": "菲谢尔",
+      "Slot": "passive2",
+      "Name": "断罪雷影",
+      "Description": "奥兹在场时，若当前场上自己的角色攻击敌人时触发了雷元素相关反应，则会对敌人降下圣裁之雷，造成菲谢尔80%攻击力的雷元素伤害。",
+      "EnglishDescription": "If your current active character triggers an Electro-related Elemental Reaction when Oz is on the field, the opponent shall be stricken with Thundering Retribution that deals Electro DMG equal to 80% of Fischl's ATK.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "fischl.passive3",
+      "CharacterKey": "fischl",
+      "Character": "菲谢尔",
+      "Slot": "passive3",
+      "Name": "吾之后花园",
+      "Description": "在蒙德执行探索派遣任务时，消耗的时间缩短25%。",
+      "EnglishDescription": "When dispatched on an expedition in Mondstadt, time consumed is reduced by 25%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/fischl.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "raidenshogun.a",
+      "CharacterKey": "raidenshogun",
+      "Character": "雷电将军",
+      "Slot": "a",
+      "Name": "源流",
+      "Description": "普通攻击\n进行至多五段的连续枪击。\n\n重击\n消耗一定体力，进行向上的挑斩攻击。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 5 consecutive spear strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to perform an upward slash.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "raidenshogun.e",
+      "CharacterKey": "raidenshogun",
+      "Character": "雷电将军",
+      "Slot": "e",
+      "Name": "神变·恶曜开眼",
+      "Description": "雷电将军展开净土的一角，对周围的敌人造成雷元素伤害，为队伍中附近的所有角色授以「雷罚恶曜之眼」。\n\n雷罚恶曜之眼\n·获授雷罚恶曜之眼的角色的攻击对敌人造成伤害时，雷罚恶曜之眼会进行协同攻击，在敌人的位置造成雷元素范围伤害。\n·获授雷罚恶曜之眼的角色在持续期间内，元素爆发造成的伤害获得提升，提升程度基于元素爆发的元素能量。\n\n每个队伍的雷罚恶曜之眼，每0.9秒至多进行一次协同攻击。\n由队伍中自己的角色以外的角色触发的协同攻击造成的伤害为原本的20%。",
+      "EnglishDescription": "The Raiden Shogun unveils a shard of her Euthymia, dealing Electro DMG to nearby opponents, and granting nearby party members the Eye of Stormy Judgment.\n\nEye of Stormy Judgment\n·When characters with this buff attack and deal DMG to opponents, the Eye will unleash a coordinated attack, dealing AoE Electro DMG at the opponent's position.\n·Characters who gain the Eye of Stormy Judgment will have their Elemental Burst DMG increased based on the Energy Cost of the Elemental Burst during the Eye's duration.\n\nThe Eye can initiate one coordinated attack every 0.9s per party.\nCoordinated attacks generated by characters not controlled by you deal 20% of the normal DMG.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param3",
+          "Values": [
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25,
+            25
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param5",
+          "Values": [
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10
+          ]
+        },
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            0.9
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "raidenshogun.q",
+      "CharacterKey": "raidenshogun",
+      "Character": "雷电将军",
+      "Slot": "q",
+      "Name": "奥义·梦想真说",
+      "Description": "汇聚万千真言，竭尽诸愿百眼之愿力，斩出粉碎一切诅咒的梦想一刀，造成雷元素范围伤害；并在接下来的一段时间内，使用「梦想一心」战斗。依据施放时消耗的诸愿百眼之轮的愿力层数，增加梦想一刀与梦想一心的攻击造成的伤害。\n\n梦想一心\n在此状态下，雷电将军将使用刀进行攻击，并将普通攻击、重击与下落攻击造成的伤害转为无法被附魔覆盖的雷元素伤害，并在这些攻击命中敌人时，为队伍中附近的所有角色恢复元素能量。每1秒至多通过这种方式恢复一次元素能量，在持续期间内至多触发5次。\n在此状态下，雷电将军的抗打断能力提高，并免疫感电反应的伤害。\n梦想一心状态下，雷电将军的普通攻击、重击与下落攻击造成的伤害，视为元素爆发伤害。\n\n梦想一心的效果将在雷电将军退场时解除。\n\n诸愿百眼之轮\n队伍中附近的角色（不包括雷电将军自己）施放元素爆发时，会依据元素爆发的元素能量，为雷电将军的诸愿百眼之轮积攒愿力。\n至多积攒60层愿力。\n\n诸愿百眼之轮中积攒的愿力，会在脱离战斗300秒后清除。",
+      "EnglishDescription": "Gathering truths unnumbered and wishes uncounted, the Raiden Shogun unleashes the Musou no Hitotachi and deals AoE Electro DMG, using Musou Isshin in combat for a certain duration afterward. The DMG dealt by Musou no Hitotachi and Musou Isshin's attacks will be increased based on the number of Chakra Desiderata's Resolve stacks consumed when this skill is used.\n\nMusou Isshin\nWhile in this state, the Raiden Shogun will wield her tachi in battle, while her Normal, Charged, and Plunging Attacks will be infused with Electro DMG, which cannot be overridden. When such attacks hit opponents, she will regenerate Energy for all nearby party members. Energy can be restored this way once every 1s, and this effect can be triggered 5 times throughout this skill's duration.\nWhile in this state, the Raiden Shogun's resistance to interruption is increased, and she is immune to Electro-Charged reaction DMG.\nWhile Musou Isshin is active, the Raiden Shogun's Normal, Charged, and Plunging Attack DMG will be considered Elemental Burst DMG.\n\nThe effects of Musou Isshin will be cleared when the Raiden Shogun leaves the field.\n\nChakra Desiderata\nWhen nearby party members (excluding the Raiden Shogun herself) use their Elemental Bursts, the Raiden Shogun will build up Resolve stacks based on the Energy Cost of these Elemental Bursts.\nThe maximum number of Resolve stacks is 60.\n\nThe Resolve gained by Chakra Desiderata will be cleared 300s after the Raiden Shogun leaves the field.",
+      "Metrics": {
+        "musou-isshin-duration": {
+          "Unit": "seconds",
+          "Label": "Musou Isshin Duration",
+          "SourceParameter": "param18",
+          "Values": [
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param19",
+          "Values": [
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param20",
+          "Values": [
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90,
+            90
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "raidenshogun.passive1",
+      "CharacterKey": "raidenshogun",
+      "Character": "雷电将军",
+      "Slot": "passive1",
+      "Name": "万千的愿望",
+      "Description": "队伍中附近的角色获得元素晶球或元素微粒时，会为诸愿百眼之轮积攒2层愿力。\n该效果每3秒至多触发一次。",
+      "EnglishDescription": "When nearby party members gain Elemental Orbs or Particles, Chakra Desiderata gains 2 Resolve stacks.\nThis effect can occur once every 3s.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            3
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "raidenshogun.passive2",
+      "CharacterKey": "raidenshogun",
+      "Character": "雷电将军",
+      "Slot": "passive2",
+      "Name": "殊胜之御体",
+      "Description": "基于元素充能效率超过100%的部分，每1%使雷电将军获得下列效果：\n·梦想一心状态提供的元素能量恢复提高0.6%；\n·雷元素伤害加成提升0.4%。",
+      "EnglishDescription": "Each 1% above 100% Energy Recharge that the Raiden Shogun possesses grants her:\n·0.6% greater Energy restoration from Musou Isshin\n·0.4% Electro DMG Bonus.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "raidenshogun.passive3",
+      "CharacterKey": "raidenshogun",
+      "Character": "雷电将军",
+      "Slot": "passive3",
+      "Name": "天下名物狩",
+      "Description": "突破单手剑和长柄武器时，消耗的摩拉数量减少50%。",
+      "EnglishDescription": "Mora expended when ascending Swords and Polearms is decreased by 50%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/raidenshogun.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kukishinobu.a",
+      "CharacterKey": "kukishinobu",
+      "Character": "久岐忍",
+      "Slot": "a",
+      "Name": "忍流飞刃斩",
+      "Description": "普通攻击\n进行至多四段的连续剑击。\n\n重击\n消耗一定体力，瞬间向前方挥出两剑。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 4 rapid strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to unleash 2 rapid sword strikes.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kukishinobu.e",
+      "CharacterKey": "kukishinobu",
+      "Character": "久岐忍",
+      "Slot": "e",
+      "Name": "越祓雷草之轮",
+      "Description": "编结越祓草轮，消耗一部分生命值，对周围的敌人造成雷元素伤害。\n\n越祓草轮\n将跟随当前场上角色。每1.5秒，对周围的敌人造成雷元素伤害，并为范围内的当前场上角色恢复生命值，回复量受益于久岐忍的生命值上限。\n\n施放该技能所消耗的生命值，至多使久岐忍的生命值降低至20%。",
+      "EnglishDescription": "Creates a Grass Ring of Sanctification at the cost of part of her HP, dealing Electro DMG to nearby opponents.\n\nGrass Ring of Sanctification\nFollows your current active character around. Deals Electro DMG to nearby opponents every 1.5s and restores HP for active character(s) within the ring's AoE based on Kuki Shinobu's Max HP.\n\nThe HP consumption from using this skill can only bring her to 20% HP.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param6",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param7",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            1.5
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kukishinobu.q",
+      "CharacterKey": "kukishinobu",
+      "Character": "久岐忍",
+      "Slot": "q",
+      "Name": "御咏鸣神刈山祭",
+      "Description": "将退邪之刃刺入地面，在前方创造清净邪物的结界，基于久岐忍的生命值上限，对其中的敌人持续造成雷元素伤害。\n施放时，若久岐忍的生命值低于或等于50%，结界的持续时间将会延长。",
+      "EnglishDescription": "Stabs an evil-excoriating blade into the ground, creating a field that cleanses the area of all that is foul, dealing continuous Electro DMG to opponents within its AoE based on Shinobu's Max HP.\nIf Shinobu's HP is less than or equal to 50% when this skill is used, the field will last longer.",
+      "Metrics": {
+        "duration-param4": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param4",
+          "Values": [
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2,
+            2
+          ]
+        },
+        "duration-param5": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param5",
+          "Values": [
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5,
+            3.5
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param6",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param7",
+          "Values": [
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kukishinobu.passive1",
+      "CharacterKey": "kukishinobu",
+      "Character": "久岐忍",
+      "Slot": "passive1",
+      "Name": "破笼之志",
+      "Description": "久岐忍的生命值不高于50%时，治疗加成提升15%。",
+      "EnglishDescription": "When Shinobu's HP is not higher than 50%, her Healing Bonus is increased by 15%.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kukishinobu.passive2",
+      "CharacterKey": "kukishinobu",
+      "Character": "久岐忍",
+      "Slot": "passive2",
+      "Name": "安心之所",
+      "Description": "基于久岐忍的元素精通，越祓雷草之轮获得以下提升：\n·治疗量提升值：元素精通的75%；\n·伤害提升值：元素精通的25%。",
+      "EnglishDescription": "Sanctifying Ring's abilities will be boosted based on Shinobu's Elemental Mastery:\n·Healing amount will be increased by 75% of Elemental Mastery.\n·DMG dealt is increased by 25% of Elemental Mastery.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kukishinobu.passive3",
+      "CharacterKey": "kukishinobu",
+      "Character": "久岐忍",
+      "Slot": "passive3",
+      "Name": "久时的祝祷",
+      "Description": "在稻妻执行时长为20小时的探索派遣任务时，获得的奖励增加25%。",
+      "EnglishDescription": "Gains 25% more rewards when dispatched on an Inazuma Expedition for 20 hours.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kukishinobu.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "sangonomiyakokomi.a",
+      "CharacterKey": "sangonomiyakokomi",
+      "Character": "珊瑚宫心海",
+      "Slot": "a",
+      "Name": "水有常形",
+      "Description": "普通攻击\n以水元素幻造成的游鱼进行至多三段的攻击，造成水元素伤害。\n\n重击\n消耗一定体力，短暂咏唱后，造成水元素范围伤害。\n\n下落攻击\n凝聚水元素的力量，从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成水元素范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 3 consecutive attacks that take the form of swimming fish, dealing Hydro DMG.\n\nCharged Attack\nConsumes a certain amount of Stamina to deal AoE Hydro DMG after a short casting time.\n\nPlunging Attack\nGathering the might of Hydro, Kokomi plunges towards the ground from mid-air, damaging all opponents in her path. Deals AoE Hydro DMG upon impact with the ground.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "sangonomiyakokomi.e",
+      "CharacterKey": "sangonomiyakokomi",
+      "Character": "珊瑚宫心海",
+      "Slot": "e",
+      "Name": "海月之誓",
+      "Description": "召唤能够治愈同伴的幻造水之生命「化海月」。\n施放的瞬间，为珊瑚宫心海施加潮湿状态。\n\n化海月\n每隔一段时间，对周围的敌人造成水元素伤害，并为周围的当前场上角色恢复生命值，回复量受益于珊瑚宫心海的生命值上限。",
+      "EnglishDescription": "Summons a \"Bake-Kurage\" created from water that can heal her allies.\nUsing this skill will apply the Wet status to Sangonomiya Kokomi.\n\nBake-Kurage\nDeals Hydro DMG to surrounding opponents and heals nearby active characters at fixed intervals. This healing is based on Kokomi's Max HP.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param4",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param5",
+          "Values": [
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "sangonomiyakokomi.q",
+      "CharacterKey": "sangonomiyakokomi",
+      "Character": "珊瑚宫心海",
+      "Slot": "q",
+      "Name": "海人化羽",
+      "Description": "请降海祇的力量，对周围的敌人造成水元素伤害，并披上珊瑚宫之水汇聚而成的「仪来羽衣」。\n\n仪来羽衣\n·增加珊瑚宫心海的普通攻击，重击以及元素战技的「化海月」造成的伤害，增加值基于珊瑚宫心海的生命值上限；\n·普通攻击和重击命中敌人时，为队伍中附近的所有角色恢复生命值，回复量受益于珊瑚宫心海的生命值上限；\n·提升珊瑚宫心海的抗打断能力，并使她能在水面上移动。\n\n效果将在珊瑚宫心海退场时解除。",
+      "EnglishDescription": "Summons the might of Watatsumi, dealing Hydro DMG to surrounding opponents, before robing Kokomi in a Ceremonial Garment made from the flowing waters of Sangonomiya.\n\nCeremonial Garment\n·Sangonomiya Kokomi's Normal Attack, Charged Attack and Bake-Kurage DMG are increased based on her Max HP.\n·When her Normal and Charged Attacks hit opponents, Kokomi will restore HP for all nearby party members, and the amount restored is based on her Max HP.\n·Increases Sangonomiya Kokomi's resistance to interruption and allows her to walk on the water's surface.\n\nThese effects will be cleared once Sangonomiya Kokomi leaves the field.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param6",
+          "Values": [
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param7",
+          "Values": [
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18,
+            18
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param8",
+          "Values": [
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70,
+            70
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "sangonomiyakokomi.passive1",
+      "CharacterKey": "sangonomiyakokomi",
+      "Character": "珊瑚宫心海",
+      "Slot": "passive1",
+      "Name": "匣中玉栉",
+      "Description": "施放海人化羽时，若场上有珊瑚宫心海自己的化海月，则重置化海月的存在时间。",
+      "EnglishDescription": "If Sangonomiya Kokomi's own Bake-Kurage is on the field when she uses Nereid's Ascension, the Bake-Kurage's duration will be refreshed.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "sangonomiyakokomi.passive2",
+      "CharacterKey": "sangonomiyakokomi",
+      "Character": "珊瑚宫心海",
+      "Slot": "passive2",
+      "Name": "真珠御呗",
+      "Description": "处于海人化羽的仪来羽衣状态下时，珊瑚宫心海的普通攻击与重击基于生命值上限造成的伤害获得额外提升，提升程度相当于她的治疗加成的15%。",
+      "EnglishDescription": "While donning the Ceremonial Garment created by Nereid's Ascension, the Normal and Charged Attack DMG Bonus Sangonomiya Kokomi gains based on her Max HP will receive a further increase based on 15% of her Healing Bonus.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "sangonomiyakokomi.passive3",
+      "CharacterKey": "sangonomiyakokomi",
+      "Character": "珊瑚宫心海",
+      "Slot": "passive3",
+      "Name": "海祇姬君",
+      "Description": "队伍中自己的角色游泳消耗的体力降低20%。\n无法与效果完全相同的固有天赋叠加。",
+      "EnglishDescription": "Decreases swimming Stamina consumption for your own party members by 20%.\nNot stackable with Passive Talents that provide the exact same effects.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "sangonomiyakokomi.passive4",
+      "CharacterKey": "sangonomiyakokomi",
+      "Character": "珊瑚宫心海",
+      "Slot": "passive4",
+      "Name": "庙算无遗",
+      "Description": "珊瑚宫心海的治疗加成提升25%，暴击率降低100%。",
+      "EnglishDescription": "Sangonomiya Kokomi has a 25% Healing Bonus, but a 100% decrease in CRIT Rate.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/sangonomiyakokomi.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kamisatoayaka.a",
+      "CharacterKey": "kamisatoayaka",
+      "Character": "神里绫华",
+      "Slot": "a",
+      "Name": "神里流·倾",
+      "Description": "普通攻击\n进行至多五段的连续剑击。\n\n重击\n消耗一定体力，在居合中放出连续的剑风。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 5 rapid strikes.\n\nCharged Attack\nConsumes a certain amount of Stamina to unleash a flurry of sword ki.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging enemies along the path and dealing AoE DMG upon impact.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kamisatoayaka.e",
+      "CharacterKey": "kamisatoayaka",
+      "Character": "神里绫华",
+      "Slot": "e",
+      "Name": "神里流·冰华",
+      "Description": "唤起盛开的冰之华，击飞身边的敌人并造成冰元素范围伤害。",
+      "EnglishDescription": "Summons blooming ice to launch nearby opponents, dealing AoE Cryo DMG.",
+      "Metrics": {
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param2",
+          "Values": [
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10,
+            10
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kamisatoayaka.q",
+      "CharacterKey": "kamisatoayaka",
+      "Character": "神里绫华",
+      "Slot": "q",
+      "Name": "神里流·霜灭",
+      "Description": "以倾奇之姿汇聚寒霜，放出持续行进的霜见雪关扉。\n\n霜见雪关扉\n·以刀锋般尖锐的霜风持续切割触及的敌人，造成冰元素伤害；\n·持续时间结束时绽放，造成冰元素范围伤害。",
+      "EnglishDescription": "Summons forth a snowstorm with flawless poise, unleashing a Frostflake Seki no To that moves forward continuously.\n\nFrostflake Seki no To\n·A storm of whirling icy winds that slashes repeatedly at every enemy it touches, dealing Cryo DMG.\n·The snowstorm explodes after its duration ends, dealing AoE Cryo DMG.",
+      "Metrics": {
+        "duration": {
+          "Unit": "seconds",
+          "Label": "Duration",
+          "SourceParameter": "param3",
+          "Values": [
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param4",
+          "Values": [
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20,
+            20
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param5",
+          "Values": [
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80,
+            80
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kamisatoayaka.passive1",
+      "CharacterKey": "kamisatoayaka",
+      "Character": "神里绫华",
+      "Slot": "passive1",
+      "Name": "天罪国罪镇词",
+      "Description": "施放神里流·冰华后的6秒内，神里绫华的普通攻击与重击造成的伤害提升30%。",
+      "EnglishDescription": "After using Kamisato Art: Hyouka, Kamisato Ayaka's Normal and Charged Attacks deal 30% increased DMG for 6s.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            6
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kamisatoayaka.passive2",
+      "CharacterKey": "kamisatoayaka",
+      "Character": "神里绫华",
+      "Slot": "passive2",
+      "Name": "寒天宣命祝词",
+      "Description": "神里流·霰步结束时释放的寒冰命中了敌人时，神里绫华将获得如下效果：\n·恢复10点体力；\n·获得18%冰元素伤害加成，持续10秒。",
+      "EnglishDescription": "When the Cryo application at the end of Kamisato Art: Senho hits an opponent, Kamisato Ayaka gains the following effects:\n·Restores 10 Stamina\n·Gains 18% Cryo DMG Bonus for 10s.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            10
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "kamisatoayaka.passive3",
+      "CharacterKey": "kamisatoayaka",
+      "Character": "神里绫华",
+      "Slot": "passive3",
+      "Name": "鉴查心得",
+      "Description": "合成武器突破素材时，有10%概率获得2倍产出。",
+      "EnglishDescription": "When Ayaka crafts Weapon Ascension Materials, she has a 10% chance to receive double the product.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/kamisatoayaka.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "navia.a",
+      "CharacterKey": "navia",
+      "Character": "娜维娅",
+      "Slot": "a",
+      "Name": "直率的辞绝",
+      "Description": "普通攻击\n进行至多四段的连续挥砍。\n\n重击\n持续消耗体力，旋转大剑攻击周围的敌人。\n停止旋转时，会进行一次格外有力的挥砍。\n\n下落攻击\n从空中下坠冲击地面，攻击下落路径上的敌人，并在落地时造成范围伤害。",
+      "EnglishDescription": "Normal Attack\nPerforms up to 4 consecutive strikes.\n\nCharged Attack\nDrains Stamina over time to perform continuous spinning attacks against all nearby opponents.\nAt the end of the sequence, performs a more powerful slash.\n\nPlunging Attack\nPlunges from mid-air to strike the ground below, damaging opponents along the path and dealing AoE DMG upon impact.",
+      "Metrics": {
+        "max-duration": {
+          "Unit": "seconds",
+          "Label": "Max Duration",
+          "SourceParameter": "param8",
+          "Values": [
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5,
+            5
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "navia.e",
+      "CharacterKey": "navia",
+      "Character": "娜维娅",
+      "Slot": "e",
+      "Name": "典仪式晶火",
+      "Description": "队伍中的角色获取结晶反应产生的晶片或触发月结晶反应时，将为娜维娅积攒1枚「裂晶弹片」，至多积攒6枚「裂晶弹片」，每次触发都会刷新已有的「裂晶弹片」持续时间。通过月结晶反应的方式，每1秒至多为娜维娅积攒1枚「裂晶弹片」。\n施放时，娜维娅将消耗所有的「裂晶弹片」，展开优雅而致命的铳柄伞，打出多枚能够穿透敌人的「玫瑰晶弹」，对命中的敌人造成岩元素伤害。\n消耗0/1/2/3枚及以上的「裂晶弹片」时，将分别打出5/7/9/11枚「玫瑰晶弹」。命中同一个敌人的「玫瑰晶弹」越多，对这名敌人造成的伤害越高；11枚「玫瑰晶弹」全部命中时，将造成原本200%的伤害。\n此外，消耗的「裂晶弹片」超过3枚时，超过3枚的每枚「裂晶弹片」都将使本次射击造成的伤害额外提升15%。\n\n长按\n进入瞄准状态，持续获取附近的结晶反应产生的晶片，并在结束长按时打出与点按相同的「玫瑰晶弹」。\n\n初始拥有2次可用次数。\n\n始基力：荒性\n每隔一段时间，娜维娅以铳柄伞进行射击时，将唤出流涌之刃，造成具有荒性的岩元素伤害。",
+      "EnglishDescription": "When a character in the party obtains an Elemental Shard created from the Crystallize reaction, or when they trigger the Lunar-Crystallize reaction, Navia will gain 1 Crystal Shrapnel stack. Navia can have up to 6 stacks of Crystal Shrapnel at once. Each time Crystal Shrapnel gain is triggered, the duration of the Crystal Shrapnel stacks you already have will be reset. Through the Lunar-Crystallize reaction, Navia will gain up to 1 Crystal Shrapnel stack every second.\nWhen she fires, Navia will consume all Crystal Shrapnel stacks and open her elegant yet lethal Gunbrella, firing multiple Rosula Shardshots that can penetrate opponents, dealing Geo DMG to opponents hit.\nWhen 0/1/2/3 or more stacks of Crystal Shrapnel are consumed, 5/7/9/11 Rosula Shardshots will be fired respectively. The more Rosula Shardshots that strike a single opponent, the greater the DMG dealt to them. When all 11 Rosula Shardshots strike, 200% of the original amount of DMG is dealt.\nIn addition, when more than 3 stacks of Crystal Shrapnel are consumed, every stack consumed beyond those 3 will increase the DMG dealt by this Gunbrella attack by an additional 15%.\n\nHold\nEnter Aiming Mode, continually collecting nearby Elemental Shards created by Crystallize reactions. When released, fire Rosula Shardshots with the same effect as when the skill is Tapped.\n\nTwo initial charges.\n\nArkhe: Ousia\nPeriodically, when Navia fires her Gunbrella, a Surging Blade will be summoned, dealing Ousia-aligned Geo DMG.",
+      "Metrics": {
+        "crystal-shrapnel-duration": {
+          "Unit": "seconds",
+          "Label": "Crystal Shrapnel Duration",
+          "SourceParameter": "param3",
+          "Values": [
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300
+          ]
+        },
+        "surging-blade-interval": {
+          "Unit": "seconds",
+          "Label": "Surging Blade Interval",
+          "SourceParameter": "param6",
+          "Values": [
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7,
+            7
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param4",
+          "Values": [
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "navia.q",
+      "CharacterKey": "navia",
+      "Character": "娜维娅",
+      "Slot": "q",
+      "Name": "如霰澄天的鸣礼",
+      "Description": "以刺玫会会长之令，召唤华丽的「金花礼炮」，猛烈炮击前方的敌人，造成岩元素范围伤害，并在接下来的一段时间内持续进行「支援炮击」，间歇性对附近的敌人造成岩元素伤害。\n炮击命中敌人时，将为娜维娅积攒1枚「裂晶弹片」，此效果每2.4秒至多触发一次。",
+      "EnglishDescription": "On the orders of the President of the Spina di Rosula, call for a magnificent Rosula Dorata Salute. Unleashes a massive cannon bombardment on opponents in front of her, dealing AoE Geo DMG and providing Cannon Fire Support for a duration afterward, periodically dealing Geo DMG to nearby opponents.\nWhen cannon attacks hit opponents, Navia will gain 1 stack of Crystal Shrapnel. This effect can be triggered up to once every 2.4s.",
+      "Metrics": {
+        "cannon-fire-support-duration": {
+          "Unit": "seconds",
+          "Label": "Cannon Fire Support Duration",
+          "SourceParameter": "param3",
+          "Values": [
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12,
+            12
+          ]
+        },
+        "cd": {
+          "Unit": "seconds",
+          "Label": "CD",
+          "SourceParameter": "param4",
+          "Values": [
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15,
+            15
+          ]
+        },
+        "energy-cost": {
+          "Unit": "energy",
+          "Label": "Energy Cost",
+          "SourceParameter": "param5",
+          "Values": [
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60,
+            60
+          ]
+        },
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            2.4
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "navia.passive1",
+      "CharacterKey": "navia",
+      "Character": "娜维娅",
+      "Slot": "passive1",
+      "Name": "不明流通渠道",
+      "Description": "施放典仪式晶火后的4秒内，娜维娅的普通攻击、重击与下落攻击造成的伤害转为无法被附魔覆盖的岩元素伤害，且娜维娅的普通攻击、重击与下落攻击造成的伤害提升40%。",
+      "EnglishDescription": "For 4s after using Ceremonial Crystalshot, the DMG dealt by Navia's Normal Attacks, Charged Attacks, and Plunging Attacks will be converted into Geo DMG which cannot be overridden by other Elemental infusions, and the DMG dealt by Navia's Normal Attacks, Charged Attacks, and Plunging Attacks will be increased by 40%.",
+      "Metrics": {
+        "description-duration": {
+          "Unit": "seconds",
+          "Label": "Single duration stated in description",
+          "SourceParameter": "description",
+          "Values": [
+            4
+          ]
+        }
+      },
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "navia.passive2",
+      "CharacterKey": "navia",
+      "Character": "娜维娅",
+      "Slot": "passive2",
+      "Name": "互助关系网",
+      "Description": "队伍中每存在一位火元素/雷元素/冰元素/水元素角色，娜维娅的攻击力提升20%，此效果至多叠加2层。",
+      "EnglishDescription": "For each Pyro/Electro/Cryo/Hydro party member, Navia gains 20% increased ATK. This effect can stack up to 2 times.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    },
+    {
+      "Id": "navia.passive3",
+      "CharacterKey": "navia",
+      "Character": "娜维娅",
+      "Slot": "passive3",
+      "Name": "流程细致的交易",
+      "Description": "在枫丹执行时长为20小时的探索派遣任务时，获得的奖励增加25%。",
+      "EnglishDescription": "Gains 25% more rewards when dispatched on a Fontaine Expedition for 20 hours.",
+      "Metrics": {},
+      "SourceUrl": "https://github.com/theBowja/genshin-db/blob/8b15995fa220c88a4d0d7ffe1e21b041d0b32588/src/data/English/talents/navia.json",
+      "Revision": "8b15995fa220c88a4d0d7ffe1e21b041d0b32588"
+    }
+  ]
+}

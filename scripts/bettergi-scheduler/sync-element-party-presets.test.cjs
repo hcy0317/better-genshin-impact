@@ -11,6 +11,30 @@ test('refresh scripts cannot be installed without a compatible published runtime
   assert.throws(() => assertRefreshRuntime(root, root), /Publish and install/);
 });
 
+test('a changed unified flow source invalidates an older matching publish output', () => {
+  const source = fs.mkdtempSync(path.join(os.tmpdir(), 'bettergi-flow-gate-'));
+  const installed = path.join(source, 'installed');
+  const published = path.join(source, 'bin/x64/Release/net8.0-windows10.0.22621.0/publish/win-x64');
+  const oldFiles = ['GuardianSkillSwitchPolicy.cs', 'AutoFightTask.cs', 'AutoFightJsonTask.cs',
+    'AutoFightSeek.cs', 'Script/CombatCommand.cs', 'Script/CombatScriptExecutor.cs', 'Model/Avatar.cs'];
+  for (const relative of oldFiles) {
+    const file = path.join(source, 'GameTask/AutoFight', relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '// source fixture');
+    fs.utimesSync(file, new Date('2000-01-01'), new Date('2000-01-01'));
+  }
+  for (const directory of [installed, published]) {
+    fs.mkdirSync(directory, { recursive: true });
+    const executable = path.join(directory, 'BetterGI.exe');
+    fs.writeFileSync(executable, 'matching older executable');
+    fs.utimesSync(executable, new Date('2001-01-01'), new Date('2001-01-01'));
+  }
+  const flow = path.join(source, 'GameTask/AutoFight/Script/Flow/CombatFlowExecution.cs');
+  fs.mkdirSync(path.dirname(flow), { recursive: true });
+  fs.writeFileSync(flow, '// a newer implementation');
+  assert.throws(() => assertRefreshRuntime(installed, source), /Publish and install/);
+});
+
 test('nine presets update water, make both utility parties double-anemo and preserve unrelated settings', () => {
   const group = { config: { taskOrder: ['b', 'a'] }, projects: [{ name: '配置水', folderName: 'AutoSwitchRoles', jsScriptSettingsObject: { switchPartyName: '水', option: 'unchanged', position1: '钟离', position2: '珊瑚宫心海', position3: '那维莱特', position4: '枫原万叶' } }] };
   const water = { ...group.projects[0].jsScriptSettingsObject, position2: '芙宁娜', position4: '琴' };

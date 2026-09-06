@@ -544,12 +544,22 @@ public class Avatar
     /// <summary>
     /// 使用元素战技 E
     /// </summary>
-    public void UseSkill(bool hold = false, bool observeCooldown = true)
+    public void UseSkill(bool hold = false, bool observeCooldown = true, Func<bool>? tryBeginInput = null)
     {
+        var skillReadyBeforeCast = IsSkillReady();
+        Ct.ThrowIfCancellationRequested();
+        if (tryBeginInput != null && (!skillReadyBeforeCast || !tryBeginInput())) return;
         if (AvatarSpecialAction.ExecuteSpecializedAction(this, "UseSkill", Name, new ActionArgs(Hold: hold)))
         {
             LastSkillTime = DateTime.UtcNow;
-            QueueSkillCooldownObservation();
+            if (observeCooldown)
+            {
+                Sleep(200, Ct);
+                using var confirmation = CaptureToRectArea();
+                var observedCd = ReadSkillCurrentCd(confirmation);
+                if (skillReadyBeforeCast && observedCd > 0) ConfirmSkillUsed(observedCd);
+            }
+            else QueueSkillCooldownObservation();
             return;
         }
 
@@ -562,8 +572,6 @@ public class Avatar
 
             // 只有动作前技能处于就绪态，动作后又观察到有效 CD，才把普通策略的 E
             // 计入“已确认护盾覆盖”。否则可能把本来就在冷却中的重复 E 错记为新护盾。
-            var skillReadyBeforeCast = IsSkillReady();
-
             if (hold)
             {
                 Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
@@ -648,62 +656,30 @@ public class Avatar
     /// </summary>
     public void UseBurst(bool waitForConfirmation = true)
     {
-        if (!waitForConfirmation)
-        {
-            Ct.ThrowIfCancellationRequested();
-            using (var capture = CaptureToRectArea())
-            {
-                // 单次检查能量/冷却；不就绪或识别不确定均跳过，不轮询等能量。
-                if (!IsActive(capture) || IsBurstReadyByClassify(capture) != BurstReadyState.Ready)
-                    return;
-            }
-            Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
-            // 只有实际发送了 Q 才保留动画时间。
-            Sleep(1700, Ct);
-            return;
-        }
+        // 兼容旧调用签名；不再允许无确认路径把输入发送当成释放成功。
+        TryUseBurst();
+    }
+
+    public BurstCastResult TryUseBurst(double timeoutSeconds = 2.4, int maxSamples = 16, Func<bool>? tryBeginInput = null)
+    {
         using (AvatarRecognition.BeginExclusiveOperation())
         {
-            // CD 中立即返回，其余场景尝试释放
-            using var region1 = CaptureToRectArea();
-            if (IsBurstReadyByClassify(region1) != BurstReadyState.Ready)
-            {
-                // Logger.LogInformation("Q在CD，跳过");
-                return;
-            }
-
-            for (var i = 0; i < 10; i++)
-            {
-                if (Ct is { IsCancellationRequested: true })
+            return BurstCastProtocol.TryCast(() =>
                 {
-                    return;
-                }
-
-                // Logger.LogInformation("释放Q");
-                Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
-                Sleep(200, Ct);
-
-                using var region = CaptureToRectArea();
-                ThrowWhenDefeated(region, Ct);
-
-                if (!PartyAvatarSideIndexHelper.HasAnyIndexRect(region))
-                {
-                    // 找不到角色编号块意味者技能释放成功
-                    Sleep(1500, Ct);
-                    return;
-                }
-                else
-                {
-                    // 找到编号块判断是否进入了CD，四星角色没有大招动画
-                    if (IsBurstReadyByClassify(region) != BurstReadyState.Ready)
-                    {
-                        // Logger.LogInformation("释放Q后检查到CD");
-                        Sleep(1500, Ct);
-                        return;
-                    }
-                }
-            }
+                    using var region = CaptureToRectArea();
+                    ThrowWhenDefeated(region, Ct);
+                    return IsActive(region) ? ObserveBurst(region) : default;
+                }, () => Simulation.SendInput.SimulateAction(GIActions.ElementalBurst),
+                milliseconds => Sleep(milliseconds, Ct), Ct, timeoutSeconds: timeoutSeconds, maxSamples: maxSamples,
+                tryBeginInput: tryBeginInput);
         }
+    }
+
+    internal static BurstObservation ObserveBurst(ImageRegion imageRegion)
+    {
+        using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
+        var top = QBurstClassifierLazy.Value.Predictor.Classify(qRa.CacheImage).GetTopClass();
+        return BurstObservation.FromClassifier(top.Name.Name, top.Confidence);
     }
 
     private static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
@@ -763,8 +739,8 @@ public class Avatar
         }
 
         Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyDown);
-        Sleep(ms); // 冲刺不能被cts取消
-        Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyUp);
+        try { Sleep(ms, Ct); }
+        finally { Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyUp); }
     }
 
     public void Walk(string key, int ms)
@@ -798,8 +774,8 @@ public class Avatar
         }
 
         Simulation.SendInput.Keyboard.KeyDown(vk);
-        Sleep(ms); // 行走不能被cts取消
-        Simulation.SendInput.Keyboard.KeyUp(vk);
+        try { Sleep(ms, Ct); }
+        finally { Simulation.SendInput.Keyboard.KeyUp(vk); }
     }
 
     /// <summary>
@@ -818,7 +794,7 @@ public class Avatar
     /// <param name="ms"></param>
     public void Wait(int ms)
     {
-        Sleep(ms); // 由于存在宏操作，等待不应被cts取消
+        Sleep(ms, Ct); // 增强执行链按预算分片；宏持有键由输入所有者负责 finally 释放。
     }
     
     /// <summary>
@@ -874,8 +850,14 @@ public class Avatar
     {
         Ct.ThrowIfCancellationRequested();
         using var capture = CaptureToRectArea();
+        return IsSkillReadyFromCurrentFrame(capture);
+    }
+
+    internal bool IsSkillReadyFromCurrentFrame(ImageRegion capture, double? observedCooldown = null)
+    {
+        Ct.ThrowIfCancellationRequested();
         if (!IsActive(capture)) return false;
-        var cooldown = ReadSkillCurrentCd(capture);
+        var cooldown = observedCooldown ?? ReadSkillCurrentCd(capture);
         if (cooldown > 0)
         {
             ESkillCdTracker.Record(Name, cooldown);
@@ -963,8 +945,8 @@ public class Avatar
         if (AvatarSpecialAction.ExecuteSpecializedAction(this, "Charge", Name, new ActionArgs(Ms: ms))) return;
 
         Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
-        Sleep(ms);
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
+        try { Sleep(ms, Ct); }
+        finally { Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp); }
     }
 
     public void MouseDown(string key = "left")
