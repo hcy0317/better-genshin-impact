@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.AutoFight.SkillData;
 using Microsoft.Extensions.Time.Testing;
@@ -68,7 +69,7 @@ public class NativeCombatFlowRunnerTests
     }
 
     [Fact]
-    public async Task EnhancedJsonFailureReturnsToTheHostAndClosingTheRunnerClosesItsBattle()
+    public async Task FailedPassesAllowHostFinishDetectionBeforeStoppingWithoutReviveRetry()
     {
         var strategy = new JsonCombatStrategy
         {
@@ -78,16 +79,93 @@ public class NativeCombatFlowRunnerTests
         var game = new FailedSkillGame();
         using var runner = NativeCombatFlowRunner.Create(strategy, game, clock: new FakeTimeProvider());
         Assert.NotNull(runner);
-        await Assert.ThrowsAsync<CombatFlowRecoveryException>(async () =>
+        var battleId = runner.Context.BattleId;
+        var failedPasses = 0;
+        for (var i = 0; i < 30 && failedPasses < 3; i++)
         {
-            for (var i = 0; i < 10; i++) await runner.StepAsync(default);
-        });
+            var step = await runner.StepAsync(default);
+            if (!step.RoundCompleted) continue;
+            Assert.Equal(CombatFlowResult.Failed, step.Result);
+            failedPasses++;
+            Assert.True(runner.TakeFinishCheckRequest());
+            Assert.False(runner.TakeFinishCheckRequest());
+            Assert.Equal(battleId, runner.Context.BattleId);
+            Assert.True(runner.Context.IsOpen);
+        }
+        Assert.Equal(3, failedPasses);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () => await runner.StepAsync(default));
+        Assert.IsNotAssignableFrom<BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception.RetryException>(error);
+        Assert.Contains("未确认结束", error.Message);
         Assert.Null(runner.Context.Find("开场完成"));
-        Assert.Equal(new[] { Method.Skill }, game.Actions);
+        Assert.Equal(new[] { Method.Skill, Method.Skill, Method.Skill }, game.Actions);
         runner.Dispose();
         Assert.False(runner.Context.IsOpen);
         Assert.True(game.Closed);
         await Assert.ThrowsAsync<ObjectDisposedException>(async () => await runner.StepAsync(default));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task IndependentHostDetectorCanEndBattleButPolicyFailureCannotReportVictory(bool detectorConfirmsEnd)
+    {
+        using var session = new CancellationTokenSource();
+        using var runner = NativeCombatFlowRunner.Create(new JsonCombatStrategy
+        {
+            Actions = [new() { Character = "琴", Action = "e(required,record=已施放)" }]
+        }, new FailedSkillGame(), clock: new FakeTimeProvider())!;
+        var firstFailure = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var detectorObserved = false;
+        var host = NativeCombatTaskGroup.RunAsync(session, default,
+            combat: async () =>
+            {
+                while (true)
+                {
+                    var step = await runner.StepAsync(session.Token);
+                    if (step.RoundCompleted) firstFailure.TrySetResult();
+                }
+            },
+            detectEnd: async () =>
+            {
+                await firstFailure.Task.WaitAsync(session.Token);
+                detectorObserved = true;
+                if (detectorConfirmsEnd) return;
+                await Task.Delay(Timeout.Infinite, session.Token);
+            });
+
+        if (detectorConfirmsEnd) await host.WaitAsync(TimeSpan.FromSeconds(10));
+        else await Assert.ThrowsAsync<InvalidOperationException>(() => host.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(detectorObserved);
+        Assert.True(session.IsCancellationRequested);
+        Assert.Null(runner.Context.Find("已施放"));
+    }
+
+    [Fact]
+    public async Task SuccessfulPassClearsFailureStreakWithoutReplacingBattleRecords()
+    {
+        var game = new FailedSkillGame();
+        using var runner = NativeCombatFlowRunner.Create(new JsonCombatStrategy
+        {
+            Actions = [new() { Character = "琴", Action = "e(required,record=成功施放)" }]
+        }, game, clock: new FakeTimeProvider())!;
+        async Task<CombatFlowResult> Pass()
+        {
+            for (var i = 0; i < 10; i++)
+            {
+                var step = await runner.StepAsync(default);
+                if (step.RoundCompleted) return step.Result;
+            }
+            throw new Exception("遍历没有完成");
+        }
+        Assert.Equal(CombatFlowResult.Failed, await Pass());
+        game.Result = CombatFlowResult.Succeeded;
+        Assert.Equal(CombatFlowResult.Succeeded, await Pass());
+        var record = runner.Context.Find("成功施放");
+        Assert.NotNull(record);
+        game.Result = CombatFlowResult.Failed;
+        for (var i = 0; i < 3; i++) Assert.Equal(CombatFlowResult.Failed, await Pass());
+        Assert.Same(record, runner.Context.Find("成功施放"));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await runner.StepAsync(default));
     }
 
     private sealed class FailedSkillGame : ICombatFlowGame, IDisposable
@@ -95,7 +173,7 @@ public class NativeCombatFlowRunnerTests
         public List<Method> Actions { get; } = [];
         public bool Closed { get; private set; }
         public bool ThrowOnRelease { get; init; }
-        public CombatFlowResult Result { get; init; } = CombatFlowResult.Failed;
+        public CombatFlowResult Result { get; set; } = CombatFlowResult.Failed;
         public void ReleaseHeldInput() { if (ThrowOnRelease) throw new InvalidOperationException("模拟释放失败"); }
         public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
         {

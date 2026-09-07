@@ -115,6 +115,21 @@ public class TaskRunnerTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WrappedRecoveryFailureNeverStartsAnotherRecoveryBudget(bool aggregate)
+    {
+        var failure = new TaskFailureRecoveryException(new Exception("task"), new TimeoutException("recovery"));
+        Exception wrapped = aggregate ? new AggregateException(failure) : new System.Reflection.TargetInvocationException(failure);
+        var retried = false;
+        var actual = await Assert.ThrowsAsync(wrapped.GetType(), () => TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+            wrapped, () => { retried = true; return Task.CompletedTask; }));
+        Assert.Same(wrapped, actual);
+        Assert.False(retried);
+        Assert.Same(wrapped, TaskRunnerFailurePolicy.GetTerminationException(wrapped, false, false));
+    }
+
+    [Theory]
     [MemberData(nameof(NormalTerminationExceptions))]
     public async Task StateRecoveryNeverConvertsTerminationIntoManagedFailure(Exception termination)
     {

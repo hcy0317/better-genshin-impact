@@ -27,6 +27,7 @@ using BetterGenshinImpact.GameTask.AutoTrackPath;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Job;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.Service.Notification.Model.Enum;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 using static Vanara.PInvoke.Kernel32;
@@ -192,17 +193,14 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 if (!string.IsNullOrEmpty(_taskParam.DomainName))
                 {
                     var msg = e.Message;
-                    if (e is BetterGenshinImpact.GameTask.AutoFight.Script.Flow.CombatFlowRecoveryException)
+                    if (IsDomainReviveRetry(e))
                     {
-                        if (!await TryExitDomainForRetry()) throw;
-                        msg = "自适应战斗需要恢复，已退出秘境后重新准备；不在秘境内直接传送";
-                    }
-                    else if (IsDomainReviveRetry(e))
-                    {
-                        var recovered = await TryRecoverAfterDomainReviveRetry(_ct, TryExitDomainForRetry, Avatar.RecoverAtStatueOfTheSeven);
-                        msg = recovered
-                            ? "存在角色死亡，退出秘境并前往七天神像复苏后重试..."
-                            : "存在角色死亡，退出秘境失败，跳过七天神像复苏并重试...";
+                        await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(e, async () =>
+                        {
+                            await TryRecoverAfterDomainReviveRetry(_ct, TryExitDomainForRetry, Avatar.RecoverAtStatueOfTheSeven);
+                        }, _ct, Logger, TimeSpan.FromSeconds(80), // 退出最多20秒，后续传送仍受60秒及父剩余预算约束。
+                            (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
+                        msg = "存在角色死亡，已确认退出秘境并完成神像恢复，允许重试";
                     }
                     else if (msg.Contains("复活") || msg.Contains("复苏"))
                     {
@@ -221,7 +219,8 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
 
         await Delay(2000, ct);
-        await Bv.WaitForMainUi(_ct, 30);
+        if (!await Bv.WaitForMainUi(_ct, 30))
+            throw new InvalidOperationException("秘境任务结束后未确认主界面，停止后续背包处理");
         await Delay(2000, ct);
 
         await ArtifactSalvage();
@@ -374,7 +373,8 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 Logger.LogInformation("自动秘境：传送到秘境{Text}", _taskParam.DomainName);
                 await new TpTask(_ct).Tp(domainPosition.X, domainPosition.Y);
                 await Delay(1000, _ct);
-                await Bv.WaitForMainUi(_ct);
+                if (!await Bv.WaitForMainUi(_ct))
+                    throw new InvalidOperationException("传送到秘境后未确认主界面，禁止继续走路或按F");
 
                 var menuFound = false;
                 AutoPickAssets pickAssets;
@@ -453,7 +453,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     {
         if (!string.IsNullOrEmpty(partyName))
         {
-            var b = await new SwitchPartyTask().Start(partyName, _ct);
+            var b = await new SwitchPartyTask().StartForDomain(partyName, _ct);
             await Delay(500, _ct);
             return b;
         }
@@ -633,9 +633,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         );
         if (!teamUiFound)
         {
-            if (_taskParam.AutoSelectPartyByRecommendedElements)
-                throw new PartySetupFailedException("队伍选择界面未出现，无法选择推荐或默认队伍");
-            Logger.LogWarning("队伍选择界面未出现，跳过切换队伍。");
+            throw new PartySetupFailedException("队伍选择界面未出现，不能继续选择队伍或开始挑战");
         }
         else if (_taskParam.AutoSelectPartyByRecommendedElements)
         {
@@ -644,7 +642,7 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             if (recommendedElements.Count == 0)
                 Logger.LogWarning("自动秘境：未识别到推荐元素，回退默认队伍 {Party}", _taskParam.PartyName);
             var switched = await DomainRecommendedParty.SwitchAsync(recommendedElements, _taskParam.PartyName,
-                (names, ct) => new SwitchPartyTask().StartAny(names, ct),
+                (names, ct) => new SwitchPartyTask().StartAnyForDomain(names, ct),
                 async (name, _) =>
                 {
                     Logger.LogInformation("自动秘境：使用默认配置队伍 {Party}", name);
@@ -654,7 +652,8 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         }
         else
         {
-            await SwitchParty(_taskParam.PartyName);
+            if (!await SwitchParty(_taskParam.PartyName))
+                throw new PartySetupFailedException("默认队伍选择未确认，不能开始挑战");
         }
 
         // 点击开始挑战确认并等待“开始挑战”文字消失
@@ -2127,12 +2126,11 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
     private async Task<bool> ExitDomain()
     {
-        Simulation.SendInput.Keyboard.KeyPress(VK.VK_ESCAPE);
-        await Delay(500, _ct);
-        Simulation.SendInput.Keyboard.KeyPress(VK.VK_ESCAPE);
-        await Delay(800, _ct);
-        using var ra = CaptureToRectArea();
-        return Bv.ClickBlackConfirmButton(ra);
+        using var suspendedCombatBudget = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.CombatActionScope.Suspend();
+        using var driver = new NativeUiDriver();
+        await UiRecovery.ExitDomainAsync(driver, _ct, Logger,
+            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
+        return true;
     }
 
     internal static bool IsDomainReviveRetry(RetryException e)
@@ -2152,41 +2150,23 @@ public class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     {
         ArgumentNullException.ThrowIfNull(tryExitDomainForRetryAsync);
         ArgumentNullException.ThrowIfNull(recoverAtStatueAsync);
+        ct.ThrowIfCancellationRequested();
 
         if (!await tryExitDomainForRetryAsync())
         {
-            return false;
+            throw new InvalidOperationException("未确认退出秘境，禁止前往神像或重新进入秘境");
         }
 
+        ct.ThrowIfCancellationRequested();
         await recoverAtStatueAsync(ct);
+        ct.ThrowIfCancellationRequested();
         return true;
     }
 
-    private async Task<bool> TryExitDomainForRetry()
+    private Task<bool> TryExitDomainForRetry()
     {
-        try
-        {
-            Logger.LogWarning("自动秘境：角色在秘境内被击败，先退出秘境再重试");
-            await ExitDomain();
-            await Delay(2000, _ct);
-            using var ra = CaptureToRectArea();
-            var exited = HasExitedDomainReviveState(Bv.IsInDomainIncludingRevivePrompt(ra));
-            if (!exited)
-            {
-                Logger.LogWarning("自动秘境：未能确认退出秘境，跳过七天神像复苏并继续按重试流程处理");
-            }
-
-            return exited;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Logger.LogWarning(ex, "自动秘境：秘境内复苏后退出秘境失败，将继续按重试流程处理");
-            return false;
-        }
+        Logger.LogWarning("自动秘境：先确认退出到秘境外主界面，恢复失败将停止本次任务");
+        return ExitDomain();
     }
 
     public static (bool, int) PressUseResin(ImageRegion ra, string resinName, string logPrefix = "自动秘境")

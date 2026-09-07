@@ -14,6 +14,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Script.Dependence;
+using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 
 namespace BetterGenshinImpact.GameTask.Common.Job
 {
@@ -46,8 +47,6 @@ namespace BetterGenshinImpact.GameTask.Common.Job
 
         public async Task<object> Start(CancellationToken ct)
         {
-            this.ct = ct;
-
             if (this.itemName != null)
             {
                 logger.LogInformation("打开背包并在{grid}寻找{name}……", this.gridScreenName, this.itemName!);
@@ -56,24 +55,51 @@ namespace BetterGenshinImpact.GameTask.Common.Job
             {
                 logger.LogInformation("打开背包并在{grid}寻找{first}等{count}类物品……", this.gridScreenName, this.itemNames!.First(), this.itemNames!.Count());
             }
-            await new ReturnMainUiTask().Start(ct);
-            await AutoArtifactSalvageTask.OpenInventory(this.gridScreenName, input, logger, this.ct);
-
-            using IItemIconRecognizer iconRecognizer = ItemIconRecognizerFactory.Create(this.iconRecognitionMode);
-
-            object result;
-            if (this.itemName != null)
+            try
             {
-                result = await FindOne(iconRecognizer);
+                return await RunWithTimeout<object>(async scanToken =>
+                {
+                    // GridScreen 使用构造时传入的令牌，必须贯穿打开背包、预滚动和每页扫描。
+                    this.ct = scanToken;
+                    await new ReturnMainUiTask().Start(scanToken);
+                    await AutoArtifactSalvageTask.OpenInventory(this.gridScreenName, input, logger, scanToken);
+                    using IItemIconRecognizer iconRecognizer = ItemIconRecognizerFactory.Create(this.iconRecognitionMode);
+                    object result = this.itemName != null
+                        ? await FindOne(iconRecognizer)
+                        : await FindMulti(iconRecognizer);
+                    await new ReturnMainUiTask().Start(scanToken);
+                    return result;
+                }, ct);
             }
-            else
+            catch (TimeoutException exception)
             {
-                result = await FindMulti(iconRecognizer);
+                logger.LogWarning(exception, "背包计数超时：页面={Grid}，材料={Names}；未确认数量保留未知，不继续无限翻页",
+                    this.gridScreenName, this.itemName ?? string.Join("、", this.itemNames!));
+                throw;
             }
+            finally { this.ct = ct; }
+        }
 
-            await new ReturnMainUiTask().Start(ct);
-
-            return result;
+        internal static async Task<T> RunWithTimeout<T>(Func<CancellationToken, Task<T>> scan,
+            CancellationToken ct, TimeSpan? timeout = null)
+        {
+            ct.ThrowIfCancellationRequested();
+            var budget = timeout ?? TimeSpan.FromMinutes(3);
+            using var scanCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            scanCts.CancelAfter(budget);
+            try
+            {
+                // 合作取消后等待当前扫描及其 finally 完成，不能遗留后台滚动/输入任务。
+                var result = await scan(scanCts.Token);
+                ct.ThrowIfCancellationRequested();
+                scanCts.Token.ThrowIfCancellationRequested();
+                return result;
+            }
+            catch (Exception exception) when (!ct.IsCancellationRequested && scanCts.IsCancellationRequested
+                && exception is OperationCanceledException or NormalEndException)
+            {
+                throw new TimeoutException($"背包计数扫描超过 {budget.TotalSeconds:0.###} 秒预算；未确认物品数量保持未知", exception);
+            }
         }
 
         private GridParams CreateGridParams()
@@ -118,6 +144,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                 //开始识别
                 await foreach ((ImageRegion pageRegion, Rect itemRect) in gridScreen)
                 {
+                    ct.ThrowIfCancellationRequested();
                     using ImageRegion itemRegion = pageRegion.DeriveCrop(itemRect);
                     string? predName = RecognizeItemName(itemRegion, iconRecognizer);
                     if (predName == null)
@@ -162,6 +189,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                 }
                 await foreach ((ImageRegion pageRegion, Rect itemRect) in gridScreen)
                 {
+                    ct.ThrowIfCancellationRequested();
                     using ImageRegion itemRegion = pageRegion.DeriveCrop(itemRect);
                     string? predName = RecognizeItemName(itemRegion, iconRecognizer);
                     if (predName == null)

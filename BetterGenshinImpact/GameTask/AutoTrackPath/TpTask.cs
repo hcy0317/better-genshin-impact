@@ -13,6 +13,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Job;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Common.Map.Maps;
 using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -1253,45 +1254,10 @@ public class TpTask
         return isInBigMapUi;
     }
 
-    private async Task CloseBigMapAfterTeleportFailure(bool forceClose = false)
+    private async Task CloseBigMapAfterTeleportFailure()
     {
-        try
-        {
-            var isInBigMapUi = IsInBigMapUi();
-            if (!forceClose && !ShouldCloseBigMapAfterTeleportFailure(isInBigMapUi))
-            {
-                isInBigMapUi = await WaitForBigMapUiAppear(BigMapFailureDetectionTimeoutMs);
-            }
-
-            if (!forceClose && !ShouldCloseBigMapAfterTeleportFailure(isInBigMapUi))
-            {
-                return;
-            }
-
-            Logger.LogWarning("地图操作失败且大地图仍处于打开状态，关闭地图后再重试");
-            Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-
-            var stopwatch = Stopwatch.StartNew();
-            while (stopwatch.ElapsedMilliseconds < BigMapCloseTimeoutMs)
-            {
-                await Delay(BigMapOpenCheckIntervalMs, ct);
-                if (!IsInBigMapUi())
-                {
-                    return;
-                }
-            }
-
-            Logger.LogWarning("Esc 后大地图仍未关闭，尝试返回主界面");
-            await new ReturnMainUiTask().Start(ct);
-        }
-        catch (Exception e) when (IsTaskStopException(e))
-        {
-            throw;
-        }
-        catch (Exception e)
-        {
-            Logger.LogWarning(e, "传送失败后的地图关闭恢复未完成");
-        }
+        Logger.LogWarning("传送失败，必须确认已恢复秘境外主界面才能重试；地图图标消失不代表恢复成功");
+        await new ReturnMainUiTask().Start(ct, requireOverworld: true);
     }
 
 
@@ -1302,53 +1268,20 @@ public class TpTask
 
     public async Task<(double, double)> Tp(double tpX, double tpY, RouteMapContext mapContext, bool force = false)
     {
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(TeleportTimeoutMs);
-        try
-        {
-            return await new TpTask(timeoutCts.Token).TpWithRetries(tpX, tpY, mapContext, force);
-        }
-        catch (OperationCanceledException e) when (!ct.IsCancellationRequested && timeoutCts.IsCancellationRequested)
-        {
-            throw new TimeoutException($"单次传送超过 {TeleportTimeoutMs / 1000} 秒", e);
-        }
+        using var driver = new NativeUiDriver();
+        return await UiRecovery.TeleportAsync(driver,
+            token => new TpTask(token).TpWithRetries(tpX, tpY, mapContext, force), ct, Logger,
+            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
     }
 
-    private async Task<(double, double)> TpWithRetries(double tpX, double tpY, RouteMapContext mapContext, bool force)
+    private Task<(double, double)> TpWithRetries(double tpX, double tpY, RouteMapContext mapContext, bool force)
     {
-        for (var i = 0; i < 3; i++)
-        {
-            try
-            {
-                return await TpOnce(tpX, tpY, mapContext, force);
-            }
-            catch (TeleportPanelNotOpenedException)
-            {
-                await CloseBigMapAfterTeleportFailure(forceClose: true);
-                throw;
-            }
-            catch (TpPointNotActivate e)
-            {
-                // 未激活点位的详情面板会遮挡后续地图操作，重试前先关闭。
-                // 最后一次失败也需要执行清理，避免影响脚本组中的下一个任务。
-                await CloseBigMapAfterTeleportFailure(forceClose: true);
-                // throw; // 不抛出异常，继续重试
-                Logger.LogWarning(e.Message + "  重试");
-            }
-            catch (Exception e) when (IsTaskStopException(e))
-            {
-                throw;
-            }
-            catch (Exception e)
-            {
-                Logger.LogDebug(e, e.Message);
-                Logger.LogWarning("传送异常" + e.Message);
-                await CloseBigMapAfterTeleportFailure();
-                await Delay(300, ct);
-            }
-        }
-
-        throw new InvalidOperationException("传送失败");
+        return UiRecovery.RunWithRecoveryAsync(_ => TpOnce(tpX, tpY, mapContext, force),
+            _ => CloseBigMapAfterTeleportFailure(), ct,
+            canRetry: error => error is not TeleportPanelNotOpenedException,
+            logger: Logger,
+            captureFailure: error => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
+                $"UI root={UiOperation.Current?.RootId} op={UiOperation.Current?.Id} 传送原始失败，恢复前现场"));
     }
 
     /// <summary>

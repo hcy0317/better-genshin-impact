@@ -49,17 +49,26 @@ public class AutoDomainReviveRetryTests
     {
         var recoverCalls = 0;
 
-        var recovered = await AutoDomainTask.TryRecoverAfterDomainReviveRetry(
+        await Assert.ThrowsAsync<InvalidOperationException>(() => AutoDomainTask.TryRecoverAfterDomainReviveRetry(
             CancellationToken.None,
             () => Task.FromResult(false),
             _ =>
             {
                 recoverCalls++;
                 return Task.CompletedTask;
-            });
-
-        Assert.False(recovered);
+            }));
         Assert.Equal(0, recoverCalls);
+    }
+
+    [Fact]
+    public async Task CancellationAfterExitingDomainCannotStartStatueTravel()
+    {
+        using var cts = new CancellationTokenSource();
+        var travelled = false;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => AutoDomainTask.TryRecoverAfterDomainReviveRetry(
+            cts.Token, () => { cts.Cancel(); return Task.FromResult(true); },
+            _ => { travelled = true; return Task.CompletedTask; }));
+        Assert.False(travelled);
     }
 
     [Fact]

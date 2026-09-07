@@ -368,7 +368,8 @@ public sealed partial class CombatFlowExecution : IDisposable
             }
             var action = new CombatFlowAction(command, Context, CanStart,
                 Math.Min(actionDeadline, Context.Now + CombatFlowPolicy.ActionTimeout(command, _program.Timing(command))),
-                command.Method == Method.Skill || command.Method == Method.Burst ? null : MaintenanceIsDue, CanContinue);
+                command.Method == Method.Skill || command.Method == Method.Burst ? null : MaintenanceIsDue, CanContinue,
+                canReuseConfirmedActor: IsAtomic && (command.Method == Method.Wait || command.Method == Method.MoveBy || command.Method == Method.KeyUp));
             if (!action.CanStart)
             {
                 CompleteNode(frame, command, CombatFlowResult.Skipped);

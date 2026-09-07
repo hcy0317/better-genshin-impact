@@ -171,7 +171,7 @@ public class GuardianSkillSwitchPolicyTests
             "AutoStygianOnslaught",
             "AutoStygianOnslaughtTask.cs"));
 
-        Assert.Contains("AvatarSwitchConfirmationPolicy.IsConfirmed", avatarSource,
+        Assert.Contains("AvatarSwitchConfirmationPolicy.TryConfirm", avatarSource,
             StringComparison.Ordinal);
         Assert.Contains("public bool Execute(CombatScenes", commandSource,
             StringComparison.Ordinal);

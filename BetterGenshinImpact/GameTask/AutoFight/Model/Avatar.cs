@@ -33,6 +33,8 @@ using Compunet.YoloSharp;
 using Compunet.YoloSharp.Data;
 using Microsoft.Extensions.DependencyInjection;
 
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
+
 namespace BetterGenshinImpact.GameTask.AutoFight.Model;
 
 /// <summary>
@@ -142,6 +144,8 @@ public class Avatar
     {
         if (Bv.IsInRevivePrompt(region))
         {
+            using var recoveryScope = CombatActionScope.Suspend();
+            ct.ThrowIfCancellationRequested();
             if (Bv.IsInDomainIncludingRevivePrompt(region))
             {
                 Logger.LogWarning("检测到秘境内复苏界面，跳过七天神像传送并交由自动秘境重试");
@@ -156,6 +160,8 @@ public class Avatar
         }
         else if(AutoFightParam.SwimmingEnabled && AutoFightTask.FightStatusFlag && SwimmingConfirm(region))
         {
+            using var recoveryScope = CombatActionScope.Suspend();
+            ct.ThrowIfCancellationRequested();
             if (AutoFightTask.FightWaypoint is not null)
             {
                 // 二次确认：延迟 800ms 后重新截屏，避免同帧误判
@@ -190,6 +196,14 @@ public class Avatar
                     Simulation.SendInput.Mouse.RightButtonDown();
                     pathExecutor.MoveTo(AutoFightTask.FightWaypoint).GetAwaiter().GetResult();
                     Logger.LogInformation("游泳检测：移动结束");
+                }
+                catch (NormalEndException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (NormalEndException) when (cts.IsCancellationRequested)
+                {
+                    Logger.LogWarning("游泳检测：回到战斗地点超时");
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
@@ -262,6 +276,8 @@ public class Avatar
 
     public static async Task RecoverAtStatueOfTheSeven(CancellationToken ct)
     {
+        using var recoveryScope = CombatActionScope.Suspend();
+        ct.ThrowIfCancellationRequested();
         var tpTask = new TpTask(ct);
         await tpTask.TpToStatueOfTheSeven();
         Logger.LogInformation("血量恢复完成。【设置】-【七天神像设置】可以修改回血相关配置。");
@@ -285,54 +301,26 @@ public class Avatar
     public bool TrySwitch(int tryTimes = 4)
     {
         var context = new AvatarActiveCheckContext();
-        var consecutiveTargetFrames = 0;
-        for (var i = 0; i < tryTimes; i++)
+        var confirmed = AvatarSwitchConfirmationPolicy.TryConfirm(Index, tryTimes, () =>
         {
-            if (Ct is { IsCancellationRequested: true })
-            {
-                return false;
-            }
-
             using var region = CaptureToRectArea();
             ThrowWhenDefeated(region, Ct);
-            var currentIndex = CombatScenes.GetActiveAvatarIndex(region, context);
-            consecutiveTargetFrames = AvatarSwitchConfirmationPolicy.Observe(
-                consecutiveTargetFrames,
-                currentIndex,
-                Index);
-            if (AvatarSwitchConfirmationPolicy.IsConfirmed(consecutiveTargetFrames))
+            return CombatScenes.GetActiveAvatarIndex(region, context);
+        }, index =>
+        {
+            CombatActionScope.Current?.Check();
+            Ct.ThrowIfCancellationRequested();
+            SimulateSwitchAction(index);
+        }, milliseconds => Sleep(milliseconds, Ct), Ct, (i, currentIndex) =>
+        {
+            if (i == tryTimes - 1 && tryTimes == 4)
             {
-                return true;
+                Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", currentIndex, Index);
             }
-
-            if (currentIndex != Index)
-            {
-                if (i == tryTimes - 1 && tryTimes == 4) //默认状态，没有特意设置重试次数的情况下，最后一次重试失败才输出日志
-                {
-                    Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", currentIndex, Index);
-                }
-                else
-                {
-                    // 特意需要脱困情形下，会设置重试次数激活脱困检测，第10次重试时(2.5秒切换失败，超过角色的大招动画时间)，如在盾奶位功能中次数会到第十次。
-                    if (i == 9 && AutoFightTask.FightStatusFlag)
-                    {
-                        PerformUnstuckAction(Ct);
-                    }
-                }
-
-                SimulateSwitchAction(Index);
-                Sleep(250, Ct);
-                continue;
-            }
-
-            // 首帧只证明“可能已切到目标”；短暂等待第二个独立截图，
-            // 避免单帧颜色误判让后续技能在错误角色上执行。
-            Sleep(100, Ct);
-        }
-        
-        Logger.LogWarning("切换角色失败:{Name}", Name);
-
-        return false;
+            else if (i == 9 && AutoFightTask.FightStatusFlag) PerformUnstuckAction(Ct);
+        });
+        if (!confirmed && !Ct.IsCancellationRequested) Logger.LogWarning("切换角色失败:{Name}", Name);
+        return confirmed;
     }
 
     internal void QueueSkillCooldownObservation()
