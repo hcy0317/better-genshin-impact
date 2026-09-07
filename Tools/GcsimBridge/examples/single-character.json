@@ -1,0 +1,27 @@
+{
+  "evaluation": {
+    "schemaVersion": "1",
+    "engineRevision": "1de5a42438791757a7178b16e59ec97dc1690d61",
+    "config": "options duration=60; target lvl=90 resist=0.1; amber char lvl=90/90 cons=0 talent=6,6,6; amber add weapon=\"favoniuswarbow\" refine=1 lvl=90/90; active amber; while 1 { amber skill; amber attack:3; }",
+    "seeds": [17, 29],
+    "inventory": {
+      "uid": "demo-not-an-account",
+      "scanSessionId": "synthetic-example",
+      "catalogVersion": "manual-fixture-v1",
+      "snapshotDigest": "synthetic-example-only"
+    },
+    "equipment": {
+      "amber": [
+        {"scanIndex": 0, "slotKey": "flower", "setKey": "EmblemOfSeveredFate", "mainStatKey": "hp", "mainStatValue": 4780, "substats": [{"key": "critDMG_", "value": 21}]},
+        {"scanIndex": 1, "slotKey": "plume", "setKey": "EmblemOfSeveredFate", "mainStatKey": "atk", "mainStatValue": 311, "substats": []},
+        {"scanIndex": 2, "slotKey": "sands", "setKey": "EmblemOfSeveredFate", "mainStatKey": "atk_", "mainStatValue": 46.6, "substats": []},
+        {"scanIndex": 3, "slotKey": "goblet", "setKey": "EmblemOfSeveredFate", "mainStatKey": "pyro_dmg_", "mainStatValue": 46.6, "substats": []},
+        {"scanIndex": 4, "slotKey": "circlet", "setKey": "EmblemOfSeveredFate", "mainStatKey": "critRate_", "mainStatValue": 31.1, "substats": []}
+      ]
+    },
+    "rounds": [{"id": "scored-1", "startFrame": 1200, "endFrame": 2400}, {"id": "scored-2", "startFrame": 2400, "endFrame": 3600}],
+    "constraints": [{"id": "required-skill", "kind": "min_actions", "character": "amber", "action": "skill", "threshold": 1}],
+    "buffs": [{"id": "manual-food", "kind": "stat", "target": "amber", "stat": "atk", "value": 100, "unit": "flat", "anchor": "start", "durationFrames": -1, "relationship": "additional", "source": "synthetic demonstration, not an observed game buff"}]
+  },
+  "limits": {"wallTimeMs": 30000, "memoryMiB": 512, "outputKiB": 16384}
+}
