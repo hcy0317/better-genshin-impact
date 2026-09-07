@@ -13,7 +13,7 @@ type Improvement struct {
 
 // A paired 95% Student interval on the independent batch, conditional on the
 // declared scenarios/seeds. Never a universal random guarantee or global optimum.
-func compareImprovement(mode string, weights map[string]float64, candidate, baseline *Plan, n int) *Improvement {
+func CompareImprovement(mode string, weights map[string]float64, candidate, baseline *Plan, n int) *Improvement {
 	result := &Improvement{State: "uncertain", Samples: n, Method: "paired_student_95_actual_weighted_dps; finite_batch_only"}
 	if mode != "balanced" {
 		result.Method = "independent_role_ranking; confidence_not_established"

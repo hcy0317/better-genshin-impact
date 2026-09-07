@@ -185,3 +185,33 @@ func TestNoisyImprovementIsNotReportedAsConfirmed(t *testing.T) {
 		t.Fatalf("noisy gain must be explicit: %+v", result)
 	}
 }
+
+func TestGlobalProtectionAlsoFreezesASelectedCharacter(t *testing.T) {
+	r := fixtureRequest()
+	r.ProtectedCharacters = []string{"a"}
+	r.Characters[0].Current = []int{0, 2, 4, 6, 8}
+	for i := range r.Items {
+		if i%2 == 0 {
+			r.Items[i].Location = "a"
+		}
+	}
+	for i := 0; i < 5; i++ {
+		copy := r.Items[i*2+1]
+		copy.ScanIndex = 10 + i
+		value := 3.0
+		copy.MainStatValue = &value
+		r.Items = append(r.Items, copy)
+	}
+	result, err := optimizer.Optimize(context.Background(), r, testEvaluator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Plan == nil {
+		t.Fatalf("missing protected plan: %+v", result)
+	}
+	for _, id := range result.Plan.Equipment["a"] {
+		if id%2 != 0 {
+			t.Fatal("protection allowed replacing an equipped artifact")
+		}
+	}
+}

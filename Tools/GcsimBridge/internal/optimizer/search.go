@@ -151,7 +151,7 @@ func Optimize(ctx context.Context, request Request, evaluate Evaluator) (Result,
 	} else {
 		t.result.Status = "feasible_recommendation"
 		if verifiedBaseline != nil && verifiedBaseline.Qualified {
-			t.result.Improvement = compareImprovement(request.Mode, t.weights, validated, verifiedBaseline, len(request.ValidationSeeds))
+			t.result.Improvement = CompareImprovement(request.Mode, t.weights, validated, verifiedBaseline, len(request.ValidationSeeds))
 			if t.result.Improvement.State != "confirmed" {
 				t.result.Status = "feasible_uncertain"
 			}
@@ -204,6 +204,13 @@ func prepare(request Request, evaluate Evaluator) (*task, error) {
 	for _, name := range request.ProtectedCharacters {
 		protected[normalize(name)] = true
 	}
+	request.Characters = append([]Character(nil), request.Characters...)
+	for i := range request.Characters {
+		if protected[normalize(request.Characters[i].Character)] {
+			request.Characters[i].Protected = true
+		}
+	}
+	t.request = request
 	characters := map[string]bool{}
 	for _, character := range request.Characters {
 		if character.Character == "" || characters[character.Character] {
@@ -228,6 +235,23 @@ func prepare(request Request, evaluate Evaluator) (*task, error) {
 		if item.Location != "" && protected[normalize(item.Location)] {
 			t.reserved[item.ScanIndex] = normalize(item.Location)
 		}
+	}
+	// Scan order is not slot order. Neighborhood swaps always operate on the
+	// canonical five-slot order, while physical identities remain unchanged.
+	for i := range t.request.Characters {
+		c := &t.request.Characters[i]
+		if len(c.Current) != 5 {
+			continue
+		}
+		ordered := []int{-1, -1, -1, -1, -1}
+		for _, id := range c.Current {
+			for index, slot := range slots {
+				if t.items[id].SlotKey == slot {
+					ordered[index] = id
+				}
+			}
+		}
+		c.Current = ordered
 	}
 	seenScenario := map[string]string{}
 	ids := map[string]string{}
