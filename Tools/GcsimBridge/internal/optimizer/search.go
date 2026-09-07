@@ -183,7 +183,7 @@ func prepare(request Request, evaluate Evaluator) (*task, error) {
 	if request.EvaluationBudget < 4*len(request.Scenarios) || request.EvaluationBudget > 100000 {
 		return nil, errors.New("evaluation budget is outside supported bounds")
 	}
-	if len(request.SearchSeeds) == 0 || len(request.ValidationSeeds) == 0 || len(request.SearchSeeds) > 64 || len(request.ValidationSeeds) > 64 {
+	if len(request.SearchSeeds) == 0 || len(request.ValidationSeeds) == 0 || len(request.SearchSeeds) > engine.MaxEvaluationSamples || len(request.ValidationSeeds) > engine.MaxEvaluationSamples {
 		return nil, errors.New("search and independent validation seeds are required")
 	}
 	seeds := map[int64]bool{}

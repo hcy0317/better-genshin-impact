@@ -50,7 +50,7 @@ func ValidateBatch(seeds []int64, rounds []Round, constraints []Constraint, samp
 			result.State = "indeterminate"
 		}
 	}
-	if len(seeds) == 0 || len(seeds) > 64 || validateRounds(rounds, 0) != nil {
+	if len(seeds) == 0 || len(seeds) > MaxEvaluationSamples || validateRounds(rounds, 0) != nil {
 		result.Complete = false
 		add(Check{State: "indeterminate", Source: "batch", Reason: "empty or invalid declared validation batch"})
 		return result

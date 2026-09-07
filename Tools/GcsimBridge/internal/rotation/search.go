@@ -78,7 +78,7 @@ func Optimize(ctx context.Context, r Request, evaluate optimizer.Evaluator) (Res
 	if strings.Count(r.Base.Config, Marker) != 1 || r.Budget < 4 || r.Budget > 512 || evaluate == nil {
 		return result, errors.New("invalid rotation template or evaluation budget")
 	}
-	if len(r.SearchSeeds) == 0 || len(r.SearchSeeds) > 64 || len(r.ValidationSeeds) == 0 || len(r.ValidationSeeds) > 64 {
+	if len(r.SearchSeeds) == 0 || len(r.SearchSeeds) > engine.MaxEvaluationSamples || len(r.ValidationSeeds) == 0 || len(r.ValidationSeeds) > engine.MaxEvaluationSamples {
 		return result, errors.New("declared search and independent validation batches required")
 	}
 	seenSeeds := map[int64]bool{}

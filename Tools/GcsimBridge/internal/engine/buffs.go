@@ -39,7 +39,7 @@ type BuffActivation struct {
 	ExpiresAt int    `json:"expiresAt"`
 }
 
-func prepareBuffs(cfg *info.ActionList, buffs []Buff, rounds []Round) ([]Buff, error) {
+func prepareBuffs(cfg *info.ActionList, buffs []Buff, rounds []Round, automatic ...bool) ([]Buff, error) {
 	if len(buffs) > 32 {
 		return nil, errors.New("at most 32 manual buffs are supported")
 	}
@@ -82,7 +82,11 @@ func prepareBuffs(cfg *info.ActionList, buffs []Buff, rounds []Round) ([]Buff, e
 		} else if (buff.Anchor != "start" && buff.Anchor != "round") || buff.SourceCharacter != "" || buff.Action != "" {
 			return nil, errors.New("unsupported buff anchor")
 		}
-		if buff.Anchor == "round" && validateRounds(rounds, int(cfg.Settings.Duration*60)) != nil {
+		maximumFrame := int(cfg.Settings.Duration * 60)
+		if cfg.Settings.DamageMode {
+			maximumFrame = 0
+		}
+		if buff.Anchor == "round" && !(len(automatic) > 0 && automatic[0]) && validateRounds(rounds, maximumFrame) != nil {
 			return nil, errors.New("round buffs require explicit valid simulation windows")
 		}
 		if err := prepareBuffEffect(cfg, buff); err != nil {
