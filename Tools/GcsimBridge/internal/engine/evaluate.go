@@ -20,7 +20,10 @@ import (
 	"github.com/genshinsim/gcsim/pkg/stats"
 )
 
-const Revision = "1de5a42438791757a7178b16e59ec97dc1690d61"
+// Official packaging overrides this together with the exact SDK version; the
+// executable verifies both against Go's checksummed build dependency metadata.
+var Revision = "1de5a42438791757a7178b16e59ec97dc1690d61"
+
 const AdapterVersion = "1"
 
 type Request struct {

@@ -15,6 +15,8 @@ type sdkIdentity struct {
 	Revision string `json:"revision"`
 }
 
+var expectedSDKVersion = "v1.15.2-0.20260905220630-1de5a4243879"
+
 func verifySDK() (sdkIdentity, error) {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -24,7 +26,7 @@ func verifySDK() (sdkIdentity, error) {
 		if dependency.Path != "github.com/genshinsim/gcsim" {
 			continue
 		}
-		if dependency.Replace != nil || !strings.HasSuffix(dependency.Version, "-"+engine.Revision[:12]) || dependency.Sum == "" {
+		if len(engine.Revision) != 40 || strings.ContainsAny(engine.Revision, "/\\ \t\n") || dependency.Replace != nil || dependency.Version != expectedSDKVersion || dependency.Sum == "" {
 			return sdkIdentity{}, errors.New("gcsim dependency does not match the pinned, checksummed engine")
 		}
 		return sdkIdentity{Module: dependency.Path, Version: dependency.Version, Checksum: dependency.Sum, Revision: engine.Revision}, nil
