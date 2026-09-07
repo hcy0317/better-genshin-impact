@@ -25,6 +25,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'SDK download/resolve failed; no package published.' }
     $module = (& go list -m -json github.com/genshinsim/gcsim | ConvertFrom-Json)
     if ($LASTEXITCODE -ne 0 -or $module.Version -notmatch '^v[0-9][0-9A-Za-z.+-]*$') { throw 'Invalid resolved SDK version.' }
+    & go run ./cmd/sync-localization -module-dir $module.Dir
+    if ($LASTEXITCODE -ne 0) { throw 'Upstream Chinese name synchronization failed; no package published.' }
     $flags = '-s -w -X github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/engine.Revision=' + $revision + ' -X main.expectedSDKVersion=' + $module.Version
     & go test -p 2 -ldflags $flags ./... -count=1 -timeout 120s
     if ($LASTEXITCODE -ne 0) { throw 'Alignment/constraints/termination regressions failed; old engine remains valid.' }

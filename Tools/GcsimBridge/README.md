@@ -42,6 +42,10 @@ Windows 承载端使用 Job Object。Linux 使用 pidfd、父线程退出信号�
 
 `--catalog` 导出与当前引擎相同版本的角色、武器、套装及技能数值和游戏 ID，供网页、Enka 映射及战斗数据补充使用。条目存在不等于所有机制完整支持。
 
+目录的 `localization` 来自同一固定版本 gcsim 的中文名称表及旅行者元素覆写；`Build-Packages.ps1` 每次打包都会重新生成，离线可用。开发时更新 SDK 后运行 `go run ./cmd/sync-localization -module-dir <go list -m -json 返回的 Dir>`，不要手工维护整套名称。Tools 页面只展示中文，保存的角色、武器和套装标识仍是原始引擎键；循环中的中文角色名由 Tools 的词法兼容层转换，注释和字符串不改写。
+
+Tools 的鉴权接口 `GET /jwt/artifacts/optimizer/rotations/strategies` 列出策略（包含子目录）；`GET .../strategies/source?name=<相对路径>` 独立读取原文与命名片段，不要求先建配队。`POST .../import?uid=<UID>` 用所选 `buildId` 核验队员并转换文件或粘贴的 `source`，文本和有限动作 JSON 复用同一适配器。无状态声明的单独片段可转换；动态分支、状态守卫、记录依赖及鼠标宏必须保留并报告不支持，不能把读取成功当作可等价模拟或实机执行。
+
 `--optimize` 接收 `{ "optimization": Request, "limits": Budget }`，在同一受限 worker 内完成联合搜索。Request 使用 `schemaVersion=1`，引用既有 `inventory`，并携带 `items`、`characters`、`scenarios`、独立的 `searchSeeds`/`validationSeeds`、`evaluationBudget`。角色 `current`、`fixedSlots`、`mainStats`、`requiredSets`、`minimumStats` 和保护属于硬约束。场景 `participants` 指定本场景参与的优化角色，`fixedEquipment` 预留真实固定队友的五件实物。
 
 三档分别为 `balanced`（去重场景加权实际 DPS）、`peak`（角色目标保留率）、`fallback`（完整加权短缺向量词典序）。零参照可由本次有预算搜索批次中合格观测生成，搜索结束后冻结、再统一排名，不从最终验证样本更新；它不是理论上界。百分比初始属性下限使用 GOOD 百分数，取帧零面板，不冒充战斗期间覆盖率。

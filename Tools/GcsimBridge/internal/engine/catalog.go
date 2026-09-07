@@ -24,5 +24,5 @@ func Catalog() map[string]any {
 	sort.Slice(characters, func(i, j int) bool { return characters[i].Key < characters[j].Key })
 	sort.Slice(weapons, func(i, j int) bool { return weapons[i].Key < weapons[j].Key })
 	sort.Slice(sets, func(i, j int) bool { return sets[i].Key < sets[j].Key })
-	return map[string]any{"engineRevision": Revision, "adapterVersion": AdapterVersion, "characters": characters, "weapons": weapons, "sets": sets, "capabilities": Capabilities()}
+	return map[string]any{"engineRevision": Revision, "adapterVersion": AdapterVersion, "characters": characters, "weapons": weapons, "sets": sets, "localization": chineseNames, "capabilities": Capabilities()}
 }
