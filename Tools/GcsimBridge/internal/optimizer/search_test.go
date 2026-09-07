@@ -215,3 +215,29 @@ func TestGlobalProtectionAlsoFreezesASelectedCharacter(t *testing.T) {
 		}
 	}
 }
+
+func TestHeuristicConstructsRequiredSetRatherThanRelyingOnRandomChance(t *testing.T) {
+	r := fixtureRequest()
+	r.Exact = false
+	r.EvaluationBudget = 16
+	r.Characters = r.Characters[:1]
+	r.Characters[0].RequiredSets = map[string]int{"required": 4}
+	r.Items = nil
+	for slotIndex, slot := range []string{"flower", "plume", "sands", "goblet", "circlet"} {
+		for j := 0; j < 20; j++ {
+			value := 1.0
+			set := "other"
+			if j == 10 && slotIndex < 4 {
+				set = "required"
+			}
+			r.Items = append(r.Items, optimizer.Item{Artifact: engine.Artifact{ScanIndex: slotIndex*30 + j, SlotKey: slot, SetKey: set, MainStatKey: "atk", MainStatValue: &value}})
+		}
+	}
+	result, err := optimizer.Optimize(context.Background(), r, testEvaluator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Plan == nil {
+		t.Fatalf("four-piece feasibility must guide candidate construction: %+v", result)
+	}
+}

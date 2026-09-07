@@ -27,6 +27,9 @@ func (t *task) searchNeighborhoods(ctx context.Context, pools []pool, best *Plan
 			best = p
 		}
 	}
+	if seed := t.feasibleSeed(ctx, pools); seed != nil {
+		consider(seed)
+	}
 	// Try the entire reverse-priority outfit as well as the forward one. This
 	// resolves the common all-five-pieces contested by the same two characters case.
 	for attempt := 0; attempt < 2; attempt++ {
