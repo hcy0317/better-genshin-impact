@@ -208,7 +208,7 @@
 		<None Update="GameTask\QuickClaimReward\Assets\1920x1080\**">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</None>
-		<None Update="GameTask\UseRedeemCode\Assets\1920x1080\**">
+		<None Update="GameTask\UseRedeemCode\Assets\**">
 			<CopyToOutputDirectory>Always</CopyToOutputDirectory>
 		</None>
 		<None Update="User\**">
