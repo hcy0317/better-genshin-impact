@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Simulator;
+using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
@@ -32,6 +33,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             using var match = image.Find(ElementRecognition.Get(name, image));
             return match.IsExist();
         }
+        using var menuBack = image.Find(RecognitionAssets.Get("UseRedeemCode", "MenuBack", image));
         return new UiSnapshot(Interlocked.Increment(ref _frameSequence))
         {
             CapturedAt = DateTimeOffset.UtcNow,
@@ -45,7 +47,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             InDomain = Bv.IsInDomainIncludingRevivePrompt(image),
             Closable = Bv.IsInAnyClosableUi(image),
             ExitDoor = Has("BtnExitDoor"),
-            BlackConfirm = Has("BtnBlackConfirm")
+            BlackConfirm = Has("BtnBlackConfirm"),
+            MenuBack = menuBack.IsExist()
         };
     }
 
