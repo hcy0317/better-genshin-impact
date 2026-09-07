@@ -86,6 +86,9 @@ public sealed class ArtifactHostRequestReader
             throw new InvalidOperationException(
                 "Artifact lock request is missing its approved target binding.");
         }
+        if (request.Operation == ArtifactHostOperation.ExecuteEquipPlan
+            && (request.SourceArtifactCount is null or < 0 || request.NativePlanDigest is null || request.NativePlanDigest.Length != 64))
+            throw new InvalidOperationException("Equipment request is missing its reviewed inventory and plan binding.");
         if (request.Operation == ArtifactHostOperation.RebuildNativePlans
             && (request.NativeCapacity is null or < 1
                 || string.IsNullOrWhiteSpace(request.NativePlanDigest)))
