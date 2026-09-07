@@ -15,23 +15,29 @@ using static BetterGenshinImpact.GameTask.Common.TaskControl;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
-internal sealed class CombatFlowRecoveryException(string message)
-    : BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception.RetryException(message);
-
 /// <summary>宿主拥有结束检测；此适配器只驱动一份本场流程，不启动后台输入循环。</summary>
 internal sealed class NativeCombatFlowRunner : IDisposable
 {
+    internal const int SwitchAttempts = 10;
     private static readonly CombatInputCoordinator InputCoordinator = new();
     private readonly ICombatFlowGame _game;
     private readonly CombatFlowExecution? _execution;
     private readonly JsonCombatFlowExecution? _jsonExecution;
     private IDisposable? _exclusive;
     private bool _disposed;
+    private int _consecutiveFailedPasses;
+    private bool _failureFinishCheckRequested;
     public CombatFlowContext Context => _execution?.Context ?? _jsonExecution!.Context;
     public CombatFlowStatistics RuntimeStatistics => _execution?.RuntimeStatistics ?? _jsonExecution!.RuntimeStatistics;
     public bool IsAtomic => _execution?.IsAtomic ?? _jsonExecution!.IsAtomic;
     public bool IsAtRootBoundary => _execution?.IsAtRootBoundary ?? _jsonExecution!.IsAtRootBoundary;
-    public bool TakeFinishCheckRequest() => _execution?.TakeFinishCheckRequest() ?? _jsonExecution!.TakeFinishCheckRequest();
+    public bool TakeFinishCheckRequest()
+    {
+        var requested = _execution?.TakeFinishCheckRequest() ?? _jsonExecution!.TakeFinishCheckRequest();
+        var failedPass = _failureFinishCheckRequested;
+        _failureFinishCheckRequested = false;
+        return requested || failedPass;
+    }
 
     private NativeCombatFlowRunner(CombatFlowProgram program, CombatScenes scenes)
     {
@@ -110,23 +116,48 @@ internal sealed class NativeCombatFlowRunner : IDisposable
     public async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ct.ThrowIfCancellationRequested();
+        // 上一次失败先返回给宿主做结束检测；不能把策略失败当作复活信号触发传送。
+        if (_consecutiveFailedPasses >= 3)
+            throw new InvalidOperationException("增强战斗连续 3 轮关键流程失败，战斗未确认结束；停止当前任务，不执行复活重试");
         // 整步（包含产球后的接球）独占；进入 atomic 后跨 Step 保留，退出再交还普通观察。
         if (_game is NativeGame) _exclusive ??= AvatarRecognition.BeginExclusiveOperation();
         try
         {
             var step = await (_execution?.StepAsync(ct) ?? _jsonExecution!.StepAsync(ct));
             if (step.RoundCompleted && step.Result == CombatFlowResult.Failed)
-                throw new CombatFlowRecoveryException("增强战斗关键流程未满足，停止本场并交还宿主恢复");
+            {
+                _consecutiveFailedPasses++;
+                _failureFinishCheckRequested = true;
+                if (_game is NativeGame)
+                    Logger.LogWarning("战斗 {BattleId} 第 {Failures}/3 轮关键流程失败，未确认结束；保留本场记录并交回宿主检测，不传送",
+                        Context.BattleId, _consecutiveFailedPasses);
+                // 秘境/幽境的独立检测器按约一秒节拍工作；失败时让出执行线程，且保留取消。
+                await Task.Delay(1000, ct);
+            }
+            else if (step.RoundCompleted) _consecutiveFailedPasses = 0;
             return step;
         }
         catch { EndExclusive(); throw; }
         finally { if (!IsAtomic) EndExclusive(); }
     }
 
-    private void EndExclusive() => Interlocked.Exchange(ref _exclusive, null)?.Dispose();
+    private void EndExclusive()
+    {
+        var exclusive = Interlocked.Exchange(ref _exclusive, null);
+        if (exclusive == null) return;
+        if (_game is NativeGame native) native.InvalidateActorConfirmation();
+        exclusive.Dispose();
+    }
     public bool HasVisibleTarget => AutoFightSeek.TryCreatePassiveDecision(AvatarRecognition.LatestPassiveObservation,
         DateTime.UtcNow, out _, out _, out _);
-    public ValueTask<CombatFlowResult> RunRoundAsync(CancellationToken ct) => _execution!.RunRoundAsync(ct);
+    public async ValueTask<CombatFlowResult> RunRoundAsync(CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_game is NativeGame) _exclusive ??= AvatarRecognition.BeginExclusiveOperation();
+        try { return await _execution!.RunRoundAsync(ct); }
+        finally { EndExclusive(); }
+    }
     public void Dispose()
     {
         if (_disposed) return;
@@ -141,6 +172,14 @@ internal sealed class NativeCombatFlowRunner : IDisposable
                 Logger.LogInformation("战斗流程诊断：{Steps} 步、{Actions} 次游戏执行调用、{Observations} 次观察调用、{FailedPasses} 次失败遍历；核心步总耗时 {Milliseconds:F1}ms。调用计数不是命中或施放成功次数。",
                     statistics.CoreSteps, statistics.GameActionCalls, statistics.GameObservationCalls,
                     statistics.FailedPasses, statistics.CoreStepMilliseconds);
+                if (statistics.FailedPasses > 0 || statistics.RecentEvents.Count > 0 &&
+                    !statistics.RecentEvents.Any(entry => entry.InputStarted))
+                {
+                    foreach (var entry in statistics.RecentEvents.TakeLast(12))
+                        Logger.LogDebug("战斗动作证据 {BattleId}：t={At:F2}s，行={Line}，角色={Actor}，动作={Action}，结果={Result}，已发输入={InputStarted}，耗时={Milliseconds:F1}ms，原因={Reason}",
+                            Context.BattleId, entry.At, entry.SourceLine, entry.Actor, entry.Action,
+                            entry.ReportedResult, entry.InputStarted, entry.Milliseconds, entry.Reason ?? "无额外观测");
+                }
             }
         }
         finally
@@ -159,6 +198,9 @@ internal sealed class NativeCombatFlowRunner : IDisposable
         private long _frameId;
         private CombatInputCoordinator.Session? _input;
         private bool _disposed;
+        private string? _confirmedActor;
+
+        public void InvalidateActorConfirmation() => _confirmedActor = null;
 
         public void BeginStep() => ClearCapture();
 
@@ -183,8 +225,10 @@ internal sealed class NativeCombatFlowRunner : IDisposable
             try
             {
                 ClearCapture();
-                if (avatar.TrySwitch(3))
+                _confirmedActor = null;
+                if (avatar.TrySwitch(SwitchAttempts))
                 {
+                    _confirmedActor = avatar.Name;
                     action.ReportActiveActor(avatar.Name);
                     ClearCapture();
                     scope.Check();
@@ -272,15 +316,25 @@ internal sealed class NativeCombatFlowRunner : IDisposable
             ct.ThrowIfCancellationRequested();
             ObjectDisposedException.ThrowIf(_disposed, this);
             var command = action.Command;
-            if (!action.CanStart) return CombatFlowResult.Skipped;
+            if (!action.CanStart)
+            {
+                action.DiagnosticReason = "动作预算或前置条件不再满足";
+                return CombatFlowResult.Skipped;
+            }
             // 可选 Q 无可靠就绪证据时不为试探而切人；必要观察由核心在预算内显式准备。
             if (command.Method == Method.Burst && Observe("q-ready", [], command.Name) is not true)
+            {
+                action.DiagnosticReason = "Q 没有可靠的当前就绪证据";
                 return CombatFlowResult.Skipped;
+            }
             ClearCapture();
             var name = command.Name == CombatScriptParser.CurrentAvatarName ? scenes.CurrentAvatar(true) : command.Name;
             if (name == null || scenes.SelectAvatar(name) is not { } avatar) return CombatFlowResult.Failed;
             if (command.Args?.Contains("fast") == true && ESkillCdTracker.TryGetKnownRemainingCd(name, out var cd) && cd > 0)
+            {
+                action.DiagnosticReason = $"fast 动作仍有已知 E 冷却 {cd:F2}s";
                 return CombatFlowResult.Skipped;
+            }
             _input ??= InputCoordinator.TryAcquire(action.BattleId, ReleaseOwnedInput)
                 ?? throw new InvalidOperationException("上一场输入尚未退出或释放，禁止新的战斗输入接管");
             using var operation = _input.EnterOperation();
@@ -288,7 +342,16 @@ internal sealed class NativeCombatFlowRunner : IDisposable
             using var scope = new CombatActionScope(action, ct);
             try
             {
-            if (!avatar.TrySwitch(3)) return CombatFlowResult.Failed;
+            if (!action.CanReuseConfirmedActor || _confirmedActor != name)
+            {
+                _confirmedActor = null;
+                if (!avatar.TrySwitch(SwitchAttempts))
+                {
+                    action.DiagnosticReason = "在切换窗口内未取得连续两帧角色确认";
+                    return CombatFlowResult.Failed;
+                }
+                _confirmedActor = name;
+            }
             action.ReportActiveActor(name);
             ct.ThrowIfCancellationRequested();
             if (command.Method == Method.Skill && command.HasFlag("wait")) await avatar.WaitSkillCd(ct);
@@ -303,7 +366,11 @@ internal sealed class NativeCombatFlowRunner : IDisposable
                     ? observedCd > 0 ? true : skillReady ? false : null : burst.CoolingDown;
                 _attempts.Observe(name, command.Method, new(action.BattleId, ++_frameId, action.Now,
                     cooling, command.Method == Method.Skill ? skillReady : burst.Ready));
-                if (_attempts.IsOccupied(name, command.Method)) return CombatFlowResult.Pending;
+                if (_attempts.IsOccupied(name, command.Method))
+                {
+                    action.DiagnosticReason = "已有未决施放请求，等待新证据，不重复发送技能输入";
+                    return CombatFlowResult.Pending;
+                }
             }
             CombatSkillAttempt? attempt = null;
             bool BeginSkillInput()
@@ -316,13 +383,18 @@ internal sealed class NativeCombatFlowRunner : IDisposable
             }
             if (command.Method == Method.Skill)
             {
-                if (!avatar.IsSkillReadyFromCurrentFrame()) return CombatFlowResult.Skipped;
+                if (!avatar.IsSkillReadyFromCurrentFrame())
+                {
+                    action.DiagnosticReason = "当前截图未确认该角色 E 就绪";
+                    return CombatFlowResult.Skipped;
+                }
                 var before = avatar.LastConfirmedSkillCastAtUtc;
                 avatar.UseSkill(command.Args?.Contains("hold") == true, observeCooldown: true, tryBeginInput: BeginSkillInput);
                 ct.ThrowIfCancellationRequested();
                 if (action.InputAt == null) return CombatFlowResult.Skipped;
                 if (avatar.LastConfirmedSkillCastAtUtc > before && attempt != null && _attempts.Confirm(attempt.AttemptId, action.Now))
                     return CombatFlowResult.Succeeded;
+                action.DiagnosticReason = "已发送 E 输入，尚未确认新的施放冷却";
                 return CombatFlowResult.Pending;
             }
             if (command.Method == Method.Burst)
@@ -347,11 +419,15 @@ internal sealed class NativeCombatFlowRunner : IDisposable
             var primitive = new CombatCommand(command.Name, command.Method.Alias[0] + "(" + string.Join(",", arguments) + ")");
             if (!action.TryBeginInput()) return CombatFlowResult.Skipped;
             primitive.Execute(avatar);
+            // 原始按键可能包含角色切换；下一条宏原语不能复用按键前的角色身份。
+            if (command.Method == Method.KeyPress || command.Method == Method.KeyDown || command.Method == Method.KeyUp)
+                _confirmedActor = null;
             ct.ThrowIfCancellationRequested();
             return CombatFlowResult.Succeeded;
             }
             catch (CombatActionInterruptedException)
             {
+                action.DiagnosticReason = $"动作被维护/条件/预算边界中断，剩余预算 {action.RemainingBudget:F3}s";
                 // 先在本场仍拥有输入时结束持续键/宏，再让调度器转移；不伪造动作完成。
                 Simulation.ReleaseAllKey();
                 if (action.InputAt != null && (command.Method == Method.Skill || command.Method == Method.Burst))

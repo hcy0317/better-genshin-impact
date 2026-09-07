@@ -378,9 +378,6 @@ public partial class ScriptService : IScriptService
                             }
                             catch (Exception e)
                             {
-                                TaskFailureDiagnostics.CaptureScreenshotOnce(
-                                    e,
-                                    $"配置组 {groupName} / 脚本 {exeProject.Name}");
                                 _logger.LogDebug(e, "执行脚本时发生异常");
                                 _logger.LogError("执行脚本时发生异常: {Msg}", e.Message);
                                 if (!RunnerContext.Instance.IsPreExecution && taskProgress != null && taskProgress.CurrentScriptGroupProjectInfo != null)
@@ -410,13 +407,16 @@ public partial class ScriptService : IScriptService
                                 {
                                     await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
                                         projectFailure!,
-                                        () => new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token));
+                                        () => new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token, requireOverworld: true),
+                                        CancellationContext.Instance.Cts.Token, _logger,
+                                        captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
+                                            $"{context} 配置组 {groupName} / 脚本 {exeProject.Name}"));
                                     _logger.LogInformation(
-                                        "脚本 {Name} 失败后的主界面恢复成功，耗时 {ElapsedSeconds:0.000} 秒",
+                                        "脚本 {Name} 失败后已验证回到大世界主界面，耗时 {ElapsedSeconds:0.000} 秒",
                                         exeProject.Name,
                                         recoveryStopwatch.Elapsed.TotalSeconds);
                                 }
-                                catch (TaskFailureRecoveryException recoveryException)
+                                catch (Exception recoveryException) when (TaskFailureRecoveryPolicy.IsRecoveryFailure(recoveryException))
                                 {
                                     _logger.LogError(
                                         recoveryException,

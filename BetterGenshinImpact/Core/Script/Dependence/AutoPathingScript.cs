@@ -16,6 +16,7 @@ public class AutoPathingScript
     private string _rootPath;
     private readonly LimitedFile _autoPathingFile;
     private readonly Action<string, Exception> _logFailure;
+    private readonly Func<string, string?, Task<bool>> _executePath;
 
     public AutoPathingScript(string rootPath, object? config)
         : this(rootPath, config, new LimitedFile(Global.Absolute(@"User\AutoPathing")), LogFailure)
@@ -26,12 +27,14 @@ public class AutoPathingScript
         string rootPath,
         object? config,
         LimitedFile autoPathingFile,
-        Action<string, Exception> logFailure)
+        Action<string, Exception> logFailure,
+        Func<string, string?, Task<bool>>? executePath = null)
     {
         _config = config;
         _rootPath = rootPath;
         _autoPathingFile = autoPathingFile;
         _logFailure = logFailure;
+        _executePath = executePath ?? ExecuteNativePath;
     }
 
     /// <summary>
@@ -48,16 +51,8 @@ public class AutoPathingScript
     {
         try
         {
-            var task = string.IsNullOrEmpty(sourcePath)
-                ? PathingTask.BuildFromJson(json)
-                : PathingTask.BuildFromJson(json, sourcePath);
-            var pathExecutor = new PathExecutor(CancellationContext.Instance.Cts.Token);
-            if (_config != null && _config is PathingPartyConfig patyConfig)
-            {
-                pathExecutor.PartyConfig = patyConfig;
-            }
-
-            await pathExecutor.Pathing(task);
+            if (!await _executePath(json, sourcePath))
+                throw new InvalidOperationException("地图追踪未完整完成，不能将本路线记为成功或写入采集冷却");
         }
         catch (Exception e)
         {
@@ -68,6 +63,17 @@ public class AutoPathingScript
             _logFailure("执行地图追踪时候发生错误", e);
             throw;
         }
+    }
+
+    private async Task<bool> ExecuteNativePath(string json, string? sourcePath)
+    {
+        var task = string.IsNullOrEmpty(sourcePath)
+            ? PathingTask.BuildFromJson(json)
+            : PathingTask.BuildFromJson(json, sourcePath);
+        var pathExecutor = new PathExecutor(CancellationContext.Instance.Cts.Token);
+        if (_config is PathingPartyConfig partyConfig) pathExecutor.PartyConfig = partyConfig;
+        await pathExecutor.Pathing(task);
+        return pathExecutor.SuccessEnd;
     }
 
     public async Task RunFile(string path)

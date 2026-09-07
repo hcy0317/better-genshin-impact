@@ -359,7 +359,7 @@ internal static class TaskRunnerFailurePolicy
         bool isContinuousRunGroup,
         bool propagateExceptions)
     {
-        if (exception is TaskFailureRecoveryException)
+        if (TaskFailureRecoveryPolicy.IsRecoveryFailure(exception))
         {
             return exception;
         }

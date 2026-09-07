@@ -17,6 +17,7 @@ public class CombatFlowDiagnosticsTests
         Assert.Equal(100, statistics.CompletedPasses);
         Assert.True(statistics.GameObservationCalls >= 100);
         Assert.InRange(statistics.RecentEvents.Count, 1, 64);
+        Assert.All(statistics.RecentEvents, entry => Assert.Equal("测试边界证据", entry.Reason));
         Assert.True(statistics.CoreStepMilliseconds >= 0);
         execution.Dispose();
         Assert.Null(execution.Context.Find("动作"));
@@ -32,6 +33,7 @@ public class CombatFlowDiagnosticsTests
         public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
         {
             if (!action.TryBeginInput()) return ValueTask.FromResult(CombatFlowResult.Skipped);
+            action.DiagnosticReason = "测试边界证据";
             clock.Advance(TimeSpan.FromMilliseconds(100));
             return ValueTask.FromResult(CombatFlowResult.Succeeded);
         }

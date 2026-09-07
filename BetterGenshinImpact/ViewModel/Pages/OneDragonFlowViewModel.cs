@@ -665,43 +665,21 @@ public partial class OneDragonFlowViewModel : ViewModel
                     {
                         _logger.LogInformation($"一条龙任务执行: {finishOneTaskcount++}/{enabledoneTaskCount}");
                         CancellationToken taskCancellationToken = default;
-                        Exception? recoveredFailure = null;
-                        await new TaskRunner().RunThreadAsync(async () =>
-                        {
-                            taskCancellationToken = CancellationContext.Instance.GetTokenOrNone();
-                            try
+                        var recoveredFailure = await OneDragonStepRunner.RunAsync(propagateExceptions,
+                            (action, propagate) => new TaskRunner().RunThreadAsync(action, propagate),
+                            async () =>
                             {
+                                taskCancellationToken = CancellationContext.Instance.GetTokenOrNone();
                                 await task.Action();
                                 await Task.Delay(1000, taskCancellationToken);
-                            }
-                            catch (Exception exception) when (propagateExceptions)
-                            {
-                                TaskFailureDiagnostics.CaptureScreenshotOnce(
-                                    exception, $"一条龙任务 {task.Name}");
-                                _logger.LogError(
-                                    exception,
-                                    "一条龙任务 {TaskName} 执行失败，保持任务锁并恢复主界面",
-                                    task.Name);
-                                var recoveryStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                                await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
-                                    exception,
-                                    () => new ReturnMainUiTask().Start(taskCancellationToken));
-                                _logger.LogInformation(
-                                    "一条龙任务 {TaskName} 失败后的主界面恢复成功，耗时 {ElapsedSeconds:0.000} 秒，将继续后续任务",
-                                    task.Name,
-                                    recoveryStopwatch.Elapsed.TotalSeconds);
-                                recoveredFailure = exception;
-                            }
-                        }, propagateExceptions);
-                        TaskRunnerFailurePolicy.ThrowIfTaskCancelled(
-                            taskCancellationToken,
-                            propagateExceptions);
+                            }, exception => RecoverOneDragonStepAsync(exception, task.Name, taskCancellationToken));
+                        taskCancellationToken.ThrowIfCancellationRequested();
                         if (recoveredFailure is not null)
                         {
                             managedFailures.Add(recoveredFailure);
                         }
                     }
-                    catch (Exception exception) when (propagateExceptions)
+                    catch (Exception exception)
                     {
                         TaskFailureDiagnostics.CaptureScreenshotOnce(exception, $"一条龙任务 {task.Name}");
                         _logger.LogError(
@@ -731,31 +709,29 @@ public partial class OneDragonFlowViewModel : ViewModel
                         await scriptService!.RunMulti(
                             ScriptControlViewModel.GetNextProjects(group),
                             group.Name,
-                            propagateExceptions: propagateExceptions);
+                            propagateExceptions: true);
                         await Task.Delay(1000);
                     }
-                    catch (TaskFailureRecoveryException)
+                    catch (Exception e) when (e is OperationCanceledException or NormalEndException
+                        || TaskFailureRecoveryPolicy.IsRecoveryFailure(e))
                     {
                         throw;
                     }
                     catch (Exception e)
                     {
-                        TaskFailureDiagnostics.CaptureScreenshotOnce(e, $"配置组任务 {task.Name}");
                         _logger.LogDebug(e, "执行配置组任务时失败");
                         Toast.Error("执行配置组任务时失败");
-                        if (propagateExceptions)
-                        {
-                            var recoveryStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                            _logger.LogWarning("配置组任务 {TaskName} 失败，开始验证并恢复主界面", task.Name);
-                            await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
-                                e,
-                                () => new ReturnMainUiTask().Start(CancellationContext.Instance.GetTokenOrNone()));
-                            _logger.LogInformation(
-                                "配置组任务 {TaskName} 失败后的主界面恢复成功，耗时 {ElapsedSeconds:0.000} 秒，将继续后续任务",
-                                task.Name,
-                                recoveryStopwatch.Elapsed.TotalSeconds);
-                            managedFailures.Add(e);
-                        }
+                        // RunMulti 已释放自己的任务锁；外层恢复必须重新取得所有权，不能裸发输入。
+                        CancellationToken recoveryToken = default;
+                        var recoveredFailure = await OneDragonStepRunner.RunAsync(propagateExceptions,
+                            (action, propagate) => new TaskRunner().RunThreadAsync(action, propagate),
+                            () =>
+                            {
+                                recoveryToken = CancellationContext.Instance.GetTokenOrNone();
+                                return Task.FromException(e);
+                            }, error => RecoverOneDragonStepAsync(error, task.Name, recoveryToken));
+                        recoveryToken.ThrowIfCancellationRequested();
+                        if (recoveredFailure is not null) managedFailures.Add(recoveredFailure);
                     }
                 }
                 // 如果任务已经被取消，中断所有任务
@@ -801,6 +777,18 @@ public partial class OneDragonFlowViewModel : ViewModel
         }
 
         managedFailures.ThrowIfAny("一条龙中有任务执行失败，后续任务已继续完成。");
+    }
+
+    private async Task RecoverOneDragonStepAsync(Exception exception, string taskName, CancellationToken ct)
+    {
+        _logger.LogError(exception, "一条龙任务 {TaskName} 执行失败，保持任务锁并恢复大世界主界面", taskName);
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(exception,
+            () => new ReturnMainUiTask().Start(ct, requireOverworld: true), ct, _logger,
+            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, $"{context} 一条龙任务 {taskName}"));
+        _logger.LogInformation(
+            "一条龙任务 {TaskName} 失败后已验证回到大世界主界面，耗时 {ElapsedSeconds:0.000} 秒，将继续后续任务",
+            taskName, stopwatch.Elapsed.TotalSeconds);
     }
 
     private void ExecuteCompletionAction()

@@ -15,6 +15,22 @@ public sealed class CombatActionScope : IDisposable
     private readonly CancellationToken _ct;
     public static CombatActionScope? Current => Active.Value;
 
+    /// <summary>异常恢复沿用自己的取消/超时，不继承已经失效的战斗动作预算。</summary>
+    internal static IDisposable? Suspend() => Active.Value == null ? null : new Suspension();
+
+    private sealed class Suspension : IDisposable
+    {
+        private readonly CombatActionScope? _saved = Active.Value;
+        private bool _disposed;
+        public Suspension() => Active.Value = null;
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            if (Active.Value == null) Active.Value = _saved;
+        }
+    }
+
     public CombatActionScope(CombatFlowAction action, CancellationToken ct)
     {
         _action = action;

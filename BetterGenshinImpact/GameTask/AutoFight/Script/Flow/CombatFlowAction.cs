@@ -12,7 +12,7 @@ public sealed class CombatFlowAction
     private readonly Func<bool>? _continuation;
 
     internal CombatFlowAction(CombatCommand command, CombatFlowContext context, Func<bool> validate, double deadline,
-        Func<bool>? shouldYield = null, Func<bool>? continuation = null)
+        Func<bool>? shouldYield = null, Func<bool>? continuation = null, bool canReuseConfirmedActor = false)
     {
         Command = command;
         _context = context;
@@ -20,9 +20,12 @@ public sealed class CombatFlowAction
         _deadline = deadline;
         _shouldYield = shouldYield;
         _continuation = continuation;
+        CanReuseConfirmedActor = canReuseConfirmedActor;
     }
 
     public CombatCommand Command { get; }
+    internal bool CanReuseConfirmedActor { get; }
+    internal string? DiagnosticReason { get; set; }
     public Guid BattleId => _context.BattleId;
     public double Now => _context.Now;
     public double? InputAt { get; private set; }
