@@ -9,7 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,11 +37,25 @@ type Output struct {
 
 var ErrOutputLimit = errors.New("worker output limit exceeded")
 
+const readyMarker = "GCSIM_TRUSTED_RUNTIME_READY\n"
+
+// The worker has finished trusted Go/package initialization, but has not read
+// any untrusted configuration. Linux virtual/data limits are attached here.
+func WorkerReady() {
+	if runtime.GOOS == "linux" {
+		debug.SetMaxThreads(16)
+		_, _ = os.Stderr.WriteString(readyMarker)
+	}
+}
+
 func Run(ctx context.Context, executable string, input []byte, limits Limits) (output Output, err error) {
 	return RunWorker(ctx, executable, "--worker", input, limits)
 }
 
 func RunWorker(ctx context.Context, executable, workerMode string, input []byte, limits Limits) (output Output, err error) {
+	// Linux PDEATHSIG is tied to the creator thread. Keep it alive until reap.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if workerMode != "--worker" && workerMode != "--optimizer-worker" && workerMode != "--rotation-worker" {
 		return output, errors.New("unsupported worker mode")
 	}
@@ -71,10 +88,16 @@ func RunWorker(ctx context.Context, executable, workerMode string, input []byte,
 		return output, err
 	}
 	defer job.Close()
-	capture := &boundedCapture{remaining: limits.OutputBytes, exceeded: make(chan struct{}, 1)}
+	capture := &boundedCapture{remaining: limits.OutputBytes, exceeded: make(chan struct{}, 1), ready: make(chan struct{})}
 	cmd := exec.Command(executable, workerMode)
 	configureProcess(cmd)
-	cmd.Env = append(os.Environ(), "GOMAXPROCS=1", "GOMEMLIMIT="+strconv.FormatUint(limits.MemoryBytes*3/4, 10)+"B")
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != "GOMAXPROCS" && key != "GOMEMLIMIT" {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, "GOMAXPROCS=1", "GOMEMLIMIT="+strconv.FormatUint(limits.MemoryBytes*3/4, 10)+"B")
 	cmd.Stdout = captureWriter{capture: capture}
 	cmd.Stderr = captureWriter{capture: capture, stderr: true}
 	cmd.WaitDelay = time.Second
@@ -87,6 +110,19 @@ func RunWorker(ctx context.Context, executable, workerMode string, input []byte,
 		return output, err
 	}
 	output.PID = cmd.Process.Pid
+	if runtime.GOOS == "linux" {
+		select {
+		case <-capture.ready:
+		case <-ctx.Done():
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return output, ctx.Err()
+		case <-capture.exceeded:
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return output, ErrOutputLimit
+		}
+	}
 	// No untrusted configuration enters the worker until OS limits are attached.
 	// cmd retains its process handle until Wait, so Windows cannot recycle this PID.
 	if err := job.Assign(cmd.Process.Pid); err != nil {
@@ -128,6 +164,8 @@ type boundedCapture struct {
 	remaining      int
 	stdout, stderr bytes.Buffer
 	exceeded       chan struct{}
+	ready          chan struct{}
+	readySent      bool
 }
 
 type captureWriter struct {
@@ -142,6 +180,10 @@ func (writer captureWriter) Write(data []byte) (int, error) {
 	n := min(len(data), c.remaining)
 	if writer.stderr {
 		_, _ = c.stderr.Write(data[:n])
+		if c.ready != nil && !c.readySent && bytes.Contains(c.stderr.Bytes(), []byte(readyMarker)) {
+			c.readySent = true
+			close(c.ready)
+		}
 	} else {
 		_, _ = c.stdout.Write(data[:n])
 	}

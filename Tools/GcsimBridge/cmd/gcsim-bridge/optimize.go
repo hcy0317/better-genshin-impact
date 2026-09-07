@@ -41,6 +41,7 @@ func optimizationCLI(ctx context.Context, input io.Reader, output io.Writer) int
 }
 
 func optimizationWorker(input io.Reader, output io.Writer) (code int) {
+	host.WorkerReady()
 	os.Stdout = os.Stderr
 	defer func() {
 		if r := recover(); r != nil {

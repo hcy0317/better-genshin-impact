@@ -123,6 +123,7 @@ func RunCLI(ctx context.Context, input io.Reader, output io.Writer) int {
 }
 
 func worker(input io.Reader, output io.Writer) (code int) {
+	host.WorkerReady()
 	// Keep upstream diagnostics away from the machine-readable stdout channel.
 	os.Stdout = os.Stderr
 	response := reply{Status: "failed"}
