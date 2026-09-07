@@ -173,6 +173,14 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--optimizer-worker" {
 		os.Exit(optimizationWorker(os.Stdin, os.Stdout))
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--rotation-worker" {
+		os.Exit(rotationWorker(os.Stdin, os.Stdout))
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--rotation" {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+		os.Exit(rotationCLI(ctx, os.Stdin, os.Stdout))
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--optimize" {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 		defer cancel()
