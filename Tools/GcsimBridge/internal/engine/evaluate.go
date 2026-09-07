@@ -62,24 +62,26 @@ type Substat struct {
 }
 
 type Report struct {
-	EngineRevision       string                `json:"engineRevision"`
-	AdapterVersion       string                `json:"adapterVersion"`
-	Samples              []stats.Result        `json:"samples"`
-	MeanDPS              float64               `json:"meanDps"`
-	BuffActivations      [][]BuffActivation    `json:"buffActivations"`
-	Assumptions          []string              `json:"assumptions"`
-	Validation           Validation            `json:"validation"`
-	InputSHA256          string                `json:"inputSha256"`
-	Parameters           *info.ActionList      `json:"parameters"`
-	DurationSeconds      float64               `json:"durationSeconds"`
-	ScoringWindows       []Round               `json:"scoringWindows,omitempty"`
-	MeanDPSSource        string                `json:"meanDpsSource"`
-	Metrics              []Metric              `json:"metrics"`
-	ManualBuffs          []Buff                `json:"manualBuffs,omitempty"`
-	IncompleteCharacters []string              `json:"incompleteCharacters,omitempty"`
-	Support              string                `json:"support"`
-	Inventory            *InventoryRef         `json:"inventory,omitempty"`
-	EnergyWindows        [][]EnergyObservation `json:"energyWindows"`
+	EngineRevision       string                        `json:"engineRevision"`
+	AdapterVersion       string                        `json:"adapterVersion"`
+	Samples              []stats.Result                `json:"samples"`
+	MeanDPS              float64                       `json:"meanDps"`
+	ScoredDPS            []float64                     `json:"scoredDps"`
+	BuffActivations      [][]BuffActivation            `json:"buffActivations"`
+	Assumptions          []string                      `json:"assumptions"`
+	Validation           Validation                    `json:"validation"`
+	InputSHA256          string                        `json:"inputSha256"`
+	Parameters           *info.ActionList              `json:"parameters"`
+	DurationSeconds      float64                       `json:"durationSeconds"`
+	ScoringWindows       []Round                       `json:"scoringWindows,omitempty"`
+	MeanDPSSource        string                        `json:"meanDpsSource"`
+	Metrics              []Metric                      `json:"metrics"`
+	ManualBuffs          []Buff                        `json:"manualBuffs,omitempty"`
+	IncompleteCharacters []string                      `json:"incompleteCharacters,omitempty"`
+	Support              string                        `json:"support"`
+	Inventory            *InventoryRef                 `json:"inventory,omitempty"`
+	EnergyWindows        [][]EnergyObservation         `json:"energyWindows"`
+	InitialStats         map[string]map[string]float64 `json:"initialStats"`
 }
 
 // Evaluate is called only inside an owned, resource-limited worker process.
@@ -190,6 +192,9 @@ func Evaluate(request Request) (Report, error) {
 		if err != nil {
 			return report, err
 		}
+		if report.InitialStats == nil {
+			report.InitialStats = initialStats(core)
+		}
 		activations := attachBuffs(core, buffs, request.Rounds, int(cfg.Settings.Duration*60))
 		energyWindows := observeRoundEnergy(core, rounds)
 		scoredDamage := 0.0
@@ -220,6 +225,7 @@ func Evaluate(request Request) (Report, error) {
 			report.MeanDPSSource = "gcsim.OnEnemyDamage/scored_window_seconds"
 		}
 		report.MeanDPS += dps / float64(len(request.Seeds))
+		report.ScoredDPS = append(report.ScoredDPS, dps)
 	}
 	report.Validation = ValidateBatch(request.Seeds, rounds, request.Constraints, report.Samples)
 	report.Metrics, err = SummarizeMetrics(report.Samples, request.Rounds)

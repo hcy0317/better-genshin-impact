@@ -13,6 +13,8 @@ import (
 
 type workerJob struct{ handle windows.Handle }
 
+func (*workerJob) Isolation() string { return "windows_job" }
+
 func newWorkerJob(memoryBytes uint64) (*workerJob, error) {
 	handle, err := windows.CreateJobObject(nil, nil)
 	if err != nil {

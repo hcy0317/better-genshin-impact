@@ -35,6 +35,13 @@ type Output struct {
 var ErrOutputLimit = errors.New("worker output limit exceeded")
 
 func Run(ctx context.Context, executable string, input []byte, limits Limits) (output Output, err error) {
+	return RunWorker(ctx, executable, "--worker", input, limits)
+}
+
+func RunWorker(ctx context.Context, executable, workerMode string, input []byte, limits Limits) (output Output, err error) {
+	if workerMode != "--worker" && workerMode != "--optimizer-worker" && workerMode != "--rotation-worker" {
+		return output, errors.New("unsupported worker mode")
+	}
 	started := time.Now()
 	defer func() { output.Elapsed = time.Since(started) }()
 	output.ExitCode = -1
@@ -65,7 +72,7 @@ func Run(ctx context.Context, executable string, input []byte, limits Limits) (o
 	}
 	defer job.Close()
 	capture := &boundedCapture{remaining: limits.OutputBytes, exceeded: make(chan struct{}, 1)}
-	cmd := exec.Command(executable, "--worker")
+	cmd := exec.Command(executable, workerMode)
 	configureProcess(cmd)
 	cmd.Env = append(os.Environ(), "GOMAXPROCS=1", "GOMEMLIMIT="+strconv.FormatUint(limits.MemoryBytes*3/4, 10)+"B")
 	cmd.Stdout = captureWriter{capture: capture}
@@ -87,7 +94,7 @@ func Run(ctx context.Context, executable string, input []byte, limits Limits) (o
 		_ = cmd.Wait()
 		return output, fmt.Errorf("isolate worker: %w", err)
 	}
-	output.Isolation = "windows_job"
+	output.Isolation = job.Isolation()
 	inputDone := make(chan error, 1)
 	go func() { _, err := stdin.Write(input); _ = stdin.Close(); inputDone <- err }()
 	waited := make(chan error, 1)

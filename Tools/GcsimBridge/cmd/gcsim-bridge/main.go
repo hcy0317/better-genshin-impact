@@ -160,8 +160,22 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--catalog" {
+		if json.NewEncoder(os.Stdout).Encode(engine.Catalog()) != nil {
+			os.Exit(2)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--worker" {
 		os.Exit(worker(os.Stdin, os.Stdout))
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--optimizer-worker" {
+		os.Exit(optimizationWorker(os.Stdin, os.Stdout))
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--optimize" {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+		os.Exit(optimizationCLI(ctx, os.Stdin, os.Stdout))
 	}
 	if len(os.Args) > 1 {
 		os.Exit(writeReply(os.Stdout, reply{Status: "invalid_input", Error: "expected JSON on stdin or --capabilities"}))

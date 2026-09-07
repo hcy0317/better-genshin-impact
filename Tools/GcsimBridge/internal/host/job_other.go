@@ -9,6 +9,8 @@ import (
 
 type workerJob struct{}
 
+func (*workerJob) Isolation() string { return "unsupported" }
+
 func newWorkerJob(uint64) (*workerJob, error) {
 	return nil, errors.New("bounded worker execution currently requires Windows")
 }
