@@ -27,6 +27,7 @@ var Revision = "1de5a42438791757a7178b16e59ec97dc1690d61"
 const AdapterVersion = "1"
 
 type Request struct {
+	CompactSamples     bool                  `json:"compactSamples,omitempty"`
 	Assumptions        []string              `json:"assumptions,omitempty"`
 	AutoRounds         bool                  `json:"autoRounds,omitempty"`
 	MainLoopIndex      int                   `json:"mainLoopIndex,omitempty"`
@@ -70,6 +71,7 @@ type Substat struct {
 }
 
 type Report struct {
+	Warnings              []string                      `json:"warnings,omitempty"`
 	SamplingIterations    int                           `json:"samplingIterations"`
 	SamplesCompacted      bool                          `json:"samplesCompacted,omitempty"`
 	SampleMetrics         []SampleMetricEvidence        `json:"sampleMetrics,omitempty"`
@@ -133,6 +135,7 @@ func Evaluate(request Request) (Report, error) {
 	if len(cfg.Errors) != 0 {
 		return report, fmt.Errorf("invalid gcsim configuration: %w", errors.Join(cfg.Errors...))
 	}
+	report.Warnings = scriptWarnings(script, file, cfg, request.RotationLineOffset)
 	for _, profile := range cfg.Characters {
 		if !resultinfo.IsCharacterComplete(profile.Base.Key) {
 			report.IncompleteCharacters = append(report.IncompleteCharacters, profile.Base.Key.String())
@@ -163,7 +166,7 @@ func Evaluate(request Request) (Report, error) {
 		}
 	}
 	report.ManualBuffs = buffs
-	if math.IsNaN(cfg.Settings.Duration) || math.IsInf(cfg.Settings.Duration, 0) || cfg.Settings.Duration < 0 || cfg.Settings.Duration > 600 || (!cfg.Settings.DamageMode && int(cfg.Settings.Duration*60)<1) {
+	if math.IsNaN(cfg.Settings.Duration) || math.IsInf(cfg.Settings.Duration, 0) || cfg.Settings.Duration < 0 || cfg.Settings.Duration > 600 || (!cfg.Settings.DamageMode && int(cfg.Settings.Duration*60) < 1) {
 		return report, errors.New("fixed-duration evaluation requires 0 < duration <= 600 seconds; target/script mode requires valid target HP")
 	}
 	report.StopMode = "fixed_duration"
@@ -278,14 +281,30 @@ func Evaluate(request Request) (Report, error) {
 				}
 			}, "bettergi/scored-team-damage")
 		}
+		trajectoryLimitReached := false
+		if cfg.Settings.DamageMode {
+			core.Events.Subscribe(event.OnTick, func(...any) {
+				if core.F >= MaxTrajectorySeconds*60 {
+					trajectoryLimitReached = true
+					panic("owned trajectory resource limit")
+				}
+			}, "bettergi/trajectory-resource-limit")
+		}
 		result, err := sim.Run()
+		if trajectoryLimitReached {
+			detail := ""
+			if len(report.Warnings) > 0 {
+				detail = "；" + report.Warnings[0]
+			}
+			return report, fmt.Errorf("trajectory_limit：单次战斗超过%d游戏秒的资源保护上限，未返回截断后的合格伤害；请检查循环中的等待条件或敌人血量%s", MaxTrajectorySeconds, detail)
+		}
 		if err != nil {
 			return report, err
 		}
 		if result.Duration <= 0 || math.IsNaN(result.DPS) || math.IsInf(result.DPS, 0) {
 			return report, errors.New("gcsim returned an invalid trajectory")
 		}
-		if len(request.Seeds) > 64 {
+		if len(request.Seeds) > 64 || request.CompactSamples {
 			trimFrameVectors(&result)
 		}
 		report.Samples = append(report.Samples, result)

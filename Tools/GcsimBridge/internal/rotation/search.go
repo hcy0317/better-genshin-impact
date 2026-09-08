@@ -99,6 +99,7 @@ func Optimize(ctx context.Context, r Request, evaluate optimizer.Evaluator) (Res
 			return nil, err
 		}
 		req := r.Base
+		req.CompactSamples = true
 		req.SchemaVersion = "1"
 		req.EngineRevision = engine.Revision
 		req.Seeds = seeds

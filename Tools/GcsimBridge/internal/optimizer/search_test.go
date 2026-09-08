@@ -2,11 +2,32 @@ package optimizer_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/engine"
 	"github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/optimizer"
 )
+
+func TestUnavailableCandidatesKeepBoundedActionableExamples(t *testing.T) {
+	r := fixtureRequest()
+	r.EvaluationBudget = 16
+	r.Exact = false
+	result, err := optimizer.Optimize(context.Background(), r, func(context.Context, engine.Request) (engine.Report, error) {
+		return engine.Report{}, errors.New("trajectory_limit: 检查循环等待条件")
+	})
+	if err != nil || result.Plan != nil || result.Status != "indeterminate" {
+		t.Fatalf("invalid result: %+v / %v", result, err)
+	}
+	data, _ := json.Marshal(result)
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(data, &fields)
+	if !strings.Contains(string(fields["issues"]), "循环等待条件") {
+		t.Fatal("specific candidate failure was lost")
+	}
+}
 
 func fixtureRequest() optimizer.Request {
 	r := optimizer.Request{SchemaVersion: "1", Mode: "balanced", Inventory: engine.InventoryRef{UID: "fixture", ScanSessionID: "scan", CatalogVersion: "catalog", SnapshotDigest: "snapshot"}, SearchSeeds: []int64{1}, ValidationSeeds: []int64{2}, EvaluationBudget: 1000, Exact: true}

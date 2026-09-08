@@ -14,7 +14,25 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "--worker" {
 		os.Exit(worker(os.Stdin, os.Stdout))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--optimizer-worker" {
+		os.Exit(optimizationWorker(os.Stdin, os.Stdout))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--rotation-worker" {
+		os.Exit(rotationWorker(os.Stdin, os.Stdout))
+	}
 	os.Exit(m.Run())
+}
+
+func TestOptimizationPreservesWorkerInputErrors(t *testing.T) {
+	var output bytes.Buffer
+	code := optimizationCLI(context.Background(), strings.NewReader(`{"optimization":{"schemaVersion":"unsupported"},"limits":{"wallTimeMs":5000,"memoryMiB":256,"outputKiB":128}}`), &output)
+	var response reply
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if code == 0 || response.Status != "invalid_input" || !strings.Contains(response.Error, "schema") || strings.Contains(response.Error, "exit status") {
+		t.Fatalf("worker error was lost: code=%d response=%s", code, output.String())
+	}
 }
 
 const config = `options duration=5; target lvl=90 resist=0.1;

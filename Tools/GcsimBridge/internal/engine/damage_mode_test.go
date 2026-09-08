@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestDamageModeLongTrajectoryStopsWithResourceError(t *testing.T) {
+	request := Request{SchemaVersion: "1", EngineRevision: Revision, Seeds: []int64{17},
+		Config: `target lvl=90 resist=0.1 hp=999999999;amber char lvl=90/90 cons=0 talent=6,6,6;amber add weapon="huntersbow" refine=1 lvl=90/90;active amber;wait(36060);`}
+	_, err := Evaluate(request)
+	if err == nil || !strings.Contains(err.Error(), "600") {
+		t.Fatalf("long trajectory lacked a specific resource boundary: %v", err)
+	}
+}
+
+func TestMissingFavoniusDoesNotOverrideTargetDeathOrFixedDuration(t *testing.T) {
+	for _, target := range []string{`options duration=1;target lvl=90 resist=0.1;`, `target lvl=90 resist=0.1 hp=1;`} {
+		request := Request{SchemaVersion: "1", EngineRevision: Revision, Seeds: []int64{17},
+			Config: target + `amber char lvl=90/90 cons=0 talent=6,6,6;amber add weapon="huntersbow" refine=1 lvl=90/90;active amber;while !.amber.mods.favonius-cd {amber attack;}`}
+		result, err := Evaluate(request)
+		if err != nil || !result.Validation.Complete {
+			t.Fatalf("valid native stopping condition was rejected: %v", err)
+		}
+	}
+}
+
 func TestDamageModeStopsOnFiniteScriptInsteadOfDuration(t *testing.T) {
 	config := `options duration=1; target lvl=90 resist=0.1 hp=999999999;
  amber char lvl=90/90 cons=0 talent=6,6,6; amber add weapon="huntersbow" refine=1 lvl=90/90;

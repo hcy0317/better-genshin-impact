@@ -32,7 +32,7 @@ func optimizationCLI(ctx context.Context, input io.Reader, output io.Writer) int
 	}
 	result, err := host.RunWorker(ctx, exe, "--optimizer-worker", data, host.Limits{WallTime: time.Duration(job.Limits.WallTimeMS) * time.Millisecond, MemoryBytes: job.Limits.MemoryMiB << 20, OutputBytes: job.Limits.OutputKiB << 10})
 	if err != nil {
-		return writeReply(output, reply{Status: "failed", Error: fmt.Sprintf("bounded optimizer: %v", err)})
+		return writeReply(output, workerFailure("bounded optimizer", result, err))
 	}
 	if _, err = output.Write(result.Stdout); err != nil {
 		return 2

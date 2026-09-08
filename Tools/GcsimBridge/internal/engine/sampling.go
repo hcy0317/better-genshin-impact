@@ -6,6 +6,7 @@ import (
 )
 
 const MaxEvaluationSamples = 1000
+const MaxTrajectorySeconds = 600
 
 type SampleMetricEvidence struct {
 	Seed    string   `json:"seed"`
@@ -28,7 +29,7 @@ func trimFrameVectors(result *stats.Result) {
 	}
 }
 func compactLargeSamples(report *Report, request Request, windows [][]Round) {
-	if len(request.Seeds) <= 64 {
+	if len(request.Seeds) <= 64 && !request.CompactSamples {
 		return
 	}
 	report.SamplesCompacted = true

@@ -115,7 +115,7 @@ func Optimize(ctx context.Context, request Request, evaluate Evaluator) (Result,
 	if best == nil {
 		if t.hadIndeterminate {
 			t.result.Status = "indeterminate"
-			t.result.Message = "required evaluation evidence is unavailable"
+			t.result.Message = "部分候选未能完成有效模拟，请查看具体原因；本次结果不能证明无解"
 		} else if t.result.Exhaustive {
 			t.result.Status = "proven_infeasible"
 			t.result.Message = "complete enumeration found no qualified assignment"
@@ -415,6 +415,22 @@ func (t *task) proxy(item Item, character Character) float64 {
 	return value
 }
 
+func (t *task) recordIssue(message string) {
+	if len(t.result.Issues) >= 16 {
+		return
+	}
+	runes := []rune(message)
+	if len(runes) > 1200 {
+		message = string(runes[:1200]) + "…"
+	}
+	for _, old := range t.result.Issues {
+		if old == message {
+			return
+		}
+	}
+	t.result.Issues = append(t.result.Issues, message)
+}
+
 func (t *task) evaluatePlan(ctx context.Context, state map[string][]int, seeds []int64, final bool) *Plan {
 	encoded, _ := json.Marshal(state)
 	key := string(encoded)
@@ -480,6 +496,7 @@ func (t *task) evaluatePlan(ctx context.Context, state map[string][]int, seeds [
 			break
 		}
 		r := scenario.Evaluation
+		r.CompactSamples = true
 		r.SchemaVersion = "1"
 		r.EngineRevision = engine.Revision
 		r.Seeds = append([]int64(nil), seeds...)
@@ -505,6 +522,7 @@ func (t *task) evaluatePlan(ctx context.Context, state map[string][]int, seeds [
 			plan.Indeterminate = true
 			t.hadIndeterminate = true
 			plan.Issues = append(plan.Issues, scenario.ID+": "+err.Error())
+			t.recordIssue(scenario.ID + ": " + err.Error())
 			continue
 		}
 		if report.Validation.State != "passed" || !report.Validation.Complete {

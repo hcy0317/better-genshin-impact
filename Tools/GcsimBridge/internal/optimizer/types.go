@@ -60,6 +60,7 @@ type Impact struct {
 	After     []int  `json:"after"`
 }
 type Result struct {
+	Issues          []string          `json:"issues,omitempty"`
 	Improvement     *Improvement      `json:"improvement,omitempty"`
 	Status          string            `json:"status"`
 	Plan            *Plan             `json:"plan,omitempty"`

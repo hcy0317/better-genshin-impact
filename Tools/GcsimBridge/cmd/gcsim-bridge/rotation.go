@@ -32,7 +32,7 @@ func rotationCLI(ctx context.Context, input io.Reader, output io.Writer) int {
 	}
 	r, err := host.RunWorker(ctx, exe, "--rotation-worker", payload, host.Limits{WallTime: time.Duration(job.Limits.WallTimeMS) * time.Millisecond, MemoryBytes: job.Limits.MemoryMiB << 20, OutputBytes: job.Limits.OutputKiB << 10})
 	if err != nil {
-		return writeReply(output, reply{Status: "failed", Error: fmt.Sprintf("bounded rotation search: %v", err)})
+		return writeReply(output, workerFailure("bounded rotation search", r, err))
 	}
 	if _, err = output.Write(r.Stdout); err != nil {
 		return 2
