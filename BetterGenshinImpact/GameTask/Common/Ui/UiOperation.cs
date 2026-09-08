@@ -90,6 +90,7 @@ internal sealed class UiOperation : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _userToken.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
         if (_callerToken.IsCancellationRequested && !(_parent?.Token.IsCancellationRequested ?? false))
             _callerToken.ThrowIfCancellationRequested();
         _parent?.Check();

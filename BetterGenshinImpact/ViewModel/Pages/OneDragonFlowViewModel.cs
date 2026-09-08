@@ -713,7 +713,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                         await Task.Delay(1000);
                     }
                     catch (Exception e) when (e is OperationCanceledException or NormalEndException
-                        || TaskFailureRecoveryPolicy.IsRecoveryFailure(e))
+                        || TaskFailureRecoveryPolicy.IsRecoveryFailure(e) || TaskExecutionScope.IsUnconfirmedCombat(e))
                     {
                         throw;
                     }
@@ -1223,7 +1223,8 @@ internal static class OneDragonFinalizer
             await action();
         }
         catch (Exception actionException) when (
-            actionException is not OperationCanceledException and not NormalEndException)
+            actionException is not OperationCanceledException and not NormalEndException
+            && !TaskExecutionScope.IsUnconfirmedCombat(actionException))
         {
             try
             {
@@ -1251,7 +1252,8 @@ internal static class OneDragonFinalizer
         {
             await finalCheck();
         }
-        catch (Exception exception) when (exception is not OperationCanceledException and not NormalEndException)
+        catch (Exception exception) when (exception is not OperationCanceledException and not NormalEndException
+            && !TaskExecutionScope.IsUnconfirmedCombat(exception))
         {
             finalCheckException = exception;
             onFinalCheckFailure?.Invoke(exception);

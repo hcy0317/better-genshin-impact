@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using BetterGenshinImpact.Core.Script.Dependence;
+using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.Core.Script.Dependence.Model;
 using Microsoft.ClearScript;
 using System.Threading;
@@ -136,6 +137,7 @@ public class EngineExtend
 
     public static void AddAllGlobalMethod(IScriptEngine engine)
     {
+        var taskGuard = TaskExecutionScope.Capture();
         // // 获取GlobalMethod类的所有静态方法
         // var methods = typeof(GlobalMethod).GetMethods(BindingFlags.Static | BindingFlags.Public);
         //
@@ -147,29 +149,29 @@ public class EngineExtend
         // }
 
 #pragma warning disable CS8974 // Converting method group to non-delegate type
-        engine.AddHostObject("sleep", GlobalMethod.Sleep);
+        engine.AddHostObject("sleep", taskGuard.Bind((Func<int, Task>)GlobalMethod.Sleep));
         engine.AddHostObject("getVersion", GlobalMethod.GetVersion);
-        engine.AddHostObject("keyDown", GlobalMethod.KeyDown);
-        engine.AddHostObject("keyUp", GlobalMethod.KeyUp);
-        engine.AddHostObject("keyPress", GlobalMethod.KeyPress);
+        engine.AddHostObject("keyDown", taskGuard.Bind((Action<string>)GlobalMethod.KeyDown));
+        engine.AddHostObject("keyUp", taskGuard.Bind((Action<string>)GlobalMethod.KeyUp));
+        engine.AddHostObject("keyPress", taskGuard.Bind((Action<string>)GlobalMethod.KeyPress));
         engine.AddHostObject("setGameMetrics", GlobalMethod.SetGameMetrics);
         engine.AddHostObject("getGameMetrics", GlobalMethod.GetGameMetrics);
-        engine.AddHostObject("moveMouseBy", GlobalMethod.MoveMouseBy);
-        engine.AddHostObject("moveMouseTo", GlobalMethod.MoveMouseTo);
-        engine.AddHostObject("click", GlobalMethod.Click);
-        engine.AddHostObject("leftButtonClick", GlobalMethod.LeftButtonClick);
-        engine.AddHostObject("leftButtonDown", GlobalMethod.LeftButtonDown);
-        engine.AddHostObject("leftButtonUp", GlobalMethod.LeftButtonUp);
-        engine.AddHostObject("rightButtonClick", GlobalMethod.RightButtonClick);
-        engine.AddHostObject("rightButtonDown", GlobalMethod.RightButtonDown);
-        engine.AddHostObject("rightButtonUp", GlobalMethod.RightButtonUp);
-        engine.AddHostObject("middleButtonClick", GlobalMethod.MiddleButtonClick);
-        engine.AddHostObject("middleButtonDown", GlobalMethod.MiddleButtonDown);
-        engine.AddHostObject("middleButtonUp", GlobalMethod.MiddleButtonUp);
-        engine.AddHostObject("verticalScroll", GlobalMethod.VerticalScroll);
-        engine.AddHostObject("captureGameRegion", GlobalMethod.CaptureGameRegion);
-        engine.AddHostObject("getAvatars", GlobalMethod.GetAvatars);
-        engine.AddHostObject("inputText", GlobalMethod.InputText);
+        engine.AddHostObject("moveMouseBy", taskGuard.Bind((Action<int, int>)GlobalMethod.MoveMouseBy));
+        engine.AddHostObject("moveMouseTo", taskGuard.Bind((Action<int, int>)GlobalMethod.MoveMouseTo));
+        engine.AddHostObject("click", taskGuard.Bind((Action<int, int>)GlobalMethod.Click));
+        engine.AddHostObject("leftButtonClick", taskGuard.Bind((Action)GlobalMethod.LeftButtonClick));
+        engine.AddHostObject("leftButtonDown", taskGuard.Bind((Action)GlobalMethod.LeftButtonDown));
+        engine.AddHostObject("leftButtonUp", taskGuard.Bind((Action)GlobalMethod.LeftButtonUp));
+        engine.AddHostObject("rightButtonClick", taskGuard.Bind((Action)GlobalMethod.RightButtonClick));
+        engine.AddHostObject("rightButtonDown", taskGuard.Bind((Action)GlobalMethod.RightButtonDown));
+        engine.AddHostObject("rightButtonUp", taskGuard.Bind((Action)GlobalMethod.RightButtonUp));
+        engine.AddHostObject("middleButtonClick", taskGuard.Bind((Action)GlobalMethod.MiddleButtonClick));
+        engine.AddHostObject("middleButtonDown", taskGuard.Bind((Action)GlobalMethod.MiddleButtonDown));
+        engine.AddHostObject("middleButtonUp", taskGuard.Bind((Action)GlobalMethod.MiddleButtonUp));
+        engine.AddHostObject("verticalScroll", taskGuard.Bind((Action<int>)GlobalMethod.VerticalScroll));
+        engine.AddHostObject("captureGameRegion", taskGuard.Bind((Func<ImageRegion>)GlobalMethod.CaptureGameRegion));
+        engine.AddHostObject("getAvatars", taskGuard.Bind((Func<string[]>)GlobalMethod.GetAvatars));
+        engine.AddHostObject("inputText", taskGuard.Bind((Action<string>)GlobalMethod.InputText));
 #pragma warning restore CS8974 // Converting method group to non-delegate type
     }
 }

@@ -31,6 +31,9 @@ internal readonly record struct RegionBackgroundClickTarget(int X, int Y)
 /// </summary>
 public class Region : IDisposable
 {
+    // 只给交给 JS 的截图/派生区域绑定任务；长期缓存的原生模板区域不能永久绑定第一次使用的任务。
+    private TaskExecutionScope.Guard? _taskGuard;
+    internal void BindInputToCurrentTask() => _taskGuard = TaskExecutionScope.Capture();
     public int X { get; set; }
     public int Y { get; set; }
     public int Width { get; set; }
@@ -82,6 +85,7 @@ public class Region : IDisposable
         Width = width;
         Height = height;
         Prev = owner;
+        _taskGuard = owner?._taskGuard;
         PrevConverter = converter;
         this.drawContent = drawContent ?? VisionContext.Instance().DrawContent;
     }
@@ -109,6 +113,7 @@ public class Region : IDisposable
     /// </summary>
     public void BackgroundClick()
     {
+        using var ownedTask = (_taskGuard ?? TaskExecutionScope.Capture()).Enter();
         var converted = ConvertRes<GameCaptureRegion>.ConvertPositionToTargetRegion(0, 0, Width, Height, this);
         var target = RegionBackgroundClickTarget.Resolve(
             converted.X,
@@ -168,6 +173,7 @@ public class Region : IDisposable
     /// <exception cref="Exception"></exception>
     public void ClickTo(int x, int y, int w, int h)
     {
+        using var ownedTask = (_taskGuard ?? TaskExecutionScope.Capture()).Enter();
         var res = ConvertRes<DesktopRegion>.ConvertPositionToTargetRegion(x, y, w, h, this);
         res.TargetRegion.DesktopRegionClick(res.X, res.Y, res.Width, res.Height);
     }
@@ -203,6 +209,7 @@ public class Region : IDisposable
     /// <exception cref="Exception"></exception>
     public void MoveTo(int x, int y, int w, int h)
     {
+        using var ownedTask = (_taskGuard ?? TaskExecutionScope.Capture()).Enter();
         var res = ConvertRes<DesktopRegion>.ConvertPositionToTargetRegion(x, y, w, h, this);
         res.TargetRegion.DesktopRegionMove(res.X, res.Y, res.Width, res.Height);
     }

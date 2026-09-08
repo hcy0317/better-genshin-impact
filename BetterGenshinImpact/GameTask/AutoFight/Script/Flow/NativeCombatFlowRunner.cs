@@ -119,7 +119,7 @@ internal sealed class NativeCombatFlowRunner : IDisposable
         ct.ThrowIfCancellationRequested();
         // 上一次失败先返回给宿主做结束检测；不能把策略失败当作复活信号触发传送。
         if (_consecutiveFailedPasses >= 3)
-            throw new InvalidOperationException("增强战斗连续 3 轮关键流程失败，战斗未确认结束；停止当前任务，不执行复活重试");
+            TaskExecutionScope.StopUnconfirmedCombat("增强战斗连续 3 轮关键流程失败，不执行复活重试");
         // 整步（包含产球后的接球）独占；进入 atomic 后跨 Step 保留，退出再交还普通观察。
         if (_game is NativeGame) _exclusive ??= AvatarRecognition.BeginExclusiveOperation();
         try

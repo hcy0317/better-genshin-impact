@@ -32,6 +32,7 @@ namespace BetterGenshinImpact.Core.Script.Dependence;
 
 public class Dispatcher
 {
+    private readonly TaskExecutionScope.Guard _taskGuard = TaskExecutionScope.Capture();
     private readonly ILogger<Dispatcher> _logger;
     private readonly CombatSkillCatalog? _skillCatalog;
     private CombatSkillCatalog SkillCatalog => _skillCatalog ?? CombatSkillCatalog.Default;
@@ -39,6 +40,7 @@ public class Dispatcher
     /// <summary>同步公共技能数值；角色使用英文键，逗号分隔。不会启动战斗或热改当前快照。</summary>
     public async Task<string> SyncCombatSkills(string? characterKeys = null, CancellationToken? customCt = null)
     {
+        using var ownedTask = _taskGuard.Enter();
         var keys = string.IsNullOrWhiteSpace(characterKeys) ? null
             : characterKeys.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         await SkillCatalog.SyncAsync(keys, ct: customCt ?? CancellationContext.Instance.Cts.Token);
@@ -116,6 +118,7 @@ public class Dispatcher
     /// <exception cref="ArgumentNullException"></exception>
     public void AddTimer(RealtimeTimer timer)
     {
+        using var ownedTask = _taskGuard.Enter();
         ClearAllTriggers();
         try
         {
@@ -146,6 +149,7 @@ public class Dispatcher
     /// <exception cref="ArgumentException"></exception>
     public void AddTrigger(RealtimeTimer timer)
     {
+        using var ownedTask = _taskGuard.Enter();
         var realtimeTimer = timer;
         if (realtimeTimer == null)
         {
@@ -165,8 +169,9 @@ public class Dispatcher
 
     public async Task RunTask(SoloTask soloTask, CancellationTokenSource customCts)
     {
+        using var ownedTask = _taskGuard.Enter();
         // 创建链接的取消令牌源，任何一个取消都会触发
-        CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+        using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             customCts.Token,
             CancellationContext.Instance.Cts.Token);
         await RunTask(soloTask, linkedCts.Token);
@@ -188,6 +193,7 @@ public class Dispatcher
     /// <exception cref="ArgumentException"></exception>
     public async Task<object?> RunTask(SoloTask soloTask, CancellationToken? customCt = null)
     {
+        using var ownedTask = _taskGuard.Enter();
         if (soloTask == null)
         {
             throw new ArgumentNullException(nameof(soloTask), "独立任务对象不能为空");
@@ -382,6 +388,7 @@ public class Dispatcher
     /// <returns></returns>  
     public async Task<object> RunAutoDomainTask(AutoDomainParam param, CancellationToken? customCt = null)
     {  
+        using var ownedTask = _taskGuard.Enter();
         if (param == null)  
         {  
             throw new ArgumentNullException(nameof(param), "秘境任务参数不能为空");  
@@ -400,6 +407,7 @@ public class Dispatcher
     /// <returns></returns>
     public async Task<object> RunAutoBossTask(AutoBossParam param, CancellationToken? customCt = null)
     {
+        using var ownedTask = _taskGuard.Enter();
         if (param == null)
         {
             throw new ArgumentNullException(nameof(param), "自动首领讨伐任务参数不能为空");
@@ -418,6 +426,7 @@ public class Dispatcher
     /// <returns></returns>  
     public async Task RunAutoFightTask(AutoFightParam param, CancellationToken? customCt = null)  
     {  
+        using var ownedTask = _taskGuard.Enter();
         if (param == null)  
         {  
             throw new ArgumentNullException(nameof(param), "战斗任务参数不能为空");  
@@ -438,6 +447,7 @@ public class Dispatcher
     /// <param name="customCt">自定义取消令牌</param>
     public async Task RunCombatScript(string script, string? avatarName = null, CancellationToken? customCt = null)
     {
+        using var ownedTask = _taskGuard.Enter();
         if (string.IsNullOrWhiteSpace(script))
         {
             throw new ArgumentException("策略字符串不能为空", nameof(script));
@@ -462,6 +472,7 @@ public class Dispatcher
     /// <returns></returns>  
     public async Task RunAutoLeyLineOutcropTask(AutoLeyLineOutcropParam param, CancellationToken? customCt = null)  
     {  
+        using var ownedTask = _taskGuard.Enter();
         if (param == null)  
         {  
             throw new ArgumentNullException(nameof(param), "自动地脉花任务参数不能为空");  
@@ -480,6 +491,7 @@ public class Dispatcher
     /// <returns></returns>  
     public async Task RunAutoStygianOnslaughtTask(AutoStygianOnslaughtParam param, CancellationToken? customCt = null)
     {
+        using var ownedTask = _taskGuard.Enter();
         if (param == null)
         {
             throw new ArgumentNullException(nameof(param), "自动幽境危战任务参数不能为空");
@@ -497,6 +509,7 @@ public class Dispatcher
     /// <returns>单物品返回数量；多物品返回名称到数量的脚本对象。</returns>
     public async Task<object?> RunCountInventoryItemTask(CountInventoryItemParam param, CancellationToken? customCt = null)
     {
+        using var ownedTask = _taskGuard.Enter();
         if (param == null)
         {
             throw new ArgumentNullException(nameof(param), "背包物品计数参数不能为空");

@@ -35,13 +35,15 @@ internal static class TaskFailureRecoveryPolicy
         TimeSpan? budget = null,
         Action<Exception, string>? captureFailure = null)
     {
-        if (taskFailure is OperationCanceledException or NormalEndException || IsRecoveryFailure(taskFailure))
+        if (taskFailure is OperationCanceledException or NormalEndException || IsRecoveryFailure(taskFailure)
+            || TaskExecutionScope.IsUnconfirmedCombat(taskFailure))
         {
             ExceptionDispatchInfo.Capture(taskFailure).Throw();
         }
 
         try
         {
+            TaskExecutionScope.ThrowIfFailed();
             // 父级UI截止时间耗尽是恢复失败，不是用户取消；保留原始任务异常。
             UiOperation.Current?.Check();
             ct.ThrowIfCancellationRequested();
