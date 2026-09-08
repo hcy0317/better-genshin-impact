@@ -21,14 +21,39 @@ public sealed class ArtifactEquipmentJobRunner(HttpClient client) : IArtifactEqu
         var path = $"artifacts/optimizer/host/plans/{Uri.EscapeDataString(request.JobId)}" +
                    $"?uid={Uri.EscapeDataString(request.Uid)}&requestToken={Uri.EscapeDataString(token)}";
         string Endpoint(string action) => path.Replace("?", "/" + action + "?");
-        using var claim = await client.PostAsync(Endpoint("claim"), null, ct);
-        var plan = await Read<ArtifactEquipmentPlanDto>(claim, ct);
-        if (!plan.Confirmed || plan.Id != request.JobId || plan.Uid != request.Uid || plan.Digest != request.NativePlanDigest
-            || plan.InventoryCount != request.SourceArtifactCount)
-            throw new InvalidOperationException("Equipment confirmation binding does not match the host request.");
-        var task = new EquipmentTask(plan, client, Endpoint, _json, ct);
-        await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
-        if (task.Result?.Status != "completed") throw new InvalidOperationException(task.Result?.Message ?? "Equipment execution requires a new observation.");
+        EquipmentTask? task = null;
+        try
+        {
+            using var claim = await client.PostAsync(Endpoint("claim"), null, ct);
+            var plan = await Read<ArtifactEquipmentPlanDto>(claim, ct);
+            if (!plan.Confirmed || plan.Id != request.JobId || plan.Uid != request.Uid || plan.Digest != request.NativePlanDigest
+                || plan.InventoryCount != request.SourceArtifactCount)
+                throw new InvalidOperationException("Equipment confirmation binding does not match the host request.");
+            ct.ThrowIfCancellationRequested();
+            task = new EquipmentTask(plan, client, Endpoint, _json, ct);
+            await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+            if (task.Result?.Status != "completed") throw new InvalidOperationException(task.Result?.Message ?? "Equipment execution requires a new observation.");
+        }
+        catch (Exception error)
+        {
+            // Claim can succeed remotely even if its response is lost. The bound
+            // progress endpoint authorizes the token before accepting a terminal state.
+            if (task?.Result?.Status != "completed")
+            {
+                var last = task?.Result ?? task?.LastCheckpoint;
+                var report = last is null
+                    ? new ArtifactEquipmentResultDto(task is not null ? "needs_observation" : error is OperationCanceledException ? "cancelled" : "rejected", [], null, error.Message)
+                    : last with { Status = "needs_observation", Message = error.Message };
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    using var response = await client.PostAsJsonAsync(Endpoint("progress"), report, _json, timeout.Token);
+                    await Read<JsonElement>(response, timeout.Token);
+                }
+                catch (Exception reportingError) { error.Data["EquipmentReportError"] = reportingError.Message; }
+            }
+            throw;
+        }
     }
     private async Task<T> Read<T>(HttpResponseMessage response, CancellationToken ct)
     {
@@ -43,6 +68,7 @@ public sealed class ArtifactEquipmentJobRunner(HttpClient client) : IArtifactEqu
     {
         public string Name => "已确认圣遗物穿戴";
         public ArtifactEquipmentResultDto? Result { get; private set; }
+        public ArtifactEquipmentResultDto? LastCheckpoint { get; private set; }
         public async Task Start(CancellationToken taskToken)
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(taskToken, external);
@@ -53,6 +79,7 @@ public sealed class ArtifactEquipmentJobRunner(HttpClient client) : IArtifactEqu
                 Result = await new ArtifactEquipmentExecution().RunAsync(plan, new ArtifactEquipmentGamePort(App.GetLogger<ArtifactEquipmentGamePort>()),
                     async state =>
                     {
+                        LastCheckpoint = state;
                         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                         using var response = await client.PostAsJsonAsync(endpoint("progress"), state, json, timeout.Token);
                         response.EnsureSuccessStatusCode();
