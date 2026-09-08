@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/genshinsim/gcsim/pkg/core/action"
+	"github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/nativeflow"
 	"math"
 
 	"github.com/genshinsim/gcsim/pkg/core/event"
@@ -27,6 +29,7 @@ var Revision = "1de5a42438791757a7178b16e59ec97dc1690d61"
 const AdapterVersion = "1"
 
 type Request struct {
+	NativeFlow         *nativeflow.Program   `json:"nativeFlow,omitempty"`
 	CompactSamples     bool                  `json:"compactSamples,omitempty"`
 	Assumptions        []string              `json:"assumptions,omitempty"`
 	AutoRounds         bool                  `json:"autoRounds,omitempty"`
@@ -71,6 +74,7 @@ type Substat struct {
 }
 
 type Report struct {
+	NativeFlowTraces      []NativeFlowTrace             `json:"nativeFlowTraces,omitempty"`
 	Warnings              []string                      `json:"warnings,omitempty"`
 	SamplingIterations    int                           `json:"samplingIterations"`
 	SamplesCompacted      bool                          `json:"samplesCompacted,omitempty"`
@@ -100,11 +104,28 @@ type Report struct {
 	EnergyWindows         [][]EnergyObservation         `json:"energyWindows"`
 	InitialStats          map[string]map[string]float64 `json:"initialStats"`
 }
+type NativeFlowTrace struct {
+	Seed      int64                   `json:"seed"`
+	Events    []nativeflow.TraceEvent `json:"events"`
+	Truncated bool                    `json:"truncated"`
+}
 
 // Evaluate is called only inside an owned, resource-limited worker process.
 func Evaluate(request Request) (Report, error) {
 	report := Report{EngineRevision: Revision, AdapterVersion: AdapterVersion, Support: "native_simulation"}
 	report.SamplingIterations = len(request.Seeds)
+	if request.NativeFlow != nil {
+		if err := request.NativeFlow.Validate(); err != nil {
+			return report, err
+		}
+		report.Assumptions = append(report.Assumptions, "native_flow_model")
+		for _, block := range request.NativeFlow.Blocks {
+			if block.Macro == "neuvillette_charge_v1" {
+				report.Assumptions = append(report.Assumptions, "native_macro_neuvillette_charge")
+				break
+			}
+		}
+	}
 	if len(request.Assumptions) > 16 {
 		return report, errors.New("too many declared assumptions")
 	}
@@ -134,6 +155,12 @@ func Evaluate(request Request) (Report, error) {
 	}
 	if len(cfg.Errors) != 0 {
 		return report, fmt.Errorf("invalid gcsim configuration: %w", errors.Join(cfg.Errors...))
+	}
+	if request.NativeFlow != nil {
+		block, ok := script.(*ast.BlockStmt)
+		if !ok || len(block.List) > 0 {
+			return report, errors.New("原生流程不能混合gcsim可执行语句；请明确切换循环来源")
+		}
 	}
 	report.Warnings = scriptWarnings(script, file, cfg, request.RotationLineOffset)
 	for _, profile := range cfg.Characters {
@@ -225,13 +252,24 @@ func Evaluate(request Request) (Report, error) {
 		}
 		program := script.Copy()
 		var roundRecorder *roundObserver
-		if request.AutoRounds {
+		if request.AutoRounds && request.NativeFlow == nil {
 			program, roundRecorder, err = observeAutomaticRounds(script, file, core, seed, request.MainLoopIndex, request.RotationLineOffset)
 			if err != nil {
 				return report, err
 			}
 		}
-		evaluator, err := eval.NewEvaluator(file, program, core)
+		var evaluator action.Evaluator
+		var nativeEvaluator *nativeflow.Evaluator
+		if request.NativeFlow != nil {
+			nativeEvaluator, err = nativeflow.New(request.NativeFlow, core)
+			evaluator = nativeEvaluator
+			if err == nil && request.AutoRounds {
+				roundRecorder = newNativeRoundObserver(core, seed)
+				nativeEvaluator.OnRound = roundRecorder.nativeBoundary
+			}
+		} else {
+			evaluator, err = eval.NewEvaluator(file, program, core)
+		}
 		if err != nil {
 			return report, err
 		}
@@ -291,6 +329,9 @@ func Evaluate(request Request) (Report, error) {
 			}, "bettergi/trajectory-resource-limit")
 		}
 		result, err := sim.Run()
+		if nativeEvaluator != nil && len(report.NativeFlowTraces) < 4 {
+			report.NativeFlowTraces = append(report.NativeFlowTraces, NativeFlowTrace{seed, nativeEvaluator.Events, nativeEvaluator.TraceTruncated})
+		}
 		if trajectoryLimitReached {
 			detail := ""
 			if len(report.Warnings) > 0 {

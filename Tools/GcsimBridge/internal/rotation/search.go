@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/engine"
+	"github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/nativeflow"
 	"github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/optimizer"
 	"math"
 	"regexp"
@@ -26,14 +27,16 @@ type Request struct {
 	Budget          int            `json:"budget"`
 }
 type Result struct {
-	Status      string                 `json:"status"`
-	Actions     []Action               `json:"actions,omitempty"`
-	Script      string                 `json:"script,omitempty"`
-	Report      *engine.Report         `json:"report,omitempty"`
-	Baseline    *engine.Report         `json:"baseline,omitempty"`
-	Evaluations int                    `json:"evaluations"`
-	Improvement *optimizer.Improvement `json:"improvement,omitempty"`
-	Issues      []string               `json:"issues"`
+	Native        bool                   `json:"native,omitempty"`
+	NativeChanges []nativeflow.Parameter `json:"nativeChanges,omitempty"`
+	Status        string                 `json:"status"`
+	Actions       []Action               `json:"actions,omitempty"`
+	Script        string                 `json:"script,omitempty"`
+	Report        *engine.Report         `json:"report,omitempty"`
+	Baseline      *engine.Report         `json:"baseline,omitempty"`
+	Evaluations   int                    `json:"evaluations"`
+	Improvement   *optimizer.Improvement `json:"improvement,omitempty"`
+	Issues        []string               `json:"issues"`
 }
 
 // Script is a finite-action IR rendering, not a general parser for arbitrary
@@ -74,6 +77,9 @@ func Script(actions []Action) (string, error) {
 }
 
 func Optimize(ctx context.Context, r Request, evaluate optimizer.Evaluator) (Result, error) {
+	if r.Base.NativeFlow != nil {
+		return optimizeNative(ctx, r, evaluate)
+	}
 	result := Result{Issues: []string{}}
 	if strings.Count(r.Base.Config, Marker) != 1 || r.Budget < 4 || r.Budget > 512 || evaluate == nil {
 		return result, errors.New("invalid rotation template or evaluation budget")

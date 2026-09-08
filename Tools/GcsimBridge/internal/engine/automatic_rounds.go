@@ -44,6 +44,29 @@ type roundObserver struct {
 	linear           bool
 }
 
+func newNativeRoundObserver(c *core.Core, seed int64) *roundObserver {
+	// Invoked directly by the native evaluator, not installed as a user-script
+	// logger. Script prints therefore cannot forge these boundaries.
+	return &roundObserver{Logger: c.Log, core: c, startTag: "native-root-start", endTag: "native-root-end",
+		trace: RoundTrace{Seed: strconv.FormatInt(seed, 10), State: "complete", Rounds: []ObservedRound{}}}
+}
+func (o *roundObserver) nativeBoundary(start, complete bool) {
+	tag := o.endTag
+	if start {
+		tag = o.startTag
+	}
+	o.NewEvent(tag, glog.LogUserEvent, -1)
+	if !start && !complete {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if len(o.trace.Rounds) > 0 {
+			o.trace.Rounds[len(o.trace.Rounds)-1].Complete = false
+		}
+		o.trace.State = "unavailable"
+		o.trace.Issues = append(o.trace.Issues, "原流程本轮未完成必需动作，不能作为合格计分轮次")
+	}
+}
+
 func containsOuterExit(node ast.Node) bool {
 	switch n := node.(type) {
 	case *ast.CtrlStmt, *ast.ReturnStmt, *ast.SwitchStmt:

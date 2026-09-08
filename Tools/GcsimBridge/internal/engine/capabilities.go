@@ -24,6 +24,7 @@ func Capabilities() map[string]any {
 		}
 	}
 	return map[string]any{
+		"nativeFlow":    map[string]any{"schemaVersion": "native-flow-v1", "macros": []string{"neuvillette_charge_v1"}, "execution": "simulation_reference_only", "maxNodes": 600},
 		"schemaVersion": "1", "engineRevision": Revision, "adapterVersion": AdapterVersion,
 		"buffKinds": []string{"stat", "resistance", "defense_reduction", "attack_bonus"},
 		"anchors":   []string{"start", "round", "action"}, "actionAnchors": []string{"attack", "skill", "burst"},
