@@ -93,8 +93,14 @@ internal sealed class UiOperation : IDisposable
         TaskExecutionScope.ThrowIfFailed();
         if (_callerToken.IsCancellationRequested && !(_parent?.Token.IsCancellationRequested ?? false))
             _callerToken.ThrowIfCancellationRequested();
-        _parent?.Check();
         if (Remaining <= TimeSpan.Zero || _deadline.IsCancellationRequested) throw Timeout();
+        try { _parent?.Check(); }
+        catch (TimeoutException parentTimeout)
+        {
+            var timeout = Timeout();
+            timeout.Data["ParentUiTimeout"] = parentTimeout.Message;
+            throw timeout;
+        }
         Token.ThrowIfCancellationRequested();
     }
 
@@ -103,7 +109,15 @@ internal sealed class UiOperation : IDisposable
         if (error is OperationCanceledException or NormalEndException && !_userToken.IsCancellationRequested)
         {
             try { Check(); }
-            catch (TimeoutException timeout) { return new TimeoutException(timeout.Message, error); }
+            catch (TimeoutException timeout)
+            {
+                // ClearScript 会取 GetBaseException；把截止产生的取消挂成 InnerException
+                // 会让 JS 只看到 "A task was canceled"。业务错误保持为当前页面的 Timeout。
+                timeout.Data["UiDeadlineCause"] = error.GetType().Name + ": " + error.Message;
+                Debug(() => _logger.LogDebug(error, "UI_DEADLINE root={RootId} op={OpId} expected={Expected}",
+                    RootId, Id, Expected));
+                return timeout;
+            }
             catch (OperationCanceledException) { }
         }
         return error;

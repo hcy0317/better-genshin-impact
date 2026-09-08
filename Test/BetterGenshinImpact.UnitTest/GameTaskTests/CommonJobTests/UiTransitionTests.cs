@@ -9,6 +9,35 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiTransitionTests
 {
     [Fact]
+    public async Task RecognizedCommissionHandbookCanExitBeforeTrackingStarts()
+    {
+        var clock = new FakeTimeProvider();
+        var handbook = HandbookUiRecognition.IsCommissionPage(
+            ["见闻", "委托", "秘境", "讨伐", "向导", "备战"],
+            ["每日委托奖励0/4", "选择委托任务倾向地域", "长效历练点778.3"]);
+        Assert.True(handbook);
+        var driver = new ReplayDriver(clock, new(1) { Handbook = handbook }, new(2),
+            new(3) { MainHud = true }, new(4) { MainHud = true });
+        Assert.Equal(4, (await UiRecovery.ToMainAsync(driver, default, clock: clock)).FrameId);
+        Assert.Equal(new[] { UiAction.Escape }, driver.Actions);
+        Assert.False(HandbookUiRecognition.IsCommissionPage(["委托"], ["每日委托奖励"]));
+        Assert.False(HandbookUiRecognition.IsCommissionPage(["委托", "秘境"], ["普通任务详情"]));
+    }
+
+    [Fact]
+    public async Task NestedRecoveryTimeoutReportsTheInnerPageAndItsObservation()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { Handbook = true });
+        var error = await Assert.ThrowsAsync<TimeoutException>(() => UiOperation.RunAsync(
+            "failure-recovery", TimeSpan.FromSeconds(1), default,
+            operation => UiRecovery.ToMainAsync(driver, operation.Token, requireOverworld: true, clock: clock), clock: clock));
+        Assert.Contains("return-main", error.Message);
+        Assert.Contains("Overworld", error.Message);
+        Assert.Contains("handbook=True", error.Message);
+    }
+
+    [Fact]
     public async Task CraftingResultOverlayMustClearBeforeTheNextMaterialCanStart()
     {
         var clock = new FakeTimeProvider();

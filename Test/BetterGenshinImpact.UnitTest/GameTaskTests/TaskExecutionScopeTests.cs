@@ -24,6 +24,28 @@ public class TaskExecutionScopeTests
     }
 
     [Fact]
+    public async Task JavascriptReceivesUiTimeoutContextRatherThanTheInternalDeadlineCancellation()
+    {
+        var clock = new FakeTimeProvider();
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        var message = "";
+        engine.AddHostObject("exitBook", (Func<Task>)(() => UiOperation.RunAsync(
+            "return-main", TimeSpan.FromMilliseconds(100), default, async operation =>
+            {
+                operation.Observe(new(1) { Handbook = true }, UiTarget.Main);
+                var wait = operation.DelayAsync(1000, default);
+                clock.Advance(TimeSpan.FromMilliseconds(200));
+                await wait;
+                return true;
+            }, clock: clock)));
+        engine.AddHostObject("report", (Action<string>)(value => message = value));
+        await (Task)engine.Evaluate("(async () => { try { await exitBook(); } catch (e) { report(e.message); } })()");
+        Assert.Contains("return-main", message);
+        Assert.Contains("handbook=True", message);
+        Assert.DoesNotContain("was canceled", message);
+    }
+
+    [Fact]
     public void UnexpectedFightExitRemainsTerminalUnlessEndWasAlreadyConfirmed()
     {
         var original = new TimeoutException("结束检测未能完成");

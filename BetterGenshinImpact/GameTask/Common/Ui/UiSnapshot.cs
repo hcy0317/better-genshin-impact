@@ -22,12 +22,13 @@ internal sealed record UiSnapshot(long FrameId)
     public bool BlackConfirm { get; init; }
     public bool MenuBack { get; init; }
     public bool Crafting { get; init; }
+    public bool Handbook { get; init; }
 
     public bool MainReady => MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
-        && !Revive && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting;
+        && !Revive && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook;
     public bool MapReady => BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
-        && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack;
-    public bool CanEscape => !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack);
+        && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook;
+    public bool CanEscape => !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook);
     public bool Matches(UiTarget target) => FrameId > 0 && target switch
     {
         UiTarget.Main => MainReady,
@@ -44,6 +45,6 @@ internal sealed record UiSnapshot(long FrameId)
 
     public int Signature => (MainHud ? 1 : 0) | (BigMap ? 2 : 0) | (Party ? 4 : 0)
         | (PartyList ? 8 : 0) | (Talk ? 16 : 0) | (Prompt ? 32 : 0) | (Revive ? 64 : 0)
-        | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0);
-    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting}";
+        | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0);
+    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook}";
 }
