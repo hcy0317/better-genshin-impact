@@ -1,12 +1,25 @@
 using System.Dynamic;
 using BetterGenshinImpact.Core.Script.Group;
 using BetterGenshinImpact.GameTask.LogParse;
+using BetterGenshinImpact.Core.Script.Project;
 using Newtonsoft.Json;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.LogParseTests;
 
 public class ExecutionRecordStorageTests
 {
+    [Fact]
+    public void SelfManagedJavascriptReevaluatesMaterialCooldownDespiteSameDaySuccess()
+    {
+        var project = CreateProject("采集选中的材料");
+        var record = CreateRecord(null);
+        var manifest = Manifest.FromJson("""{"self_managed_completion":true}""");
+        var skip = ExecutionRecordStorage.IsSkipTask(project, out var message,
+            [new DailyExecutionRecord { ExecutionRecords = [record] }], _ => manifest);
+        Assert.False(skip);
+        Assert.Contains("材料", message);
+    }
+
     [Fact]
     public void ChangedJavascriptSettings_ShouldInvalidateSuccessfulDailyRecord()
     {
