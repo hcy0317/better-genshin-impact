@@ -2462,130 +2462,55 @@ public class TpTask
         throw new Exception($"切换区域[{areaName}]失败");
     }
 
-    private async Task<bool> TrySwitchArea(string areaName)
-    {
-        GameCaptureRegion.GameRegionClick((rect, scale) => (rect.Width - 160 * scale, rect.Height - 60 * scale));
-        await Delay(50, ct);
-        var minCountryLocalized = this.stringLocalizer.WithCultureGet(this.cultureInfo, areaName);
-        var candidatesText = "";
-        var stopwatch = Stopwatch.StartNew();
-        while (stopwatch.ElapsedMilliseconds < SwitchAreaCandidateTimeoutMs)
+    private Task<bool> TrySwitchArea(string areaName) =>
+        UiOperation.RunAsync("open-area-selector", TimeSpan.FromSeconds(10), ct, async operation =>
         {
-            ct.ThrowIfCancellationRequested();
-            using var ra = CaptureToRectArea();
-            var list = FindSwitchAreaCandidates(ra);
-            candidatesText = FormatSwitchAreaCandidateTexts(list);
-            var matchRect = list
-                .OrderByDescending(r => r.Y)
-                .FirstOrDefault(r => IsSwitchAreaCandidateMatch(r.Text, minCountryLocalized, areaName));
-            if (matchRect != null)
+            CheckAndSleep(0);
+            operation.Check();
+            GameCaptureRegion.GameRegionClick((rect, scale) => (rect.Width - 160 * scale, rect.Height - 60 * scale));
+            await Delay(50, operation.Token);
+            var localized = stringLocalizer.WithCultureGet(cultureInfo, areaName);
+            var areaLabels = MapLazyAssets.Get().CountryPositions.Keys.Append(areaName)
+                .SelectMany(name => new[] { name, stringLocalizer.WithCultureGet(cultureInfo, name) })
+                .Select(NormalizeSwitchAreaCandidateText).ToHashSet();
+            string candidatesText = "";
+            Region? FindCandidate(List<Region> list, int height) => list
+                .Where(candidate => candidate.Y < height - 100d * height / 1080d)
+                .OrderByDescending(candidate => candidate.Y)
+                .FirstOrDefault(candidate => IsSwitchAreaCandidateMatch(candidate.Text, localized, areaName));
+            bool SelectorVisible(List<Region> list, int height) => list.Any(candidate =>
+                candidate.Y < height - 100d * height / 1080d && areaLabels.Contains(NormalizeSwitchAreaCandidateText(candidate.Text)));
+
+            var applied = await AreaSelectionClickController.TryApplyAsync(() =>
             {
-                var applied = await AreaSelectionClickController.TryApplyAsync(
-                    SwitchAreaSelectionMaxClickAttempts,
-                    async attempt =>
-                    {
-                        using var retryCapture = CaptureToRectArea();
-                        var retryMatch = FindSwitchAreaCandidates(retryCapture)
-                            .OrderByDescending(candidate => candidate.Y)
-                            .FirstOrDefault(candidate => IsSwitchAreaCandidateMatch(
-                                candidate.Text,
-                                minCountryLocalized,
-                                areaName));
-                        if (retryMatch is null)
-                        {
-                            Logger.LogWarning(
-                                "区域选择器或候选已消失，不再复用旧坐标：{Country}，重试 {Attempt}/{MaxAttempts}",
-                                areaName,
-                                attempt,
-                                SwitchAreaSelectionMaxClickAttempts);
-                            return false;
-                        }
-                        var clickedCandidateRect = new Rect(
-                            retryMatch.X,
-                            retryMatch.Y,
-                            retryMatch.Width,
-                            retryMatch.Height);
-                        retryMatch.Click();
-                        await Delay(50, ct);
-                        var confirmed = await WaitForAreaSelectionApplied(
-                            areaName,
-                            minCountryLocalized,
-                            clickedCandidateRect);
-                        if (!confirmed)
-                        {
-                            Logger.LogWarning(
-                                "区域选择点击未确认：{Country}，重试 {Attempt}/{MaxAttempts}",
-                                areaName,
-                                attempt,
-                                SwitchAreaSelectionMaxClickAttempts);
-                        }
-
-                        return confirmed;
-                    });
-                if (applied)
-                {
-                    RememberAreaSwitchCenterPoint(areaName);
-                    Logger.LogInformation("切换到区域：{Country}", areaName);
-                    return true;
-                }
-            }
-
-            await Delay(UiRecognitionPollIntervalMs, ct);
-        }
-
-        Logger.LogWarning(
-            "切换区域失败：{Country}，OCR候选：{Candidates}",
-            areaName,
-            string.IsNullOrWhiteSpace(candidatesText) ? "无" : candidatesText);
-        return false;
-    }
-
-    private async Task<bool> WaitForAreaSelectionApplied(
-        string areaName,
-        string localizedAreaName,
-        Rect clickedCandidateRect)
-    {
-        var stopwatch = Stopwatch.StartNew();
-        var consecutiveMissingChecks = 0;
-        while (stopwatch.ElapsedMilliseconds < SwitchAreaSelectionTimeoutMs)
-        {
-            ct.ThrowIfCancellationRequested();
-            using var capture = CaptureToRectArea();
-            var clickedCandidateStillVisible = FindSwitchAreaCandidates(capture).Any(candidate =>
-                IsSwitchAreaCandidateMatch(candidate.Text, localizedAreaName, areaName) &&
-                IsSameSwitchAreaCandidatePosition(clickedCandidateRect, candidate));
-
-            if (!clickedCandidateStillVisible &&
-                stopwatch.ElapsedMilliseconds >= SwitchAreaSelectionMinimumWaitMs)
+                using var capture = CaptureToRectArea(forceNew: true);
+                var list = FindSwitchAreaCandidates(capture);
+                candidatesText = FormatSwitchAreaCandidateTexts(list);
+                var snapshot = NativeUiDriver.Read(capture);
+                return new AreaSelectionObservation(snapshot.FrameId, snapshot.MapReady,
+                    SelectorVisible(list, capture.Height), FindCandidate(list, capture.Height) != null);
+            }, (attempt, token) =>
             {
-                consecutiveMissingChecks++;
-                if (consecutiveMissingChecks >= SwitchAreaSelectionStableChecks)
-                {
-                    return true;
-                }
-            }
-            else
+                CheckAndSleep(0);
+                token.ThrowIfCancellationRequested();
+                operation.Check();
+                using var capture = CaptureToRectArea(forceNew: true);
+                var list = FindSwitchAreaCandidates(capture);
+                var candidate = FindCandidate(list, capture.Height);
+                if (candidate == null || !SelectorVisible(list, capture.Height)) return Task.FromResult(false);
+                operation.Check();
+                candidate.Click();
+                Logger.LogDebug("区域选择新帧点击：{Country}，attempt={Attempt}，候选={Candidates}",
+                    areaName, attempt, candidatesText);
+                return Task.FromResult(true);
+            }, Delay, operation.Token, logger: Logger);
+            if (applied)
             {
-                consecutiveMissingChecks = 0;
+                RememberAreaSwitchCenterPoint(areaName);
+                Logger.LogInformation("切换到区域：{Country}", areaName);
             }
-
-            await Delay(UiRecognitionPollIntervalMs, ct);
-        }
-
-        Logger.LogWarning("区域选择动画等待达到上限且未确认生效：{Country}", areaName);
-        return false;
-    }
-
-    private static bool IsSameSwitchAreaCandidatePosition(Rect clickedCandidateRect, Region candidate)
-    {
-        var tolerance = Math.Max(24d, clickedCandidateRect.Height * 1.5d);
-        var clickedCenterX = clickedCandidateRect.X + clickedCandidateRect.Width / 2d;
-        var clickedCenterY = clickedCandidateRect.Y + clickedCandidateRect.Height / 2d;
-        var candidateCenterX = candidate.X + candidate.Width / 2d;
-        var candidateCenterY = candidate.Y + candidate.Height / 2d;
-        return Math.Abs(clickedCenterX - candidateCenterX) <= tolerance &&
-               Math.Abs(clickedCenterY - candidateCenterY) <= tolerance;
-    }
+            return applied;
+        }, Logger);
 
     private List<Region> FindSwitchAreaCandidates(ImageRegion imageRegion)
     {

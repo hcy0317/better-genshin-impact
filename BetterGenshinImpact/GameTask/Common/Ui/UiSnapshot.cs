@@ -32,8 +32,8 @@ internal sealed record UiSnapshot(long FrameId)
         UiTarget.Main => MainReady,
         UiTarget.Overworld => MainReady && !InDomain,
         UiTarget.DomainMain => MainReady && InDomain,
-        UiTarget.Party => Party && !PartyList && !BigMap && !Talk && !Prompt && !Revive && !ExitDoor && !BlackConfirm && !MenuBack,
-        UiTarget.PartyList => PartyList && !BigMap && !Talk && !Prompt && !Revive && !ExitDoor && !BlackConfirm && !MenuBack,
+        UiTarget.Party => Party && !PartyList && !BigMap && !Talk && !Prompt && !Revive && !ExitDoor && !MenuBack,
+        UiTarget.PartyList => PartyList && !BigMap && !Talk && !Prompt && !Revive && !ExitDoor && !MenuBack,
         UiTarget.PartyOrMain => Matches(UiTarget.Party) || MainReady,
         UiTarget.Menu => MenuBack && !BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive && !BlackConfirm,
         _ => false

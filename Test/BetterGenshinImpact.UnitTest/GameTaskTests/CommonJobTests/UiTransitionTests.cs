@@ -39,6 +39,23 @@ public class UiTransitionTests
     }
 
     [Fact]
+    public async Task PartyListOwnConfirmButtonDoesNotPreventSelectingTheParty()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock,
+            new(1) { PartyList = true, BlackConfirm = true },
+            new(2) { PartyList = true, BlackConfirm = true },
+            new(3) { Party = true, BlackConfirm = true },
+            new(4) { Party = true, BlackConfirm = true });
+        var selected = false;
+        var result = await UiRecovery.ConfirmPartyAsync(driver,
+            _ => { selected = true; return Task.FromResult(true); },
+            _ => Task.FromResult(true), default, deferApplyToCaller: true, clock: clock);
+        Assert.True(selected);
+        Assert.True(result.Matches(UiTarget.Party));
+    }
+
+    [Fact]
     public async Task FailedPartySelectionCannotApplyOrReportSuccess()
     {
         var clock = new FakeTimeProvider();
@@ -89,7 +106,7 @@ public class UiTransitionTests
         var snapshot = new UiSnapshot(1)
         {
             Party = true, PartyList = target == UiTarget.PartyList,
-            ExitDoor = exitDoor, BlackConfirm = !exitDoor
+            ExitDoor = exitDoor, Prompt = !exitDoor, BlackConfirm = !exitDoor
         };
         Assert.False(snapshot.Matches(target));
     }
