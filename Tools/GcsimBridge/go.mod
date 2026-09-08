@@ -5,7 +5,7 @@ go 1.27.0
 toolchain go1.27.1
 
 require (
-	github.com/genshinsim/gcsim v1.15.2-0.20260905220630-1de5a4243879
+	github.com/genshinsim/gcsim v1.15.2-0.20260907234712-720f1a1f8167
 	golang.org/x/sys v0.43.0
 )
 

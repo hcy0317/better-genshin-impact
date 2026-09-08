@@ -2,6 +2,8 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/genshinsim/gcsim v1.15.2-0.20260905220630-1de5a4243879 h1:o9g3KWGDl+VqTlA59uxtGgm6apGAJ2AsdiyGdVFgi0g=
 github.com/genshinsim/gcsim v1.15.2-0.20260905220630-1de5a4243879/go.mod h1:Ir9NtinIRB1ojVJLD779vDhx8BtE3/dQ9ifm4+iq6Wg=
+github.com/genshinsim/gcsim v1.15.2-0.20260907234712-720f1a1f8167 h1:Rt/2gr0JK/o/a2Q/cv2AJarJd0XLma6W02mRkMI/n0k=
+github.com/genshinsim/gcsim v1.15.2-0.20260907234712-720f1a1f8167/go.mod h1:Ir9NtinIRB1ojVJLD779vDhx8BtE3/dQ9ifm4+iq6Wg=
 github.com/google/go-cmp v0.5.5 h1:Khx7svrCpmxxtHBq5j2mp/xVjsi8hQMfNLvJFAlrGgU=
 github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
 github.com/josharian/intern v1.0.0 h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=

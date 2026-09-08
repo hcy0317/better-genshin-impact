@@ -103,7 +103,7 @@ func prepareBuffEffect(cfg *info.ActionList, buff Buff) error {
 			return errors.New("invalid enemy modifier scope/unit")
 		}
 		if buff.Kind == "resistance" {
-			if attributes.EleToDmgP(attributes.StringToEle(buff.Element)) < 0 {
+			if _, ok := damageElement(buff.Element); !ok {
 				return errors.New("invalid resistance element")
 			}
 		} else if buff.Element != "" || buff.Value < 0 || buff.Value > 1 {
@@ -152,7 +152,8 @@ func applyBuffEffect(c *core.Core, buff Buff, horizon int) {
 		for _, target := range c.Combat.Enemies() {
 			enemy := target.(info.Enemy)
 			if buff.Kind == "resistance" {
-				enemy.AddResistMod(info.ResistMod{Base: base, Ele: attributes.StringToEle(buff.Element), Value: buff.Value})
+				element, _ := damageElement(buff.Element) // validated by prepareBuffEffect
+				enemy.AddResistMod(info.ResistMod{Base: base, Ele: element, Value: buff.Value})
 			} else {
 				enemy.AddDefMod(info.DefMod{Base: base, Dur: duration, Value: -buff.Value})
 			}

@@ -24,7 +24,7 @@ import (
 
 // Official packaging overrides this together with the exact SDK version; the
 // executable verifies both against Go's checksummed build dependency metadata.
-var Revision = "1de5a42438791757a7178b16e59ec97dc1690d61"
+var Revision = "720f1a1f81673f9dc82f803e32239c4ad729bd0c"
 
 const AdapterVersion = "1"
 

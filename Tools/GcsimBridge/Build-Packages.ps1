@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$EngineRef = '1de5a42438791757a7178b16e59ec97dc1690d61',
+    [string]$EngineRef = '720f1a1f81673f9dc82f803e32239c4ad729bd0c',
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'bin\packages')
 )
 $ErrorActionPreference = 'Stop'

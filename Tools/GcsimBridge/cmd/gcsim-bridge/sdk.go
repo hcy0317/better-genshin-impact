@@ -15,7 +15,7 @@ type sdkIdentity struct {
 	Revision string `json:"revision"`
 }
 
-var expectedSDKVersion = "v1.15.2-0.20260905220630-1de5a4243879"
+var expectedSDKVersion = "v1.15.2-0.20260907234712-720f1a1f8167"
 
 func verifySDK() (sdkIdentity, error) {
 	info, ok := debug.ReadBuildInfo()
