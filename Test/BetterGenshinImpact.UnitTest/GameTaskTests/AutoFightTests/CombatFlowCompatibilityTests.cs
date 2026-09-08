@@ -62,7 +62,7 @@ public class CombatFlowCompatibilityTests
         var game = new SkillGame(skillResult);
         using var execution = new CombatFlowExecution(CombatFlowProgram.Compile(script), game, new FakeTimeProvider());
         var succeeded = skillResult == CombatFlowResult.Succeeded;
-        Assert.Equal(succeeded ? CombatFlowResult.Succeeded : CombatFlowResult.Failed, await execution.RunRoundAsync());
+        Assert.Equal(succeeded ? CombatFlowResult.Succeeded : CombatFlowResult.Deferred, await execution.RunRoundAsync());
         Assert.Equal(succeeded, execution.Context.Find("后继") != null);
         Assert.True(game.SkillRequired);
         Assert.True(game.SkillWaits);

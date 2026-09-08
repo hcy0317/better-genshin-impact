@@ -345,11 +345,12 @@ public class Avatar
         return GetSkillCurrentCd(imageRegion, updateState: false);
     }
 
-    internal void ConfirmSkillUsed(double detectedCd)
+    internal void ConfirmSkillUsed(double detectedCd, DateTime? inputAtUtc = null)
     {
         var now = DateTime.UtcNow;
-        LastSkillTime = now;
-        LastConfirmedSkillCastAtUtc = now;
+        var castAt = inputAtUtc ?? now;
+        LastSkillTime = castAt;
+        LastConfirmedSkillCastAtUtc = castAt;
         ManualSkillCd = -1;
         var effectiveCd = detectedCd > 0
             ? detectedCd
@@ -358,7 +359,7 @@ public class Avatar
         {
             OcrSkillCd = now.AddSeconds(detectedCd);
         }
-        ESkillCdTracker.RecordConfirmedCast(Name, effectiveCd, now);
+        ESkillCdTracker.RecordConfirmedCast(Name, effectiveCd + (now - castAt).TotalSeconds, castAt);
     }
 
     private void SimulateSwitchAction(int index)

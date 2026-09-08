@@ -9,6 +9,29 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class NativeCombatFlowRunnerTests
 {
+    [Fact]
+    public async Task PendingRequiredSkillDoesNotBecomeThreeHardFailuresOrUnlockTheOpening()
+    {
+        var game = new FailedSkillGame { Result = CombatFlowResult.Pending };
+        using var runner = NativeCombatFlowRunner.Create(new JsonCombatStrategy
+        {
+            Info = new() { Declarations = ["segment(start,name=开场,define)\n琴 e(required)\nsegment(end,record=开场完成)"] },
+            Actions = [new() { Character = "琴", Action = "call(开场,once=battle,required),attack(0.1)" }]
+        }, game, clock: new FakeTimeProvider())!;
+        var passes = 0;
+        for (var i = 0; i < 50 && passes < 5; i++)
+        {
+            var step = await runner.StepAsync(default);
+            if (!step.RoundCompleted) continue;
+            passes++;
+            Assert.Equal(CombatFlowResult.Deferred, step.Result);
+            Assert.True(runner.TakeFinishCheckRequest());
+        }
+        Assert.Equal(5, passes);
+        Assert.Null(runner.Context.Find("开场完成"));
+        Assert.DoesNotContain(Method.Attack, game.Actions);
+    }
+
     [Theory]
     [InlineData("missing-file")]
     [InlineData("corrupt-file")]
