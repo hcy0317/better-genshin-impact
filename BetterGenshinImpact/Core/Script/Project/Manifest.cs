@@ -27,6 +27,8 @@ public class Manifest
     public string[] Library { get; set; } = [];
     public string[] SavedFiles { get; set; } = [];
     public string[] HttpAllowedUrls { get; set; } = [];
+    /// <summary>脚本自己按材料目标和刷新时间判断是否完成；一次成功不代表整日完成。</summary>
+    public bool SelfManagedCompletion { get; set; }
 
     public static Manifest FromJson(string json)
     {

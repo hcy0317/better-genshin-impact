@@ -34,7 +34,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             return match.IsExist();
         }
         using var menuBack = image.Find(RecognitionAssets.Get("UseRedeemCode", "MenuBack", image));
-        return new UiSnapshot(Interlocked.Increment(ref _frameSequence))
+        var snapshot = new UiSnapshot(Interlocked.Increment(ref _frameSequence))
         {
             CapturedAt = DateTimeOffset.UtcNow,
             MainHud = Has("PaimonMenu") || Has("FriendChat"),
@@ -50,6 +50,9 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             BlackConfirm = Has("BtnBlackConfirm"),
             MenuBack = menuBack.IsExist()
         };
+        if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
+            snapshot = snapshot with { Handbook = HandbookUiRecognition.Read(image) };
+        return snapshot;
     }
 
     public Task DelayAsync(int milliseconds, CancellationToken ct) => TaskControl.Delay(milliseconds, ct);

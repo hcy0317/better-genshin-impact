@@ -136,6 +136,7 @@ public partial class PathExecutor
 
     public async Task Pathing(PathingTask task)
     {
+        TaskExecutionScope.ThrowIfFailed();
         SuccessEnd = false;
         // SuspendableDictionary;
         const string sdKey = "PathExecutor";
@@ -277,6 +278,7 @@ public partial class PathExecutor
             {
                 await execute();
                 ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
                 return false;
             }
             catch (EndConditionSatisfiedException)

@@ -16,9 +16,9 @@ internal static class OneDragonStepRunner
             // 两种入口都必须看到异常；否则底层 runner 会先吞错，跳过恢复。
             await runOwned(async () =>
             {
-                try { await action(); }
+                try { await action(); TaskExecutionScope.ThrowIfFailed(); }
                 catch (Exception error) when (error is not OperationCanceledException and not NormalEndException
-                    && !TaskFailureRecoveryPolicy.IsRecoveryFailure(error))
+                    && !TaskFailureRecoveryPolicy.IsRecoveryFailure(error) && !TaskExecutionScope.IsUnconfirmedCombat(error))
                 {
                     await recover(error);
                     recoveredFailure = error;

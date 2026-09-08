@@ -44,6 +44,7 @@ internal class AutoFightHandler : IActionHandler
             taskParams = new AutoFightParam(GetFightStrategy(), TaskContext.Instance().Config.AutoFightConfig);
         }
 
+        taskParams.FightFinishDetectEnabled = RequireFinishDetection(taskParams.FightFinishDetectEnabled, waypointForTrack != null);
         if (ShouldDisableTimeTimeoutForPathing(waypointForTrack))
         {
             ApplyElite400NoTimeoutSafety(taskParams);
@@ -88,6 +89,8 @@ internal class AutoFightHandler : IActionHandler
     {
         return IsElite400PathingSource(waypointForTrack?.PathingTaskFileName, waypointForTrack?.PathingTaskFullPath);
     }
+
+    internal static bool RequireFinishDetection(bool configured, bool isPathing) => configured || isPathing;
 
     internal static bool IsElite400PathingSource(string? fileName, string? fullPath)
     {

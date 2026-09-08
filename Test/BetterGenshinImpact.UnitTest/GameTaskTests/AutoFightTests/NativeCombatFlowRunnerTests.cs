@@ -1,5 +1,6 @@
 using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.AutoFight;
+using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.AutoFight.SkillData;
 using Microsoft.Extensions.Time.Testing;
@@ -8,6 +9,29 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class NativeCombatFlowRunnerTests
 {
+    [Fact]
+    public async Task PendingRequiredSkillDoesNotBecomeThreeHardFailuresOrUnlockTheOpening()
+    {
+        var game = new FailedSkillGame { Result = CombatFlowResult.Pending };
+        using var runner = NativeCombatFlowRunner.Create(new JsonCombatStrategy
+        {
+            Info = new() { Declarations = ["segment(start,name=开场,define)\n琴 e(required)\nsegment(end,record=开场完成)"] },
+            Actions = [new() { Character = "琴", Action = "call(开场,once=battle,required),attack(0.1)" }]
+        }, game, clock: new FakeTimeProvider())!;
+        var passes = 0;
+        for (var i = 0; i < 50 && passes < 5; i++)
+        {
+            var step = await runner.StepAsync(default);
+            if (!step.RoundCompleted) continue;
+            passes++;
+            Assert.Equal(CombatFlowResult.Deferred, step.Result);
+            Assert.True(runner.TakeFinishCheckRequest());
+        }
+        Assert.Equal(5, passes);
+        Assert.Null(runner.Context.Find("开场完成"));
+        Assert.DoesNotContain(Method.Attack, game.Actions);
+    }
+
     [Theory]
     [InlineData("missing-file")]
     [InlineData("corrupt-file")]
@@ -93,7 +117,7 @@ public class NativeCombatFlowRunnerTests
             Assert.True(runner.Context.IsOpen);
         }
         Assert.Equal(3, failedPasses);
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(async () => await runner.StepAsync(default));
+        var error = await Assert.ThrowsAsync<CombatNotFinishedException>(async () => await runner.StepAsync(default));
         Assert.IsNotAssignableFrom<BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception.RetryException>(error);
         Assert.Contains("未确认结束", error.Message);
         Assert.Null(runner.Context.Find("开场完成"));
@@ -134,7 +158,7 @@ public class NativeCombatFlowRunnerTests
             });
 
         if (detectorConfirmsEnd) await host.WaitAsync(TimeSpan.FromSeconds(10));
-        else await Assert.ThrowsAsync<InvalidOperationException>(() => host.WaitAsync(TimeSpan.FromSeconds(10)));
+        else await Assert.ThrowsAsync<CombatNotFinishedException>(() => host.WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.True(detectorObserved);
         Assert.True(session.IsCancellationRequested);
         Assert.Null(runner.Context.Find("已施放"));
@@ -165,7 +189,7 @@ public class NativeCombatFlowRunnerTests
         game.Result = CombatFlowResult.Failed;
         for (var i = 0; i < 3; i++) Assert.Equal(CombatFlowResult.Failed, await Pass());
         Assert.Same(record, runner.Context.Find("成功施放"));
-        await Assert.ThrowsAsync<InvalidOperationException>(async () => await runner.StepAsync(default));
+        await Assert.ThrowsAsync<CombatNotFinishedException>(async () => await runner.StepAsync(default));
     }
 
     private sealed class FailedSkillGame : ICombatFlowGame, IDisposable

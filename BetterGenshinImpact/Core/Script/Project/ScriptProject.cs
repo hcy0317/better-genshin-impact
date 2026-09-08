@@ -11,6 +11,7 @@ using System.Windows;
 using System.Windows.Controls;
 using BetterGenshinImpact.Core.Script.Dependence;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.View;
 using Microsoft.ClearScript.JavaScript;
 using Microsoft.Extensions.Logging;
@@ -99,6 +100,7 @@ public class ScriptProject
 
     public async Task ExecuteAsync(dynamic? context = null, PathingPartyConfig? partyConfig = null)
     {
+        TaskExecutionScope.ThrowIfFailed();
         // 默认值
         GlobalMethod.SetGameMetrics(1920, 1080);
         // 加载代码
@@ -137,9 +139,12 @@ public class ScriptProject
                 var evaluation = engine.Evaluate(code);
                 if (evaluation is Task task) await task;
             }
+            TaskExecutionScope.ThrowIfFailed();
         }
         catch (Exception e)
         {
+            TaskExecutionScope.Capture().Report(e);
+            TaskExecutionScope.ThrowIfFailed();
             Debug.WriteLine(e);
             throw;
         }

@@ -218,6 +218,7 @@ public partial class ScriptGroupProject : ObservableObject
 
     public async Task Run()
     {
+        TaskExecutionScope.ThrowIfFailed();
         //执行记录
         ExecutionRecord executionRecord = new ExecutionRecord()
         {
@@ -340,6 +341,7 @@ public partial class ScriptGroupProject : ObservableObject
                 await task.Start(CancellationContext.Instance.Cts.Token);
             }
 
+            TaskExecutionScope.ThrowIfFailed();
             if (Type != "Pathing")
             {
                 executionRecord.IsSuccessful = true;
@@ -347,6 +349,7 @@ public partial class ScriptGroupProject : ObservableObject
         }
         catch (Exception exception)
         {
+            TaskExecutionScope.Capture().Report(exception);
             executionFailure = exception;
             throw;
         }

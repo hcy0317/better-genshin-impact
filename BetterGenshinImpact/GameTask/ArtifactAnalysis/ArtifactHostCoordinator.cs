@@ -10,7 +10,8 @@ public enum ArtifactHostOperation
     Analyze,
     ScanCharacterRoster,
     ExecuteLockPlan,
-    RebuildNativePlans
+    RebuildNativePlans,
+    ExecuteEquipPlan
 }
 
 public sealed record ArtifactHostRequest(
@@ -162,7 +163,8 @@ public sealed class ArtifactHostCoordinator(
     IArtifactToolsClient client,
     IArtifactLockPlanExecutor lockExecutor,
     IArtifactNativePlanExecutor nativePlanExecutor,
-    IArtifactCharacterRosterScanner? characterRosterScanner = null)
+    IArtifactCharacterRosterScanner? characterRosterScanner = null,
+    IArtifactEquipmentJobRunner? equipmentJobRunner = null)
 {
     public async Task RunAsync(
         ArtifactHostRequest request,
@@ -171,6 +173,12 @@ public sealed class ArtifactHostCoordinator(
         bool allowExpiredClaimed = false)
     {
         Validate(request, requestToken, allowExpiredClaimed);
+        if (request.Operation == ArtifactHostOperation.ExecuteEquipPlan)
+        {
+            if (equipmentJobRunner is null) throw new InvalidOperationException("Equipment execution adapter is unavailable.");
+            await equipmentJobRunner.RunAsync(request, requestToken, cancellationToken);
+            return;
+        }
         try
         {
             await client.ClaimAsync(

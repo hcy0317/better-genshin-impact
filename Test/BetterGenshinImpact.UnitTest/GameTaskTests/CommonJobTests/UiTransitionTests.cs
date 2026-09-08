@@ -9,6 +9,48 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiTransitionTests
 {
     [Fact]
+    public async Task RecognizedCommissionHandbookCanExitBeforeTrackingStarts()
+    {
+        var clock = new FakeTimeProvider();
+        var handbook = HandbookUiRecognition.IsCommissionPage(
+            ["见闻", "委托", "秘境", "讨伐", "向导", "备战"],
+            ["每日委托奖励0/4", "选择委托任务倾向地域", "长效历练点778.3"]);
+        Assert.True(handbook);
+        var driver = new ReplayDriver(clock, new(1) { Handbook = handbook }, new(2),
+            new(3) { MainHud = true }, new(4) { MainHud = true });
+        Assert.Equal(4, (await UiRecovery.ToMainAsync(driver, default, clock: clock)).FrameId);
+        Assert.Equal(new[] { UiAction.Escape }, driver.Actions);
+        Assert.False(HandbookUiRecognition.IsCommissionPage(["委托"], ["每日委托奖励"]));
+        Assert.False(HandbookUiRecognition.IsCommissionPage(["委托", "秘境"], ["普通任务详情"]));
+    }
+
+    [Fact]
+    public async Task NestedRecoveryTimeoutReportsTheInnerPageAndItsObservation()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { Handbook = true });
+        var error = await Assert.ThrowsAsync<TimeoutException>(() => UiOperation.RunAsync(
+            "failure-recovery", TimeSpan.FromSeconds(1), default,
+            operation => UiRecovery.ToMainAsync(driver, operation.Token, requireOverworld: true, clock: clock), clock: clock));
+        Assert.Contains("return-main", error.Message);
+        Assert.Contains("Overworld", error.Message);
+        Assert.Contains("handbook=True", error.Message);
+    }
+
+    [Fact]
+    public async Task CraftingResultOverlayMustClearBeforeTheNextMaterialCanStart()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock,
+            new(1) { Crafting = true, Prompt = true }, new(2) { Crafting = true },
+            new(3), new(4) { Crafting = true }, new(5) { Crafting = true });
+        var result = await UiTransition.WaitAsync("craft-result", UiTarget.Crafting, driver,
+            default, TimeSpan.FromSeconds(3), clock: clock);
+        Assert.Equal(5, result.FrameId);
+        Assert.Empty(driver.Actions);
+    }
+
+    [Fact]
     public async Task TransitionNeedsTwoFreshUnambiguousSamplesAfterAnyUnknownState()
     {
         var clock = new FakeTimeProvider();
@@ -36,6 +78,23 @@ public class UiTransitionTests
             _ => { applied = true; return Task.FromResult(true); }, default, deferApplyToCaller: true, clock: clock);
         Assert.True(result.Matches(UiTarget.Party));
         Assert.False(applied);
+    }
+
+    [Fact]
+    public async Task PartyListOwnConfirmButtonDoesNotPreventSelectingTheParty()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock,
+            new(1) { PartyList = true, BlackConfirm = true },
+            new(2) { PartyList = true, BlackConfirm = true },
+            new(3) { Party = true, BlackConfirm = true },
+            new(4) { Party = true, BlackConfirm = true });
+        var selected = false;
+        var result = await UiRecovery.ConfirmPartyAsync(driver,
+            _ => { selected = true; return Task.FromResult(true); },
+            _ => Task.FromResult(true), default, deferApplyToCaller: true, clock: clock);
+        Assert.True(selected);
+        Assert.True(result.Matches(UiTarget.Party));
     }
 
     [Fact]
@@ -89,7 +148,7 @@ public class UiTransitionTests
         var snapshot = new UiSnapshot(1)
         {
             Party = true, PartyList = target == UiTarget.PartyList,
-            ExitDoor = exitDoor, BlackConfirm = !exitDoor
+            ExitDoor = exitDoor, Prompt = !exitDoor, BlackConfirm = !exitDoor
         };
         Assert.False(snapshot.Matches(target));
     }

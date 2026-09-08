@@ -8,25 +8,33 @@ namespace BetterGenshinImpact.Core.Script.Dependence.Simulator;
 
 public class PostMessage
 {
-    private readonly PostMessageSimulator _postMessageSimulator = TaskContext.Instance().PostMessageSimulator;
+    private readonly TaskExecutionScope.Guard _taskGuard = TaskExecutionScope.Capture();
+    private readonly PostMessageSimulator _postMessageSimulator;
+
+    public PostMessage() : this(TaskContext.Instance().PostMessageSimulator) { }
+    internal PostMessage(PostMessageSimulator? simulator) => _postMessageSimulator = simulator!;
 
     public void KeyDown(string key)
     {
+        using var ownedTask = _taskGuard.Enter();
         _postMessageSimulator.KeyDownBackground(ToVk(key));
     }
 
     public void KeyUp(string key)
     {
+        using var ownedTask = _taskGuard.Enter();
         _postMessageSimulator.KeyUpBackground(ToVk(key));
     }
 
     public void KeyPress(string key)
     {
+        using var ownedTask = _taskGuard.Enter();
         _postMessageSimulator.KeyPressBackground(ToVk(key));
     }
 
     public void Click()
     {
+        using var ownedTask = _taskGuard.Enter();
         _postMessageSimulator.LeftButtonClick();
     }
 

@@ -119,7 +119,7 @@ internal sealed class NativeCombatFlowRunner : IDisposable
         ct.ThrowIfCancellationRequested();
         // 上一次失败先返回给宿主做结束检测；不能把策略失败当作复活信号触发传送。
         if (_consecutiveFailedPasses >= 3)
-            throw new InvalidOperationException("增强战斗连续 3 轮关键流程失败，战斗未确认结束；停止当前任务，不执行复活重试");
+            TaskExecutionScope.StopUnconfirmedCombat("增强战斗连续 3 轮关键流程失败，不执行复活重试");
         // 整步（包含产球后的接球）独占；进入 atomic 后跨 Step 保留，退出再交还普通观察。
         if (_game is NativeGame) _exclusive ??= AvatarRecognition.BeginExclusiveOperation();
         try
@@ -135,7 +135,13 @@ internal sealed class NativeCombatFlowRunner : IDisposable
                 // 秘境/幽境的独立检测器按约一秒节拍工作；失败时让出执行线程，且保留取消。
                 await Task.Delay(1000, ct);
             }
-            else if (step.RoundCompleted) _consecutiveFailedPasses = 0;
+            else if (step.RoundCompleted && step.Result == CombatFlowResult.Deferred)
+            {
+                // 暂未确认的施放/维护让出不是失败，也不能假装恢复成功清除既有失败。
+                _failureFinishCheckRequested = true;
+                await _game.YieldAsync(ct);
+            }
+            else if (step.RoundCompleted && step.Result == CombatFlowResult.Succeeded) _consecutiveFailedPasses = 0;
             return step;
         }
         catch { EndExclusive(); throw; }
@@ -151,6 +157,32 @@ internal sealed class NativeCombatFlowRunner : IDisposable
     }
     public bool HasVisibleTarget => AutoFightSeek.TryCreatePassiveDecision(AvatarRecognition.LatestPassiveObservation,
         DateTime.UtcNow, out _, out _, out _);
+
+    internal static CombatFlowResult? ReconcilePendingSkill(CombatSkillAttempts attempts, CombatFlowAction action,
+        string actor, Func<CombatSkillObservation> capture)
+    {
+        var before = attempts.GetState(actor, action.Command.Method, action.Now);
+        if (before == CombatSkillAttemptState.Empty) return null;
+        if (!action.CanStart) return action.RemainingBudget <= 0 ? CombatFlowResult.Failed : CombatFlowResult.Skipped;
+        attempts.Observe(actor, action.Command.Method, capture());
+        var after = attempts.GetState(actor, action.Command.Method, action.Now);
+        if (before == CombatSkillAttemptState.Expired || after == CombatSkillAttemptState.Expired)
+        {
+            action.DiagnosticReason = "原技能请求确认预算耗尽，未确认新的施放，不重发输入";
+            return CombatFlowResult.Failed;
+        }
+        var confirmation = attempts.TakeConfirmation(actor, action.Command.Method, action.CommandId, action.Now);
+        if (confirmation != null && action.AcceptConfirmation(confirmation))
+        {
+            action.DiagnosticReason = $"迟到冷却确认原请求，原输入时点 {confirmation.InputAt:F3}s；本步没有发送技能输入";
+            return CombatFlowResult.Succeeded;
+        }
+        if (after == CombatSkillAttemptState.Empty) return null;
+        action.DiagnosticReason = after == CombatSkillAttemptState.Confirmed
+            ? "原施放已确认且仍处于冷却，不重复完成或发送技能输入"
+            : "已有未决施放请求，等待原请求的新证据，不重复发送技能输入";
+        return after == CombatSkillAttemptState.Confirmed ? CombatFlowResult.Deferred : CombatFlowResult.Pending;
+    }
     public async ValueTask<CombatFlowResult> RunRoundAsync(CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -203,6 +235,8 @@ internal sealed class NativeCombatFlowRunner : IDisposable
         public void InvalidateActorConfirmation() => _confirmedActor = null;
 
         public void BeginStep() => ClearCapture();
+        public bool HasPendingSkill(CombatFlowAction action) =>
+            _attempts?.HasUnresolved(action.Command.Name, action.Command.Method) == true;
 
         public void ReleaseHeldInput()
         {
@@ -321,19 +355,22 @@ internal sealed class NativeCombatFlowRunner : IDisposable
                 action.DiagnosticReason = "动作预算或前置条件不再满足";
                 return CombatFlowResult.Skipped;
             }
-            // 可选 Q 无可靠就绪证据时不为试探而切人；必要观察由核心在预算内显式准备。
-            if (command.Method == Method.Burst && Observe("q-ready", [], command.Name) is not true)
-            {
-                action.DiagnosticReason = "Q 没有可靠的当前就绪证据";
-                return CombatFlowResult.Skipped;
-            }
             ClearCapture();
             var name = command.Name == CombatScriptParser.CurrentAvatarName ? scenes.CurrentAvatar(true) : command.Name;
             if (name == null || scenes.SelectAvatar(name) is not { } avatar) return CombatFlowResult.Failed;
-            if (command.Args?.Contains("fast") == true && ESkillCdTracker.TryGetKnownRemainingCd(name, out var cd) && cd > 0)
+            _attempts ??= new(action.BattleId);
+            var hasUnresolved = _attempts.HasUnresolved(name, command.Method);
+            // 先允许原请求领取迟到证据。就绪/CD 门禁只控制新输入，不能挡住已发送请求的确认。
+            if (!hasUnresolved && command.Method == Method.Burst && Observe("q-ready", [], name) is not true)
+            {
+                action.DiagnosticReason = "Q 没有可靠的当前就绪证据";
+                return CombatFlowResult.Deferred;
+            }
+            if (!hasUnresolved && command.Method == Method.Skill && command.Args?.Contains("fast") == true
+                && ESkillCdTracker.TryGetKnownRemainingCd(name, out var cd) && cd > 0)
             {
                 action.DiagnosticReason = $"fast 动作仍有已知 E 冷却 {cd:F2}s";
-                return CombatFlowResult.Skipped;
+                return CombatFlowResult.Deferred;
             }
             _input ??= InputCoordinator.TryAcquire(action.BattleId, ReleaseOwnedInput)
                 ?? throw new InvalidOperationException("上一场输入尚未退出或释放，禁止新的战斗输入接管");
@@ -354,30 +391,33 @@ internal sealed class NativeCombatFlowRunner : IDisposable
             }
             action.ReportActiveActor(name);
             ct.ThrowIfCancellationRequested();
-            if (command.Method == Method.Skill && command.HasFlag("wait")) await avatar.WaitSkillCd(ct);
-            _attempts ??= new(action.BattleId);
-            if (_attempts.IsOccupied(name, command.Method))
+            var pendingCd = 0d;
+            var pendingResult = ReconcilePendingSkill(_attempts, action, name, () =>
             {
                 using var capture = CaptureToRectArea();
                 var observedCd = command.Method == Method.Skill ? avatar.ReadSkillCurrentCd(capture) : 0;
+                pendingCd = observedCd;
                 var skillReady = command.Method == Method.Skill && avatar.IsSkillReadyFromCurrentFrame(capture, observedCd);
                 var burst = command.Method == Method.Burst ? Avatar.ObserveBurst(capture) : default;
                 bool? cooling = command.Method == Method.Skill
                     ? observedCd > 0 ? true : skillReady ? false : null : burst.CoolingDown;
-                _attempts.Observe(name, command.Method, new(action.BattleId, ++_frameId, action.Now,
-                    cooling, command.Method == Method.Skill ? skillReady : burst.Ready));
-                if (_attempts.IsOccupied(name, command.Method))
-                {
-                    action.DiagnosticReason = "已有未决施放请求，等待新证据，不重复发送技能输入";
-                    return CombatFlowResult.Pending;
-                }
+                return new(action.BattleId, ++_frameId, action.Now,
+                    cooling, command.Method == Method.Skill ? skillReady : burst.Ready);
+            });
+            if (pendingResult != null)
+            {
+                if (pendingResult == CombatFlowResult.Succeeded && command.Method == Method.Skill)
+                    avatar.ConfirmSkillUsed(pendingCd,
+                        DateTime.UtcNow.AddSeconds(-(action.Now - action.EffectiveInputAt!.Value)));
+                return pendingResult.Value;
             }
+            if (command.Method == Method.Skill && command.HasFlag("wait")) await avatar.WaitSkillCd(ct);
             CombatSkillAttempt? attempt = null;
             bool BeginSkillInput()
             {
                 if (!action.TryBeginInput()) return false;
                 attempt = _attempts.TryBegin(name, command.Method,
-                    $"{command.SourceFile}:{command.SourceLine}:{command.SourceColumn}", action.InputAt!.Value,
+                    action.CommandId, action.InputAt!.Value,
                     action.Now + action.RemainingBudget);
                 return attempt != null;
             }
@@ -386,7 +426,7 @@ internal sealed class NativeCombatFlowRunner : IDisposable
                 if (!avatar.IsSkillReadyFromCurrentFrame())
                 {
                     action.DiagnosticReason = "当前截图未确认该角色 E 就绪";
-                    return CombatFlowResult.Skipped;
+                    return CombatFlowResult.Deferred;
                 }
                 var before = avatar.LastConfirmedSkillCastAtUtc;
                 avatar.UseSkill(command.Args?.Contains("hold") == true, observeCooldown: true, tryBeginInput: BeginSkillInput);
@@ -430,11 +470,12 @@ internal sealed class NativeCombatFlowRunner : IDisposable
                 action.DiagnosticReason = $"动作被维护/条件/预算边界中断，剩余预算 {action.RemainingBudget:F3}s";
                 // 先在本场仍拥有输入时结束持续键/宏，再让调度器转移；不伪造动作完成。
                 Simulation.ReleaseAllKey();
+                if (action.RemainingBudget <= 0) return CombatFlowResult.Failed;
                 if (action.InputAt != null && (command.Method == Method.Skill || command.Method == Method.Burst))
                 {
                     return CombatFlowResult.Pending;
                 }
-                return CombatFlowResult.Skipped;
+                return CombatFlowResult.Deferred;
             }
         }
 

@@ -37,7 +37,7 @@ public class CombatContinuityTests
         var method = source[start..end];
         Assert.DoesNotContain("await RunConfiguredSeekAsync", method);
         Assert.DoesNotContain("await AutoFightSeek.DetectAndApproachEnemyAsync", method);
-        Assert.Contains("IsPartySetupProgressBarVisible", method);
+        Assert.Contains("probe.Observe(observed)", method);
     }
 
     [Fact]

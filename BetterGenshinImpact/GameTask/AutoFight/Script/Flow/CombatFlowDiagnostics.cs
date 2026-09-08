@@ -73,6 +73,7 @@ internal sealed class CombatFlowDiagnostics
 internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagnostics diagnostics) : ICombatFlowGame
 {
     public void BeginStep() => game.BeginStep();
+    public bool HasPendingSkill(CombatFlowAction action) => game.HasPendingSkill(action);
     public void ReleaseHeldInput() => game.ReleaseHeldInput();
     public CombatScopeObservation? ObserveScope()
     {

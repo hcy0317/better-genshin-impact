@@ -26,6 +26,7 @@ public class TaskControl
 
     public static void CheckAndSleep(int millisecondsTimeout)
     {
+        TaskExecutionScope.ThrowIfFailed();
         if (TryUiSleep(millisecondsTimeout)) return;
         if (TryCombatSleep(millisecondsTimeout)) return;
         TrySuspend();
@@ -36,6 +37,7 @@ public class TaskControl
 
     public static void Sleep(int millisecondsTimeout)
     {
+        TaskExecutionScope.ThrowIfFailed();
         if (TryUiSleep(millisecondsTimeout)) return;
         if (TryCombatSleep(millisecondsTimeout)) return;
         NewRetry.Do(() =>
@@ -225,6 +227,10 @@ public class TaskControl
 
     public static void Sleep(int millisecondsTimeout, CancellationToken ct)
     {
+        if (ct.IsCancellationRequested && UiOperation.Current == null && CombatActionScope.Current == null)
+            throw new NormalEndException("取消自动任务");
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
         if (TryUiSleep(millisecondsTimeout, ct)) return;
         if (CombatActionScope.Current != null) ct.ThrowIfCancellationRequested();
         if (TryCombatSleep(millisecondsTimeout)) return;
@@ -257,6 +263,10 @@ public class TaskControl
 
     public static async Task Delay(int millisecondsTimeout, CancellationToken ct)
     {
+        if (ct.IsCancellationRequested && UiOperation.Current == null && CombatActionScope.Current == null)
+            throw new NormalEndException("取消自动任务");
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
         if (UiOperation.Current is { } operation)
         {
             ct.ThrowIfCancellationRequested();

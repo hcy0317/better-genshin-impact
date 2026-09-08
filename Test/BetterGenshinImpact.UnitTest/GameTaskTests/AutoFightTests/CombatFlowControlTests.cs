@@ -185,7 +185,8 @@ public class CombatFlowControlTests
             """);
         var game = new ControlGame { EnergyLow = low, Cooling = cooling };
         using var execution = new CombatFlowExecution(program, game, new FakeTimeProvider());
-        Assert.Equal(CombatFlowResult.Failed, await execution.RunRoundAsync());
+        Assert.Equal(cooling == true ? CombatFlowResult.Deferred : CombatFlowResult.Failed,
+            await execution.RunRoundAsync());
         Assert.Empty(game.Actions);
     }
 

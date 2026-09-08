@@ -54,5 +54,6 @@ internal static class ExecutionRecordFinalizer
     {
         record.ServerEndTime = serverEndTime;
         record.EndTime = endTime;
+        if (TaskExecutionScope.Failure != null) record.IsSuccessful = false;
     }
 }
