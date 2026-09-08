@@ -150,6 +150,12 @@ public partial class App : Application
                         Timeout = TimeSpan.FromMinutes(10)
                     })));
                 services.AddSingleton<ArtifactHostCoordinator>();
+                services.AddSingleton<IArtifactEquipmentJobRunner>(_ => new ArtifactEquipmentJobRunner(
+                    HttpClientFactory.GetClient("artifact-tools", () => new HttpClient
+                    {
+                        BaseAddress = new Uri("http://127.0.0.1:18081/bgi/"),
+                        Timeout = TimeSpan.FromMinutes(10)
+                    })));
                 services.AddSingleton<ArtifactHostService>();
                 services.AddTransient<ChildSessionWindowViewModel>();
                 services.AddTransient<ChildSessionWindow>();
