@@ -1,4 +1,6 @@
 using BetterGenshinImpact.Core.BgiVision;
+using BetterGenshinImpact.Core.Recognition;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.Common.Reward;
@@ -128,12 +130,15 @@ public class CraftMaterialTask
     /// <exception cref="InvalidOperationException">合成界面、材料筛选、材料搜索或数量设置失败时抛出。</exception>
     public async Task<CraftMaterialResult> Start(CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         _ct = ct;
         _page = new BvPage(ct);
         ValidateArguments();
 
+        try
+        {
         var materialType = ResolveMaterialType();
-        EnsureInCraftingUi();
+        await EnsureInCraftingUi("craft-entry");
 
         _logger.LogInformation("开始合成材料：{MaterialName}，目标个数：{Quantity}，筛选类型：{MaterialType}", _materialName, _targetQuantity, materialType);
 
@@ -148,6 +153,12 @@ public class CraftMaterialTask
             adjustedQuantity,
             FormatRewards(rewards));
         return CraftMaterialResult.CreateSuccess(_materialName, _targetQuantity, adjustedQuantity, materialType, rewards);
+        }
+        catch (Exception error)
+        {
+            TaskFailureDiagnostics.CaptureScreenshotOnce(error, $"合成材料 {_materialName} x{_targetQuantity}");
+            throw;
+        }
     }
 
     /// <summary>
@@ -248,22 +259,35 @@ public class CraftMaterialTask
     /// 确认当前界面是合成界面。
     /// </summary>
     /// <exception cref="InvalidOperationException">当前不在合成界面时抛出。</exception>
-    private void EnsureInCraftingUi()
-    {
-        if (!IsInCraftingUi())
-        {
-            throw new InvalidOperationException("请先打开合成界面。");
-        }
-    }
+    private Task<UiSnapshot> EnsureInCraftingUi(string phase) =>
+        UiTransition.WaitAsync(phase, UiTarget.Crafting, new CraftingUiDriver(), _ct,
+            TimeSpan.FromSeconds(10), logger: _logger,
+            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
 
     /// <summary>
     /// 判断当前是否处于合成界面。
     /// </summary>
     /// <returns>处于合成界面时返回 true。</returns>
-    private bool IsInCraftingUi()
+    private sealed class CraftingUiDriver : IUiDriver
     {
-        return ContainsText(Rect1080(40, 960, 720, 105), "筛选")
-               && ContainsText(Rect1080(0, 0, 260, 95), "合成");
+        private long _frame;
+        public UiSnapshot Capture()
+        {
+            using var image = CaptureToRectArea(forceNew: true);
+            bool Has(Rect roi, string text) => StringUtils.RemoveAllSpace(string.Concat(image.FindMulti(
+                new RecognitionObject { RecognitionType = RecognitionTypes.Ocr, RegionOfInterest = roi })
+                .Select(region => region.Text))).Contains(text, StringComparison.Ordinal);
+            // 页头、筛选栏和叠加确认窗必须来自同一帧，不能拼接不同动画阶段的 OCR。
+            return new UiSnapshot(++_frame)
+            {
+                CapturedAt = DateTimeOffset.UtcNow,
+                BigMap = BetterGenshinImpact.GameTask.Common.BgiVision.Bv.IsInBigMapUi(image),
+                Crafting = Has(Rect1080(40, 960, 720, 105), "筛选") && Has(Rect1080(0, 0, 260, 95), "合成"),
+                Prompt = Has(Rect1080(790, 875, 340, 65), "确认") || Has(Rect1080(980, 725, 370, 70), "确认")
+            };
+        }
+        public Task DelayAsync(int milliseconds, CancellationToken ct) => Delay(milliseconds, ct);
+        public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct) => Task.FromResult(false);
     }
 
     /// <summary>
@@ -553,6 +577,8 @@ public class CraftMaterialTask
             rewards = RecognizeCraftRewards(actualQuantity);
 
             resultConfirmButtons.First().Click();
+            // 只点击一次领取；等待关闭动画和可用合成页，不重复提交资源操作。
+            await EnsureInCraftingUi("craft-result-return");
             return rewards;
         }
         catch (TimeoutException e)
@@ -585,6 +611,8 @@ public class CraftMaterialTask
         }
         catch (Exception e)
         {
+            _ct.ThrowIfCancellationRequested();
+            if (TaskExecutionScope.IsUnconfirmedCombat(e)) throw;
             _logger.LogWarning(e, "合成产物识别失败，已回退为默认产物。");
         }
 

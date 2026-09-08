@@ -9,6 +9,19 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiTransitionTests
 {
     [Fact]
+    public async Task CraftingResultOverlayMustClearBeforeTheNextMaterialCanStart()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock,
+            new(1) { Crafting = true, Prompt = true }, new(2) { Crafting = true },
+            new(3), new(4) { Crafting = true }, new(5) { Crafting = true });
+        var result = await UiTransition.WaitAsync("craft-result", UiTarget.Crafting, driver,
+            default, TimeSpan.FromSeconds(3), clock: clock);
+        Assert.Equal(5, result.FrameId);
+        Assert.Empty(driver.Actions);
+    }
+
+    [Fact]
     public async Task TransitionNeedsTwoFreshUnambiguousSamplesAfterAnyUnknownState()
     {
         var clock = new FakeTimeProvider();
