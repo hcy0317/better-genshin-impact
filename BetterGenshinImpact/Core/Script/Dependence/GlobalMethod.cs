@@ -256,7 +256,9 @@ public class GlobalMethod
 
     public static ImageRegion CaptureGameRegion()
     {
-        return TaskControl.CaptureToRectArea();
+        var region = TaskControl.CaptureToRectArea();
+        region.BindInputToCurrentTask();
+        return region;
     }
 
     public static string[] GetAvatars()

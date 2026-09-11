@@ -126,7 +126,8 @@ public class CombatSafetyIntegrationContractTests
             "public static async Task<GuardianBoundaryAction> EnsureGuardianBoundaryAsync",
             "private static void LogGuardianBoundaryDecision");
 
-        Assert.Contains("LastConfirmedSkillCastAtUtc = now", confirm);
+        Assert.Contains("var castAt = inputAtUtc ?? now", confirm);
+        Assert.Contains("LastConfirmedSkillCastAtUtc = castAt", confirm);
         Assert.DoesNotContain("LastConfirmedSkillCastAtUtc", ordinarySkill);
         Assert.Contains("guardianAvatar.LastConfirmedSkillCastAtUtc", guardianBoundary);
         Assert.DoesNotContain("guardianAvatar.LastSkillTime", guardianBoundary);

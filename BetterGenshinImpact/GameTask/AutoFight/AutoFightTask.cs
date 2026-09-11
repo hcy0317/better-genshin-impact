@@ -11,6 +11,7 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
@@ -27,6 +28,8 @@ using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
+using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.GameTask.Common.Ui;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
 
@@ -129,6 +132,10 @@ public class AutoFightTask : ISoloTask
         public CombatTargetingMode CombatTargetingMode = CombatTargetingMode.ClosedLoop;
         public int RotaryFactor = 12;
         internal Func<TimeSpan>? SeekBudgetProvider;
+        internal string FinishEvidenceId = Guid.NewGuid().ToString();
+        internal long FinishFrameSequence;
+        internal int FinishEvidenceCount;
+        internal bool EndConfirmed;
 
         public TaskFightFinishDetectConfig(AutoFightParam taskParam)
         {
@@ -279,6 +286,10 @@ public class AutoFightTask : ISoloTask
     public async Task Start(CancellationToken ct)
     {
         _ct = ct;
+        _finishDetectConfig.EndConfirmed = false;
+        _finishDetectConfig.FinishEvidenceId = Guid.NewGuid().ToString();
+        _finishDetectConfig.FinishEvidenceCount = 0;
+        _finishDetectConfig.FinishFrameSequence = 0;
         CombatRuntimeMetrics.Shared.Reset();
         AvatarRecognition.SetCurrentAutoFightParam(_taskParam);
         AvatarRecognition.ClearLegendaryBarTracker();
@@ -315,6 +326,7 @@ public class AutoFightTask : ISoloTask
 
         combatScenes.BeforeTask(cts2.Token);
         using var flow = Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
+        if (flow != null) _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
         var fightTimeoutEnabled = AutoFightParam.IsTimeTimeoutEnabled(_taskParam.Timeout);
         TimeSpan fightTimeout = fightTimeoutEnabled ? TimeSpan.FromSeconds(_taskParam.Timeout) : TimeSpan.Zero; // 战斗超时时间
         Stopwatch timeoutStopwatch = Stopwatch.StartNew();
@@ -753,6 +765,8 @@ public class AutoFightTask : ISoloTask
 
         try
         {
+        try
+        {
             await fightTask;
         }
         finally
@@ -768,8 +782,9 @@ public class AutoFightTask : ISoloTask
             FightStatusFlag = false;
         }
 
-        try
-        {
+            ct.ThrowIfCancellationRequested();
+            EnsureFightFinishConfirmed(_taskParam.FightFinishDetectEnabled, !skipPostFightPickupFlag,
+                AutoFightParam.IsSeekRotationLimitReached(AutoFightSeek.RotationCount) ? "找敌次数上限" : "战斗时间上限");
             if (skipPostFightPickupFlag)
             {
                 Logger.LogInformation("战斗被强制结束，跳过战后拾取");
@@ -812,8 +827,8 @@ public class AutoFightTask : ISoloTask
             // 确保检测器在任何路径（异常/取消/正常）都被停止和释放
             if (expDetector != null)
             {
-                await expDetector.StopAsync();
-                expDetector.Dispose();
+                try { await expDetector.StopAsync(); }
+                finally { expDetector.Dispose(); }
             }
         }
 
@@ -1086,6 +1101,11 @@ public class AutoFightTask : ISoloTask
             await new ScanPickTask().Start(ct, _taskParam.PickDropsAfterFightSeconds);
         }
     }
+        catch (Exception error)
+        {
+            TaskExecutionScope.RethrowCombatFailure(error, _taskParam.FightFinishDetectEnabled, _finishDetectConfig.EndConfirmed, ct);
+            throw;
+        }
         finally
         {
             AvatarRecognition.ClearCurrentAutoFightParam();
@@ -1095,6 +1115,11 @@ public class AutoFightTask : ISoloTask
     private void LogScreenResolution()
     {
         AssertUtils.CheckGameResolution("自动战斗");
+    }
+
+    internal static void EnsureFightFinishConfirmed(bool detectionEnabled, bool confirmed, string reason)
+    {
+        if (detectionEnabled && !confirmed) TaskExecutionScope.StopUnconfirmedCombat(reason);
     }
 
     public async Task<bool> CheckFightFinish(int delayTime = 1500, int detectDelayTime = 450)
@@ -1143,8 +1168,14 @@ public class AutoFightTask : ISoloTask
 
             // Logger.LogInformation("打开编队界面检查战斗是否结束，延时{detectDelayTime}毫秒检查", detectDelayTime);
             Logger.LogInformation("打开编队界面检查战斗是否结束");
+            using var finishOperation = UiOperation.Begin("fight-end-check", TimeSpan.FromSeconds(10), ct, Logger);
+            ct.ThrowIfCancellationRequested();
+            using var beforeCapture = CaptureToRectArea(forceNew: true);
+            var before = ObservePartySetupBar(beforeCapture, Interlocked.Increment(ref finishDetectConfig.FinishFrameSequence));
+            finishOperation.Check();
             // 最终方案确认战斗结束
             Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+            var probe = new PartySetupFinishDetector(before, DateTimeOffset.UtcNow);
             if (finishDetectConfig.PaimonEndCheckEnabled)
             {
                 // 派蒙图标只作为“编队加载进度条”出现速度的提示，不再把它作为战斗未结束的否决条件。
@@ -1174,16 +1205,27 @@ public class AutoFightTask : ISoloTask
                 await Delay(detectDelayTime, ct);
             }
 
-            Vec3b lastProgressBar = default;
-            Vec3b lastWhiteTile = default;
-            var progressBarCheckCount = finishDetectConfig.PaimonEndCheckEnabled ? 5 : 1;
+            // 不开启派蒙加速时也必须保留第二幅独立图像的确认机会。
+            var progressBarCheckCount = 5;
             for (var attempt = 0; attempt < progressBarCheckCount; attempt++)
             {
-                using var ra = CaptureToRectArea();
-                lastProgressBar = ra.SrcMat.At<Vec3b>(50, 790); // 编队加载进度条颜色
-                lastWhiteTile = ra.SrcMat.At<Vec3b>(50, 768); // 进度条白块
-                if (IsPartySetupProgressBarVisible(ra))
+                finishOperation.Check();
+                using var ra = CaptureToRectArea(forceNew: true);
+                var observed = ObservePartySetupBar(ra, Interlocked.Increment(ref finishDetectConfig.FinishFrameSequence));
+                var confirmed = probe.Observe(observed);
+                try
                 {
+                    Logger.LogDebug("FIGHT_END_PROBE battle={Battle} check={Check} frame={Frame} captured={Captured:O} size={Width}x{Height} beforeCandidate={Before} candidate={Candidate} confirmed={Confirmed} reason={Reason}",
+                        finishDetectConfig.FinishEvidenceId, finishOperation.Id, observed.FrameId, observed.CapturedAt,
+                        observed.Width, observed.Height, before.BarVisible, observed.BarVisible, confirmed, probe.Reason);
+                }
+                catch { /* 诊断不能影响是否放行战斗。 */ }
+                if (observed.BarVisible)
+                    SaveFightEndEvidence(finishDetectConfig, finishOperation.Id, probe.Reason, beforeCapture, ra);
+                if (confirmed)
+                {
+                    finishDetectConfig.EndConfirmed = true;
+                    finishOperation.Check();
                     Simulation.SendInput.SimulateAction(GIActions.Drop);
                     Logger.LogInformation("检测到编队加载进度条，识别到战斗结束");
                     // 取消正在进行的换队
@@ -1197,8 +1239,9 @@ public class AutoFightTask : ISoloTask
                 }
             }
 
+            finishOperation.Check();
             Simulation.SendInput.SimulateAction(GIActions.Drop);
-            Logger.LogInformation($"未检测到编队加载进度条: yellow{lastProgressBar.Item0},{lastProgressBar.Item1},{lastProgressBar.Item2};white{lastWhiteTile.Item0},{lastWhiteTile.Item1},{lastWhiteTile.Item2}");
+            Logger.LogInformation("未确认编队加载进度条，继续战斗：{Reason}，check={Check}", probe.Reason, finishOperation.Id);
 
             _lastFightFlagTime = DateTime.Now;
             return false;
@@ -1206,6 +1249,51 @@ public class AutoFightTask : ISoloTask
     }
 
     private static readonly AsyncLocal<DateTime> LastPassiveCameraFrame = new();
+
+    private static PartySetupFinishObservation ObservePartySetupBar(ImageRegion image, long frame)
+    {
+        // 截图接口没有底层帧编号；局部图像指纹额外拒绝重复缓存帧，不能仅靠调用次数称为新证据。
+        ulong fingerprint = 14695981039346656037UL;
+        var mat = image.SrcMat;
+        var scale = mat.Width / 1920d;
+        if (!mat.Empty() && mat.Channels() == 3)
+        {
+            for (var y = (int)(34 * scale); y < Math.Min(mat.Height, (int)(66 * scale)); y++)
+            for (var x = (int)(736 * scale); x < Math.Min(mat.Width, (int)(1184 * scale)); x++)
+            {
+                var pixel = mat.At<Vec3b>(y, x);
+                fingerprint = unchecked((fingerprint ^ pixel.Item0) * 1099511628211UL);
+                fingerprint = unchecked((fingerprint ^ pixel.Item1) * 1099511628211UL);
+                fingerprint = unchecked((fingerprint ^ pixel.Item2) * 1099511628211UL);
+            }
+        }
+        return new(frame, DateTimeOffset.UtcNow, mat.Width, mat.Height, IsPartySetupProgressBarVisible(image), fingerprint);
+    }
+
+    private static void SaveFightEndEvidence(TaskFightFinishDetectConfig config, string check, string reason,
+        ImageRegion before, ImageRegion after)
+    {
+        try
+        {
+            if (!Logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Debug) || Interlocked.Increment(ref config.FinishEvidenceCount) > 2) return;
+            var directory = Global.Absolute(@"log\screenshot");
+            Directory.CreateDirectory(directory);
+            foreach (var (name, image) in new[] { ("before", before), ("after", after) })
+            {
+                var scale = image.Width / 1920d;
+                // 只保存顶部中间的判定现场，不包含右下 UID；不另抓可能已变化的截图。
+                using var crop = image.DeriveCrop(600 * scale, 0, 720 * scale, 300 * scale);
+                var path = Path.Combine(directory, $"fight-end-{config.FinishEvidenceId}-{check}-{after.Width}-{reason}-{name}.png");
+                if (!Cv2.ImWrite(path, crop.SrcMat)) throw new IOException("无法保存战斗结束证据");
+                Logger.LogDebug("FIGHT_END_EVIDENCE check={Check} reason={Reason} file={File}", check, reason, path);
+            }
+        }
+        catch (Exception error)
+        {
+            try { Logger.LogDebug(error, "战斗结束证据保存失败，不改变判定结果"); }
+            catch { /* 日志接收器失败同样不能改变结果。 */ }
+        }
+    }
 
     private static bool? RunPassiveSeek(
         TaskFightFinishDetectConfig finishDetectConfig,
@@ -1245,10 +1333,24 @@ public class AutoFightTask : ISoloTask
 
     internal static bool IsPartySetupProgressBarVisible(ImageRegion captureRa)
     {
-        var progressBar = captureRa.SrcMat.At<Vec3b>(50, 790);
-        var whiteTile = captureRa.SrcMat.At<Vec3b>(50, 768);
-        return IsWhite(whiteTile.Item2, whiteTile.Item1, whiteTile.Item0) &&
-               IsYellow(progressBar.Item2, progressBar.Item1, progressBar.Item0);
+        var image = captureRa.SrcMat;
+        if (image.Empty() || image.Channels() != 3 || image.Width < 640 || image.Width * 9 != image.Height * 16) return false;
+        var scale = image.Width / 1920d;
+        var y = (int)Math.Round(50 * scale);
+        // 两个孤立颜色点也可能来自场景或特效；白色标记和黄色条身都必须连续。
+        bool HasRun(int from, int to, Func<int, int, int, bool> matches)
+        {
+            from = (int)Math.Round(from * scale);
+            to = (int)Math.Round(to * scale);
+            var count = 0;
+            for (var x = from; x <= to; x++)
+            {
+                var pixel = image.At<Vec3b>(y, x);
+                if (matches(pixel.Item2, pixel.Item1, pixel.Item0)) count++;
+            }
+            return count >= Math.Ceiling((to - from + 1) * 0.8);
+        }
+        return HasRun(767, 769, IsWhite) && HasRun(786, 794, IsYellow);
     }
 
     internal static int FindNextGuardianSkillCommandIndex(

@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Script.Group;
+using BetterGenshinImpact.Core.Script.Project;
 using BetterGenshinImpact.Helpers;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -205,7 +206,8 @@ public class ExecutionRecordStorage
         return targetDate >= todayStart && targetDate < todayEnd;
     }
 
-    public static bool IsSkipTask(ScriptGroupProject project, out string message,List<DailyExecutionRecord>? dailyRecords=null)
+    public static bool IsSkipTask(ScriptGroupProject project, out string message,
+        List<DailyExecutionRecord>? dailyRecords = null, Func<string, Manifest?>? loadManifest = null)
     {
         // 初始化消息字符串
         message = "";
@@ -219,6 +221,13 @@ public class ExecutionRecordStorage
             (config.BoundaryTime < 0 || config.BoundaryTime > 23) && config.LastRunGapSeconds < 0)
         {
             return false; // 配置无效，不执行跳过检查
+        }
+
+        if (project.Type == "Javascript"
+            && (project.Project?.Manifest ?? (loadManifest ?? ReadManifest)(project.FolderName))?.SelfManagedCompletion == true)
+        {
+            message = "脚本声明自主管理完成状态，交由脚本按材料库存目标和刷新时间重新评估";
+            return false;
         }
 
         // 确定边界时间是否有效（0-23之间）
@@ -342,5 +351,16 @@ public class ExecutionRecordStorage
 
 // 未找到匹配记录
         return false;
+    }
+
+    private static Manifest? ReadManifest(string folderName)
+    {
+        // 预执行规划中的项目可能尚未初始化，读取 manifest 不构造脚本引擎或任务。
+        var path = Path.Combine(Global.ScriptPath(), folderName, "manifest.json");
+        try { return File.Exists(path) ? Manifest.FromJson(File.ReadAllText(path)) : null; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return null; // 缺失或旧 manifest 不隐式获得豁免；实际执行仍走原来的 manifest 校验。
+        }
     }
 }

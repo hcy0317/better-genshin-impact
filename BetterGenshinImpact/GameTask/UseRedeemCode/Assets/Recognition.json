@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "objects": {
+    "MenuBack": {
+      "type": "TemplateMatch",
+      "template": "esc_return_button.png",
+      "roi": "rect(0, 0, 100 * s, 120 * s)",
+      "threshold": 0.8,
+      "draw": false
+    }
+  }
+}

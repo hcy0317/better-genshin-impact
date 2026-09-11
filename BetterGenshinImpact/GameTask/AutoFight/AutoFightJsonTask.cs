@@ -127,6 +127,10 @@ public class AutoFightJsonTask : ISoloTask
     public async Task Start(CancellationToken ct)
     {
         _ct = ct;
+        _finishDetectConfig.EndConfirmed = false;
+        _finishDetectConfig.FinishEvidenceId = Guid.NewGuid().ToString();
+        _finishDetectConfig.FinishEvidenceCount = 0;
+        _finishDetectConfig.FinishFrameSequence = 0;
         CombatRuntimeMetrics.Shared.Reset();
         AvatarRecognition.SetCurrentAutoFightParam(_taskParam);
         AvatarRecognition.ClearLegendaryBarTracker();
@@ -145,6 +149,7 @@ public class AutoFightJsonTask : ISoloTask
             Logger.LogInformation("JSON 策略：当前队伍角色：{Names}", string.Join(", ", _teamCharacterNames));
             // 增强 JSON 一次编译全部根，缺角色或不合法依赖不能经旧过滤器静默裁剪。
             using var flow = NativeCombatFlowRunner.Create(_strategy, combatScenes);
+            if (flow != null) _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
 
             // 过滤可用动作：Character 为空（通用）或在当前队伍中
             var filteredActions = _strategy.Actions
@@ -183,6 +188,7 @@ public class AutoFightJsonTask : ISoloTask
 
             if (flow == null && validActions.Count == 0)
             {
+                AutoFightTask.EnsureFightFinishConfirmed(_taskParam.FightFinishDetectEnabled, false, "JSON策略没有可用动作");
                 Logger.LogWarning("JSON 策略：没有可用的动作节点，跳过战斗");
                 return;
             }
@@ -603,6 +609,8 @@ public class AutoFightJsonTask : ISoloTask
 
             try
             {
+            try
+            {
                 await fightTask;
             }
             finally
@@ -618,8 +626,9 @@ public class AutoFightJsonTask : ISoloTask
                 AutoFightTask.FightStatusFlag = false;
             }
 
-            try
-            {
+                ct.ThrowIfCancellationRequested();
+                AutoFightTask.EnsureFightFinishConfirmed(_taskParam.FightFinishDetectEnabled, !skipPostFightPickupFlag,
+                    AutoFightParam.IsSeekRotationLimitReached(AutoFightSeek.RotationCount) ? "找敌次数上限" : "战斗时间上限");
                 if (skipPostFightPickupFlag)
                 {
                     Logger.LogInformation("战斗被强制结束，跳过战后拾取");
@@ -657,13 +666,18 @@ public class AutoFightJsonTask : ISoloTask
             {
                 if (expDetector != null)
                 {
-                    await expDetector.StopAsync();
-                    expDetector.Dispose();
+                    try { await expDetector.StopAsync(); }
+                    finally { expDetector.Dispose(); }
                 }
             }
 
             // 战后拾取（完全参照 AutoFightTask）
             await PostFightPickup(combatScenes, skipPostFightPickupFlag, lastFightName);
+        }
+        catch (Exception error)
+        {
+            TaskExecutionScope.RethrowCombatFailure(error, _taskParam.FightFinishDetectEnabled, _finishDetectConfig.EndConfirmed, ct);
+            throw;
         }
         finally
         {
@@ -828,7 +842,7 @@ public class AutoFightJsonTask : ISoloTask
             {
                 await CombatScriptExecutor.ExecuteAsync(combatScript, _ct, Logger, combatScenes);
             }
-            catch (RetryException e)
+            catch (RetryException e) when (e is not BetterGenshinImpact.GameTask.Common.Exceptions.DefeatedRetryException)
             {
                 Logger.LogWarning("战斗前动作重试异常，跳过此动作继续：{Msg}", e.Message);
             }

@@ -7,7 +7,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Config;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
-public enum CombatFlowResult { Succeeded, SatisfiedExisting, Skipped, Failed, Unknown, Pending, Transferred }
+public enum CombatFlowResult { Succeeded, SatisfiedExisting, Skipped, Failed, Unknown, Pending, Transferred, Deferred }
 public readonly record struct CombatFlowStep(CombatFlowResult Result, bool RoundCompleted);
 
 /// <summary>游戏观测/输入及等待边界，不在模拟测试中替换解析器或流程状态。</summary>
@@ -16,6 +16,7 @@ public interface ICombatFlowGame
     void BeginStep() { }
     void ReleaseHeldInput() { }
     CombatScopeObservation? ObserveScope() => null;
+    bool HasPendingSkill(CombatFlowAction action) => false;
     ValueTask PrepareObservationAsync(CombatFlowAction action, string function, CancellationToken ct) => ValueTask.CompletedTask;
     ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct);
     object? Observe(string function, IReadOnlyList<object?> args, string actor);
@@ -73,7 +74,7 @@ public sealed partial class CombatFlowExecution : IDisposable
     public bool IsAtomic => _frames.Any(frame => frame.Block.Atomic && frame.AtomicAdmitted);
     public bool IsAtRootBoundary => !_roundStarted || _frames.Count == 1 && !IsAtomic;
     internal bool NeedsCompletion => _roundStarted && _frames.TryPeek(out var frame) &&
-        (frame.Index >= frame.Block.Nodes.Count || frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred);
+        (frame.Index >= frame.Block.Nodes.Count || frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred or CombatFlowResult.Deferred);
     public bool LastRoundHadAction => _acted;
     internal bool MadeProgressInRound => _madeProgress;
     public bool TakeFinishCheckRequest() => _battle.TakeFinishCheckRequest();
@@ -168,18 +169,18 @@ public sealed partial class CombatFlowExecution : IDisposable
             }
             if (Context.Now >= frame.Deadline) frame.Result = CombatFlowResult.Failed;
             if (!RequirementsHold(frame)) frame.Result = CombatFlowResult.Failed;
-            if (frame.Index >= frame.Block.Nodes.Count || frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred)
+            if (frame.Index >= frame.Block.Nodes.Count || frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred or CombatFlowResult.Deferred)
             {
                 if (frame.Result == CombatFlowResult.Succeeded && !frame.SuppressCallerSuccess &&
                     (frame.RechargeSource && frame.Caller != null && !frame.CaughtFor.Contains(frame.Caller.Name) ||
                      frame.WatchFor is { } watched && (Context.Remaining(watched) is not { } coverage || coverage <= frame.WatchDemand)))
                     frame.Result = CombatFlowResult.Failed;
-                if (frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred && !frame.InputAbandoned)
+                if (frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred or CombatFlowResult.Deferred && !frame.InputAbandoned)
                 {
                     _game.ReleaseHeldInput();
                     frame.InputAbandoned = true;
                 }
-                if (frame.Result == CombatFlowResult.Failed && TryBeginRecovery(frame)) continue;
+                if (frame.Result is CombatFlowResult.Failed or CombatFlowResult.Deferred && TryBeginRecovery(frame)) continue;
                 var result = FinishFrame();
                 if (_frames.Count == 0)
                 {
@@ -296,7 +297,7 @@ public sealed partial class CombatFlowExecution : IDisposable
             if ((command.Options.GetValueOrDefault("watch") ?? command.Options.GetValueOrDefault("maintain")) is { } maintenanceChannel &&
                 _deferredMaintenance.ContainsKey(maintenanceChannel))
             {
-                CompleteNode(frame, command, CombatFlowResult.Skipped);
+                CompleteNode(frame, command, CombatFlowResult.Deferred);
                 continue;
             }
             if (command.Options.TryGetValue("keep", out var keep) && Context.Remaining(keep) is not > 0)
@@ -305,6 +306,7 @@ public sealed partial class CombatFlowExecution : IDisposable
                 continue;
             }
             var actionDeadline = frame.Deadline;
+            string? actionEpisode = null;
             if (command.Options.TryGetValue("maintain", out var maintain))
             {
                 var demand = Math.Max(_program.CoverageAfter(frame.Block, frame.Index, maintain),
@@ -330,6 +332,7 @@ public sealed partial class CombatFlowExecution : IDisposable
                     continue;
                 }
                 actionDeadline = Math.Min(actionDeadline, deadline);
+                if (watchFrame == null) actionEpisode = "coverage:" + maintain;
                 if (_program.Timing(command)?.Duration is { } fullWindow && fullWindow <= demand)
                 {
                     CompleteNode(frame, command, CombatFlowResult.Failed);
@@ -368,13 +371,15 @@ public sealed partial class CombatFlowExecution : IDisposable
             }
             var action = new CombatFlowAction(command, Context, CanStart,
                 Math.Min(actionDeadline, Context.Now + CombatFlowPolicy.ActionTimeout(command, _program.Timing(command))),
-                command.Method == Method.Skill || command.Method == Method.Burst ? null : MaintenanceIsDue, CanContinue);
+                command.Method == Method.Skill || command.Method == Method.Burst ? null : MaintenanceIsDue, CanContinue,
+                canReuseConfirmedActor: IsAtomic && (command.Method == Method.Wait || command.Method == Method.MoveBy || command.Method == Method.KeyUp));
             if (!action.CanStart)
             {
                 CompleteNode(frame, command, CombatFlowResult.Skipped);
                 continue;
             }
-            if (command.Method == Method.Burst && (Required(command) || _program.Recharge(command) != null) &&
+            var hasPendingSkill = _game.HasPendingSkill(action);
+            if (!hasPendingSkill && command.Method == Method.Burst && (Required(command) || _program.Recharge(command) != null) &&
                 ConditionEvaluator.Truth(_game.Observe("q-ready", [], command.Name)) != true &&
                 ConditionEvaluator.Truth(_game.Observe("q-cd", [], command.Name)) != true &&
                 (_game.Observe("q-energy-low", [], command.Name) == null || _game.Observe("q-cd", [], command.Name) == null))
@@ -398,10 +403,12 @@ public sealed partial class CombatFlowExecution : IDisposable
                     _game.Observe("q-energy-low", [], command.Name) is bool && _game.Observe("q-cd", [], command.Name) is bool)
                     _episodes.Resolve(goal);
             }
-            if (await TryBeginRechargeAsync(frame, command, keep, action, ct)) continue;
+            if (!hasPendingSkill && await TryBeginRechargeAsync(frame, command, keep, action, ct)) continue;
             var actionResult = await _game.ExecuteAsync(action, ct);
             ct.ThrowIfCancellationRequested();
-            if (actionResult == CombatFlowResult.Succeeded && action.InputAt == null) actionResult = CombatFlowResult.Unknown;
+            if (actionEpisode != null && actionResult is CombatFlowResult.Pending or CombatFlowResult.Deferred)
+                _episodes.Defer(actionEpisode);
+            if (actionResult == CombatFlowResult.Succeeded && action.EffectiveInputAt == null) actionResult = CombatFlowResult.Unknown;
             if (actionResult == CombatFlowResult.Succeeded)
             {
                 _acted = true;
@@ -415,10 +422,10 @@ public sealed partial class CombatFlowExecution : IDisposable
                 if (command.Options.TryGetValue("record", out var record))
                 {
                     // 技能使用保守的调用前时点；普通动作记录完成边界，不将迟到确认当作效果起点。
-                    var at = command.Method == Method.Skill || command.Method == Method.Burst ? action.InputAt!.Value : Context.Now;
+                    var at = command.Method == Method.Skill || command.Method == Method.Burst ? action.EffectiveInputAt!.Value : Context.Now;
                     var source = _program.RecordSource(command);
                     if (source.Scope is "target" or "range" && _game.ObserveScope() is { } scopeAfterInput) Context.ObserveScope(scopeAfterInput);
-                    Context.TryRecord(record, at, _program.Timing(command)?.Duration, Context.BindScope(source, action.InputAt!.Value));
+                    Context.TryRecord(record, at, _program.Timing(command)?.Duration, Context.BindScope(source, action.EffectiveInputAt!.Value));
                     if (command.Options.GetValueOrDefault("watch") == record)
                         _watchProducers[record] = new(frame.Block, frame.Index - 1);
                     if (Context.Remaining(record) is { } coverage && coverage >
@@ -430,7 +437,7 @@ public sealed partial class CombatFlowExecution : IDisposable
                     }
                 }
                 if (refreshRecord != null && (Context.Remaining(refreshName!) is not > 0 ||
-                    !Context.TryRefresh(refreshName!, refreshRecord.Generation, action.InputAt!.Value, refreshRecord.Duration!.Value,
+                    !Context.TryRefresh(refreshName!, refreshRecord.Generation, action.EffectiveInputAt!.Value, refreshRecord.Duration!.Value,
                         refreshRecord.EffectVersion)))
                     actionResult = CombatFlowResult.Unknown;
                 if (actionResult == CombatFlowResult.Succeeded && _program.Feed(command) is { } feed)
@@ -457,6 +464,8 @@ public sealed partial class CombatFlowExecution : IDisposable
     {
         var frame = _frames.Pop();
         if (frame.Block.Atomic || _frames.Count == 0) _game.ReleaseHeldInput();
+        if (frame.Result == CombatFlowResult.Deferred)
+            foreach (var objective in frame.Episodes) _episodes.Defer(objective);
         if (frame.Result == CombatFlowResult.Succeeded)
         {
             foreach (var objective in frame.Episodes) _episodes.Resolve(objective);
@@ -485,7 +494,7 @@ public sealed partial class CombatFlowExecution : IDisposable
             else CompleteNode(parent, frame.Caller, result);
         }
         if (frame.WatchFor != null && result != CombatFlowResult.Succeeded && _frames.TryPeek(out var interrupted))
-            interrupted.Result = result == CombatFlowResult.Transferred ? result : CombatFlowResult.Failed;
+            interrupted.Result = result is CombatFlowResult.Transferred or CombatFlowResult.Deferred ? result : CombatFlowResult.Failed;
         return result;
     }
 
@@ -498,7 +507,8 @@ public sealed partial class CombatFlowExecution : IDisposable
         var cooling = ConditionEvaluator.Truth(_game.Observe("q-cd", [], command.Name));
         if (low != true || cooling != false)
         {
-            CompleteNode(frame, command, cooling == true || low == false ? CombatFlowResult.Skipped : CombatFlowResult.Unknown);
+            CompleteNode(frame, command, cooling == true ? CombatFlowResult.Deferred
+                : low == false ? CombatFlowResult.Skipped : CombatFlowResult.Unknown);
             return true;
         }
         if (!_episodes.TrySpend("burst:" + command.Name, Context.Now, CombatFlowPolicy.Timeout(command),
@@ -566,7 +576,7 @@ public sealed partial class CombatFlowExecution : IDisposable
     {
         if (IsAtomic || WaitingForRequiredOpening()) return;
         // 首次开场要求未完成时，维护转移不能越过它。
-        if (_frames.Any(frame => frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred || frame.Caller?.Options.GetValueOrDefault("once") == "battle")) return;
+        if (_frames.Any(frame => frame.Result is CombatFlowResult.Failed or CombatFlowResult.Transferred or CombatFlowResult.Deferred || frame.Caller?.Options.GetValueOrDefault("once") == "battle")) return;
         var root = _frames.Last();
         foreach (var (name, producer) in _watchProducers.OrderBy(pair =>
                      (Context.Remaining(pair.Key) ?? double.PositiveInfinity) -
@@ -757,7 +767,12 @@ public sealed partial class CombatFlowExecution : IDisposable
     {
         if (result == CombatFlowResult.Succeeded && command.Options.TryGetValue("id", out var id)) frame.Succeeded.Add(id);
         if (Required(command) && result is not (CombatFlowResult.Succeeded or CombatFlowResult.SatisfiedExisting))
-            frame.Result = result == CombatFlowResult.Transferred ? result : CombatFlowResult.Failed;
+            frame.Result = result switch
+            {
+                CombatFlowResult.Transferred => result,
+                CombatFlowResult.Pending or CombatFlowResult.Deferred => CombatFlowResult.Deferred,
+                _ => CombatFlowResult.Failed
+            };
     }
 
     public void Dispose()

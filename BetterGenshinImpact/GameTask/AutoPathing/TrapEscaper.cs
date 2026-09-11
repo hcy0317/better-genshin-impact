@@ -131,7 +131,14 @@ public class TrapEscaper(CancellationToken ct)
         Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
         Simulation.SendInput.SimulateAction(GIActions.Drop);
         await Delay(75, ct);
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
+        var attacked = LandingAttackGuard.TryAttack(() =>
+        {
+            using var screen = CaptureToRectArea();
+            return Bv.GetMotionStatus(screen);
+        }, () => Simulation.SendInput.SimulateAction(GIActions.NormalAttack), ct);
+        Logger.LogDebug(attacked
+            ? "脱困：确认飞行，执行一次下落攻击"
+            : "脱困：未确认飞行，不发送普攻");
         await Delay(500, ct);
 
         TimeSpan timeSinceLastAction = DateTime.UtcNow - LastActionTime;

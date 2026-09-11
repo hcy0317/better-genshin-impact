@@ -61,10 +61,27 @@ public sealed class LimitedFileTests : IDisposable
                     _rootPath,
                     config: null,
                     new LimitedFile(_rootPath),
-                    (message, _) => failureMessages.Add(message))
+                    (message, _) => failureMessages.Add(message),
+                    captureFailure: (_, _) => { })
                 .RunFile("invalid-route.json"));
 
         Assert.Equal(["执行地图追踪时候发生错误"], failureMessages);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ScriptRouteResolvesOnlyWhenNativeExecutionReportsCompletion(bool completed)
+    {
+        var script = new AutoPathingScript(_rootPath, null, new LimitedFile(_rootPath), (_, _) => { },
+            (_, _) => Task.FromResult(completed), captureFailure: (_, _) => { });
+        const string route = """{"info":{"name":"completion-contract"},"positions":[]}""";
+        if (completed) await script.Run(route);
+        else
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => script.Run(route));
+            Assert.Contains("未完整完成", error.Message);
+        }
     }
 
     public void Dispose()

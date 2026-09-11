@@ -11,18 +11,23 @@ using OpenCvSharp;
 using Vanara.PInvoke;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
+using BetterGenshinImpact.GameTask.Common.Ui;
 
 namespace BetterGenshinImpact.GameTask.Common;
 
 public class TaskControl
 {
-    public static ILogger Logger { get; } = App.GetLogger<TaskControl>();
+    // 纯等待/取消边界可被无UI宿主复用，不能仅加载此类型就初始化App并触发提权重启。
+    private static readonly Lazy<ILogger> LoggerFactory = new(() => App.GetLogger<TaskControl>());
+    public static ILogger Logger => LoggerFactory.Value;
 
     public static readonly SemaphoreSlim TaskSemaphore = new(1, 1);
 
 
     public static void CheckAndSleep(int millisecondsTimeout)
     {
+        TaskExecutionScope.ThrowIfFailed();
+        if (TryUiSleep(millisecondsTimeout)) return;
         if (TryCombatSleep(millisecondsTimeout)) return;
         TrySuspend();
         CheckAndActivateGameWindow();
@@ -32,6 +37,8 @@ public class TaskControl
 
     public static void Sleep(int millisecondsTimeout)
     {
+        TaskExecutionScope.ThrowIfFailed();
+        if (TryUiSleep(millisecondsTimeout)) return;
         if (TryCombatSleep(millisecondsTimeout)) return;
         NewRetry.Do(() =>
         {
@@ -39,6 +46,33 @@ public class TaskControl
             CheckAndActivateGameWindow();
         }, TimeSpan.FromSeconds(1), 100);
         Thread.Sleep(millisecondsTimeout);
+    }
+
+    private static bool TryUiSleep(int milliseconds, CancellationToken ct = default)
+    {
+        if (UiOperation.Current is not { } operation) return false;
+        ct.ThrowIfCancellationRequested();
+        CombatActionScope.Current?.Check();
+        operation.Check();
+        TrySuspend();
+        CheckAndActivateGameWindow();
+        operation.DelayAsync(Math.Max(0, milliseconds), ct).GetAwaiter().GetResult();
+        return true;
+    }
+
+    /// <summary>暂停与焦点等待共用的生产轮询边界；无UI作用域时保持原等待节拍。</summary>
+    internal static void WaitWhileManaged(Func<bool> condition, Action iteration, Action<int>? wait = null)
+    {
+        wait ??= Thread.Sleep;
+        while (condition())
+        {
+            CombatActionScope.Current?.Check();
+            UiOperation.Current?.Check();
+            iteration();
+            UiOperation.Current?.Check();
+            wait(CombatActionScope.Current != null || UiOperation.Current != null ? 50 : 1000);
+        }
+        UiOperation.Current?.Check();
     }
 
     private static bool TryCombatSleep(int milliseconds)
@@ -66,9 +100,8 @@ public class TaskControl
         var first = true;
         //此处为了记录最开始的暂停状态
         var isSuspend = RunnerContext.Instance.IsSuspend;
-        while (RunnerContext.Instance.IsSuspend)
+        WaitWhileManaged(() => RunnerContext.Instance.IsSuspend, () =>
         {
-            CombatActionScope.Current?.Check();
             if (first)
             {
                 RunnerContext.Instance.StopAutoPick();
@@ -93,8 +126,7 @@ public class TaskControl
                 first = false;
             }
 
-            Thread.Sleep(CombatActionScope.Current == null ? 1000 : 50);
-        }
+        });
 
         //从暂停中解除
         if (isSuspend)
@@ -131,9 +163,8 @@ public class TaskControl
 
         var count = 0;
         //未激活则尝试恢复窗口
-        while (!SystemControl.IsGenshinImpactActiveByProcess())
+        WaitWhileManaged(() => !SystemControl.IsGenshinImpactActiveByProcess(), () =>
         {
-            CombatActionScope.Current?.Check();
             ThrowIfGameProcessExited();
             var name = SystemControl.GetActiveByProcess();
             if (RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
@@ -157,8 +188,7 @@ public class TaskControl
             }
 
             count++;
-            Thread.Sleep(CombatActionScope.Current == null ? 1000 : 50);
-        }
+        });
     }
 
     private static void DismissTransientShellWindow()
@@ -197,6 +227,11 @@ public class TaskControl
 
     public static void Sleep(int millisecondsTimeout, CancellationToken ct)
     {
+        if (ct.IsCancellationRequested && UiOperation.Current == null && CombatActionScope.Current == null)
+            throw new NormalEndException("取消自动任务");
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
+        if (TryUiSleep(millisecondsTimeout, ct)) return;
         if (CombatActionScope.Current != null) ct.ThrowIfCancellationRequested();
         if (TryCombatSleep(millisecondsTimeout)) return;
         if (ct.IsCancellationRequested)
@@ -228,6 +263,20 @@ public class TaskControl
 
     public static async Task Delay(int millisecondsTimeout, CancellationToken ct)
     {
+        if (ct.IsCancellationRequested && UiOperation.Current == null && CombatActionScope.Current == null)
+            throw new NormalEndException("取消自动任务");
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
+        if (UiOperation.Current is { } operation)
+        {
+            ct.ThrowIfCancellationRequested();
+            CombatActionScope.Current?.Check();
+            operation.Check();
+            TrySuspend();
+            CheckAndActivateGameWindow();
+            await operation.DelayAsync(Math.Max(0, millisecondsTimeout), ct);
+            return;
+        }
         if (CombatActionScope.Current is { } scope)
         {
             ct.ThrowIfCancellationRequested();

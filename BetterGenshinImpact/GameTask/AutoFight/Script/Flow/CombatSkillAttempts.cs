@@ -8,6 +8,7 @@ public readonly record struct CombatSkillObservation(Guid BattleId, long FrameId
     bool? CoolingDown, bool? Ready);
 public sealed record CombatSkillAttempt(Guid AttemptId, Guid BattleId, string Actor, Method Skill,
     string CommandId, double InputAt, double Deadline);
+internal enum CombatSkillAttemptState { Empty, Pending, Confirmed, Expired }
 
 /// <summary>在途槽按物理技能归属，不按脚本行或 press/hold 分配。Unknown 不释放槽。</summary>
 public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
@@ -17,6 +18,7 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         public CombatSkillAttempt Attempt { get; } = attempt;
         public bool SawCooldown;
         public bool Confirmed;
+        public bool CreditTaken;
         public long FrameId = -1;
         public double ObservedAt = attempt.InputAt;
     }
@@ -70,7 +72,38 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
             var slot = _slots.Values.FirstOrDefault(value => value.Attempt.AttemptId == attemptId);
             if (_closed || slot == null) return false;
             slot.SawCooldown = true;
-            return ConfirmSlot(slot, confirmedAt);
+            var confirmed = ConfirmSlot(slot, confirmedAt);
+            if (confirmed) slot.CreditTaken = true; // 即时调用已经拿到了 Succeeded，不能在下一轮再领取。
+            return confirmed;
+        }
+    }
+
+    internal bool HasUnresolved(string actor, Method skill)
+    {
+        lock (_gate) return !_closed && _slots.TryGetValue((actor, skill), out var slot) && !slot.CreditTaken;
+    }
+
+    internal CombatSkillAttemptState GetState(string actor, Method skill, double now)
+    {
+        lock (_gate)
+        {
+            if (_closed) return CombatSkillAttemptState.Expired;
+            if (!_slots.TryGetValue((actor, skill), out var slot)) return CombatSkillAttemptState.Empty;
+            if (slot.CreditTaken) return CombatSkillAttemptState.Confirmed;
+            return !double.IsFinite(now) || now >= slot.Attempt.Deadline
+                ? CombatSkillAttemptState.Expired : CombatSkillAttemptState.Pending;
+        }
+    }
+
+    public CombatSkillAttempt? TakeConfirmation(string actor, Method skill, string commandId, double now)
+    {
+        lock (_gate)
+        {
+            if (_closed || !_slots.TryGetValue((actor, skill), out var slot) || !slot.Confirmed || slot.CreditTaken
+                || slot.Attempt.CommandId != commandId || !double.IsFinite(now)
+                || now < slot.ObservedAt || now >= slot.Attempt.Deadline) return null;
+            slot.CreditTaken = true;
+            return slot.Attempt;
         }
     }
 

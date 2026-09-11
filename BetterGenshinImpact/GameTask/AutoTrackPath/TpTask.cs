@@ -13,6 +13,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Job;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Common.Map.Maps;
 using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -1253,45 +1254,10 @@ public class TpTask
         return isInBigMapUi;
     }
 
-    private async Task CloseBigMapAfterTeleportFailure(bool forceClose = false)
+    private async Task CloseBigMapAfterTeleportFailure()
     {
-        try
-        {
-            var isInBigMapUi = IsInBigMapUi();
-            if (!forceClose && !ShouldCloseBigMapAfterTeleportFailure(isInBigMapUi))
-            {
-                isInBigMapUi = await WaitForBigMapUiAppear(BigMapFailureDetectionTimeoutMs);
-            }
-
-            if (!forceClose && !ShouldCloseBigMapAfterTeleportFailure(isInBigMapUi))
-            {
-                return;
-            }
-
-            Logger.LogWarning("地图操作失败且大地图仍处于打开状态，关闭地图后再重试");
-            Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-
-            var stopwatch = Stopwatch.StartNew();
-            while (stopwatch.ElapsedMilliseconds < BigMapCloseTimeoutMs)
-            {
-                await Delay(BigMapOpenCheckIntervalMs, ct);
-                if (!IsInBigMapUi())
-                {
-                    return;
-                }
-            }
-
-            Logger.LogWarning("Esc 后大地图仍未关闭，尝试返回主界面");
-            await new ReturnMainUiTask().Start(ct);
-        }
-        catch (Exception e) when (IsTaskStopException(e))
-        {
-            throw;
-        }
-        catch (Exception e)
-        {
-            Logger.LogWarning(e, "传送失败后的地图关闭恢复未完成");
-        }
+        Logger.LogWarning("传送失败，必须确认已恢复秘境外主界面才能重试；地图图标消失不代表恢复成功");
+        await new ReturnMainUiTask().Start(ct, requireOverworld: true);
     }
 
 
@@ -1302,53 +1268,20 @@ public class TpTask
 
     public async Task<(double, double)> Tp(double tpX, double tpY, RouteMapContext mapContext, bool force = false)
     {
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(TeleportTimeoutMs);
-        try
-        {
-            return await new TpTask(timeoutCts.Token).TpWithRetries(tpX, tpY, mapContext, force);
-        }
-        catch (OperationCanceledException e) when (!ct.IsCancellationRequested && timeoutCts.IsCancellationRequested)
-        {
-            throw new TimeoutException($"单次传送超过 {TeleportTimeoutMs / 1000} 秒", e);
-        }
+        using var driver = new NativeUiDriver();
+        return await UiRecovery.TeleportAsync(driver,
+            token => new TpTask(token).TpWithRetries(tpX, tpY, mapContext, force), ct, Logger,
+            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
     }
 
-    private async Task<(double, double)> TpWithRetries(double tpX, double tpY, RouteMapContext mapContext, bool force)
+    private Task<(double, double)> TpWithRetries(double tpX, double tpY, RouteMapContext mapContext, bool force)
     {
-        for (var i = 0; i < 3; i++)
-        {
-            try
-            {
-                return await TpOnce(tpX, tpY, mapContext, force);
-            }
-            catch (TeleportPanelNotOpenedException)
-            {
-                await CloseBigMapAfterTeleportFailure(forceClose: true);
-                throw;
-            }
-            catch (TpPointNotActivate e)
-            {
-                // 未激活点位的详情面板会遮挡后续地图操作，重试前先关闭。
-                // 最后一次失败也需要执行清理，避免影响脚本组中的下一个任务。
-                await CloseBigMapAfterTeleportFailure(forceClose: true);
-                // throw; // 不抛出异常，继续重试
-                Logger.LogWarning(e.Message + "  重试");
-            }
-            catch (Exception e) when (IsTaskStopException(e))
-            {
-                throw;
-            }
-            catch (Exception e)
-            {
-                Logger.LogDebug(e, e.Message);
-                Logger.LogWarning("传送异常" + e.Message);
-                await CloseBigMapAfterTeleportFailure();
-                await Delay(300, ct);
-            }
-        }
-
-        throw new InvalidOperationException("传送失败");
+        return UiRecovery.RunWithRecoveryAsync(_ => TpOnce(tpX, tpY, mapContext, force),
+            _ => CloseBigMapAfterTeleportFailure(), ct,
+            canRetry: error => error is not TeleportPanelNotOpenedException,
+            logger: Logger,
+            captureFailure: error => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
+                $"UI root={UiOperation.Current?.RootId} op={UiOperation.Current?.Id} 传送原始失败，恢复前现场"));
     }
 
     /// <summary>
@@ -2529,130 +2462,55 @@ public class TpTask
         throw new Exception($"切换区域[{areaName}]失败");
     }
 
-    private async Task<bool> TrySwitchArea(string areaName)
-    {
-        GameCaptureRegion.GameRegionClick((rect, scale) => (rect.Width - 160 * scale, rect.Height - 60 * scale));
-        await Delay(50, ct);
-        var minCountryLocalized = this.stringLocalizer.WithCultureGet(this.cultureInfo, areaName);
-        var candidatesText = "";
-        var stopwatch = Stopwatch.StartNew();
-        while (stopwatch.ElapsedMilliseconds < SwitchAreaCandidateTimeoutMs)
+    private Task<bool> TrySwitchArea(string areaName) =>
+        UiOperation.RunAsync("open-area-selector", TimeSpan.FromSeconds(10), ct, async operation =>
         {
-            ct.ThrowIfCancellationRequested();
-            using var ra = CaptureToRectArea();
-            var list = FindSwitchAreaCandidates(ra);
-            candidatesText = FormatSwitchAreaCandidateTexts(list);
-            var matchRect = list
-                .OrderByDescending(r => r.Y)
-                .FirstOrDefault(r => IsSwitchAreaCandidateMatch(r.Text, minCountryLocalized, areaName));
-            if (matchRect != null)
+            CheckAndSleep(0);
+            operation.Check();
+            GameCaptureRegion.GameRegionClick((rect, scale) => (rect.Width - 160 * scale, rect.Height - 60 * scale));
+            await Delay(50, operation.Token);
+            var localized = stringLocalizer.WithCultureGet(cultureInfo, areaName);
+            var areaLabels = MapLazyAssets.Get().CountryPositions.Keys.Append(areaName)
+                .SelectMany(name => new[] { name, stringLocalizer.WithCultureGet(cultureInfo, name) })
+                .Select(NormalizeSwitchAreaCandidateText).ToHashSet();
+            string candidatesText = "";
+            Region? FindCandidate(List<Region> list, int height) => list
+                .Where(candidate => candidate.Y < height - 100d * height / 1080d)
+                .OrderByDescending(candidate => candidate.Y)
+                .FirstOrDefault(candidate => IsSwitchAreaCandidateMatch(candidate.Text, localized, areaName));
+            bool SelectorVisible(List<Region> list, int height) => list.Any(candidate =>
+                candidate.Y < height - 100d * height / 1080d && areaLabels.Contains(NormalizeSwitchAreaCandidateText(candidate.Text)));
+
+            var applied = await AreaSelectionClickController.TryApplyAsync(() =>
             {
-                var applied = await AreaSelectionClickController.TryApplyAsync(
-                    SwitchAreaSelectionMaxClickAttempts,
-                    async attempt =>
-                    {
-                        using var retryCapture = CaptureToRectArea();
-                        var retryMatch = FindSwitchAreaCandidates(retryCapture)
-                            .OrderByDescending(candidate => candidate.Y)
-                            .FirstOrDefault(candidate => IsSwitchAreaCandidateMatch(
-                                candidate.Text,
-                                minCountryLocalized,
-                                areaName));
-                        if (retryMatch is null)
-                        {
-                            Logger.LogWarning(
-                                "区域选择器或候选已消失，不再复用旧坐标：{Country}，重试 {Attempt}/{MaxAttempts}",
-                                areaName,
-                                attempt,
-                                SwitchAreaSelectionMaxClickAttempts);
-                            return false;
-                        }
-                        var clickedCandidateRect = new Rect(
-                            retryMatch.X,
-                            retryMatch.Y,
-                            retryMatch.Width,
-                            retryMatch.Height);
-                        retryMatch.Click();
-                        await Delay(50, ct);
-                        var confirmed = await WaitForAreaSelectionApplied(
-                            areaName,
-                            minCountryLocalized,
-                            clickedCandidateRect);
-                        if (!confirmed)
-                        {
-                            Logger.LogWarning(
-                                "区域选择点击未确认：{Country}，重试 {Attempt}/{MaxAttempts}",
-                                areaName,
-                                attempt,
-                                SwitchAreaSelectionMaxClickAttempts);
-                        }
-
-                        return confirmed;
-                    });
-                if (applied)
-                {
-                    RememberAreaSwitchCenterPoint(areaName);
-                    Logger.LogInformation("切换到区域：{Country}", areaName);
-                    return true;
-                }
-            }
-
-            await Delay(UiRecognitionPollIntervalMs, ct);
-        }
-
-        Logger.LogWarning(
-            "切换区域失败：{Country}，OCR候选：{Candidates}",
-            areaName,
-            string.IsNullOrWhiteSpace(candidatesText) ? "无" : candidatesText);
-        return false;
-    }
-
-    private async Task<bool> WaitForAreaSelectionApplied(
-        string areaName,
-        string localizedAreaName,
-        Rect clickedCandidateRect)
-    {
-        var stopwatch = Stopwatch.StartNew();
-        var consecutiveMissingChecks = 0;
-        while (stopwatch.ElapsedMilliseconds < SwitchAreaSelectionTimeoutMs)
-        {
-            ct.ThrowIfCancellationRequested();
-            using var capture = CaptureToRectArea();
-            var clickedCandidateStillVisible = FindSwitchAreaCandidates(capture).Any(candidate =>
-                IsSwitchAreaCandidateMatch(candidate.Text, localizedAreaName, areaName) &&
-                IsSameSwitchAreaCandidatePosition(clickedCandidateRect, candidate));
-
-            if (!clickedCandidateStillVisible &&
-                stopwatch.ElapsedMilliseconds >= SwitchAreaSelectionMinimumWaitMs)
+                using var capture = CaptureToRectArea(forceNew: true);
+                var list = FindSwitchAreaCandidates(capture);
+                candidatesText = FormatSwitchAreaCandidateTexts(list);
+                var snapshot = NativeUiDriver.Read(capture);
+                return new AreaSelectionObservation(snapshot.FrameId, snapshot.MapReady,
+                    SelectorVisible(list, capture.Height), FindCandidate(list, capture.Height) != null);
+            }, (attempt, token) =>
             {
-                consecutiveMissingChecks++;
-                if (consecutiveMissingChecks >= SwitchAreaSelectionStableChecks)
-                {
-                    return true;
-                }
-            }
-            else
+                CheckAndSleep(0);
+                token.ThrowIfCancellationRequested();
+                operation.Check();
+                using var capture = CaptureToRectArea(forceNew: true);
+                var list = FindSwitchAreaCandidates(capture);
+                var candidate = FindCandidate(list, capture.Height);
+                if (candidate == null || !SelectorVisible(list, capture.Height)) return Task.FromResult(false);
+                operation.Check();
+                candidate.Click();
+                Logger.LogDebug("区域选择新帧点击：{Country}，attempt={Attempt}，候选={Candidates}",
+                    areaName, attempt, candidatesText);
+                return Task.FromResult(true);
+            }, Delay, operation.Token, logger: Logger);
+            if (applied)
             {
-                consecutiveMissingChecks = 0;
+                RememberAreaSwitchCenterPoint(areaName);
+                Logger.LogInformation("切换到区域：{Country}", areaName);
             }
-
-            await Delay(UiRecognitionPollIntervalMs, ct);
-        }
-
-        Logger.LogWarning("区域选择动画等待达到上限且未确认生效：{Country}", areaName);
-        return false;
-    }
-
-    private static bool IsSameSwitchAreaCandidatePosition(Rect clickedCandidateRect, Region candidate)
-    {
-        var tolerance = Math.Max(24d, clickedCandidateRect.Height * 1.5d);
-        var clickedCenterX = clickedCandidateRect.X + clickedCandidateRect.Width / 2d;
-        var clickedCenterY = clickedCandidateRect.Y + clickedCandidateRect.Height / 2d;
-        var candidateCenterX = candidate.X + candidate.Width / 2d;
-        var candidateCenterY = candidate.Y + candidate.Height / 2d;
-        return Math.Abs(clickedCenterX - candidateCenterX) <= tolerance &&
-               Math.Abs(clickedCenterY - candidateCenterY) <= tolerance;
-    }
+            return applied;
+        }, Logger);
 
     private List<Region> FindSwitchAreaCandidates(ImageRegion imageRegion)
     {

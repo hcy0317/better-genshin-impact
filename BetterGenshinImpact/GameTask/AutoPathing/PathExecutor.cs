@@ -136,6 +136,8 @@ public partial class PathExecutor
 
     public async Task Pathing(PathingTask task)
     {
+        TaskExecutionScope.ThrowIfFailed();
+        SuccessEnd = false;
         // SuspendableDictionary;
         const string sdKey = "PathExecutor";
         var sd = RunnerContext.Instance.SuspendableDictionary;
@@ -172,139 +174,138 @@ public partial class PathExecutor
         foreach (var waypoints in waypointsList) // 按传送点分割的路径
         {
             CurWaypoints = (waypointsList.FindIndex(wps => wps == waypoints), waypoints);
-            for (var i = 0; i < RetryTimes; i++)
+            var endedEarly = await ExecuteSegmentWithRetriesAsync(async () =>
             {
-                try
+                await ResolveAnomalies(); // 异常场景处理
+
+                // 如果首个点是非TP点位，强制设置在这个点位附近优先做局部匹配
+                if (waypoints[0].Type != WaypointType.Teleport.Code)
                 {
-                    await ResolveAnomalies(); // 异常场景处理
+                    Navigation.SetPrevPosition((float)waypoints[0].X, (float)waypoints[0].Y, waypoints[0].MapLayerSelector);
+                }
 
-                    // 如果首个点是非TP点位，强制设置在这个点位附近优先做局部匹配
-                    if (waypoints[0].Type != WaypointType.Teleport.Code)
+                foreach (var waypoint in waypoints) // 一条路径
+                {
+                    CurWaypoint = (waypoints.FindIndex(wps => wps == waypoint), waypoint);
+                    TryCloseSkipOtherOperations();
+                    await RecoverWhenLowHp(waypoint); // 低血量恢复
+
+                    if (waypoint.Type == WaypointType.Teleport.Code)
                     {
-                        Navigation.SetPrevPosition((float)waypoints[0].X, (float)waypoints[0].Y, waypoints[0].MapLayerSelector);
-                    }
-
-                    foreach (var waypoint in waypoints) // 一条路径
-                    {
-                        CurWaypoint = (waypoints.FindIndex(wps => wps == waypoint), waypoint);
-                        TryCloseSkipOtherOperations();
-                        await RecoverWhenLowHp(waypoint); // 低血量恢复
-
-                        if (waypoint.Type == WaypointType.Teleport.Code)
+                        if (CurWaypoints.Item1 > 0)
                         {
-                            if (CurWaypoints.Item1 > 0)
+                            var prevWaypoints = waypointsList[CurWaypoints.Item1 - 1];
+                            var prevWaypoint = prevWaypoints[prevWaypoints.Count - 1];
+                            if (prevWaypoint.Type == WaypointType.Teleport.Code
+                                || prevWaypoint.Action == ActionEnum.Fight.Code
+                                || prevWaypoint.Action == ActionEnum.NahidaCollect.Code
+                                || prevWaypoint.Action == ActionEnum.PickAround.Code)
                             {
-                                var prevWaypoints = waypointsList[CurWaypoints.Item1 - 1];
-                                var prevWaypoint = prevWaypoints[prevWaypoints.Count - 1];
-                                if (prevWaypoint.Type == WaypointType.Teleport.Code
-                                    || prevWaypoint.Action == ActionEnum.Fight.Code
-                                    || prevWaypoint.Action == ActionEnum.NahidaCollect.Code
-                                    || prevWaypoint.Action == ActionEnum.PickAround.Code)
-                                {
-                                    // No delay
-                                }
-                                else
-                                {
-                                    await Delay(1000, ct);
-                                }
+                                // No delay
                             }
-                            await HandleTeleportWaypoint(waypoint);
-                        }
-                        else
-                        {
-                            await BeforeMoveToTarget(waypoint);
-                            // Path不用走得很近，Target需要接近，但都需要先移动到对应位置
-                            if (waypoint.Type == WaypointType.Orientation.Code)
+                            else
                             {
-                                // 方位点，只需要朝向
-                                // 考虑到方位点大概率是作为执行action的最后一个点，所以放在此处处理，不和传送点一样单独处理
-                                await FaceTo(waypoint);
-                            }
-                            else if (waypoint.Action != ActionEnum.UpDownGrabLeaf.Code)
-                            {
-                                await MoveTo(waypoint);
-                            }
-
-                            await BeforeMoveCloseToTarget(waypoint);
-
-                            if (IsTargetPoint(waypoint))
-                            {
-                                await MoveCloseTo(waypoint);
-                            }
-
-                            //skipOtherOperations如果重试，则跳过相关操作，
-                            if ((!string.IsNullOrEmpty(waypoint.Action) && !_skipOtherOperations) ||
-                                waypoint.Action == ActionEnum.CombatScript.Code)
-                            {
-                                //战斗前的节点记录，用于游泳检测回到战斗节点
-                                AutoFightTask.FightWaypoint = waypoint.Action == ActionEnum.Fight.Code ? waypoint : null;
-
-                                // 执行 action
-                                await AfterMoveToTarget(waypoint);
+                                await Delay(1000, ct);
                             }
                         }
-                    }
-
-                    if (waypoints == waypointsList.Last())
-                    {
-                        SuccessEnd = true;
-                    }
-                    break;
-                }
-                catch (HandledException handledException)
-                {
-                    SuccessEnd = true;
-                    break;
-                }
-                catch (NormalEndException normalEndException)
-                {
-                    if (!ct.IsCancellationRequested)
-                    {
-                        Logger.LogInformation(normalEndException.Message);
-                    }
-
-                    if (!RunnerContext.Instance.isAutoFetchDispatch && RunnerContext.Instance.IsContinuousRunGroup)
-                    {
-                        throw;
+                        await HandleTeleportWaypoint(waypoint);
                     }
                     else
                     {
-                        break;
+                        await BeforeMoveToTarget(waypoint);
+                        // Path不用走得很近，Target需要接近，但都需要先移动到对应位置
+                        if (waypoint.Type == WaypointType.Orientation.Code)
+                        {
+                            // 方位点，只需要朝向
+                            // 考虑到方位点大概率是作为执行action的最后一个点，所以放在此处处理，不和传送点一样单独处理
+                            await FaceTo(waypoint);
+                        }
+                        else if (waypoint.Action != ActionEnum.UpDownGrabLeaf.Code)
+                        {
+                            await MoveTo(waypoint);
+                        }
+
+                        await BeforeMoveCloseToTarget(waypoint);
+
+                        if (IsTargetPoint(waypoint))
+                        {
+                            await MoveCloseTo(waypoint);
+                        }
+
+                        //skipOtherOperations如果重试，则跳过相关操作，
+                        if ((!string.IsNullOrEmpty(waypoint.Action) && !_skipOtherOperations) ||
+                            waypoint.Action == ActionEnum.CombatScript.Code)
+                        {
+                            //战斗前的节点记录，用于游泳检测回到战斗节点
+                            AutoFightTask.FightWaypoint = waypoint.Action == ActionEnum.Fight.Code ? waypoint : null;
+
+                            // 执行 action
+                            await AfterMoveToTarget(waypoint);
+                        }
                     }
                 }
-                catch (OperationCanceledException)
-                {
-                    if (!RunnerContext.Instance.isAutoFetchDispatch && RunnerContext.Instance.IsContinuousRunGroup)
-                    {
-                        throw;
-                    }
-                    else
-                    {
-                        break;
-                    }
-                }
-                catch (RetryException retryException)
-                {
-                    StartSkipOtherOperations();
-                    Logger.LogWarning(retryException.Message);
-                }
-                catch (RetryNoCountException retryException)
-                {
-                    //特殊情况下，重试不消耗次数
-                    i--;
-                    StartSkipOtherOperations();
-                    Logger.LogWarning(retryException.Message);
-                }
-                finally
-                {
-                    // 不管咋样，松开所有按键
-                    Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_W);
-                    Simulation.SendInput.Mouse.RightButtonUp();
-                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
-                }
+
+            }, exception =>
+            {
+                StartSkipOtherOperations();
+                Logger.LogWarning("地图追踪分段 {Segment} 点位 {Waypoint} 将重试：{Reason}",
+                    CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, exception.Message);
+            }, () =>
+            {
+                Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_W);
+                Simulation.SendInput.Mouse.RightButtonUp();
+                Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
+            }, ct);
+            if (endedEarly)
+            {
+                SuccessEnd = true;
+                return;
             }
-
+            if (waypoints == waypointsList.Last()) SuccessEnd = true;
         }
+    }
+
+    internal sealed class EndConditionSatisfiedException() : Exception("达成结束条件，结束地图追踪");
+
+    /// <summary>正常完成返回 false；仅显式结束条件返回 true；失败或取消始终向调用方传播。</summary>
+    internal static async Task<bool> ExecuteSegmentWithRetriesAsync(Func<Task> execute,
+        Action<Exception> onRetry, Action releaseInput, CancellationToken ct)
+    {
+        for (var attempt = 0; attempt < RetryTimes; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await execute();
+                ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                return false;
+            }
+            catch (EndConditionSatisfiedException)
+            {
+                ct.ThrowIfCancellationRequested();
+                return true;
+            }
+            catch (HandledException exception)
+            {
+                throw new InvalidOperationException("地图追踪未完整完成：" + exception.Message, exception);
+            }
+            catch (RetryException exception)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (attempt == RetryTimes - 1)
+                    throw new InvalidOperationException($"地图追踪重试 {RetryTimes} 次仍未完成；停止当前路线：{exception.Message}", exception);
+                onRetry(exception);
+            }
+            catch (RetryNoCountException exception)
+            {
+                ct.ThrowIfCancellationRequested();
+                attempt--;
+                onRetry(exception);
+            }
+            finally { releaseInput(); }
+        }
+        throw new InvalidOperationException("地图追踪未完整完成");
     }
 
     private bool IsTargetPoint(WaypointForTrack waypoint)
@@ -1513,7 +1514,7 @@ public partial class PathExecutor
     {
         if (EndAction != null && EndAction(ra))
         {
-            throw new HandledException("达成结束条件，结束地图追踪");
+            throw new EndConditionSatisfiedException();
         }
     }
 }

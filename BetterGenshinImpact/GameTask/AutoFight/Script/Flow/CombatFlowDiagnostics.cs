@@ -7,7 +7,10 @@ using System.Threading.Tasks;
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 public sealed record CombatFlowDiagnosticEvent(double At, string Actor, string Action, int SourceLine,
-    string ReportedResult, bool InputStarted, double Milliseconds);
+    string ReportedResult, bool InputStarted, double Milliseconds)
+{
+    public string? Reason { get; init; }
+}
 
 public sealed record CombatFlowStatistics(long CoreSteps, long CompletedPasses, long FailedPasses,
     long GameActionCalls, long GameObservationCalls, long PreparationCalls, long YieldCalls,
@@ -42,7 +45,8 @@ internal sealed class CombatFlowDiagnostics
         {
             _actions++; _actionMs += milliseconds;
             _events[_next] = new(action.Now, action.Command.Name, action.Command.Method.Alias[0],
-                action.Command.SourceLine, reportedResult, action.InputAt != null, milliseconds);
+                action.Command.SourceLine, reportedResult, action.InputAt != null, milliseconds)
+                { Reason = action.DiagnosticReason };
             _next = (_next + 1) % _events.Length;
             _eventCount = Math.Min(_eventCount + 1, _events.Length);
         }
@@ -69,6 +73,7 @@ internal sealed class CombatFlowDiagnostics
 internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagnostics diagnostics) : ICombatFlowGame
 {
     public void BeginStep() => game.BeginStep();
+    public bool HasPendingSkill(CombatFlowAction action) => game.HasPendingSkill(action);
     public void ReleaseHeldInput() => game.ReleaseHeldInput();
     public CombatScopeObservation? ObserveScope()
     {

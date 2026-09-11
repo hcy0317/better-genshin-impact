@@ -16,6 +16,9 @@ public class AutoPathingScript
     private string _rootPath;
     private readonly LimitedFile _autoPathingFile;
     private readonly Action<string, Exception> _logFailure;
+    private readonly Func<string, string?, Task<bool>> _executePath;
+    private readonly TaskExecutionScope.Guard _taskGuard = TaskExecutionScope.Capture();
+    private readonly Action<Exception, string> _captureFailure;
 
     public AutoPathingScript(string rootPath, object? config)
         : this(rootPath, config, new LimitedFile(Global.Absolute(@"User\AutoPathing")), LogFailure)
@@ -26,12 +29,16 @@ public class AutoPathingScript
         string rootPath,
         object? config,
         LimitedFile autoPathingFile,
-        Action<string, Exception> logFailure)
+        Action<string, Exception> logFailure,
+        Func<string, string?, Task<bool>>? executePath = null,
+        Action<Exception, string>? captureFailure = null)
     {
         _config = config;
         _rootPath = rootPath;
         _autoPathingFile = autoPathingFile;
         _logFailure = logFailure;
+        _executePath = executePath ?? ExecuteNativePath;
+        _captureFailure = captureFailure ?? ((error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
     }
 
     /// <summary>
@@ -46,28 +53,34 @@ public class AutoPathingScript
 
     private async Task Run(string json, string? sourcePath)
     {
+        using var owned = _taskGuard.Enter();
         try
         {
-            var task = string.IsNullOrEmpty(sourcePath)
-                ? PathingTask.BuildFromJson(json)
-                : PathingTask.BuildFromJson(json, sourcePath);
-            var pathExecutor = new PathExecutor(CancellationContext.Instance.Cts.Token);
-            if (_config != null && _config is PathingPartyConfig patyConfig)
-            {
-                pathExecutor.PartyConfig = patyConfig;
-            }
-
-            await pathExecutor.Pathing(task);
+            if (!await _executePath(json, sourcePath))
+                throw new InvalidOperationException("地图追踪未完整完成，不能将本路线记为成功或写入采集冷却");
+            _taskGuard.Check();
         }
         catch (Exception e)
         {
+            _taskGuard.Report(e);
             var context = string.IsNullOrWhiteSpace(sourcePath)
                 ? "地图追踪执行失败"
                 : $"地图追踪执行失败-{System.IO.Path.GetFileName(sourcePath)}";
-            TaskFailureDiagnostics.CaptureScreenshotOnce(e, context);
+            _captureFailure(e, context);
             _logFailure("执行地图追踪时候发生错误", e);
             throw;
         }
+    }
+
+    private async Task<bool> ExecuteNativePath(string json, string? sourcePath)
+    {
+        var task = string.IsNullOrEmpty(sourcePath)
+            ? PathingTask.BuildFromJson(json)
+            : PathingTask.BuildFromJson(json, sourcePath);
+        var pathExecutor = new PathExecutor(CancellationContext.Instance.Cts.Token);
+        if (_config is PathingPartyConfig partyConfig) pathExecutor.PartyConfig = partyConfig;
+        await pathExecutor.Pathing(task);
+        return pathExecutor.SuccessEnd;
     }
 
     public async Task RunFile(string path)

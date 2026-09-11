@@ -38,5 +38,10 @@ internal sealed class CombatFlowEpisodes
     }
 
     public void Resolve(string objective) => _episodes.Remove(objective);
+    // 只是观察在途输入/等待已知冷却，不消耗新一次执行尝试；原截止时间和已有失败仍保留。
+    public void Defer(string objective)
+    {
+        if (_episodes.TryGetValue(objective, out var episode) && episode.Attempts > 0) episode.Attempts--;
+    }
     public void Clear() => _episodes.Clear();
 }

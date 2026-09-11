@@ -79,8 +79,10 @@ public class TaskRunner
             return;
         }
         Exception? executionException = null;
+        TaskExecutionScope? executionScope = null;
         try
         {
+            executionScope = TaskExecutionScope.BeginOwned();
             _logger.LogInformation("→ {Text}", _name + "任务启动！");
 
             // 初始化
@@ -92,6 +94,7 @@ public class TaskRunner
             RunnerContext.Instance.Clear();
 
             await action();
+            TaskExecutionScope.ThrowIfFailed();
         }
         catch (NormalEndException e)
         {
@@ -123,6 +126,8 @@ public class TaskRunner
         }
         finally
         {
+            // 先关闭所属任务，拒绝迟到回调；常驻触发器随后在无旧任务状态的上下文重建。
+            executionScope?.Dispose();
             IReadOnlyList<Exception> cleanupFailures;
             try
             {
@@ -359,7 +364,7 @@ internal static class TaskRunnerFailurePolicy
         bool isContinuousRunGroup,
         bool propagateExceptions)
     {
-        if (exception is TaskFailureRecoveryException)
+        if (TaskFailureRecoveryPolicy.IsRecoveryFailure(exception) || TaskExecutionScope.IsUnconfirmedCombat(exception))
         {
             return exception;
         }
