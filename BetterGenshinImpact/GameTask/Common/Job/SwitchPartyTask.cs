@@ -209,7 +209,7 @@ public class SwitchPartyTask
                 {
                     if (matches(textRegion.Text))
                     {
-                        page.ClickTo(textRegion.Right + textRegion.Width, textRegion.Bottom);
+                        page.ClickTo(textRegion.Right + 100 * _assetScale, textRegion.Bottom);
                         await Delay(200, ct);
                         await ConfirmParty(driver, ct, isInPartyViewUi, deferApplyToCaller);
                         Logger.LogInformation(deferApplyToCaller ? "队伍选择已确认，等待调用方开始挑战: {Text}" : "切换队伍成功: {Text}", textRegion.Text);
@@ -222,7 +222,7 @@ public class SwitchPartyTask
                 Region? lowest = partySwitchNameRaList.Where(r => r.X > 35 * _assetScale && r.X < 100 * _assetScale).OrderBy(r => r.Y).LastOrDefault();
                 if (lowest == null)
                 {
-                    Logger.LogWarning("未识别到队伍列表的行序号，停止翻页");
+                    Logger.LogWarning("管理队伍界面无法识别到底部队伍文字，当前识别结果：{Text}", string.Join(" | ", partySwitchNameRaList.Select(r => r.Text)));
                     break;
                 }
                 lowest.DrawSelf("底部的队伍");

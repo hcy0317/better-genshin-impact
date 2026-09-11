@@ -405,32 +405,39 @@ internal class GoToSereniteaPotTask
             }
         }
 
-        TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyDown); // 向前走
-        Logger.LogInformation("领取尘歌壶奖励:{text}", "接近阿圆");
         var approachStopwatch = Stopwatch.StartNew();
         var approachToken = treeCts.Token;
-        while (!approachToken.IsCancellationRequested)
+        approachToken.ThrowIfCancellationRequested();
+        try
         {
-            using var capture = CaptureToRectArea();
-            if (Bv.FindF(capture, text: this.ayuanHeyString))
+            TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyDown); // 向前走
+            Logger.LogInformation("领取尘歌壶奖励:{text}", "接近阿圆");
+            while (true)
             {
-                TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                Logger.LogInformation("领取尘歌壶奖励:{text}", "接近阿圆成功");
-                break;
+                approachToken.ThrowIfCancellationRequested();
+                using var capture = CaptureToRectArea();
+                if (Bv.FindF(capture, text: this.ayuanHeyString))
+                {
+                    Logger.LogInformation("领取尘歌壶奖励:{text}", "接近阿圆成功");
+                    break;
+                }
+                if (approachStopwatch.Elapsed >= TimeSpan.FromSeconds(20))
+                {
+                    fail = true;
+                    var timeout = new TimeoutException("接近阿圆超过 20 秒，始终未出现对话交互");
+                    Logger.LogWarning("领取尘歌壶奖励:接近阿圆失败，已等待 {Elapsed:F1} 秒", approachStopwatch.Elapsed.TotalSeconds);
+                    TaskFailureDiagnostics.CaptureScreenshotOnce(timeout, "领取尘歌壶奖励-接近阿圆超时");
+                    break;
+                }
+                TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.Drop);//防止爬墙
+                await Delay(50, approachToken);
             }
-            if (approachStopwatch.Elapsed >= TimeSpan.FromSeconds(20))
-            {
-                TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                fail = true;
-                var timeout = new TimeoutException("接近阿圆超过 20 秒，始终未出现对话交互");
-                Logger.LogWarning("领取尘歌壶奖励:接近阿圆失败，已等待 {Elapsed:F1} 秒", approachStopwatch.Elapsed.TotalSeconds);
-                TaskFailureDiagnostics.CaptureScreenshotOnce(timeout, "领取尘歌壶奖励-接近阿圆超时");
-                break;
-            }
-            TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.Drop);//防止爬墙
-            await Delay(50, approachToken);
         }
-        TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+        finally
+        {
+            // 正常结束、取消或异常时都释放前进键。
+            TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+        }
     }
 
     private async Task BuyMaxNumber(CancellationToken ct)

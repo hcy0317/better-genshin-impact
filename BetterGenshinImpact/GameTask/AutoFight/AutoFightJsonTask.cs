@@ -122,6 +122,25 @@ public class AutoFightJsonTask : ISoloTask
         AvatarRecognition.SetCurrentAutoFightParam(_taskParam);
         AvatarRecognition.ClearLegendaryBarTracker();
         AvatarRecognition.ClearPassiveObservation();
+        CancellationTokenSource? cts2 = null;
+        ExperienceDetector? expDetector = null;
+
+        async Task StopExperienceDetectorAsync()
+        {
+            var detector = expDetector;
+            if (detector == null) return;
+
+            expDetector = null;
+            try
+            {
+                await detector.StopAsync();
+            }
+            finally
+            {
+                detector.Dispose();
+            }
+        }
+
         try
         {
             AutoFightTask.ValidateAndLogCombatSafetyConfiguration(Logger, _taskParam);
@@ -182,8 +201,7 @@ public class AutoFightJsonTask : ISoloTask
             }
 
             // 新的取消token
-            using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
+            cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             combatScenes.BeforeTask(cts2.Token);
             // 设置初始当前角色名（用于无 Character 字段的通用 action 回退）
             _currentAvatarName = combatScenes.GetAvatars().FirstOrDefault()?.Name ?? _currentAvatarName;
@@ -213,7 +231,6 @@ public class AutoFightJsonTask : ISoloTask
             var evaluator = new ConditionEvaluator(combatScenes, () => CaptureToRectArea(),
                 _strategy.Actions.Where(a => !string.IsNullOrEmpty(a.Name)).Select(a => a.Name));
             // 基于经验值的战后拾取检测
-            ExperienceDetector? expDetector = null;
             if (_taskParam.KazuhaPickupEnabled && _taskParam.ExpBasedPickupEnabled)
             {
                 using var gameCaptureRegion = CaptureToRectArea();
@@ -655,11 +672,7 @@ public class AutoFightJsonTask : ISoloTask
             }
             finally
             {
-                if (expDetector != null)
-                {
-                    try { await expDetector.StopAsync(); }
-                    finally { expDetector.Dispose(); }
-                }
+                await StopExperienceDetectorAsync();
             }
 
             // 战后拾取（完全参照 AutoFightTask）
@@ -672,7 +685,29 @@ public class AutoFightJsonTask : ISoloTask
         }
         finally
         {
+            // 战斗可能在创建 fightTask 前因复活/恢复异常退出，统一清理战斗状态。
+            AutoFightTask.FightStatusFlag = false;
             AvatarRecognition.ClearCurrentAutoFightParam();
+            try
+            {
+                await StopExperienceDetectorAsync();
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning(e, "停止 JSON 战斗经验检测时发生异常");
+            }
+            try
+            {
+                cts2?.Cancel();
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning(e, "取消 JSON 战斗令牌时发生异常");
+            }
+            finally
+            {
+                cts2?.Dispose();
+            }
         }
     }
 
@@ -780,6 +815,11 @@ public class AutoFightJsonTask : ISoloTask
         {
             throw;
         }
+        catch (RetryException)
+        {
+            // 复活/恢复信号必须传递给 PathExecutor，以便重跑当前路径段。
+            throw;
+        }
         catch (Exception e)
         {
             Logger.LogError("自动战斗：{Name} 执行失败：{Msg}", action.Name, e.Message);
@@ -841,6 +881,11 @@ public class AutoFightJsonTask : ISoloTask
             catch (RetryException e) when (e is not CombatRecoveryCompletedException and not DomainDefeatedRetryException)
             {
                 logger.LogWarning("战斗前动作重试异常，跳过此动作继续：{Msg}", e.Message);
+            }
+            catch (RetryException e)
+            {
+                logger.LogWarning("战斗前动作要求中断当前战斗：{Msg}", e.Message);
+                throw;
             }
             logger.LogInformation("战斗前动作：{Action}", preAction);
             await betweenActions();
