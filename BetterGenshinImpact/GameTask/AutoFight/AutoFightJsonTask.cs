@@ -137,6 +137,7 @@ public class AutoFightJsonTask : ISoloTask
             // 增强 JSON 一次编译全部根，缺角色或不合法依赖不能经旧过滤器静默裁剪。
             using var flow = NativeCombatFlowRunner.Create(_strategy, combatScenes);
             if (flow != null) _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
+            _finishDetectConfig.Diagnostics = new(Logger);
 
             // 过滤可用动作：Character 为空（通用）或在当前队伍中
             var filteredActions = _strategy.Actions
@@ -332,7 +333,9 @@ public class AutoFightJsonTask : ISoloTask
                             if (AutoFightParam.ShouldRunPeriodicFinishCheck(fightTimeoutEnabled,
                                     _taskParam.FightFinishDetectEnabled, periodicFinishCheckStopwatch.Elapsed,
                                     periodicFinishCheckInterval)) _periodicFinishCheckRequested = true;
-                            if (!flow.IsAtomic && (!_finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || !flow.HasVisibleTarget))
+                            AutoFightTask.TraceFlowHost(_finishDetectConfig, flow, _finishCheckRequested,
+                                _periodicFinishCheckRequested && periodicFinishCheckStopwatch.Elapsed >= periodicFinishCheckInterval);
+                            if (!flow.IsAtomic && !flow.HasPendingConfirmation && (!_finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || !flow.HasVisibleTarget))
                                 fightEndFlag = await RunPendingFinishCheckAsync(allowSeek: flow.IsAtRootBoundary);
                             if (fightEndFlag || _fightEndFlag) break;
                             continue;
@@ -584,7 +587,8 @@ public class AutoFightJsonTask : ISoloTask
                 {
                     try
                     {
-                        await AvatarRecognition.ContinuousTargetingLoopAsync(targetingCts.Token, () => !AutoFightTask.FightStatusFlag);
+                        await AvatarRecognition.ContinuousTargetingLoopAsync(targetingCts.Token, () => !AutoFightTask.FightStatusFlag,
+                            _finishDetectConfig.FinishEvidenceId);
                     }
                     catch (OperationCanceledException) { }
                     catch (Exception e)

@@ -319,7 +319,9 @@ public class Avatar
         {
             using var region = CaptureToRectArea();
             ThrowWhenDefeated(region, Ct);
-            return CombatScenes.GetActiveAvatarIndex(region, context);
+            var observed = CombatScenes.GetActiveAvatarIndex(region, context);
+            CombatActionScope.Current?.Trace("switch-frame", $"expected={Index} observed={observed}");
+            return observed;
         }, index =>
         {
             CombatActionScope.Current?.Check();
@@ -550,8 +552,10 @@ public class Avatar
     public void UseSkill(bool hold = false, bool observeCooldown = true, Func<bool>? tryBeginInput = null)
     {
         var skillReadyBeforeCast = IsSkillReady();
+        CombatActionScope.Current?.Trace("e-preflight", $"actor={Name} trackerReady={skillReadyBeforeCast} hold={hold}");
         Ct.ThrowIfCancellationRequested();
         if (tryBeginInput != null && (!skillReadyBeforeCast || !tryBeginInput())) return;
+        CombatActionScope.Current?.Trace("e-dispatch", $"actor={Name} hold={hold}");
         if (AvatarSpecialAction.ExecuteSpecializedAction(this, "UseSkill", Name, new ActionArgs(Hold: hold)))
         {
             LastSkillTime = DateTime.UtcNow;
@@ -563,6 +567,7 @@ public class Avatar
                 if (skillReadyBeforeCast && observedCd > 0) ConfirmSkillUsed(observedCd);
             }
             else QueueSkillCooldownObservation();
+            CombatActionScope.Current?.Trace("e-special-return", $"confirmedAt={LastConfirmedSkillCastAtUtc:O}");
             return;
         }
 
@@ -575,6 +580,7 @@ public class Avatar
 
             // 只有动作前技能处于就绪态，动作后又观察到有效 CD，才把普通策略的 E
             // 计入“已确认护盾覆盖”。否则可能把本来就在冷却中的重复 E 错记为新护盾。
+            CombatActionScope.Current?.Trace("e-input-call", $"actor={Name} hold={hold}");
             if (hold)
             {
                 Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
@@ -583,6 +589,7 @@ public class Avatar
             {
                 Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
             }
+            CombatActionScope.Current?.Trace("e-input-return", $"actor={Name}");
 
             if (!observeCooldown)
             {
@@ -596,6 +603,7 @@ public class Avatar
             using var region = CaptureToRectArea();
             ThrowWhenDefeated(region, Ct); // 检测是不是要跑神像
             var cd = AfterUseSkill(region);
+            CombatActionScope.Current?.Trace("e-post-input", $"cd={cd:F3} newCooldown={skillReadyBeforeCast && cd > 0}");
             var recordedCd = ESkillCdTracker.Record(Name, cd);
             if (skillReadyBeforeCast && cd > 0)
             {
@@ -644,6 +652,7 @@ public class Avatar
         using var eRaWhite = OpenCvCommonHelper.InRangeHsv(eRa.SrcMat, new Scalar(0, 0, 235), new Scalar(0, 25, 255));
         var text = OcrFactory.Paddle.OcrWithoutDetector(eRaWhite);
         var cd = StringUtils.TryParseDouble(text);
+        CombatActionScope.Current?.Trace("e-ocr", $"actor={Name} raw={text} parsed={cd:F3}");
         if (updateState && cd > 0 && cd <= CombatAvatar.SkillCd)
         {
             OcrSkillCd = DateTime.UtcNow.AddSeconds(cd);
@@ -671,18 +680,28 @@ public class Avatar
                 {
                     using var region = CaptureToRectArea();
                     ThrowWhenDefeated(region, Ct);
-                    return IsActive(region) ? ObserveBurst(region) : default;
-                }, () => Simulation.SendInput.SimulateAction(GIActions.ElementalBurst),
+                    if (IsActive(region)) return ObserveBurst(region, expectedActorActive: true);
+                    CombatActionScope.Current?.Trace("q-observation", $"actor={Name} actorActive=False classifier=not-observed");
+                    return default;
+                }, () =>
+                {
+                    CombatActionScope.Current?.Trace("q-input-call", $"actor={Name}");
+                    Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
+                    CombatActionScope.Current?.Trace("q-input-return", $"actor={Name}");
+                },
                 milliseconds => Sleep(milliseconds, Ct), Ct, timeoutSeconds: timeoutSeconds, maxSamples: maxSamples,
                 tryBeginInput: tryBeginInput);
         }
     }
 
-    internal static BurstObservation ObserveBurst(ImageRegion imageRegion)
+    internal static BurstObservation ObserveBurst(ImageRegion imageRegion, bool? expectedActorActive = null)
     {
         using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
         var top = QBurstClassifierLazy.Value.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());
-        return BurstObservation.FromClassifier(top.Name.Name, top.Confidence);
+        var observation = BurstObservation.FromClassifier(top.Name.Name, top.Confidence);
+        CombatActionScope.Current?.Trace("q-classifier",
+            $"label={top.Name.Name} confidence={top.Confidence:F4} energy={observation.EnergyFull} cooling={observation.CoolingDown} ready={observation.Ready} actorActive={expectedActorActive}");
+        return observation;
     }
 
     private static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
@@ -858,7 +877,9 @@ public class Avatar
     internal bool IsSkillReadyFromCurrentFrame(ImageRegion capture, double? observedCooldown = null)
     {
         Ct.ThrowIfCancellationRequested();
-        if (!IsActive(capture)) return false;
+        var active = IsActive(capture);
+        CombatActionScope.Current?.Trace("e-actor", $"actor={Name} active={active}");
+        if (!active) return false;
         var cooldown = observedCooldown ?? ReadSkillCurrentCd(capture);
         if (cooldown > 0)
         {
@@ -866,8 +887,10 @@ public class Avatar
             return false;
         }
         // 复用现有 E 冷却色块检测；只检查一次，不等待也不重复切人。
-        return !AutoFightSkill.AvatarSkillAsync(Logger, this, false, 1, Ct,
+        var ready = !AutoFightSkill.AvatarSkillAsync(Logger, this, false, 1, Ct,
             capture, assumeActive: true).GetAwaiter().GetResult();
+        CombatActionScope.Current?.Trace("e-ready", $"actor={Name} ready={ready} cd={cooldown:F3}");
+        return ready;
     }
 
     /// <summary>

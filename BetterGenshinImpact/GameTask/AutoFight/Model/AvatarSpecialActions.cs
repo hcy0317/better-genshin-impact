@@ -152,6 +152,8 @@ public static class AvatarSpecialAction
         // 参数条件存在且不满足 → 提前退出
         if (condition != null && !condition(args)) return false;
 
+        // 特化动作可能主动改变视角；不继承普通战斗对只读感知的放行。
+        using var exclusive = AvatarRecognition.BeginExclusiveOperation();
         switch (action)
         {
             case "UseSkill":

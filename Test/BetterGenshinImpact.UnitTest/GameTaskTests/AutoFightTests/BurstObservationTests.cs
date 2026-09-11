@@ -37,6 +37,10 @@ public class BurstObservationTests
     [Theory]
     [InlineData(null, .99)]
     [InlineData("energy 1 cd 0", .5)]
+    [InlineData("energy_h_cd_1", .7)]
+    [InlineData("energy 2 cd 1", .99)]
+    [InlineData("energy h cd 2", .99)]
+    [InlineData("energy h cd 1 extra", .99)]
     [InlineData("energy 1 cd 0", double.NaN)]
     [InlineData("energy 1 cd 0", double.PositiveInfinity)]
     [InlineData("unexpected cd 1", .99)]
@@ -53,6 +57,8 @@ public class BurstObservationTests
     [InlineData(false, true)]
     [InlineData(true, true)]
     [InlineData(null, null)]
+    [InlineData(null, false)]
+    [InlineData(null, true)]
     public void NonReadyStateNeverSendsQ(bool? energy, bool? cooling)
     {
         var presses = 0;
@@ -83,6 +89,24 @@ public class BurstObservationTests
         Assert.Equal(1, presses);
     }
 
+    [Theory]
+    [InlineData("energy_h_cd_1", .95, BurstCastResult.Confirmed)]
+    [InlineData("energy h cd 1", .95, BurstCastResult.Confirmed)]
+    [InlineData("energy_h_cd_0", .95, BurstCastResult.Unconfirmed)]
+    [InlineData("energy_h_cd_1", .7, BurstCastResult.Unconfirmed)]
+    [InlineData("energy invalid cd 1", .99, BurstCastResult.Unconfirmed)]
+    public void OnlyReliableNewCooldownConfirmsTheSingleOriginalBurst(string label, double confidence, BurstCastResult expected)
+    {
+        var observations = 0;
+        var presses = 0;
+        var result = BurstCastProtocol.TryCast(() => ++observations == 1
+                ? BurstObservation.FromClassifier("energy_1_cd_0", .99)
+                : BurstObservation.FromClassifier(label, confidence),
+            () => presses++, _ => { }, CancellationToken.None);
+        Assert.Equal(expected, result);
+        Assert.Equal(1, presses);
+    }
+
     [Fact]
     public void CancellationDuringConfirmationStopsFurtherObservations()
     {
@@ -98,11 +122,19 @@ public class BurstObservationTests
     [InlineData("energy 1 cd 1", true, true)]
     [InlineData("energy 0 cd 0", false, false)]
     [InlineData("energy 1 cd 0", true, false)]
-    public void EnergyAndCooldownAreIndependent(string label, bool full, bool cooling)
+    [InlineData("energy h cd 0", null, false)]
+    [InlineData("energy h cd 1", null, true)]
+    [InlineData("energy_0_cd_0", false, false)]
+    [InlineData("energy_0_cd_1", false, true)]
+    [InlineData("energy_1_cd_0", true, false)]
+    [InlineData("energy_1_cd_1", true, true)]
+    [InlineData("energy_h_cd_0", null, false)]
+    [InlineData("energy_h_cd_1", null, true)]
+    public void EnergyAndCooldownAreIndependent(string label, bool? full, bool cooling)
     {
         var state = BurstObservation.FromClassifier(label, .95);
         Assert.Equal(full, state.EnergyFull);
         Assert.Equal(cooling, state.CoolingDown);
-        Assert.Equal(full && !cooling, state.Ready);
+        Assert.Equal(full == true && !cooling, state.Ready);
     }
 }

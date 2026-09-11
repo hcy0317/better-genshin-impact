@@ -114,23 +114,31 @@ public static class AvatarRecognition
     /// 返回的 <see cref="SkipSeekScope"/> 在 Dispose 时自动递减计数。
     /// 使用方应通过 using 语句确保异常安全。
     /// </summary>
-    internal static SkipSeekScope BeginExclusiveOperation()
+    internal static (long Epoch, bool CanCapture) PassiveCaptureGate
     {
+        get { lock (_seekLock) return (_exclusiveEpoch, _skipSeekCount == 0); }
+    }
+
+    internal static SkipSeekScope BeginExclusiveOperation(bool allowPassiveObservation = false)
+    {
+        // Native 的输入所属权另由 CombatInputCoordinator 保护；纯感知不借此取得输入权。
+        if (allowPassiveObservation) return new SkipSeekScope(false);
         lock (_seekLock)
         {
             _skipSeekCount++;
             _exclusiveEpoch++;
         }
-        return new SkipSeekScope();
+        return new SkipSeekScope(true);
     }
 
     /// <summary>
     /// 独占操作作用域。Dispose 时自动递减排他计数（锁内递减保证互斥）。
     /// </summary>
-    internal readonly struct SkipSeekScope : IDisposable
+    internal readonly struct SkipSeekScope(bool suppressesObservation) : IDisposable
     {
         public void Dispose()
         {
+            if (!suppressesObservation) return;
             lock (_seekLock)
             {
                 _skipSeekCount--;
@@ -434,9 +442,12 @@ public static class AvatarRecognition
     /// </summary>
     /// <param name="ct">取消令牌</param>
     /// <param name="isFightEnd">战斗是否已结束（外部标志，为 true 时退出循环）</param>
-    public static async Task ContinuousTargetingLoopAsync(
+    public static Task ContinuousTargetingLoopAsync(
         CancellationToken ct,
-        Func<bool>? isFightEnd = null)
+        Func<bool>? isFightEnd = null) => ContinuousTargetingLoopAsync(ct, isFightEnd, null);
+
+    internal static async Task ContinuousTargetingLoopAsync(
+        CancellationToken ct, Func<bool>? isFightEnd, string? diagnosticBattleId)
     {
         var visConfig = GetVisualRecognitionConfig();
         var frameIntervalMs = visConfig.TargetingDetectionInterval;
@@ -444,19 +455,31 @@ public static class AvatarRecognition
         EnemySeekVisual? indicatorCandidate = null;
         DateTime indicatorCandidateSince = default;
         long indicatorEpoch = -1;
+        var diagnostics = new CombatDecisionDiagnostics(Logger);
+        long suppressedFrames = 0, capturedFrames = 0, publishedFrames = 0, rejectedFrames = 0, nonMainFrames = 0;
+        void Trace(bool force = false) => diagnostics.Write("FIGHT_PERCEPTION", diagnosticBattleId ?? "unbound", () =>
+            $"captured={capturedFrames} skippedExclusive={suppressedFrames} published={publishedFrames} rejectedEpochOrExclusive={rejectedFrames} nonMain={nonMainFrames}", force);
+        void RecordPublication(bool published)
+        {
+            if (published) publishedFrames++;
+            else rejectedFrames++;
+        }
 
         try
         {
             while (!ct.IsCancellationRequested && !(isFightEnd?.Invoke() ?? false))
             {
                 // 快速路径：排他计数 > 0 时跳过本轮，避免不必要的截图开销
-                if (Volatile.Read(ref _skipSeekCount) > 0)
+                var captureGate = PassiveCaptureGate;
+                if (!captureGate.CanCapture)
                 {
+                    suppressedFrames++;
+                    Trace();
                     await Task.Delay(frameIntervalMs, ct);
                     continue;
                 }
 
-                var observationEpoch = Volatile.Read(ref _exclusiveEpoch);
+                var observationEpoch = captureGate.Epoch;
                 if (indicatorEpoch != observationEpoch)
                 {
                     indicatorCandidate = null;
@@ -466,12 +489,15 @@ public static class AvatarRecognition
                 using (var capture = CaptureToRectArea())
                 {
                     var capturedAtUtc = DateTime.UtcNow;
+                    capturedFrames++;
                     int preAimX = (int)(capture.Width * 0.5);
                     int preAimY = (int)(capture.Height * (480.0 / 1080.0));
 
                     // 不在主界面时跳过本轮（避免菜单/地图/对话等界面下误操作）
                     if (!Bv.IsInMainUi(capture))
                     {
+                        nonMainFrames++;
+                        Trace();
                         CombatRuntimeMetrics.Shared.Record(
                             "targeting.frame",
                             frameStopwatch.Elapsed);
@@ -494,7 +520,7 @@ public static class AvatarRecognition
                         var nearest = valid.OrderBy(b =>
                             Math.Abs((b.x + b.width / 2) - preAimX) +
                             Math.Abs((b.y + b.height / 2) - preAimY)).First();
-                        PublishPassiveObservation(
+                        RecordPublication(PublishPassiveObservation(
                             hasNormalHealthBar: true,
                             hasDamageCue: false,
                             new EnemySeekVisual(
@@ -506,7 +532,7 @@ public static class AvatarRecognition
                             capture.Width,
                             capture.Height,
                             capturedAtUtc,
-                            observationEpoch);
+                            observationEpoch));
 
                         // 叠加层：最近血条绿色粗框，其余红色细框
                         if (drawResults)
@@ -532,14 +558,14 @@ public static class AvatarRecognition
                         {
                             indicatorCandidate = null;
                             var (_, _, _, dx, dy, dw, dh) = damageResult.Value;
-                            PublishPassiveObservation(
+                            RecordPublication(PublishPassiveObservation(
                                 hasNormalHealthBar: false,
                                 hasDamageCue: true,
                                 new EnemySeekVisual(dx, dy, dw, dh, dw * dh),
                                 capture.Width,
                                 capture.Height,
                                 capturedAtUtc,
-                                observationEpoch);
+                                observationEpoch));
 
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
@@ -573,7 +599,7 @@ public static class AvatarRecognition
                                 }
                             }
                             else indicatorCandidate = null;
-                            PublishPassiveObservation(
+                            RecordPublication(PublishPassiveObservation(
                                 hasNormalHealthBar: false,
                                 hasDamageCue: false,
                                 confirmedIndicator?.Visual,
@@ -581,7 +607,7 @@ public static class AvatarRecognition
                                 capture.Height,
                                 capturedAtUtc,
                                 observationEpoch,
-                                confirmedIndicator);
+                                confirmedIndicator));
                         }
                     }
 
@@ -592,6 +618,7 @@ public static class AvatarRecognition
                 CombatRuntimeMetrics.Shared.Record(
                     "targeting.frame",
                     frameStopwatch.Elapsed);
+                Trace();
 
                 // 按配置的索敌识别间隔等待
                 await Task.Delay(frameIntervalMs, ct);
@@ -600,11 +627,12 @@ public static class AvatarRecognition
         catch (OperationCanceledException) { }
         finally
         {
+            Trace(force: true);
             VisionContext.Instance().DrawContent.RemoveRect("ContinuousTargeting");
         }
     }
 
-    private static void PublishPassiveObservation(
+    private static bool PublishPassiveObservation(
         bool hasNormalHealthBar,
         bool hasDamageCue,
         EnemySeekVisual? visual,
@@ -621,7 +649,7 @@ public static class AvatarRecognition
                     _exclusiveEpoch,
                     _skipSeekCount))
             {
-                return;
+                return false;
             }
             lock (PassiveObservationLock)
             {
@@ -634,6 +662,7 @@ public static class AvatarRecognition
                     imageHeight,
                     indicatorDecision);
             }
+            return true;
         }
     }
 

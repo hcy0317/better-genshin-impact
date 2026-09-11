@@ -9,6 +9,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 public sealed record CombatFlowDiagnosticEvent(double At, string Actor, string Action, int SourceLine,
     string ReportedResult, bool InputStarted, double Milliseconds)
 {
+    public long Sequence { get; init; }
+    public string? CommandId { get; init; }
+    public Guid? AttemptId { get; init; }
+    public double? InputAt { get; init; }
+    public double? EffectiveInputAt { get; init; }
+    public double? ConfirmationDeadline { get; init; }
+    public double RemainingBudget { get; init; }
+    public IReadOnlyList<string> Observations { get; init; } = Array.Empty<string>();
     public string? Reason { get; init; }
 }
 
@@ -23,6 +31,7 @@ internal sealed class CombatFlowDiagnostics
     private readonly object _gate = new();
     private readonly CombatFlowDiagnosticEvent?[] _events = new CombatFlowDiagnosticEvent[64];
     private int _eventCount, _next;
+    private long _eventSequence;
     private long _steps, _passes, _failedPasses, _actions, _observations, _preparations, _yields;
     private double _stepMs, _actionMs, _observationMs, _preparationMs, _yieldMs;
 
@@ -44,16 +53,51 @@ internal sealed class CombatFlowDiagnostics
         lock (_gate)
         {
             _actions++; _actionMs += milliseconds;
-            _events[_next] = new(action.Now, action.Command.Name, action.Command.Method.Alias[0],
-                action.Command.SourceLine, reportedResult, action.InputAt != null, milliseconds)
-                { Reason = action.DiagnosticReason };
-            _next = (_next + 1) % _events.Length;
-            _eventCount = Math.Min(_eventCount + 1, _events.Length);
+            Append(action, reportedResult, milliseconds);
         }
     }
 
+    private void Append(CombatFlowAction action, string reportedResult, double milliseconds)
+    {
+        Append(new(action.Now, action.Command.Name, action.Command.Method.Alias[0],
+            action.Command.SourceLine, reportedResult, action.InputAt != null, milliseconds)
+        {
+            Reason = action.DiagnosticReason, CommandId = action.CommandId,
+            AttemptId = action.DiagnosticAttemptId, InputAt = action.InputAt,
+            EffectiveInputAt = action.EffectiveInputAt, RemainingBudget = action.RemainingBudget,
+            Observations = action.DiagnosticSamples
+        });
+    }
+
+    public void PendingEnded(CombatCommand command, CombatSkillAttempt attempt, double now, double deadline, string reason)
+    {
+        lock (_gate)
+        {
+            // 生命周期事件不是游戏边界调用、输入或施放成功，不增加 Action 计数。
+            Append(new(now, attempt.Actor, command.Method.Alias[0], command.SourceLine, "PendingEnded", false, 0)
+            {
+                CommandId = attempt.CommandId, AttemptId = attempt.AttemptId, ConfirmationDeadline = deadline,
+                RemainingBudget = Math.Max(0, deadline - now), Reason = $"{reason}; originalInputAt={attempt.InputAt:F3}"
+            });
+        }
+    }
+
+    private void Append(CombatFlowDiagnosticEvent entry)
+    {
+        _events[_next] = entry with { Sequence = ++_eventSequence };
+        _next = (_next + 1) % _events.Length;
+        _eventCount = Math.Min(_eventCount + 1, _events.Length);
+    }
+
     public void Observe(double milliseconds) { lock (_gate) { _observations++; _observationMs += milliseconds; } }
-    public void Prepare(double milliseconds) { lock (_gate) { _preparations++; _preparationMs += milliseconds; } }
+    public void Prepare(double milliseconds, CombatFlowAction? action = null)
+    {
+        lock (_gate)
+        {
+            _preparations++; _preparationMs += milliseconds;
+            if (action?.CaptureDiagnostics == true) Append(action, "Observation", milliseconds);
+        }
+    }
     public void Yield(double milliseconds) { lock (_gate) { _yields++; _yieldMs += milliseconds; } }
 
     public CombatFlowStatistics Snapshot()
@@ -80,7 +124,7 @@ internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagn
     {
         var start = Stopwatch.GetTimestamp();
         try { return await game.TryRecoverExpiredSkillAsync(action, ct).ConfigureAwait(false); }
-        finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds); }
+        finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds, action); }
     }
     public void ReleaseHeldInput() => game.ReleaseHeldInput();
     public CombatScopeObservation? ObserveScope()
@@ -99,7 +143,7 @@ internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagn
     {
         var start = Stopwatch.GetTimestamp();
         try { await game.PrepareObservationAsync(action, function, ct).ConfigureAwait(false); }
-        finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds); }
+        finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds, action); }
     }
     public async ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
     {

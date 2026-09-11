@@ -13,6 +13,7 @@ public sealed class CombatActionScope : IDisposable
     private readonly CombatActionScope? _previous;
     private readonly CombatFlowAction _action;
     private readonly CancellationToken _ct;
+    private bool _disposed;
     public static CombatActionScope? Current => Active.Value;
 
     /// <summary>异常恢复沿用自己的取消/超时，不继承已经失效的战斗动作预算。</summary>
@@ -60,5 +61,13 @@ public sealed class CombatActionScope : IDisposable
     }
 
     public void Sleep(int milliseconds) => WaitAsync(milliseconds).GetAwaiter().GetResult();
-    public void Dispose() { if (ReferenceEquals(Active.Value, this)) Active.Value = _previous; }
+    internal void Trace(string phase, string detail)
+    {
+        if (!_disposed) _action.Trace(phase, detail);
+    }
+    public void Dispose()
+    {
+        _disposed = true;
+        if (ReferenceEquals(Active.Value, this)) Active.Value = _previous;
+    }
 }

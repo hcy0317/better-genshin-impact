@@ -10,8 +10,11 @@ public readonly record struct BurstObservation(bool? EnergyFull, bool? CoolingDo
     public static BurstObservation FromClassifier(string? label, double confidence)
     {
         if (label == null || !double.IsFinite(confidence) || confidence <= .7) return default;
-        var match = Regex.Match(label.Trim(), @"^energy\s+([01])\s+cd\s+([01])$", RegexOptions.IgnoreCase);
-        return match.Success ? new(match.Groups[1].Value == "1", match.Groups[2].Value == "1") : default;
+        var match = Regex.Match(label.Trim().Replace('_', ' '), @"^energy\s+([01h])\s+cd\s+([01])$", RegexOptions.IgnoreCase);
+        if (!match.Success) return default;
+        // h 类没有可靠的满能量结论，但其独立冷却位仍可确认已发送的 Q。
+        bool? energyFull = match.Groups[1].Value.ToLowerInvariant() switch { "0" => false, "1" => true, _ => null };
+        return new(energyFull, match.Groups[2].Value == "1");
     }
 }
 

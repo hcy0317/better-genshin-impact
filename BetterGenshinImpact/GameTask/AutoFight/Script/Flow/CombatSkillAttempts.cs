@@ -116,6 +116,16 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         lock (_gate) return !_closed && _slots.TryGetValue((actor, skill), out var slot) && !slot.CreditTaken;
     }
 
+    internal Guid? GetDiagnosticAttemptId(string actor, Method skill)
+    {
+        lock (_gate) return _slots.TryGetValue((actor, skill), out var slot) ? slot.Attempt.AttemptId : null;
+    }
+
+    internal CombatSkillAttempt? GetAttempt(string actor, Method skill)
+    {
+        lock (_gate) return !_closed && _slots.TryGetValue((actor, skill), out var slot) ? slot.Attempt : null;
+    }
+
     internal CombatSkillAttempt? TakeInactiveActorProbe(Func<string, bool?> isActive)
     {
         lock (_gate)
