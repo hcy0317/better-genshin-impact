@@ -34,6 +34,7 @@ using Compunet.YoloSharp.Data;
 using Microsoft.Extensions.DependencyInjection;
 
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
+using BetterGenshinImpact.GameTask.Common.Ui;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Model;
 
@@ -149,14 +150,16 @@ public class Avatar
             if (Bv.IsInDomainIncludingRevivePrompt(region))
             {
                 Logger.LogWarning("检测到秘境内复苏界面，跳过七天神像传送并交由自动秘境重试");
-                throw new RetryException("检测到秘境内复苏界面，存在角色被击败，退出秘境后重试");
+                throw new DomainDefeatedRetryException();
             }
 
             Logger.LogWarning("检测到复苏界面，存在角色被击败，前往七天神像复活");
-            // 先打开地图
-            Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE); // NOTE: 此处按下Esc是为了关闭复苏界面，无需改键
-            Sleep(600, ct);
-            TpForRecover(ct, new RetryException("检测到复苏界面，存在角色被击败，前往七天神像复活"));
+            using var driver = new NativeUiDriver();
+            UiRecovery.RecoverDefeatedAsync(driver, token =>
+            {
+                TpForRecover(token, new RetryException("复苏后重试当前路线"));
+                return Task.CompletedTask;
+            }, ct, Logger).GetAwaiter().GetResult();
         }
         else if(AutoFightParam.SwimmingEnabled && AutoFightTask.FightStatusFlag && SwimmingConfirm(region))
         {
@@ -270,8 +273,19 @@ public class Avatar
     /// <exception cref="RetryException"></exception>
     public static void TpForRecover(CancellationToken ct, Exception ex)
     {
-        RecoverAtStatueOfTheSeven(ct).Wait(ct);
-        throw ex;
+        CombatRecoveryCompletedException.RecoverAsync(
+            () => RecoverAtStatueOfTheSeven(ct),
+            () =>
+            {
+                // Recovery permission must never come from CaptureGameImage's
+                // cached-frame fallback after a capture failure.
+                var image = CaptureGameImageNoRetry(TaskTriggerDispatcher.GlobalGameCapture);
+                if (image == null) return false;
+                if (image.Empty()) { image.Dispose(); return false; }
+                using var frame = new CaptureContent(image, 0, 0).CaptureRectArea;
+                return Bv.IsInMainUi(frame) && !Bv.IsInRevivePrompt(frame);
+            },
+            () => Delay(250, ct), ct).GetAwaiter().GetResult();
     }
 
     public static async Task RecoverAtStatueOfTheSeven(CancellationToken ct)
@@ -667,15 +681,14 @@ public class Avatar
     internal static BurstObservation ObserveBurst(ImageRegion imageRegion)
     {
         using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
-        var top = QBurstClassifierLazy.Value.Predictor.Classify(qRa.CacheImage).GetTopClass();
+        var top = QBurstClassifierLazy.Value.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());
         return BurstObservation.FromClassifier(top.Name.Name, top.Confidence);
     }
 
     private static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
     {
         using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
-        var result = QBurstClassifierLazy.Value.Predictor.Classify(qRa.CacheImage);
-        var topClass = result.GetTopClass();
+        var topClass = QBurstClassifierLazy.Value.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());
         return ClassifyBurstReadiness(topClass.Name.Name, topClass.Confidence);
     }
 

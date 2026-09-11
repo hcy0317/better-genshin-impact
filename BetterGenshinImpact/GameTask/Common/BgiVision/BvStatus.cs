@@ -25,6 +25,8 @@ public enum GameUiCategory
     BigMap
 }
 
+internal enum ReviveUiState { None, FoodPrompt, FullPartyDefeat }
+
 public static partial class Bv
 {
     public static GameUiCategory WhichGameUi()
@@ -266,8 +268,19 @@ public static partial class Bv
     /// <param name="region"></param>
     /// <returns></returns>
     internal static bool IsInRevivePrompt(ImageRegion region)
+        => ReadReviveState(region) != ReviveUiState.None;
+
+    internal static ReviveUiState ClassifyReviveEvidence(bool confirmation, bool title, bool bottomButton)
+        => confirmation ? (title ? ReviveUiState.FoodPrompt : ReviveUiState.None)
+            : bottomButton ? ReviveUiState.FullPartyDefeat : ReviveUiState.None;
+
+    internal static ReviveUiState ReadReviveState(ImageRegion region)
     {
         using var confirmRectArea = region.Find(RecognitionAssets.Get("AutoFight", "Confirm", region));
+        var culture = new CultureInfo(TaskContext.Instance().Config.OtherConfig.GameCultureInfoName);
+        var localizer = App.GetService<IStringLocalizer<BvResxHelper>>() ?? throw new Exception();
+        var revival = localizer.WithCultureGet(culture, "复苏");
+        var foodTitle = localizer.WithCultureGet(culture, "使用道具复苏角色");
         if (!confirmRectArea.IsEmpty())
         {
             var list = region.FindMulti(new RecognitionObject
@@ -276,16 +289,22 @@ public static partial class Bv
                 RegionOfInterest = new Rect(0, 0, region.Width, region.Height / 2)
             });
 
-            CultureInfo cultureInfo = new CultureInfo(TaskContext.Instance().Config.OtherConfig.GameCultureInfoName);
-            IStringLocalizer stringLocalizer = App.GetService<IStringLocalizer<BvResxHelper>>() ?? throw new Exception();
-            string revival = stringLocalizer.WithCultureGet(cultureInfo, "复苏");
-            if (list.Any(r => IsReviveText(r.Text, revival)))
+            try
             {
-                return true;
+                // 确认弹框未读到标题时保持未知，不能把下方“复苏”当成免费全队复苏。
+                return ClassifyReviveEvidence(true, list.Any(r => IsReviveFoodTitle(r.Text, revival, foodTitle)), false);
             }
+            finally { foreach (var item in list) item.Dispose(); }
         }
 
-        return false;
+        // 全队倒下的复苏按钮位于下方，没有食物弹窗的确认图标。
+        var buttons = region.FindMulti(RecognitionObject.Ocr(region.Width / 4d,
+            region.Height * 2d / 3, region.Width / 2d, region.Height / 3d));
+        try
+        {
+            return ClassifyReviveEvidence(false, false, buttons.Any(r => IsReviveText(r.Text, revival)));
+        }
+        finally { foreach (var item in buttons) item.Dispose(); }
     }
 
     /// <summary>
@@ -295,36 +314,29 @@ public static partial class Bv
     /// <returns></returns>
     public static bool ClickIfInReviveModal(ImageRegion region)
     {
-        using var confirmRectArea = region.Find(RecognitionAssets.Get("AutoFight", "Confirm", region));
+        if (ReadReviveState(region) != ReviveUiState.FullPartyDefeat) return false;
         var list = region.FindMulti(new RecognitionObject
         {
             RecognitionType = RecognitionTypes.Ocr,
-            RegionOfInterest = new Rect(0, 0, region.Width, region.Height)
+            RegionOfInterest = new Rect(region.Width / 4, region.Height * 2 / 3,
+                region.Width / 2, region.Height - region.Height * 2 / 3)
         });
 
         CultureInfo cultureInfo = new CultureInfo(TaskContext.Instance().Config.OtherConfig.GameCultureInfoName);
         IStringLocalizer stringLocalizer = App.GetService<IStringLocalizer<BvResxHelper>>() ?? throw new Exception();
         string revival = stringLocalizer.WithCultureGet(cultureInfo, "复苏");
-        using var revivalText = list.FirstOrDefault(r => IsReviveText(r.Text, revival));
-        if (revivalText == null)
+        try
         {
-            return false;
-        }
-
-        if (!confirmRectArea.IsEmpty())
-        {
-            confirmRectArea.BackgroundClick();
+            var revivalText = list.FirstOrDefault(r => IsReviveText(r.Text, revival));
+            if (revivalText == null) return false;
+            revivalText.BackgroundClick();
             return true;
         }
-
-        if (revivalText.Y < region.Height * 2 / 3)
-        {
-            return false;
-        }
-
-        revivalText.BackgroundClick();
-        return true;
+        finally { foreach (var item in list) item.Dispose(); }
     }
+
+    internal static bool IsReviveFoodTitle(string? text, string? localizedRevive, string? localizedFoodTitle)
+        => IsReviveText(text, localizedRevive) || IsReviveText(text, localizedFoodTitle);
 
     internal static bool IsReviveText(string? text, string? localizedRevive)
     {
@@ -338,7 +350,7 @@ public static partial class Bv
             return string.Concat(value.Where(c => !char.IsWhiteSpace(c)));
         }
 
-        return Normalize(text).Contains(Normalize(localizedRevive), StringComparison.OrdinalIgnoreCase);
+        return Normalize(text).Equals(Normalize(localizedRevive), StringComparison.OrdinalIgnoreCase);
     }
 
     internal static bool IsReviveRecoveryConfirmed(bool clicked, bool returnedToMainUi)

@@ -37,19 +37,12 @@ public class AutoFightJsonTask : ISoloTask
     private readonly JsonCombatStrategy _strategy;
     private CancellationToken _ct;
 
-    /// <summary>
-    /// YOLO目标检测器（BgiWorld模型），用于战斗结束检测
-    /// 当前未使用（战斗结束检测已委托到 AutoFightEndDetection），保留声明以与 TXT 策略保持一致
-    /// 初始化条件：_taskParam.FightFinishDetectEnabled == true
-    /// </summary>
-    private readonly BgiYoloPredictor? _predictor;
     private DateTime _lastFightFlagTime = DateTime.Now;
 
     private readonly ReturnMainUiTask _returnMainUiTask = new();
     private readonly double _assetScale = TaskContext.Instance().SystemInfo.AssetScale;
     private readonly double _dpi = TaskContext.Instance().DpiScale;
 
-    private static readonly object PickLock = new object();
 
     /// <summary>
     /// 当前队伍中的角色名集合（用于过滤动作节点）
@@ -85,12 +78,6 @@ public class AutoFightJsonTask : ISoloTask
     {
         _taskParam = taskParam;
         _strategy = JsonCombatStrategyParser.ParseFile(_taskParam.CombatStrategyPath);
-
-        if (_taskParam.FightFinishDetectEnabled)
-        {
-            _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiWorld);
-        }
-
         _finishDetectConfig = new AutoFightTask.TaskFightFinishDetectConfig(_taskParam);
     }
 
@@ -822,10 +809,8 @@ public class AutoFightJsonTask : ISoloTask
         using var capture = CaptureToRectArea();
         evaluator.SetCachedCapture(capture);
 
-        foreach (var preAction in _strategy.Info.PreActions)
+        await RunPreActionSequenceAsync(_strategy.Info.PreActions, async preAction =>
         {
-            if (_ct.IsCancellationRequested) break;
-
             var firstSpaceIndex = preAction.IndexOf(' ');
             var character = _currentAvatarName;
             var commands = preAction;
@@ -838,16 +823,23 @@ public class AutoFightJsonTask : ISoloTask
             var cmdList = CombatScriptParser.ParseLineCommands(commands, character);
             var combatScript = new CombatScript([character], cmdList);
 
-            try
+            await CombatScriptExecutor.ExecuteAsync(combatScript, _ct, Logger, combatScenes);
+        }, () => Delay(300, _ct), Logger, _ct);
+    }
+
+    internal static async Task RunPreActionSequenceAsync(IEnumerable<string> actions, Func<string, Task> execute,
+        Func<Task> betweenActions, ILogger logger, CancellationToken ct)
+    {
+        foreach (var preAction in actions)
+        {
+            ct.ThrowIfCancellationRequested();
+            try { await execute(preAction); }
+            catch (RetryException e) when (e is not CombatRecoveryCompletedException and not DomainDefeatedRetryException)
             {
-                await CombatScriptExecutor.ExecuteAsync(combatScript, _ct, Logger, combatScenes);
+                logger.LogWarning("战斗前动作重试异常，跳过此动作继续：{Msg}", e.Message);
             }
-            catch (RetryException e)
-            {
-                Logger.LogWarning("战斗前动作重试异常，跳过此动作继续：{Msg}", e.Message);
-            }
-            Logger.LogInformation("战斗前动作：{Action}", preAction);
-            await Delay(300, _ct);
+            logger.LogInformation("战斗前动作：{Action}", preAction);
+            await betweenActions();
         }
     }
 
@@ -1004,7 +996,7 @@ public class AutoFightJsonTask : ISoloTask
                 }
                 else if (picker.Name == "琴")
                 {
-                    Logger.LogInformation("使用 琴-长E 拾取掉落物");
+                    Logger.LogInformation("准备执行 琴-长E 聚物，尚未确认动作完成");
 
                     var actionsToUse = PickUpCollectHandler.PickUpActions
                         .Where(action => action.StartsWith("琴-长E" + " ", StringComparison.OrdinalIgnoreCase))
@@ -1012,6 +1004,7 @@ public class AutoFightJsonTask : ISoloTask
                         .ToArray();
 
                     var find = _taskParam.QinDoublePickUp;
+                    var gatheringSucceeded = false;
                     if (picker.TrySwitch(10))
                     {
                         await Delay(100, _ct);
@@ -1022,32 +1015,18 @@ public class AutoFightJsonTask : ISoloTask
                             for (int i = 0; i < 2; i++)
                             {
                                 await picker.WaitSkillCd(_ct);
-                                foreach (var command in pickUpAction.CombatCommands)
-                                {
-                                    command.Execute(combatScenes);
-                                    Task.Run(() =>
+                                gatheringSucceeded = GatheredLootCommands.Run(picker, pickUpAction.CombatCommands,
+                                    () =>
                                     {
-                                        if (Monitor.TryEnter(PickLock))
-                                        {
-                                            try
-                                            {
-                                                if (find)
-                                                {
-                                                    using (var imagePick = CaptureToRectArea())
-                                                    {
-                                                        if (imagePick.Find(AutoPickAssets.Get(imagePick, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickRo).IsExist())
-                                                        {
-                                                            find = false;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            finally
-                                            {
-                                                Monitor.Exit(PickLock);
-                                            }
-                                        }
-                                    });
+                                        if (!find) return;
+                                        using var imagePick = CaptureToRectArea();
+                                        if (imagePick.Find(AutoPickAssets.Get(imagePick, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickRo).IsExist())
+                                            find = false;
+                                    }, () => Simulation.ReleaseAllKey(), _ct);
+                                if (!gatheringSucceeded)
+                                {
+                                    Logger.LogWarning("琴聚物命令未确认执行，停止后续动作及成功短扫");
+                                    break;
                                 }
 
                                 if (!find)
@@ -1068,6 +1047,12 @@ public class AutoFightJsonTask : ISoloTask
 
                             Simulation.ReleaseAllKey();
                         }
+                    }
+                    if (gatheringSucceeded && AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
+                        _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
+                    {
+                        Logger.LogInformation("琴聚物动作完成，执行3秒短时扫描拾取");
+                        await new ScanPickTask().Start(_ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
                     }
                 }
             }

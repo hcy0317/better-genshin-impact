@@ -42,9 +42,16 @@ public class AutoPathingScript
     }
 
     /// <summary>
-    /// 获取当前脚本任务是否已收到取消请求。
+    /// 获取当前脚本任务是否已收到取消请求；终止故障保持原异常，不能被脚本当普通路线失败继续。
     /// </summary>
-    public bool IsCancellationRequested => CancellationContext.Instance.IsCancellationRequested;
+    public bool IsCancellationRequested
+    {
+        get
+        {
+            _taskGuard.Check();
+            return CancellationContext.Instance.IsCancellationRequested;
+        }
+    }
 
     public async Task Run(string json)
     {

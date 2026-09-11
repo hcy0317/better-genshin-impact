@@ -1,0 +1,47 @@
+package sandrone
+
+import (
+ "github.com/genshinsim/gcsim/pkg/core/attacks"
+ "github.com/genshinsim/gcsim/pkg/core/attributes"
+ "github.com/genshinsim/gcsim/pkg/core/combat"
+ "github.com/genshinsim/gcsim/pkg/core/event"
+ "github.com/genshinsim/gcsim/pkg/core/info"
+ "github.com/genshinsim/gcsim/pkg/core/player/character"
+ "github.com/genshinsim/gcsim/pkg/modifier"
+)
+
+func stellar(tag attacks.AttackTag) bool {
+ return tag==attacks.AttackTagDirectStellarConduct || tag==attacks.AttackTagDirectStellarSwirl || tag==attacks.AttackTagReactionStellarSwirl
+}
+
+func(c *char) constellationsInit() {
+ if c.Base.Cons>=1 {
+  for _,actor:=range c.Core.Player.Chars(){
+   actor.AddReactBonusMod(character.ReactBonusMod{Base:modifier.NewBase("sandrone-c1",-1),Amount:func(ai info.AttackInfo)float64{
+    if c.power.Decoding() && stellar(ai.AttackTag){return 0.3}
+    return 0
+   }})
+  }
+ }
+ if c.Base.Cons>=4 {
+  c.Core.Events.Subscribe(event.OnEnemyDamage,func(args ...any){
+   hit:=args[1].(*info.AttackEvent)
+   if hit.Info.ActorIndex!=c.Index() || !stellar(hit.Info.AttackTag) || args[2].(float64)<=0 || c.Core.F<c.c4ReadyAt{return}
+   c.c4ReadyAt=c.Core.F+240
+   ai:=info.AttackInfo{ActorIndex:c.Index(),Abil:"Prismatic Resonance Cannon (C4)",AttackTag:attacks.AttackTagDirectStellarConduct,
+    ICDTag:attacks.ICDTagNone,ICDGroup:attacks.ICDGroupDefault,Element:attributes.Cryo,Mult:1.25,IgnoreDefPercent:1}
+   if hit.Info.AttackTag!=attacks.AttackTagDirectStellarConduct{ai.AttackTag=attacks.AttackTagDirectStellarSwirl;ai.Mult=1.875}
+   c.Core.QueueAttack(ai,combat.NewCircleHitOnTarget(args[0].(info.Target),nil,3),0,0)
+  },"sandrone-c4")
+ }
+ if c.Base.Cons>=6 {
+  c.Core.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   hit:=args[1].(*info.AttackEvent)
+   if hit.Info.ActorIndex==c.Index() && (hit.Info.AttackTag==attacks.AttackTagDirectStellarConduct||hit.Info.AttackTag==attacks.AttackTagDirectStellarSwirl){hit.Info.Elevation+=0.2}
+  },"sandrone-c6-direct")
+  c.Core.Events.Subscribe(event.OnSpecialReactionAttack,func(args ...any){
+   hit:=args[1].(*info.AttackEvent)
+   if hit.Info.ActorIndex==c.Index() && hit.Info.AttackTag==attacks.AttackTagReactionStellarSwirl{hit.Info.Elevation+=0.2}
+  },"sandrone-c6-contribution")
+ }
+}

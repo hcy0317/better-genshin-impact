@@ -16,8 +16,9 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 /// </summary>
 public class MiningHandler : IActionHandler
 {
-    private readonly string[] _miningActions =
+    private static readonly string[] MiningActions =
     [
+        "钟离 e(hold,wait)",
         "莉奈娅 moveby(0,2000),wait(0.5),charge(0.6),wait(0.5),click(middle),wait(0.1)",
         "爱诺 attack(0.8)",
         "诺艾尔 attack(1.25)",
@@ -38,12 +39,18 @@ public class MiningHandler : IActionHandler
         "迪卢克 charge(3.15),j",
         "坎蒂丝 e(hold,wait)",
         "雷泽 e(hold,wait)",
-        "凝光 attack(4.0)",
-        "钟离 e(hold,wait)"
+        "凝光 attack(4.0)"
     ];
     
 
     private readonly ScanPickTask _scanPickTask = new();
+
+    internal static string? SelectMiningAction(Func<string, bool> hasAvatar)
+    {
+        foreach (var action in MiningActions)
+            if (hasAvatar(action[..action.IndexOf(' ')])) return action;
+        return null;
+    }
 
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {
@@ -73,21 +80,14 @@ public class MiningHandler : IActionHandler
     {
         try
         {
-            bool foundAvatar = false;
-            foreach (var miningActionStr in _miningActions)
+            var selected = SelectMiningAction(name => combatScenes.SelectAvatar(name) != null);
+            if (selected == null) return;
+            var miningAction = CombatScriptParser.ParseContext(selected);
+            foreach (var command in miningAction.CombatCommands)
             {
-                var miningAction = CombatScriptParser.ParseContext(miningActionStr);
-                foreach (var command in miningAction.CombatCommands)
+                if (!command.Execute(combatScenes))
                 {
-                    var avatar = combatScenes.SelectAvatar(command.Name);
-                    if (avatar != null)
-                    {
-                        command.Execute(combatScenes);
-                        foundAvatar = true;
-                    }
-                }
-                if (foundAvatar)
-                {
+                    Logger.LogWarning("挖矿角色 {Name} 未确认执行，停止当前挖矿动作，不回退其他角色普攻", command.Name);
                     break;
                 }
             }

@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -25,6 +26,16 @@ func TestSmallOptimizationBatchCanBeCompactedWithoutChangingEvidence(t *testing.
 	}
 	if !compact.SamplesCompacted || len(compact.SampleMetrics) != len(request.Seeds) {
 		t.Fatal("search batch retained unnecessary detailed samples")
+	}
+	if len(compact.Parameters.Settings.CollectStats) == 0 || slices.Contains(compact.Parameters.Settings.CollectStats, "status") {
+		t.Fatal("compact evaluation still collects discarded per-frame status buffers")
+	}
+	for i, sample := range full.Samples {
+		for j, character := range sample.Characters {
+			if compact.Samples[i].Characters[j].ActiveTime != character.ActiveTime {
+				t.Fatal("active-time frame count changed")
+			}
+		}
 	}
 	if compact.MeanDPS != full.MeanDPS || !reflect.DeepEqual(compact.ScoredDPS, full.ScoredDPS) ||
 		!reflect.DeepEqual(compact.Metrics, full.Metrics) || !reflect.DeepEqual(compact.Validation, full.Validation) ||

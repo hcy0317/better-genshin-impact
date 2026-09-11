@@ -86,6 +86,7 @@ func applyEquipment(cfg *info.ActionList, request Request) error {
 		sort.Slice(pieces, func(i, j int) bool { return pieces[i].SlotKey < pieces[j].SlotKey })
 		stats := make([]float64, attributes.EndStatType)
 		sets := make(info.Sets)
+		supplemental := map[string]int{}
 		slots := make(map[string]bool)
 		for _, piece := range pieces {
 			if piece.ScanIndex < 0 || used[piece.ScanIndex] || slots[piece.SlotKey] {
@@ -101,14 +102,18 @@ func applyEquipment(cfg *info.ActionList, request Request) error {
 			if !validMainStat(piece.SlotKey, main) {
 				return errors.New("main stat is invalid for the artifact slot")
 			}
-			set, err := keys.SetString(strings.ToLower(piece.SetKey))
-			if err != nil {
-				return fmt.Errorf("unsupported inventory set: %w", err)
+			if !isSupplementalSet(piece.SetKey) {
+				set, err := keys.SetString(strings.ToLower(piece.SetKey))
+				if err != nil {
+					return fmt.Errorf("unsupported inventory set: %w", err)
+				}
+				if set.String() == "" || set.String() == "invalidset" {
+					return errors.New("missing or invalid inventory set")
+				}
+				sets[set]++
+			} else {
+				supplemental[strings.ToLower(piece.SetKey)]++
 			}
-			if set.String() == "" || set.String() == "invalidset" {
-				return errors.New("missing or invalid inventory set")
-			}
-			sets[set]++
 			stats[main] += value
 			seen := map[attributes.Stat]bool{main: true}
 			if len(piece.Substats) > 4 {
@@ -129,6 +134,12 @@ func applyEquipment(cfg *info.ActionList, request Request) error {
 				stats[stat] += value
 			}
 			used[piece.ScanIndex], slots[piece.SlotKey] = true, true
+		}
+		// Permanent bonuses must be present before SDK character initialization.
+		for _, count := range supplemental {
+			if count >= 2 {
+				stats[attributes.ATKP] += .18
+			}
 		}
 		profile.Stats = stats
 		profile.StatsByLabel = map[string][]float64{"inventory": append([]float64(nil), stats...)}

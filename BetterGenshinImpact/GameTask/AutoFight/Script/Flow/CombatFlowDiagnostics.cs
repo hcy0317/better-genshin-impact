@@ -73,7 +73,15 @@ internal sealed class CombatFlowDiagnostics
 internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagnostics diagnostics) : ICombatFlowGame
 {
     public void BeginStep() => game.BeginStep();
+    public void CheckDefeated(CancellationToken ct) => game.CheckDefeated(ct);
     public bool HasPendingSkill(CombatFlowAction action) => game.HasPendingSkill(action);
+    public ValueTask WaitAfterFailedPassAsync(CancellationToken ct) => game.WaitAfterFailedPassAsync(ct);
+    public async ValueTask<CombatSkillAttempt?> TryRecoverExpiredSkillAsync(CombatFlowAction action, CancellationToken ct)
+    {
+        var start = Stopwatch.GetTimestamp();
+        try { return await game.TryRecoverExpiredSkillAsync(action, ct).ConfigureAwait(false); }
+        finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds); }
+    }
     public void ReleaseHeldInput() => game.ReleaseHeldInput();
     public CombatScopeObservation? ObserveScope()
     {

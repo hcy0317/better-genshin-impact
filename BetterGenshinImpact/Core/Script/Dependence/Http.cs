@@ -64,6 +64,19 @@ public class Http
         _logger.LogDebug($"[HTTP] 发送HTTP请求: {method} {url} Body: {(body != null ? body : "null")} Headers: {(headersJson != null ? headersJson : "null")}");
         CheckHttpPermission(url);
 
+        using var request = CreateRequest(method, url, body, headersJson);
+        using var httpClient = new HttpClient();
+        using var response = await httpClient.SendAsync(request);
+        return new HttpReponse
+        {
+            status_code = (int)response.StatusCode,
+            headers = response.Headers.ToDictionary(h => h.Key, h => h.Value.First()),
+            body = await response.Content.ReadAsStringAsync(),
+        };
+    }
+
+    internal static HttpRequestMessage CreateRequest(string method, string url, string? body, string? headersJson)
+    {
         var dictHeaders = new Dictionary<string, string>();
         if (!string.IsNullOrWhiteSpace(headersJson))
         {
@@ -82,7 +95,11 @@ public class Http
         }
 
         // header全部小写
-        dictHeaders = dictHeaders.ToDictionary(kvp => kvp.Key.ToLowerInvariant(), kvp => kvp.Value);
+        // 可选认证未配置时，旧脚本会生成 { "": "" }；只忽略完全为空的占位项。
+        // 空名称带有值仍是错误，不能静默丢弃可能必需的认证信息。
+        dictHeaders = dictHeaders
+            .Where(kvp => !string.IsNullOrWhiteSpace(kvp.Key) || !string.IsNullOrWhiteSpace(kvp.Value))
+            .ToDictionary(kvp => kvp.Key.ToLowerInvariant(), kvp => kvp.Value);
 
         // 提前取出来Content-Type，防止被覆盖
         string contentType = "application/json";
@@ -92,25 +109,18 @@ public class Http
             dictHeaders.Remove("content-type");
         }
 
-        // 使用HttpClient发送请求
-        using var httpClient = new HttpClient();
-        httpClient.DefaultRequestHeaders.Clear();
-        foreach (var header in dictHeaders)
+        var request = new HttpRequestMessage(new HttpMethod(method), url);
+        try
         {
-            httpClient.DefaultRequestHeaders.Add(header.Key, header.Value);
+            foreach (var header in dictHeaders)
+                request.Headers.Add(header.Key, header.Value);
+            request.Content = body == null ? null : new StringContent(body, Encoding.UTF8, contentType);
+            return request;
         }
-
-        var content = body == null ? null : new StringContent(body, Encoding.UTF8, contentType);
-        var response = await httpClient.SendAsync(new HttpRequestMessage(new HttpMethod(method), url) { Content = content });
-
-        var responseCode = (int)response.StatusCode;
-        var responseHeaders = response.Headers.ToDictionary(h => h.Key, h => h.Value.First()); // 只取第一个值
-        var responseBody = await response.Content.ReadAsStringAsync();
-        return new HttpReponse
+        catch
         {
-            status_code = responseCode,
-            headers = responseHeaders,
-            body = responseBody,
-        };
+            request.Dispose();
+            throw;
+        }
     }
 }

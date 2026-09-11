@@ -25,7 +25,7 @@ internal sealed class UiOperation : IDisposable
     private double _lastStateLog = double.NegativeInfinity;
     private int _debugEvents, _suppressed;
     private bool _ended, _disposed;
-    private UiSnapshot? _latest;
+    private string? _latestDescription;
 
     public static UiOperation? Current => Active.Value;
     public string Id { get; } = Guid.NewGuid().ToString("N");
@@ -123,7 +123,7 @@ internal sealed class UiOperation : IDisposable
         return error;
     }
 
-    public TimeoutException Timeout() => new($"界面转换超时：{Name}，期望={Expected}，实际={_latest?.Describe() ?? "未取得观察"}，op={Id}");
+    public TimeoutException Timeout() => new($"界面转换超时：{Name}，期望={Expected}，实际={_latestDescription ?? "未取得观察"}，op={Id}");
 
     public async Task DelayAsync(int milliseconds, CancellationToken extraToken)
     {
@@ -139,7 +139,7 @@ internal sealed class UiOperation : IDisposable
     public void Observe(UiSnapshot snapshot, UiTarget expected, string phase = "observe")
     {
         Expected = expected.ToString();
-        _latest = snapshot;
+        _latestDescription = snapshot.Describe();
         if (_lastSignature == snapshot.Signature && Elapsed.TotalSeconds - _lastStateLog < 2)
         { _suppressed++; return; }
         _lastSignature = snapshot.Signature;
@@ -151,6 +151,20 @@ internal sealed class UiOperation : IDisposable
     public void Action(UiAction action, bool applied, int attempt, int maxAttempts) => Debug(() =>
         _logger.LogDebug("UI_ACTION root={RootId} op={OpId} action={Action} applied={Applied} attempt={Attempt}/{MaxAttempts} remainingMs={RemainingMs:F0}",
             RootId, Id, action, applied, attempt, maxAttempts, Remaining.TotalMilliseconds));
+
+    /// <summary>登记专用控制器的实际观察，仅用于诊断，不推断通用界面状态。</summary>
+    public void Observe(string expected, string description, long frameId)
+    {
+        Expected = expected;
+        _latestDescription = description;
+        var signature = HashCode.Combine(expected, description);
+        if (_lastSignature == signature && Elapsed.TotalSeconds - _lastStateLog < 2)
+        { _suppressed++; return; }
+        _lastSignature = signature;
+        _lastStateLog = Elapsed.TotalSeconds;
+        Debug(() => _logger.LogDebug("UI_STATE root={RootId} op={OpId} expected={Expected} frame={FrameId} observed={Observed} remainingMs={RemainingMs:F0}",
+            RootId, Id, Expected, frameId, description, Remaining.TotalMilliseconds));
+    }
 
     private void Debug(Action emit)
     {
@@ -164,7 +178,7 @@ internal sealed class UiOperation : IDisposable
         _ended = true;
         SafeLog(() => _logger.Log(error == null || outcome == "cancelled" ? LogLevel.Debug : LogLevel.Warning,
             error, "UI_END root={RootId} op={OpId} operation={Operation} outcome={Outcome} expected={Expected} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0} suppressed={Suppressed}",
-            RootId, Id, Name, outcome, Expected, _latest?.Describe() ?? "未取得观察", Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds, _suppressed));
+            RootId, Id, Name, outcome, Expected, _latestDescription ?? "未取得观察", Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds, _suppressed));
     }
 
     private static void SafeLog(Action emit) { try { emit(); } catch { } }

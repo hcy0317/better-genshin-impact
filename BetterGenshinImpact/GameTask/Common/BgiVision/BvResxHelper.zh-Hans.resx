@@ -120,4 +120,7 @@
   <data name="复苏" xml:space="preserve">
     <value>复苏</value>
   </data>
+  <data name="使用道具复苏角色" xml:space="preserve">
+    <value>使用道具复苏角色</value>
+  </data>
 </root>

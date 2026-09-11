@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
@@ -9,6 +11,30 @@ public sealed partial class CombatFlowExecution
     private readonly Dictionary<string, int> _maintenanceAttemptsSinceProgress = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (long Generation, long EffectVersion)> _deferredMaintenance = new(StringComparer.Ordinal);
     public string? LastMaintenanceDecision { get; private set; }
+
+    private async ValueTask<double?> TrySpendCoverageAsync(string name, CombatCommand command,
+        double ancestorDeadline, double demand, CancellationToken ct)
+    {
+        var goal = "coverage:" + name;
+        if (_program.Timing(command)?.Duration is { } full && full <= demand) return null;
+        if (_episodes.TrySpend(goal, Context.Now, CombatFlowPolicy.EpisodeTimeoutSeconds,
+                CombatFlowPolicy.EpisodeAttempts, out var deadline)) return deadline;
+        LastMaintenanceDecision = $"维护目标 {name} 的原预算已耗尽，等待物理技能新就绪证据";
+        if (IsAtomic || Context.Now >= ancestorDeadline || !_episodes.CanTrySkillReset(goal, Context.Now) ||
+            command.Method != Method.Skill && command.Method != Method.Burst) return null;
+
+        var probe = new CombatFlowAction(command, Context, () => !_closed,
+            Math.Min(ancestorDeadline, Context.Now + 3));
+        var reset = await _game.TryRecoverExpiredSkillAsync(probe, ct);
+        ct.ThrowIfCancellationRequested();
+        if (probe.DiagnosticReason is { } reason) LastMaintenanceDecision = $"维护目标 {name}：{reason}";
+        if (reset == null || !probe.CanStart || _closed || Context.Now >= ancestorDeadline || reset.BattleId != Context.BattleId ||
+            reset.Actor != command.Name || reset.Skill != command.Method || reset.Deadline > Context.Now ||
+            !_episodes.TryReopenAfterSkillReset(goal, reset.AttemptId, Context.Now)) return null;
+        LastMaintenanceDecision = $"维护目标 {name} 已取得双新帧就绪证据，释放过期请求 {reset.AttemptId} 并有界重新准入；未补记旧施放成功";
+        return _episodes.TrySpend(goal, Context.Now, CombatFlowPolicy.EpisodeTimeoutSeconds,
+            CombatFlowPolicy.EpisodeAttempts, out deadline) ? deadline : null;
+    }
 
     private void ReportMaintenanceProgress(CombatCommand command)
     {

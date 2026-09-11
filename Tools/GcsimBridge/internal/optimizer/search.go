@@ -133,7 +133,13 @@ func Optimize(ctx context.Context, request Request, evaluate Evaluator) (Result,
 	validated := t.evaluatePlan(ctx, best.Equipment, request.ValidationSeeds, true)
 	var verifiedBaseline *Plan
 	if t.result.Baseline != nil && t.result.Baseline.Qualified {
-		verifiedBaseline = t.evaluatePlan(ctx, t.result.Baseline.Equipment, request.ValidationSeeds, true)
+		if best.Rank.Key == t.result.Baseline.Rank.Key {
+			// Same equipment, scenarios and independent seed batch. Reuse both
+			// success and failure; never rerun an identical batch to seek a pass.
+			verifiedBaseline = validated
+		} else {
+			verifiedBaseline = t.evaluatePlan(ctx, t.result.Baseline.Equipment, request.ValidationSeeds, true)
+		}
 		t.result.Baseline = verifiedBaseline
 	}
 	if !validated.Qualified {

@@ -46,7 +46,9 @@ internal sealed class TaskExecutionScope : IDisposable
     internal static void RethrowCombatFailure(Exception error, bool detectionEnabled, bool endConfirmed, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        Capture().Check();
         var failure = detectionEnabled && !endConfirmed && error is not OperationCanceledException and not NormalEndException
+            and not CombatRecoveryCompletedException and not DomainDefeatedRetryException
             && !IsUnconfirmedCombat(error)
             ? new CombatNotFinishedException("结束确认前退出战斗：" + error.Message, error)
             : error;

@@ -31,6 +31,7 @@
 
     <ItemGroup>
       <Folder Include="Assets\AutoFight\" />
+      <None Update="Fixtures\Ui\*.png" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
 
 </Project>

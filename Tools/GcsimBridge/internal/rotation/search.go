@@ -27,16 +27,36 @@ type Request struct {
 	Budget          int            `json:"budget"`
 }
 type Result struct {
-	Native        bool                   `json:"native,omitempty"`
-	NativeChanges []nativeflow.Parameter `json:"nativeChanges,omitempty"`
-	Status        string                 `json:"status"`
-	Actions       []Action               `json:"actions,omitempty"`
-	Script        string                 `json:"script,omitempty"`
-	Report        *engine.Report         `json:"report,omitempty"`
-	Baseline      *engine.Report         `json:"baseline,omitempty"`
-	Evaluations   int                    `json:"evaluations"`
-	Improvement   *optimizer.Improvement `json:"improvement,omitempty"`
-	Issues        []string               `json:"issues"`
+	NativeTradeoffs []NativeTradeoff            `json:"nativeTradeoffs,omitempty"`
+	NativeProbes    []NativeProbe               `json:"nativeProbes,omitempty"`
+	Native          bool                        `json:"native,omitempty"`
+	NativeChanges   []nativeflow.Parameter      `json:"nativeChanges,omitempty"`
+	NativeEdits     []nativeflow.StructuralEdit `json:"nativeEdits,omitempty"`
+	Status          string                      `json:"status"`
+	Actions         []Action                    `json:"actions,omitempty"`
+	Script          string                      `json:"script,omitempty"`
+	Report          *engine.Report              `json:"report,omitempty"`
+	Baseline        *engine.Report              `json:"baseline,omitempty"`
+	Evaluations     int                         `json:"evaluations"`
+	Improvement     *optimizer.Improvement      `json:"improvement,omitempty"`
+	Issues          []string                    `json:"issues"`
+}
+
+type NativeProbe struct {
+	Passed         bool                  `json:"passed"`
+	Kind           string                `json:"kind"`
+	Samples        int                   `json:"samples"`
+	Baseline       *engine.NativeQuality `json:"baseline,omitempty"`
+	Candidate      *engine.NativeQuality `json:"candidate,omitempty"`
+	BaselineError  string                `json:"baselineError,omitempty"`
+	CandidateError string                `json:"candidateError,omitempty"`
+}
+
+type NativeTradeoff struct {
+	DPS         float64               `json:"dps"`
+	BaselineDPS float64               `json:"baselineDps"`
+	Quality     *engine.NativeQuality `json:"quality"`
+	Reason      string                `json:"reason"`
 }
 
 // Script is a finite-action IR rendering, not a general parser for arbitrary

@@ -14,13 +14,16 @@ public readonly record struct CombatFlowStep(CombatFlowResult Result, bool Round
 public interface ICombatFlowGame
 {
     void BeginStep() { }
+    void CheckDefeated(CancellationToken ct) { ct.ThrowIfCancellationRequested(); }
     void ReleaseHeldInput() { }
     CombatScopeObservation? ObserveScope() => null;
     bool HasPendingSkill(CombatFlowAction action) => false;
     ValueTask PrepareObservationAsync(CombatFlowAction action, string function, CancellationToken ct) => ValueTask.CompletedTask;
+    ValueTask<CombatSkillAttempt?> TryRecoverExpiredSkillAsync(CombatFlowAction action, CancellationToken ct) => ValueTask.FromResult<CombatSkillAttempt?>(null);
     ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct);
     object? Observe(string function, IReadOnlyList<object?> args, string actor);
     ValueTask YieldAsync(CancellationToken ct);
+    ValueTask WaitAfterFailedPassAsync(CancellationToken ct) => new(Task.Delay(1000, ct));
 }
 
 public sealed partial class CombatFlowExecution : IDisposable
@@ -150,7 +153,7 @@ public sealed partial class CombatFlowExecution : IDisposable
         for (var transitions = 0; transitions < 64; transitions++)
         {
             ct.ThrowIfCancellationRequested();
-            ApplyDueWatch();
+            await ApplyDueWatchAsync(ct);
             if (_frames.FirstOrDefault(active => active.Block.Atomic && active.AtomicAdmitted &&
                     active.Result == CombatFlowResult.Succeeded && !RequirementsHold(active)) is { } invalidAtomic)
                 foreach (var active in _frames)
@@ -325,11 +328,15 @@ public sealed partial class CombatFlowExecution : IDisposable
                 }
                 var watchFrame = _frames.FirstOrDefault(active => active.WatchFor == maintain);
                 var deadline = watchFrame?.Deadline ?? double.PositiveInfinity;
-                if (watchFrame == null && !_episodes.TrySpend("coverage:" + maintain, Context.Now, CombatFlowPolicy.EpisodeTimeoutSeconds,
-                        CombatFlowPolicy.EpisodeAttempts, out deadline))
+                if (watchFrame == null)
                 {
-                    CompleteNode(frame, command, CombatFlowResult.Failed);
-                    continue;
+                    var admitted = await TrySpendCoverageAsync(maintain, command, frame.Deadline, demand, ct);
+                    if (admitted == null)
+                    {
+                        CompleteNode(frame, command, CombatFlowResult.Failed);
+                        continue;
+                    }
+                    deadline = admitted.Value;
                 }
                 actionDeadline = Math.Min(actionDeadline, deadline);
                 if (watchFrame == null) actionEpisode = "coverage:" + maintain;
@@ -572,7 +579,7 @@ public sealed partial class CombatFlowExecution : IDisposable
         return true;
     }
 
-    private void ApplyDueWatch()
+    private async ValueTask ApplyDueWatchAsync(CancellationToken ct)
     {
         if (IsAtomic || WaitingForRequiredOpening()) return;
         // 首次开场要求未完成时，维护转移不能越过它。
@@ -609,15 +616,15 @@ public sealed partial class CombatFlowExecution : IDisposable
                 _coverageRequests[name] = new(requested.Generation, requested.EffectVersion, demand);
             if (callMode)
             {
-                if (_frames.Count >= 32 || !_episodes.TrySpend("coverage:" + name, Context.Now, CombatFlowPolicy.EpisodeTimeoutSeconds,
-                        CombatFlowPolicy.EpisodeAttempts, out var deadline))
+                var admitted = _frames.Count >= 32 ? null : await TrySpendCoverageAsync(name, sourceCommand, owner.Deadline, demand, ct);
+                if (admitted == null)
                 {
                     owner.Result = CombatFlowResult.Failed;
                     return;
                 }
                 var target = _program.Blocks[sourceCommand.Options["watch-target"]];
                 _game.ReleaseHeldInput();
-                var maintenance = CreateFrame(target, deadline: Math.Min(owner.Deadline, deadline));
+                var maintenance = CreateFrame(target, deadline: Math.Min(owner.Deadline, admitted.Value));
                 maintenance.WatchFor = name;
                 maintenance.WatchDemand = Math.Max(before, demand);
                 _calls[target.Name] = _calls.GetValueOrDefault(target.Name) + 1;

@@ -1,9 +1,31 @@
 package engine
 
 import (
+	"github.com/genshinsim/gcsim/pkg/core"
+	"github.com/genshinsim/gcsim/pkg/core/event"
 	"github.com/genshinsim/gcsim/pkg/stats"
+	"sort"
 	"strconv"
 )
+
+func compactCollectorNames() []string {
+	names := make([]string, 0, len(stats.Collectors()))
+	for name := range stats.Collectors() {
+		if name != "status" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Match the status collector's integer OnTick count without producing the
+// plotting buffers that compactLargeSamples intentionally discards.
+func observeCompactActiveTime(c *core.Core) []int {
+	frames := make([]int, len(c.Player.Chars()))
+	c.Events.Subscribe(event.OnTick, func(...any) { frames[c.Player.ActiveChar().Index()]++ }, "bettergi/compact-active-time")
+	return frames
+}
 
 const MaxEvaluationSamples = 1000
 const MaxTrajectorySeconds = 600

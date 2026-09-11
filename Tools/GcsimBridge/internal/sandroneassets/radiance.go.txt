@@ -1,0 +1,32 @@
+package sandrone
+
+import (
+ "github.com/genshinsim/gcsim/pkg/core/attacks"
+ "github.com/genshinsim/gcsim/pkg/core/combat"
+ "github.com/genshinsim/gcsim/pkg/core/info"
+ "github.com/genshinsim/gcsim/pkg/reactable"
+)
+
+// Resolve against the actual field, not its periodically refreshed stat buff,
+// which can outlive the field. Stellar Swirl has its own source-defined timer.
+func(c *char) radiance() attacks.AttackTag {
+ if c.StatusIsActive("sandrone-radiance-swirl") {return attacks.AttackTagDirectStellarSwirl}
+ for _,g:=range c.Core.Combat.Gadgets(){
+  field,ok:=g.(*reactable.PolestarField)
+  if ok && c.Core.Combat.Player().IsWithinArea(combat.NewCircleHitOnTarget(field,nil,15)) {
+   return attacks.AttackTagDirectStellarConduct
+  }
+ }
+ return attacks.AttackTagNone
+}
+
+func(c *char) convertRadiance(ai *info.AttackInfo,conduct,swirl float64) {
+ tag:=c.radiance()
+ if tag==attacks.AttackTagNone{return}
+ ai.AttackTag=tag
+ ai.Durability=0
+ ai.ICDTag=attacks.ICDTagNone
+ ai.IgnoreDefPercent=1
+ ai.Mult=conduct
+ if tag==attacks.AttackTagDirectStellarSwirl{ai.Mult=swirl}
+}

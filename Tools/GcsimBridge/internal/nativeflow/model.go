@@ -12,11 +12,12 @@ import (
 )
 
 type Expression struct {
-	Op       string      `json:"op"`
-	Name     string      `json:"name,omitempty"`
-	Argument string      `json:"argument,omitempty"`
-	Left     *Expression `json:"left,omitempty"`
-	Right    *Expression `json:"right,omitempty"`
+	Threshold float64     `json:"threshold,omitempty"`
+	Op        string      `json:"op"`
+	Name      string      `json:"name,omitempty"`
+	Argument  string      `json:"argument,omitempty"`
+	Left      *Expression `json:"left,omitempty"`
+	Right     *Expression `json:"right,omitempty"`
 }
 type Node struct {
 	ID         string            `json:"id"`
@@ -41,17 +42,22 @@ type Block struct {
 	End         int    `json:"end,omitempty"`
 }
 type Program struct {
-	SchemaVersion string                       `json:"schemaVersion"`
-	Source        string                       `json:"source"`
-	Loop          bool                         `json:"loop"`
-	Root          []Node                       `json:"root"`
-	Blocks        map[string]Block             `json:"blocks"`
-	Timings       map[string]map[string]string `json:"timings"`
+	InputDelayFrames int                          `json:"inputDelayFrames,omitempty"`
+	DropFirstBurst   bool                         `json:"dropFirstBurst,omitempty"`
+	SchemaVersion    string                       `json:"schemaVersion"`
+	Source           string                       `json:"source"`
+	Loop             bool                         `json:"loop"`
+	Root             []Node                       `json:"root"`
+	Blocks           map[string]Block             `json:"blocks"`
+	Timings          map[string]map[string]string `json:"timings"`
 }
 
 func (p *Program) Validate() error {
 	if p == nil || p.SchemaVersion != "native-flow-v1" || len(p.Source) == 0 || len(p.Source) > 400000 || len(p.Root) == 0 || len(p.Blocks) > 32 || len(p.Timings) > 32 {
 		return fmt.Errorf("native_flow: invalid program")
+	}
+	if p.InputDelayFrames < 0 || p.InputDelayFrames > 60 {
+		return fmt.Errorf("native_flow: invalid diagnostic input delay")
 	}
 	all := append([]Node(nil), p.Root...)
 	macroNodes := map[string]bool{}
@@ -177,11 +183,14 @@ func validateNode(n Node, macro bool, records map[string]bool) error {
 	case "skill":
 		allowed = "hold fast wait required timeout if record maintain watch watch-mode watch-target before timing keep feed"
 	case "burst":
-		allowed = "required timeout attempts no-progress if keep record timing"
-	case "attack", "wait":
+		allowed = "required timeout attempts no-progress if keep record timing refresh"
+	case "attack", "charge", "dash", "walk", "wait":
 		allowed = "required timeout if keep"
 		if !finite(n.Seconds) || n.Seconds <= 0 || n.Seconds > 30 {
 			return n.Error("无效动作秒数")
+		}
+		if n.Kind == "walk" && (len(n.Args) != 2 || !slices.Contains([]string{"w", "a", "s", "d"}, n.Args[0])) {
+			return n.Error("walk需要方向和秒数")
 		}
 	case "check":
 	case "keydown":
@@ -224,7 +233,7 @@ func validateNode(n Node, macro bool, records map[string]bool) error {
 			if v != "battle" {
 				return n.Error("once仅支持battle")
 			}
-		case "record", "keep", "maintain", "watch", "timing", "onfail", "watch-target", "then", "else", "unknown":
+		case "record", "keep", "refresh", "maintain", "watch", "timing", "onfail", "watch-target", "then", "else", "unknown":
 			if !validName(v) {
 				return n.Error("名称无效：" + k)
 			}
@@ -240,7 +249,10 @@ func validateNode(n Node, macro bool, records map[string]bool) error {
 	if n.Options["watch"] == "" && (n.Options["watch-mode"] != "" || n.Options["watch-target"] != "") {
 		return n.Error("维护调用缺少watch声明")
 	}
-	for _, k := range []string{"keep", "maintain", "watch"} {
+	if n.Options["refresh"] != "" && (n.Character != "sangonomiyakokomi" || n.Kind != "burst") {
+		return n.Error("refresh只支持心海爆发刷新水母")
+	}
+	for _, k := range []string{"keep", "refresh", "maintain", "watch"} {
 		if r := n.Options[k]; r != "" && !records[r] {
 			return n.Error("未定义记录：" + r)
 		}
@@ -259,8 +271,18 @@ func validateExpression(e *Expression, depth int, records map[string]bool) error
 		return fmt.Errorf("无效或过深条件")
 	}
 	switch e.Op {
+	case "gt", "ge", "lt", "le", "eq", "ne":
+		if e.Name != "record-remaining" || !records[e.Argument] || !finite(e.Threshold) || e.Threshold < 0 || e.Threshold > 600 {
+			return fmt.Errorf("无效记录时间比较")
+		}
+		return nil
 	case "call":
 		switch e.Name {
+		case "round-odd", "round-even":
+			if e.Argument != "" {
+				return fmt.Errorf("轮次条件不接受参数")
+			}
+			return nil
 		case "record-active", "record-exists":
 			if !records[e.Argument] {
 				return fmt.Errorf("未定义记录：%s", e.Argument)
