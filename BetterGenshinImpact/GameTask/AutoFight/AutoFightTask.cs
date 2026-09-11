@@ -43,7 +43,6 @@ public class AutoFightTask : ISoloTask
 
     private CancellationToken _ct;
 
-    private readonly BgiYoloPredictor _predictor;
 
     private static DateTime _lastFightFlagTime = DateTime.Now; // 战斗标志最近一次出现的时间
     private static int _skipCheckCounter;
@@ -96,7 +95,6 @@ public class AutoFightTask : ISoloTask
     
     public static bool FightStatusFlag { get; set; } = false;
     
-    private static readonly object PickLock = new object(); 
     
     private readonly double _assetScale = TaskContext.Instance().SystemInfo.AssetScale;
     
@@ -250,10 +248,6 @@ public class AutoFightTask : ISoloTask
         _taskParam = taskParam;
         _combatScriptBag = CombatScriptParser.ReadAndParse(_taskParam.CombatStrategyPath);
 
-        if (_taskParam.FightFinishDetectEnabled)
-        {
-            _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiWorld);
-        }
 
         _finishDetectConfig = new TaskFightFinishDetectConfig(_taskParam);
     }
@@ -1000,7 +994,7 @@ public class AutoFightTask : ISoloTask
                 }
                 else if (picker.Name == "琴")
                 {
-                    Logger.LogInformation("使用 琴-长E 拾取掉落物");
+                    Logger.LogInformation("准备执行 琴-长E 聚物，尚未确认动作完成");
                     
                     var actionsToUse = PickUpCollectHandler.PickUpActions
                         .Where(action => action.StartsWith("琴-长E" + " ", StringComparison.OrdinalIgnoreCase))
@@ -1008,6 +1002,7 @@ public class AutoFightTask : ISoloTask
                         .ToArray();
 
                     var find = _taskParam.QinDoublePickUp;
+                    var gatheringSucceeded = false;
                     if (picker.TrySwitch(10))
                     {
                         await Delay(100, ct);
@@ -1018,34 +1013,18 @@ public class AutoFightTask : ISoloTask
                             for (int i = 0; i < 2; i++)
                             {
                                 await picker.WaitSkillCd(ct);
-                                foreach (var command in pickUpAction.CombatCommands)
-                                {
-                                    command.Execute(combatScenes);
-                                    //异步执行，防止卡顿
-                                    Task.Run(() =>
+                                gatheringSucceeded = GatheredLootCommands.Run(picker, pickUpAction.CombatCommands,
+                                    () =>
                                     {
-                                        if (Monitor.TryEnter(PickLock))
-                                        {
-                                            try
-                                            {
-                                                if (find)
-                                                {
-                                                    using (var imagePick = CaptureToRectArea())
-                                                    {
-                                                        if (imagePick.Find(AutoPickAssets.Get(imagePick, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickRo).IsExist())
-                                                        {
-                                                            find = false;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            finally
-                                            {
-                                                Monitor.Exit(PickLock);
-                                            }
-                                        }
-                                        // 后面没代码了，不用写return？
-                                    });
+                                        if (!find) return;
+                                        using var imagePick = CaptureToRectArea();
+                                        if (imagePick.Find(AutoPickAssets.Get(imagePick, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickRo).IsExist())
+                                            find = false;
+                                    }, () => Simulation.ReleaseAllKey(), ct);
+                                if (!gatheringSucceeded)
+                                {
+                                    Logger.LogWarning("琴聚物命令未确认执行，停止后续动作及成功短扫");
+                                    break;
                                 }
 
                                 if (!find)
@@ -1067,6 +1046,12 @@ public class AutoFightTask : ISoloTask
                             
                             Simulation.ReleaseAllKey();
                         }
+                    }
+                    if (gatheringSucceeded && AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
+                        _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
+                    {
+                        Logger.LogInformation("琴聚物动作完成，执行3秒短时扫描拾取");
+                        await new ScanPickTask().Start(ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
                     }
                 }
             }
@@ -1435,15 +1420,6 @@ public class AutoFightTask : ISoloTask
         return dictionary;
     }
 
-    private bool HasFightFlagByYolo(ImageRegion imageRegion)
-    {
-        // if (RuntimeHelper.IsDebug)
-        // {
-        //     imageRegion.SrcMat.SaveImage(Global.Absolute(@"log\fight\" + $"{DateTime.Now:yyyyMMdd_HHmmss_ffff}.png"));
-        // }
-        var dict = _predictor.Detect(imageRegion);
-        return dict.ContainsKey("health_bar") || dict.ContainsKey("enemy_identify");
-    }
 
     // 无用
     // [Obsolete]

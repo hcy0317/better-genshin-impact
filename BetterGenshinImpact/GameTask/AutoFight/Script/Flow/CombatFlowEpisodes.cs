@@ -15,6 +15,21 @@ internal sealed class CombatFlowEpisodes
         public int NoProgressLimit = int.MaxValue;
     }
     private readonly Dictionary<string, Episode> _episodes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _skillResets = new(StringComparer.Ordinal);
+    private readonly HashSet<Guid> _consumedResets = [];
+
+    internal bool CanTrySkillReset(string objective, double now) =>
+        double.IsFinite(now) && _skillResets.GetValueOrDefault(objective) < 2 &&
+        _episodes.TryGetValue(objective, out var episode) &&
+        (now >= episode.Deadline || episode.Attempts >= episode.Limit || episode.NoProgress >= episode.NoProgressLimit);
+
+    internal bool TryReopenAfterSkillReset(string objective, Guid attemptId, double now)
+    {
+        if (attemptId == Guid.Empty || !CanTrySkillReset(objective, now) || !_consumedResets.Add(attemptId)) return false;
+        _skillResets[objective] = _skillResets.GetValueOrDefault(objective) + 1;
+        _episodes.Remove(objective);
+        return true;
+    }
 
     public bool TrySpend(string objective, double now, double timeout, int limit, out double deadline,
         int noProgressLimit = int.MaxValue)
@@ -43,5 +58,5 @@ internal sealed class CombatFlowEpisodes
     {
         if (_episodes.TryGetValue(objective, out var episode) && episode.Attempts > 0) episode.Attempts--;
     }
-    public void Clear() => _episodes.Clear();
+    public void Clear() { _episodes.Clear(); _skillResets.Clear(); _consumedResets.Clear(); }
 }

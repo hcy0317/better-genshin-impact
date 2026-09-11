@@ -13,6 +13,15 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests;
 public class TaskExecutionScopeTests
 {
     [Fact]
+    public void PathCancellationProbePropagatesTerminalCombatFailureInsteadOfAllowingCatchToContinue()
+    {
+        using var owned = TaskExecutionScope.BeginOwned();
+        var script = new AutoPathingScript(".", null, new LimitedFile(Directory.GetCurrentDirectory()), (_, _) => { });
+        var failure = new CombatNotFinishedException("战斗尚未结束");
+        TaskExecutionScope.Capture().Report(failure);
+        Assert.Same(failure, Assert.Throws<CombatNotFinishedException>(() => _ = script.IsCancellationRequested));
+    }
+    [Fact]
     public void BackgroundInputCannotBypassTheSameTaskTerminalState()
     {
         using var owned = TaskExecutionScope.BeginOwned();

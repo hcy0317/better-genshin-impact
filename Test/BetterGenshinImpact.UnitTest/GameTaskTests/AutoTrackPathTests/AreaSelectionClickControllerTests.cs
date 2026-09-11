@@ -6,6 +6,23 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoTrackPathTests;
 
 public class AreaSelectionClickControllerTests
 {
+    [Fact]
+    public async Task TimeoutReportsCapturedMapStateInsteadOfClaimingNoObservation()
+    {
+        var clock = new FakeTimeProvider();
+        long frame = 0;
+        var error = await Assert.ThrowsAsync<TimeoutException>(() => AreaSelectionClickController.TryApplyAsync(
+            () => new(++frame, true, false, false),
+            (_, _) => throw new InvalidOperationException("no visible candidate"),
+            (ms, _) => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; },
+            default, clock: clock));
+        Assert.Contains("mapReady=True", error.Message);
+        Assert.Contains("selectorOpen=False", error.Message);
+        Assert.Contains("clicked=False", error.Message);
+        Assert.DoesNotContain("未取得观察", error.Message);
+        Assert.DoesNotContain("operation-complete", error.Message);
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, true)]

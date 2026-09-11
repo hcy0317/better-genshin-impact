@@ -7,6 +7,28 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.RecognitionTests;
 public class BgiOnnxFactoryPredictorCacheTests
 {
     [Fact]
+    public void AnUnusedModelNeverStartsInitializationOrBuildsAnEngine()
+    {
+        var built = false;
+        using var initialization = new OnnxInitializationTask<int>("unused", () => { built = true; return 1; },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.False(initialization.IsValueCreated);
+        Assert.False(built);
+    }
+    [Theory]
+    [InlineData("BgiQClassify")]
+    [InlineData("BgiAvatarSide")]
+    [InlineData("BgiWorld")]
+    public void RealtimeModelsUseTensorRtOnlyWithAnExistingCache(string model)
+    {
+        ProviderType[] configured = [ProviderType.TensorRt, ProviderType.Cuda, ProviderType.Cpu];
+        Assert.Equal([ProviderType.Cuda, ProviderType.Cpu], BgiOnnxFactory.ResolveRealtimeProviderTypes(model, false, configured));
+        Assert.Equal(configured, BgiOnnxFactory.ResolveRealtimeProviderTypes(model, true, configured));
+        Assert.Equal([ProviderType.Cpu], BgiOnnxFactory.ResolveRealtimeProviderTypes(model, false, [ProviderType.TensorRt]));
+        Assert.Equal([ProviderType.Cpu], BgiOnnxFactory.ResolveRealtimeProviderTypes(model, false, [ProviderType.Cpu]));
+        Assert.Equal(configured, BgiOnnxFactory.ResolveRealtimeProviderTypes("BgiTree", false, configured));
+    }
+    [Fact]
     public void Constructor_ShouldAllowAWorkflowToForceCpuOcr()
     {
         using var factory = new BgiOnnxFactory(

@@ -34,6 +34,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             return match.IsExist();
         }
         using var menuBack = image.Find(RecognitionAssets.Get("UseRedeemCode", "MenuBack", image));
+        var revive = Bv.ReadReviveState(image);
         var snapshot = new UiSnapshot(Interlocked.Increment(ref _frameSequence))
         {
             CapturedAt = DateTimeOffset.UtcNow,
@@ -43,7 +44,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             PartyList = Has("PartyBtnDelete"),
             Talk = Bv.IsInTalkUi(image),
             Prompt = Bv.IsInPromptDialog(image),
-            Revive = Bv.IsInRevivePrompt(image),
+            Revive = revive != ReviveUiState.None,
+            FullPartyDefeat = revive == ReviveUiState.FullPartyDefeat,
             InDomain = Bv.IsInDomainIncludingRevivePrompt(image),
             Closable = Bv.IsInAnyClosableUi(image),
             ExitDoor = Has("BtnExitDoor"),
@@ -72,6 +74,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         UiOperation.Current?.Check();
         switch (action)
         {
+            case UiAction.ReviveParty when observed.FullPartyDefeat && current.FullPartyDefeat:
+                return Task.FromResult(Bv.ClickIfInReviveModal(image));
             case UiAction.Escape when observed.CanEscape && current.CanEscape:
             case UiAction.RequestDomainExit when observed.Matches(UiTarget.DomainMain) && current.Matches(UiTarget.DomainMain):
                 Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);

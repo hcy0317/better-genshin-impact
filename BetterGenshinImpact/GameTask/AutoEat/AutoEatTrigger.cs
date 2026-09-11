@@ -3,6 +3,7 @@ using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Service.Notification;
 using BetterGenshinImpact.Service.Notification.Model.Enum;
@@ -41,6 +42,7 @@ public class AutoEatTrigger : ITaskTrigger
     public void Init()
     {
         IsEnabled = _config.Enabled;
+        _recoveryDetected = false;
     }
 
     public void OnCapture(CaptureContent content)
@@ -55,6 +57,12 @@ public class AutoEatTrigger : ITaskTrigger
         {
             var ra = content.CaptureRectArea;
             var now = DateTime.Now;
+            if (!CanUseGadget(NativeUiDriver.Read(ra)))
+            {
+                // 弹窗与复苏界面不能沿用上一页缓存继续发送小道具按键。
+                _recoveryDetected = false;
+                return;
+            }
 
             // 检测角色是否红血
             if (Bv.CurrentAvatarIsLowHp(ra))
@@ -106,14 +114,14 @@ public class AutoEatTrigger : ITaskTrigger
         }
     }
 
-    /// <summary>
-    /// 检测Recovery.png图标
-    /// </summary>
+    internal static bool CanUseGadget(UiSnapshot snapshot) => snapshot.Matches(UiTarget.Main);
+
+    /// <summary>检测Recovery.png图标。</summary>
     private bool CheckRecovery(ImageRegion imageRegion)
     {
         try
         {
-            var result = imageRegion.Find(RecognitionAssets.Get("AutoEat", "RecoveryIcon", imageRegion));
+            using var result = imageRegion.Find(RecognitionAssets.Get("AutoEat", "RecoveryIcon", imageRegion));
             return result.IsExist();
         }
         catch (Exception e)
@@ -130,7 +138,7 @@ public class AutoEatTrigger : ITaskTrigger
     {
         try
         {
-            var result = imageRegion.Find(RecognitionAssets.Get("AutoEat", "ResurrectionIcon", imageRegion));
+            using var result = imageRegion.Find(RecognitionAssets.Get("AutoEat", "ResurrectionIcon", imageRegion));
             return result.IsExist();
         }
         catch (Exception e)

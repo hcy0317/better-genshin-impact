@@ -24,9 +24,18 @@ public class StopFlyingHandler : IActionHandler
             await Delay(300, ct);
         }
 
-        // 下落攻击接近目的地
+        // 路线节点不等于当前仍在空中，已在地面时禁止把下落攻击变成普攻。
+        var attacked = LandingAttackGuard.TryAttack(() =>
+        {
+            using var screen = CaptureToRectArea();
+            return Bv.GetMotionStatus(screen);
+        }, () => Simulation.SendInput.SimulateAction(GIActions.NormalAttack), ct);
+        if (!attacked)
+        {
+            Logger.LogInformation("动作：未确认飞行，跳过下落攻击");
+            return;
+        }
         Logger.LogInformation("动作：下落攻击");
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
         int i;
         for (i = 0; i < 50; i++)
         {

@@ -26,6 +26,15 @@ internal static class AreaSelectionClickController
             {
                 operation.Check();
                 var observed = capture();
+                var fresh = observed.FrameId > lastFrame;
+                if (fresh)
+                {
+                    lastFrame = observed.FrameId;
+                    stable = clicked && observed.MapReady && !observed.SelectorOpen ? stable + 1 : 0;
+                }
+                operation.Observe("区域已点击、选择器关闭且地图连续两帧就绪",
+                    $"mapReady={observed.MapReady},selectorOpen={observed.SelectorOpen},candidate={observed.HasCandidate},clicked={clicked},stable={stable}",
+                    observed.FrameId);
                 operation.Check();
                 var state = (observed.MapReady, observed.SelectorOpen, observed.HasCandidate);
                 if (lastState != state)
@@ -35,10 +44,8 @@ internal static class AreaSelectionClickController
                         clicked, operation.Remaining.TotalMilliseconds);
                     lastState = state;
                 }
-                if (observed.FrameId > lastFrame)
+                if (fresh)
                 {
-                    lastFrame = observed.FrameId;
-                    stable = clicked && observed.MapReady && !observed.SelectorOpen ? stable + 1 : 0;
                     if (stable >= 2) return true;
                     // 先承接前次点击的迟到结果，只有新帧仍显示选择器和候选时才允许再次点击。
                     if (observed.SelectorOpen && observed.HasCandidate && attempts < 3

@@ -8,6 +8,39 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class UiTransitionTests
 {
+    [Theory]
+    [InlineData(7, 1)]
+    [InlineData(2, 2)]
+    public async Task RetryAdmissionPreservesFailureWhenRecoveryLeavesTooLittleBudget(int attemptSeconds, int expectedAttempts)
+    {
+        var clock = new FakeTimeProvider();
+        var original = new InvalidOperationException("map drag did not converge");
+        var attempts = 0;
+        var recoveries = 0;
+        async Task<int> Run() => await UiOperation.RunAsync("teleport", TimeSpan.FromSeconds(10), default,
+            operation => UiRecovery.RunWithRecoveryAsync<int>(_ =>
+            {
+                attempts++;
+                if (attempts > 1) return Task.FromResult(42);
+                clock.Advance(TimeSpan.FromSeconds(attemptSeconds));
+                throw original;
+            }, _ =>
+            {
+                recoveries++;
+                clock.Advance(TimeSpan.FromSeconds(1));
+                return Task.CompletedTask;
+            }, operation.Token, minimumRetryBudget: TimeSpan.FromSeconds(3)), clock: clock);
+        if (expectedAttempts == 1)
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(Run);
+            Assert.Same(original, error);
+            Assert.True(error.Data.Contains("UiRetrySkipped"));
+        }
+        else Assert.Equal(42, await Run());
+        Assert.Equal(expectedAttempts, attempts);
+        Assert.Equal(1, recoveries);
+    }
+
     [Fact]
     public async Task RecognizedCommissionHandbookCanExitBeforeTrackingStarts()
     {

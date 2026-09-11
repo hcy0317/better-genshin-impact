@@ -19,8 +19,10 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         public bool SawCooldown;
         public bool Confirmed;
         public bool CreditTaken;
+        public bool InactiveActorProbed;
         public long FrameId = -1;
         public double ObservedAt = attempt.InputAt;
+        public double? ReadySince;
     }
     private readonly object _gate = new();
     private readonly Dictionary<(string Actor, Method Skill), Slot> _slots = new();
@@ -56,11 +58,22 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
             slot.ObservedAt = sample.CapturedAt;
             if (sample.CoolingDown == true)
             {
+                slot.ReadySince = null;
                 slot.SawCooldown = true;
                 return ConfirmSlot(slot, sample.CapturedAt);
             }
-            // 必须先见过本次 CD，再用新的明确就绪证据结束冲突；OCR 空白不等于可重发。
-            if (slot.SawCooldown && sample.CoolingDown == false && sample.Ready == true) _slots.Remove((actor, skill));
+            // 冷却周期完成可释放；若原输入从未获确认，过期后需两帧明确就绪，
+            // 仅结束旧冲突，不补记施放成功。旧帧和 Unknown 均不能授权重发。
+            if (sample.CoolingDown == false && sample.Ready == true)
+            {
+                if (slot.SawCooldown) _slots.Remove((actor, skill));
+                else if (sample.CapturedAt >= slot.Attempt.Deadline)
+                {
+                    slot.ReadySince ??= sample.CapturedAt;
+                    if (sample.CapturedAt - slot.ReadySince.Value >= 0.2) _slots.Remove((actor, skill));
+                }
+            }
+            else slot.ReadySince = null;
             return false;
         }
     }
@@ -78,9 +91,45 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         }
     }
 
+    // A release is new readiness evidence, not a late success receipt. The
+    // removed attempt is returned once so separate goals cannot reuse it.
+    internal CombatSkillAttempt? TryReleaseExpiredReady(string actor, Method skill,
+        CombatSkillObservation first, CombatSkillObservation second)
+    {
+        lock (_gate)
+        {
+            if (_closed || !_slots.TryGetValue((actor, skill), out var slot) || slot.CreditTaken ||
+                first.BattleId != battleId || second.BattleId != battleId ||
+                first.FrameId <= slot.FrameId || second.FrameId <= first.FrameId ||
+                !double.IsFinite(first.CapturedAt) || !double.IsFinite(second.CapturedAt) ||
+                first.CapturedAt <= slot.ObservedAt || first.CapturedAt < slot.Attempt.Deadline ||
+                second.CapturedAt - first.CapturedAt < 0.2 ||
+                first.Ready != true || second.Ready != true || first.CoolingDown != false || second.CoolingDown != false)
+                return null;
+            _slots.Remove((actor, skill));
+            return slot.Attempt;
+        }
+    }
+
     internal bool HasUnresolved(string actor, Method skill)
     {
         lock (_gate) return !_closed && _slots.TryGetValue((actor, skill), out var slot) && !slot.CreditTaken;
+    }
+
+    internal CombatSkillAttempt? TakeInactiveActorProbe(Func<string, bool?> isActive)
+    {
+        lock (_gate)
+        {
+            if (_closed) return null;
+            foreach (var slot in _slots.Values)
+            {
+                if (slot.CreditTaken || slot.Confirmed || slot.InactiveActorProbed || isActive(slot.Attempt.Actor) != false)
+                    continue;
+                slot.InactiveActorProbed = true;
+                return slot.Attempt;
+            }
+            return null;
+        }
     }
 
     internal CombatSkillAttemptState GetState(string actor, Method skill, double now)

@@ -84,13 +84,13 @@ public class ApplicationHostService(
                     case CommandLineAction.StartOneDragon:
                         // 通过命令行参数启动「一条龙」 => 跳转到一条龙配置页。
                         _ = _navigationWindow.Navigate(typeof(OneDragonFlowPage));
-                        var oneDragon = App.GetService<OneDragonFlowViewModel>();
-                        if (oneDragon != null)
-                        {
-                            _ = ObserveCommandLineTaskAsync(
-                                oneDragon.RunCommandLineAsync(cmdOptions.OneDragonConfigName),
-                                "一条龙");
-                        }
+                        // 只有启动参数所拥有的进程在异常结束后退出；不能套用到UI或IPC调用。
+                        _ = CommandLineOneDragonLifetime.RunAsync(
+                            () => (App.GetService<OneDragonFlowViewModel>()
+                                ?? throw new InvalidOperationException("无法创建命令行一条龙任务协调器"))
+                                .RunCommandLineAsync(cmdOptions.OneDragonConfigName),
+                            ReportOwnedOneDragonException,
+                            RequestOwnedCommandLineShutdown);
                         break;
 
                     case CommandLineAction.ChildSessionOneDragon:
@@ -146,6 +146,27 @@ public class ApplicationHostService(
         }
         //
         await Task.CompletedTask;
+    }
+
+    private void ReportOwnedOneDragonException(Exception exception)
+    {
+        if (exception is OperationCanceledException or NormalEndException)
+        {
+            _logger.LogInformation(exception, "命令行一条龙已取消或结束，退出本次专用启动进程");
+            return;
+        }
+        TaskFailureDiagnostics.CaptureScreenshotOnce(exception, "命令行一条龙执行失败");
+        _logger.LogError(exception, "命令行一条龙执行失败，退出本次专用启动进程");
+    }
+
+    private static void RequestOwnedCommandLineShutdown(int exitCode)
+    {
+        Environment.ExitCode = exitCode;
+        var application = Application.Current;
+        if (application == null || application.Dispatcher.HasShutdownStarted || application.Dispatcher.HasShutdownFinished)
+            return;
+        // 使用WPF Shutdown而非窗口Close，避免托盘最小化逻辑取消退出；沿用OnExit的正常资源清理。
+        _ = application.Dispatcher.BeginInvoke(new Action(() => application.Shutdown(exitCode)));
     }
 
     private async Task ObserveCommandLineTaskAsync(Task task, string taskName)

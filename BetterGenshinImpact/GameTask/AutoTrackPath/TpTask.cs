@@ -847,9 +847,8 @@ public class TpTask
             return;
         }
 
-        await MouseMoveMap(
-            GetDisplayScaleAdjustedMouseDelta(moveMouseX),
-            GetDisplayScaleAdjustedMouseDelta(moveMouseY));
+        (moveMouseX, moveMouseY) = LimitMapDragDelta(moveMouseX, moveMouseY);
+        await MouseMoveMap(moveMouseX, moveMouseY);
     }
 
     private async Task<bool> AdjustInitialTeleportMoveZoomLevel(string mapName, double targetX, double targetY)
@@ -1279,6 +1278,7 @@ public class TpTask
         return UiRecovery.RunWithRecoveryAsync(_ => TpOnce(tpX, tpY, mapContext, force),
             _ => CloseBigMapAfterTeleportFailure(), ct,
             canRetry: error => error is not TeleportPanelNotOpenedException,
+            minimumRetryBudget: TimeSpan.FromSeconds(10),
             logger: Logger,
             captureFailure: error => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
                 $"UI root={UiOperation.Current?.RootId} op={UiOperation.Current?.Id} 传送原始失败，恢复前现场"));
@@ -1355,9 +1355,29 @@ public class TpTask
         }
 
         var moveCompleted = false;
+        var dragProgress = new MapDragProgress();
+        var slowDrag = false;
+        void ObserveDragProgress(double? distance)
+        {
+            var decision = dragProgress.Observe(distance);
+            if (decision == MapDragProgressDecision.Continue) return;
+            if (decision == MapDragProgressDecision.Stop)
+                throw new InvalidOperationException("地图拖动持续无进展，已重新定位并慢速重试；停止本轮传送");
+            ct.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
+            slowDrag = true;
+            if (!TryGetRecognizedMoveMapState(mapName, x, y, currentZoomLevel, out var recoveredState))
+                throw new InvalidOperationException("地图拖动停滞后的全图重定位失败，禁止按预测坐标继续拖动");
+            moveState = recoveredState;
+            dragProgress.Reanchor(Math.Sqrt(moveState.XOffset * moveState.XOffset + moveState.YOffset * moveState.YOffset));
+            exceptionTimes = 0;
+            Logger.LogWarning("地图拖动连续无进展，全图重定位后仅本次慢速绝对拖动；禁止相对输入兜底");
+        }
         // 开始移动并放大地图
         for (var iteration = 0; iteration < _tpConfig.MaxIterations; iteration++)
         {
+            ct.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
             var targetClickable = TryGetClickableTargetPosition(mapName, x, y, requiredVisibleRadius, out var targetBigMapRect, out _, out _);
             if (targetClickable)
             {
@@ -1420,11 +1440,8 @@ public class TpTask
             int moveMouseX = (int)Math.Round(moveState.MouseDeltaX) * Math.Sign(moveState.XOffset);
             int moveMouseY = (int)Math.Round(moveState.MouseDeltaY) * Math.Sign(moveState.YOffset);
             (moveMouseX, moveMouseY) = LimitMapDragDelta(moveMouseX, moveMouseY);
-            // DpiScale 是 Windows 显示缩放倍率，实际拖动和预测必须使用同一口径。
-            int effectiveMoveMouseX = GetDisplayScaleAdjustedMouseDelta(moveMouseX);
-            int effectiveMoveMouseY = GetDisplayScaleAdjustedMouseDelta(moveMouseY);
-
-            var mouseMoveResult = await MouseMoveMap(effectiveMoveMouseX, effectiveMoveMouseY);
+            // 识别使用标准图像像素，MouseMoveMap只按捕获分辨率转换一次，不叠加WPF DPI。
+            var mouseMoveResult = await MouseMoveMap(moveMouseX, moveMouseY, slowDrag);
             await Delay(30, ct);
 
             // 推算理论上的移动后坐标 (惯性预测)
@@ -1446,6 +1463,11 @@ public class TpTask
                 double actualMoveLen = Math.Sqrt(actualDeltaX * actualDeltaX + actualDeltaY * actualDeltaY);
                 double moveRatio = expectedMoveLen > 0 ? actualMoveLen / expectedMoveLen : 0;
                 double moveDirectionCos = GetMoveDirectionCos(predictedDeltaX, predictedDeltaY, actualDeltaX, actualDeltaY);
+                var targetDistance = Math.Sqrt(Math.Pow(newCenterPoint.X - x, 2) + Math.Pow(newCenterPoint.Y - y, 2));
+                Logger.LogDebug("MAP_DRAG iteration={Iteration} mode={Mode} requested1080=({RequestedX},{RequestedY}) sent1080=({SentX},{SentY}) cursorPhysical=({CursorX:F1},{CursorY:F1}) distance={Distance:F2} zoom={Zoom:F3}",
+                    iteration + 1, slowDrag ? "absolute-virtual-slow" : "absolute-virtual", moveMouseX, moveMouseY,
+                    mouseMoveResult.SentDeltaX, mouseMoveResult.SentDeltaY, mouseMoveResult.ActualDeltaX, mouseMoveResult.ActualDeltaY,
+                    targetDistance, currentZoomLevel);
                 // 如果识别结果和本次拖动的距离/方向明显不一致，则使用全图识别重新校准，
                 // 并缩小下一次拖动，避免错误反馈导致反向来回或持续过冲。
                 if (IsMapMoveRecognitionAnomaly(expectedMoveLen, actualMoveLen, moveRatio, moveDirectionCos, jumpDistance))
@@ -1459,11 +1481,13 @@ public class TpTask
                     moveState = TryGetRecognizedMoveMapState(mapName, x, y, currentZoomLevel, out var recoveredState)
                         ? recoveredState.ScaleMouseDelta(0.5d)
                         : moveState.ScaleMouseDelta(0.5d);
+                    ObserveDragProgress(null);
                     continue;
                 }
 
                 moveState = GetMoveMapState(newCenterPoint, x, y, currentZoomLevel);
                 exceptionTimes = 0;
+                ObserveDragProgress(targetDistance);
             }
             catch (MapPositionNotRecognizedException)
             {
@@ -1474,6 +1498,7 @@ public class TpTask
                 }
 
                 moveState = GetMoveMapState(predictedPoint, x, y, currentZoomLevel);
+                ObserveDragProgress(null);
             }
         }
 
@@ -1843,19 +1868,6 @@ public class TpTask
         return Math.Clamp(zoomLevel, 1d, 6d);
     }
 
-    private static int GetDisplayScaleAdjustedMouseDelta(int pixelDelta)
-    {
-        double displayScale = TaskContext.Instance().DpiScale;
-        return (int)(pixelDelta / displayScale);
-    }
-
-    private static (double X, double Y) GetCursorPositionInCapture()
-    {
-        User32.GetCursorPos(out var cursor);
-        var captureRect = TaskContext.Instance().SystemInfo.CaptureAreaRect;
-        return (cursor.X - captureRect.X, cursor.Y - captureRect.Y);
-    }
-
     private static bool TryPickSafeMapDragStart(
         double preferredX,
         double preferredY,
@@ -1943,8 +1955,20 @@ public class TpTask
         return true;
     }
 
-    private async Task<(int SentDeltaX, int SentDeltaY, int Steps, double StartX, double StartY, double EndX, double EndY, double ActualDeltaX, double ActualDeltaY)> MouseMoveMap(int pixelDeltaX, int pixelDeltaY)
+    private async Task<(int SentDeltaX, int SentDeltaY, int Steps, double StartX, double StartY, double EndX, double EndY, double ActualDeltaX, double ActualDeltaY)> MouseMoveMap(int pixelDeltaX, int pixelDeltaY, bool slowDrag = false)
     {
+        CheckAndSleep(0);
+        using (var beforeDrag = CaptureToRectArea(forceNew: true))
+        {
+            if (!Bv.IsInBigMapUi(beforeDrag))
+                throw new InvalidOperationException("拖动前已不在地图界面，禁止发送鼠标按下");
+        }
+        var context = TaskContext.Instance();
+        var capture = context.SystemInfo.CaptureAreaRect;
+        var bounds = new System.Drawing.Rectangle(capture.X, capture.Y, capture.Width, capture.Height);
+        var desktop = System.Windows.Forms.SystemInformation.VirtualScreen;
+        var pointer = new MapDragPointer(context.GameHandle, bounds, desktop);
+        pointer.Check();
         // 起点向预期拖动方向的反方向偏移，并保留随机性；位移按可拖动地图区域裁剪。
         double startX = 0;
         double startY = 0;
@@ -1952,8 +1976,10 @@ public class TpTask
         double endY = 0;
         int sentDeltaX = 0;
         int sentDeltaY = 0;
-        GameCaptureRegion.GameRegionMove((rect, scale) =>
+        (double, double) PlanStart(Size rect, double scale)
         {
+            if (rect.Width <= 230 * scale || rect.Height <= 230 * scale)
+                throw new InvalidOperationException("地图捕获区域过小，禁止拖动");
             double expectedDeltaX = pixelDeltaX * scale;
             double expectedDeltaY = pixelDeltaY * scale;
             double edgePadding = Math.Max(8d * scale, 115d * scale);
@@ -2024,42 +2050,20 @@ public class TpTask
             endX = startX;
             endY = startY;
             return (startX, startY);
-        });
+        }
+        PlanStart(new Size(capture.Width, capture.Height), context.SystemInfo.ScaleTo1080PRatio);
 
+        if (sentDeltaX == 0 && sentDeltaY == 0)
+            throw new InvalidOperationException("地图安全拖动区域内没有有效位移，未按下鼠标");
         double moveMouseLength = Math.Sqrt(sentDeltaX * sentDeltaX + sentDeltaY * sentDeltaY);
         int steps = GetMapDragStepCount(moveMouseLength);
-        int[] stepX = GenerateSteps(sentDeltaX, steps);
-        int[] stepY = GenerateSteps(sentDeltaY, steps);
-        var startCursor = GetCursorPositionInCapture();
-        int movedX = 0;
-        int movedY = 0;
-        Simulation.SendInput.Mouse.LeftButtonDown();
-        try
-        {
-            for (var i = 0; i < steps; i++)
-            {
-                var i1 = i;
-                await Delay(GetTeleportOperationDelay(TpConfig.DefaultTeleportOperationDelayMilliseconds), ct);
-                movedX += stepX[i1];
-                movedY += stepY[i1];
-                if (_tpConfig.MapDragUseRelativeMove)
-                {
-                    GameCaptureRegion.GameRegionMoveBy((_, scale) => (stepX[i1] * scale, stepY[i1] * scale));
-                }
-                else
-                {
-                    GameCaptureRegion.GameRegionMove((_, scale) => (startX + movedX * scale, startY + movedY * scale));
-                }
-            }
-        }
-        finally
-        {
-            Simulation.SendInput.Mouse.LeftButtonUp();
-        }
-
+        var start = new System.Drawing.Point(capture.X + (int)Math.Round(startX), capture.Y + (int)Math.Round(startY));
+        var end = new System.Drawing.Point(capture.X + (int)Math.Round(endX), capture.Y + (int)Math.Round(endY));
+        var actualDelta = await MapDragGesture.RunAsync(pointer, bounds, start, end, steps,
+            Math.Max(slowDrag ? 32 : 16, GetTeleportOperationDelay(TpConfig.DefaultTeleportOperationDelayMilliseconds)),
+            (milliseconds, token) => Task.Delay(milliseconds, token), ct);
         await Delay(GetMapDragSettlingDelay(_tpConfig.TeleportOperationDelayMilliseconds), ct);
-        var endCursor = GetCursorPositionInCapture();
-        return (sentDeltaX, sentDeltaY, steps, startX, startY, endX, endY, endCursor.X - startCursor.X, endCursor.Y - startCursor.Y);
+        return (sentDeltaX, sentDeltaY, steps, startX, startY, endX, endY, actualDelta.X, actualDelta.Y);
     }
 
     private static int GetMapDragStepCount(double moveMouseLength)

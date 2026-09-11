@@ -9,6 +9,16 @@ namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal static class UiRecovery
 {
+    internal static async Task RecoverDefeatedAsync(IUiDriver driver,
+        Func<CancellationToken, Task> recoverAtStatue, CancellationToken ct,
+        ILogger? logger = null, TimeProvider? clock = null)
+    {
+        await ToMainAsync(driver, ct, requireOverworld: true, logger: logger, clock: clock);
+        ct.ThrowIfCancellationRequested();
+        // 调用方保留恢复后新截图验证与 CombatRecoveryCompletedException 的唯一签发路径。
+        await recoverAtStatue(ct);
+    }
+
     internal static Task<UiSnapshot> ConfirmPartyAsync(IUiDriver driver,
         Func<CancellationToken, Task<bool>> select, Func<CancellationToken, Task<bool>> apply,
         CancellationToken ct, bool deferApplyToCaller = false, ILogger? logger = null,
@@ -51,9 +61,10 @@ internal static class UiRecovery
     internal static async Task<T> RunWithRecoveryAsync<T>(Func<CancellationToken, Task<T>> attempt,
         Func<CancellationToken, Task> recover, CancellationToken ct,
         Func<Exception, bool>? canRetry = null, ILogger? logger = null,
-        Action<Exception>? captureFailure = null, int maxAttempts = 3)
+        Action<Exception>? captureFailure = null, int maxAttempts = 3, TimeSpan? minimumRetryBudget = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxAttempts, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(minimumRetryBudget ?? TimeSpan.Zero, TimeSpan.Zero);
         for (var index = 0; index < maxAttempts; index++)
         {
             ct.ThrowIfCancellationRequested();
@@ -72,6 +83,20 @@ internal static class UiRecovery
                 await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(failure, () => recover(ct), ct, logger);
                 if (index + 1 == maxAttempts || canRetry?.Invoke(failure) == false)
                     ExceptionDispatchInfo.Capture(failure).Throw();
+                ct.ThrowIfCancellationRequested();
+                UiOperation.Current?.Check();
+                if (minimumRetryBudget is { } minimum && UiOperation.Current is { } operation
+                    && operation.Remaining < minimum)
+                {
+                    try
+                    {
+                        failure.Data["UiRetrySkipped"] = $"恢复后剩余 {operation.Remaining.TotalMilliseconds:F0}ms，小于重试所需 {minimum.TotalMilliseconds:F0}ms";
+                        logger?.LogWarning("UI_RETRY_SKIPPED root={RootId} remainingMs={Remaining:F0} minimumMs={Minimum:F0} original={Original}",
+                            operation.RootId, operation.Remaining.TotalMilliseconds, minimum.TotalMilliseconds, failure.Message);
+                    }
+                    catch { /* 诊断不得替换原失败。 */ }
+                    ExceptionDispatchInfo.Capture(failure).Throw();
+                }
             }
         }
         throw new InvalidOperationException("界面操作重试未完成");
@@ -84,7 +109,7 @@ internal static class UiRecovery
         return UiTransition.WaitAsync("return-main", requireOverworld ? UiTarget.Overworld : UiTarget.Main,
             driver, ct, TimeSpan.FromSeconds(20),
             // 退出门图标只能证明菜单存在，不能证明点击会返回HUD；使用已知的关闭动作。
-            observed => observed.CanEscape ? UiAction.Escape : null,
+            observed => observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape : null,
             logger: logger, clock: clock, captureFailure: captureFailure);
     }
 
@@ -103,7 +128,7 @@ internal static class UiRecovery
                         ? UiAction.ConfirmDomainExit : null;
                 domainFrames = observed.Matches(UiTarget.DomainMain) ? domainFrames + 1 : 0;
                 if (domainFrames >= 2) return UiAction.RequestDomainExit;
-                return observed.CanEscape ? UiAction.Escape : null;
+                return observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape : null;
             }, logger: logger, clock: clock, captureFailure: captureFailure,
             actionCompleted: (action, applied, observed) =>
             {

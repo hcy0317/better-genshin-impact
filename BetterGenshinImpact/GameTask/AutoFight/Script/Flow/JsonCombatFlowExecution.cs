@@ -22,6 +22,9 @@ public sealed class JsonCombatFlowExecution : IDisposable
     private readonly HashSet<Root> _unproductiveRoots = [];
     private bool _closed;
     public CombatFlowContext Context => _battle.Context;
+    public bool LastRoundHadAction { get; private set; }
+    public string? LastMaintenanceDecision => _active?.Execution.LastMaintenanceDecision ??
+        _roots.Select(root => root.Execution.LastMaintenanceDecision).LastOrDefault(decision => decision != null);
     public CombatFlowStatistics RuntimeStatistics => _battle.Diagnostics.Snapshot();
     public IReadOnlyCollection<string> Actors { get; }
     public IReadOnlyList<string> Diagnostics { get; }
@@ -143,6 +146,7 @@ public sealed class JsonCombatFlowExecution : IDisposable
         if (_active.Execution.MadeProgressInRound) _unproductiveRoots.Clear();
         if (step.RoundCompleted)
         {
+            LastRoundHadAction = _active.Execution.LastRoundHadAction;
             if (step.Result == CombatFlowResult.Succeeded && _active.Execution.LastRoundHadAction)
                 _battle.History.Record(_active.Action.Index, _active.Action.Name, Context.Now);
             if (!_active.Execution.MadeProgressInRound) _unproductiveRoots.Add(_active);

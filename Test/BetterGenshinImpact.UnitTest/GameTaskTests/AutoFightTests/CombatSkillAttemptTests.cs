@@ -7,6 +7,24 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatSkillAttemptTests
 {
     [Fact]
+    public void ExpiredUnconfirmedInputCanRecoverOnlyAfterTwoFreshExplicitReadyFrames()
+    {
+        var battle = Guid.NewGuid();
+        using var attempts = new CombatSkillAttempts(battle);
+        var old = attempts.TryBegin("娜维娅", Method.Burst, "old", 0, 2)!;
+        attempts.Observe("娜维娅", Method.Burst, new(battle, 1, 2.1, false, true));
+        Assert.True(attempts.IsOccupied("娜维娅", Method.Burst));
+        attempts.Observe("娜维娅", Method.Burst, new(battle, 1, 2.5, false, true));
+        Assert.True(attempts.IsOccupied("娜维娅", Method.Burst));
+        attempts.Observe("娜维娅", Method.Burst, new(battle, 2, 2.6, null, null));
+        attempts.Observe("娜维娅", Method.Burst, new(battle, 3, 2.7, false, true));
+        Assert.True(attempts.IsOccupied("娜维娅", Method.Burst));
+        attempts.Observe("娜维娅", Method.Burst, new(battle, 4, 3.0, false, true));
+        Assert.False(attempts.IsOccupied("娜维娅", Method.Burst));
+        Assert.False(attempts.Confirm(old.AttemptId, 3.1));
+        Assert.NotNull(attempts.TryBegin("娜维娅", Method.Burst, "new", 3.1, 5));
+    }
+    [Fact]
     public void NativePendingObservationCreditsTheOriginalInputTimeWithoutAnotherInput()
     {
         var clock = new FakeTimeProvider();
