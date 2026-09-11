@@ -42,6 +42,28 @@ func TestInventoryStatsMatchNativeUnitsWithoutDoubleCounting(t *testing.T) {
 	}
 }
 
+func TestNewStellarSetsApplyTheirTwoPieceBonusWithoutAReaction(t *testing.T) {
+	for _, name := range []string{"HeartOfTheFurnace", "ScarletProof"} {
+		t.Run(name, func(t *testing.T) {
+			r := inventoryRequest()
+			for i := range r.Equipment["amber"] {
+				r.Equipment["amber"][i].SetKey = name
+			}
+			actual, err := engine.Evaluate(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reference, err := engine.Evaluate(engine.Request{SchemaVersion: "1", EngineRevision: engine.Revision, Seeds: []int64{17}, Config: fixedConfig + "\namber add stats cd=0.21 atk%=0.18;"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if actual.MeanDPS != reference.MeanDPS {
+				t.Fatalf("non-triggered set damage %v != %v", actual.MeanDPS, reference.MeanDPS)
+			}
+		})
+	}
+}
+
 func TestInvalidInventoryIsNeverSilentlyAdjusted(t *testing.T) {
 	for name, change := range map[string]func(*engine.Request){
 		"double_stats":    func(r *engine.Request) { r.Config = fixedConfig },

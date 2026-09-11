@@ -1,0 +1,71 @@
+package sandrone
+
+import (
+ "github.com/genshinsim/gcsim/pkg/core/action"
+ "github.com/genshinsim/gcsim/pkg/core/attacks"
+ "github.com/genshinsim/gcsim/pkg/core/attributes"
+ "github.com/genshinsim/gcsim/pkg/core/combat"
+ "github.com/genshinsim/gcsim/pkg/core/info"
+)
+
+// Provisional animation marks, not measured frame data. Exposed as model
+// assumptions before this extension can be used for equipment recommendations.
+const skillFirstHit = 20
+const skillSecondHit = 24
+const skillAnimation = 42
+// Only the final24f gap is source-reported (~0.4s); the first three hitmarks
+// and the total animation are provisional model timings.
+var burstHitmarks = []int{36,48,60}
+const burstFinalHit = 84
+const burstAnimation = 96
+
+func actionInfo(duration int, state action.AnimationState) action.Info {
+ return action.Info{Frames:func(action.Action)int{return duration},AnimationLength:duration,CanQueueAfter:duration,State:state}
+}
+
+func(c *char) Skill(p map[string]int)(action.Info,error) {
+ boosted:=c.Base.Ascension>=1 && c.power.Value()>50 && c.radiance()!=attacks.AttackTagNone
+ c.stopCharge()
+ c.power.StartSkillCooling()
+ ai:=info.AttackInfo{ActorIndex:c.Index(),Abil:"Prism Shot",AttackTag:attacks.AttackTagElementalArt,
+  ICDTag:attacks.ICDTagElementalArt,ICDGroup:attacks.ICDGroupDefault,Element:attributes.Cryo,Durability:25,
+  StrikeType:attacks.StrikeTypeDefault,Mult:talent["combat2"]["param1"][c.TalentLvlSkill()]}
+ pattern:=combat.NewCircleHitOnTarget(c.Core.Combat.PrimaryTarget(),nil,3)
+ c.Core.QueueAttack(ai,pattern,skillFirstHit,skillFirstHit,c.particle)
+ c.Core.Tasks.Add(func(){
+  second:=ai
+  c.convertRadiance(&second,talent["combat2"]["param2"][c.TalentLvlSkill()],talent["combat2"]["param4"][c.TalentLvlSkill()])
+  if boosted && second.AttackTag!=attacks.AttackTagElementalArt{second.Mult*=4}
+  c.Core.QueueAttack(second,pattern,0,0,c.particle)
+ },skillSecondHit)
+ c.SetCD(action.ActionSkill,4*60)
+ return actionInfo(skillAnimation,action.SkillState),nil
+}
+
+func(c *char) particle(hit info.AttackCB) {
+ if hit.Target.Type()!=info.TargettableEnemy || c.StatusIsActive("sandrone-particle-icd") {return}
+ c.AddStatus("sandrone-particle-icd",150,false)
+ c.Core.QueueParticle("sandrone",1,attributes.Cryo,c.ParticleDelay)
+}
+
+func(c *char) Burst(p map[string]int)(action.Info,error) {
+ tactics:=c.consumeTactics()
+ c.stopCharge()
+ ai:=info.AttackInfo{ActorIndex:c.Index(),Abil:"Bombardment",AttackTag:attacks.AttackTagElementalBurst,
+  ICDTag:attacks.ICDTagElementalBurst,ICDGroup:attacks.ICDGroupDefault,Element:attributes.Cryo,Durability:25,
+  StrikeType:attacks.StrikeTypeDefault,Mult:talent["combat3"]["param1"][c.TalentLvlBurst()]}
+ pattern:=combat.NewCircleHitOnTarget(c.Core.Combat.PrimaryTarget(),nil,5)
+ for _,frame:=range burstHitmarks {c.Core.QueueAttack(ai,pattern,frame,frame)}
+ ai.Abil="Convective Inhibition Ray"
+ ai.ICDTag=attacks.ICDTagNone
+ ai.Mult=talent["combat3"]["param2"][c.TalentLvlBurst()]
+ c.Core.Tasks.Add(func(){
+  ray:=ai
+  c.convertRadiance(&ray,talent["combat3"]["param3"][c.TalentLvlBurst()],talent["combat3"]["param6"][c.TalentLvlBurst()])
+  if ray.AttackTag!=attacks.AttackTagElementalBurst{ray.Mult*=tactics}
+  c.Core.QueueAttack(ray,pattern,0,0)
+ },burstFinalHit)
+ c.SetCD(action.ActionBurst,15*60)
+ c.ConsumeEnergy(0)
+ return actionInfo(burstAnimation,action.BurstState),nil
+}

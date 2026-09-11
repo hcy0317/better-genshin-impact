@@ -40,7 +40,9 @@ Windows 承载端使用 Job Object。Linux 使用 pidfd、父线程退出信号�
 
 ## 维护边界
 
-单次停止方式与采样次数分开：普通模式按 `duration`（游戏内秒）结束；提供敌人 HP 的原生模式按敌人死亡或脚本动作结束停止。后者的平均 DPS 使用各自真实轨迹时长，永久减抗/减防不再被旧 duration 提前截断。`samplingIterations` 是实际独立采样数，不代表自动收敛。
+产品的配装和循环优化统一传 `autoRounds=true`、`roundCount=1..64`，默认3轮。每个随机样本在真实完成指定主循环次数后结束，不按固定秒数或靶子血量结束；每轮等待、充能、分支及开场仍照实执行。`roundWarmup`只排除逐轮指标的开场轮，须小于总循环数，不改变整场DPS。旧时长/血量保留作参考；600游戏秒只是失败保护，未完成轮数不能返回截断后的合格结果。
+
+`stopMode=loop_count`、`requestedRoundCount`与逐样本`roundTraces`说明停止依据。整场DPS包含SDK终止结算的`terminalFlushFrames=1`帧，逐轮指标保留实际循环边界；`samplingIterations`是独立随机采样数，不是循环次数。未传`roundCount`的低层旧API保留`duration`/目标结束兼容，产品入口不能用它回退。
 
 `autoRounds=true` 按唯一顶层主循环的真实执行边界记录逐样本 `roundTraces`，内部充能等待循环不另算一轮；多个顶层循环可用 `mainLoopIndex` 指定，`roundWarmup` 只控制逐轮指标忽略的开场轮数。缺失、歧义、零时长或截断轮次不能被当作完整轮次通过硬约束。逐轮指标先在每个样本内求完整轮次均值，再在样本间等权平均；整场 DPS 主评分不通过丢弃尾轮抬高。
 
@@ -50,7 +52,13 @@ Windows 承载端使用 Job Object。Linux 使用 pidfd、父线程退出信号�
 
 目录的 `localization` 来自同一固定版本 gcsim 的中文名称表及旅行者元素覆写；`Build-Packages.ps1` 每次打包都会重新生成，离线可用。开发时更新 SDK 后运行 `go run ./cmd/sync-localization -module-dir <go list -m -json 返回的 Dir>`，不要手工维护整套名称。Tools 页面只展示中文，保存的角色、武器和套装标识仍是原始引擎键；循环中的中文角色名由 Tools 的词法兼容层转换，注释和字符串不改写。
 
-Tools 的鉴权接口 `GET /jwt/artifacts/optimizer/rotations/strategies` 列出策略（包含子目录）；`GET .../strategies/source?name=<相对路径>` 独立读取原文与命名片段，不要求先建配队。`POST .../import?uid=<UID>` 用所选 `buildId` 核验队员并转换文件或粘贴的 `source`，文本和有限动作 JSON 复用同一适配器。无状态声明的单独片段可转换；动态分支、状态守卫、记录依赖及鼠标宏必须保留并报告不支持，不能把读取成功当作可等价模拟或实机执行。
+Tools 的鉴权接口 `GET /jwt/artifacts/optimizer/rotations/strategies` 列出策略（包含子目录）；`GET .../strategies/source?name=<相对路径>` 独立读取原文与命名片段。`POST .../import?uid=<UID>` 用所选 `buildId` 核验队员并导入文件或粘贴的 `source`。`native-flow-v1` 支持命名片段、分支、记录、维护与降级；适配器 3 提供 `nine-strategies-v1` 和 `structure-v1`，支持记录剩余时间比较、奇偶轮、标准重击、冲刺/行走及心海原生水母刷新。未知语义仍拒绝，结构变更须经依赖校验和独立模拟，不编造实机观测。
+
+原生流程同时搜索时长和AST结构：相邻重排、可选输出/冗余检查删除及同目标分支化简；atomic内部顺序可变，但不拆散边界或鼠标宏。`nativeEdits` 绑定原节点ID，Java重新校验后补全角色名并生成完整新文本，不直接信任任意返回脚本。`nativeQuality` 记录SDK护盾覆盖、关键输出覆盖、失败轮数、最长无伤害间隔及最低队伍生命比例；候选不能以这些指标退化换取DPS，无严格增益时可保留基线或给出等效简化。改变的候选另有每个场景1样本的独立受控延迟/首次Q丢失复评（`nativeProbes`），不替代或减少用户指定的DPS验证采样。九个 `00-*.txt` 回归覆盖真实搜索、独立复评和跨语言导出。
+
+记录读取固定SDK实时状态，显式timing仍保留；行走不模拟方向、站位或聚怪，重击完成标准动作而不按按键秒数截断伤害，喷射宏按标准重击试算。护盾指标仅对配置的模拟伤害事件成立，不能升级为实机保证。
+
+实际库存路径包含两个具名扩展套装：炉火融炼之心（15048）和血红之证（15047），来源固定为genshin-db提交`8b15995fa220c88a4d0d7ffe1e21b041d0b32588`。两件效果在SDK初始化前应用，四件效果绑定星烁事件、持续时间和不叠加规则；其他未知套装仍拒绝。`capabilities.supplementalSets` 暴露来源及输入边界；原生gcsim文本的`add set`语法仍遵守固定SDK自身支持表，不将库存扩展键冒充SDK原生枚举。
 
 `--optimize` 接收 `{ "optimization": Request, "limits": Budget }`，在同一受限 worker 内完成联合搜索。Request 使用 `schemaVersion=1`，引用既有 `inventory`，并携带 `items`、`characters`、`scenarios`、独立的 `searchSeeds`/`validationSeeds`、`evaluationBudget`。角色 `current`、`fixedSlots`、`mainStats`、`requiredSets`、`minimumStats` 和保护属于硬约束。场景 `participants` 指定本场景参与的优化角色，`fixedEquipment` 预留真实固定队友的五件实物。
 
@@ -67,3 +75,7 @@ Tools 的鉴权接口 `GET /jwt/artifacts/optimizer/rotations/strategies` 列出
 穿戴必须经过网页具体方案确认，才生成既有宿主通道的一次性请求。每步在输入前写入检查点，重新观察完整库存并核验预期变化，失败保留已完成/未执行/未知三态。恢复使用执行之后的新扫描再次预览确认；原本空槽位等不能完整自动恢复的情况会明确要求手动处理。穿戴目前优先采用完整观察保证正确性，速度取决于扫描成本。
 
 源码、受控测试、安装状态和实机验收是不同证据。界面状态、头像定位或 OCR 不符合预期时停止，不猜点击；未取得实机证据前不承诺通用 UI 兼容。复杂策略只可作为参考，带手动假设或上游不完整的循环不导出为实机执行候选。本开发任务不自动部署或操作游戏。
+
+桑多涅的隔离候选使用 `go run ./cmd/build-sandrone -output <不存在的候选目录>` 构建，先校验固定模块及 vendor 源文件，再以 overlay 接入角色与星辉场事件类型修复。默认开发构建和 `Build-Packages.ps1` 不自动启用它。候选同时生成 Windows/Linux 程序，回读 `sdk.source=verified_vendor_overlay`、模型修订和补丁摘要；不更新安装指针。
+
+该候选仍为 `experimental_incomplete_explicit_trial_only`：重击/E/Q、热量、A1/A4、星辉转换和命座已有真实 SDK 回归，但普攻/下落攻击未接入，部分附着与动作帧仍未核验。计算必须显式允许不完整机制，不能把试算当作完整角色支持。`BGI_SDK_OVERLAY_TEST=1 BGI_SANDRONE_MODEL_TEST=1` 启用真实角色模型回归；`BGI_SANDRONE_BUILD_TEST=1` 启用正式桥接构建、目录身份及 C0/C6 受限工作进程验证。测试均不启动游戏或替换运行服务。

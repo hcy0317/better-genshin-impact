@@ -11,13 +11,13 @@ import (
 	"github.com/genshinsim/gcsim/pkg/core/action"
 	"github.com/hcy0317/better-genshin-impact/tools/gcsimbridge/internal/nativeflow"
 	"math"
+	"regexp"
 
 	"github.com/genshinsim/gcsim/pkg/core/event"
 	"github.com/genshinsim/gcsim/pkg/core/info"
 	"github.com/genshinsim/gcsim/pkg/gcs/ast"
 	"github.com/genshinsim/gcsim/pkg/gcs/eval"
 	"github.com/genshinsim/gcsim/pkg/gcs/parser"
-	resultinfo "github.com/genshinsim/gcsim/pkg/result"
 	"github.com/genshinsim/gcsim/pkg/simulation"
 	"github.com/genshinsim/gcsim/pkg/stats"
 )
@@ -26,9 +26,12 @@ import (
 // executable verifies both against Go's checksummed build dependency metadata.
 var Revision = "720f1a1f81673f9dc82f803e32239c4ad729bd0c"
 
-const AdapterVersion = "1"
+const AdapterVersion = "4"
+
+var weaponWaitAdaptation = regexp.MustCompile(`^removed_impossible_favonius_wait:[a-z0-9]{1,40}$`)
 
 type Request struct {
+	RoundCount         int                   `json:"roundCount,omitempty"`
 	NativeFlow         *nativeflow.Program   `json:"nativeFlow,omitempty"`
 	CompactSamples     bool                  `json:"compactSamples,omitempty"`
 	Assumptions        []string              `json:"assumptions,omitempty"`
@@ -74,6 +77,9 @@ type Substat struct {
 }
 
 type Report struct {
+	RequestedRoundCount   int                           `json:"requestedRoundCount,omitempty"`
+	TerminalFlushFrames   int                           `json:"terminalFlushFrames,omitempty"`
+	NativeQuality         *NativeQuality                `json:"nativeQuality,omitempty"`
 	NativeFlowTraces      []NativeFlowTrace             `json:"nativeFlowTraces,omitempty"`
 	Warnings              []string                      `json:"warnings,omitempty"`
 	SamplingIterations    int                           `json:"samplingIterations"`
@@ -113,12 +119,37 @@ type NativeFlowTrace struct {
 // Evaluate is called only inside an owned, resource-limited worker process.
 func Evaluate(request Request) (Report, error) {
 	report := Report{EngineRevision: Revision, AdapterVersion: AdapterVersion, Support: "native_simulation"}
+	if request.RoundCount < 0 || request.RoundCount > 64 || request.RoundCount > 0 && (!request.AutoRounds || request.RoundWarmup >= request.RoundCount || len(request.Rounds) > 0) {
+		return report, errors.New("round_count_invalid：循环次数须为1至64，开启自动轮次，且大于忽略的开场轮数")
+	}
+	report.RequestedRoundCount = request.RoundCount
 	report.SamplingIterations = len(request.Seeds)
 	if request.NativeFlow != nil {
 		if err := request.NativeFlow.Validate(); err != nil {
 			return report, err
 		}
 		report.Assumptions = append(report.Assumptions, "native_flow_model")
+		if request.NativeFlow.InputDelayFrames > 0 {
+			report.Assumptions = append(report.Assumptions, "native_diagnostic_input_delay")
+		}
+		if request.NativeFlow.DropFirstBurst {
+			report.Assumptions = append(report.Assumptions, "native_diagnostic_first_burst_drop")
+		}
+		nodes := append([]nativeflow.Node(nil), request.NativeFlow.Root...)
+		for _, b := range request.NativeFlow.Blocks {
+			nodes = append(nodes, b.Nodes...)
+		}
+		movement, charge := false, false
+		for _, n := range nodes {
+			movement = movement || n.Kind == "walk" || n.Kind == "dash"
+			charge = charge || n.Kind == "charge"
+		}
+		if movement {
+			report.Assumptions = append(report.Assumptions, "native_movement_timing_only")
+		}
+		if charge {
+			report.Assumptions = append(report.Assumptions, "native_standard_charge")
+		}
 		for _, block := range request.NativeFlow.Blocks {
 			if block.Macro == "neuvillette_charge_v1" {
 				report.Assumptions = append(report.Assumptions, "native_macro_neuvillette_charge")
@@ -130,7 +161,7 @@ func Evaluate(request Request) (Report, error) {
 		return report, errors.New("too many declared assumptions")
 	}
 	for _, assumption := range request.Assumptions {
-		if assumption != "auxiliary_logic_disabled" {
+		if assumption != "auxiliary_logic_disabled" && !weaponWaitAdaptation.MatchString(assumption) {
 			return report, errors.New("unknown declared assumption")
 		}
 		report.Assumptions = append(report.Assumptions, assumption)
@@ -164,13 +195,17 @@ func Evaluate(request Request) (Report, error) {
 	}
 	report.Warnings = scriptWarnings(script, file, cfg, request.RotationLineOffset)
 	for _, profile := range cfg.Characters {
-		if !resultinfo.IsCharacterComplete(profile.Base.Key) {
+		if !characterComplete(profile.Base.Key) {
 			report.IncompleteCharacters = append(report.IncompleteCharacters, profile.Base.Key.String())
-			report.Assumptions = append(report.Assumptions, "gcsim_incomplete:"+profile.Base.Key.String())
+			prefix := "gcsim_incomplete:"
+			if profile.Base.Key.String() == "sandrone" && SupplementalCharacterRevision != "" {
+				prefix = "supplemental_incomplete:"
+			}
+			report.Assumptions = append(report.Assumptions, prefix+profile.Base.Key.String())
 		}
 	}
 	if len(report.IncompleteCharacters) > 0 && !request.AllowPartial {
-		return report, errors.New("scenario includes incomplete upstream character support; explicit trial opt-in is required")
+		return report, errors.New("scenario includes incomplete character support; explicit trial opt-in is required")
 	}
 	if request.Inventory != nil {
 		ref := *request.Inventory
@@ -193,6 +228,11 @@ func Evaluate(request Request) (Report, error) {
 		}
 	}
 	report.ManualBuffs = buffs
+	if request.RoundCount > 0 {
+		// Non-lethal training targets: enemy HP is not an execution deadline.
+		cfg.Settings.DamageMode = false
+		cfg.Settings.Duration = MaxTrajectorySeconds
+	}
 	if math.IsNaN(cfg.Settings.Duration) || math.IsInf(cfg.Settings.Duration, 0) || cfg.Settings.Duration < 0 || cfg.Settings.Duration > 600 || (!cfg.Settings.DamageMode && int(cfg.Settings.Duration*60) < 1) {
 		return report, errors.New("fixed-duration evaluation requires 0 < duration <= 600 seconds; target/script mode requires valid target HP")
 	}
@@ -200,6 +240,9 @@ func Evaluate(request Request) (Report, error) {
 	if cfg.Settings.DamageMode {
 		report.StopMode = "target_or_script"
 		cfg.Settings.Duration = 0
+	}
+	if request.RoundCount > 0 {
+		report.StopMode = "loop_count"
 	}
 	if len(request.Constraints) > 64 || (len(request.Constraints) > 0 && len(request.Rounds) == 0 && !request.AutoRounds) {
 		return report, errors.New("constraints require explicit scoring windows and a bounded list")
@@ -212,7 +255,7 @@ func Evaluate(request Request) (Report, error) {
 		constraintIDs[constraint.ID] = true
 	}
 	rounds := request.Rounds
-	if len(rounds) == 0 && !cfg.Settings.DamageMode {
+	if len(rounds) == 0 && !cfg.Settings.DamageMode && request.RoundCount == 0 {
 		rounds = []Round{{ID: "native-full", StartFrame: 0, EndFrame: int(cfg.Settings.Duration * 60)}}
 	}
 	if err := validateRounds(rounds, int(cfg.Settings.Duration*60)); err != nil && len(rounds) > 0 {
@@ -234,12 +277,19 @@ func Evaluate(request Request) (Report, error) {
 	digest := sha256.Sum256(encoded)
 	report.InputSHA256 = hex.EncodeToString(digest[:])
 	report.DurationSeconds = cfg.Settings.Duration
+	if request.RoundCount > 0 {
+		report.DurationSeconds = 0
+	}
 	report.ScoringWindows = append([]Round(nil), request.Rounds...)
 	report.MeanDPSSource = "gcsim.Result.DPS"
 	// Sampling and parallelism belong to the caller's bounded job, not embedded scripts.
 	cfg.Settings.NumberOfWorkers = 1
 	cfg.Settings.Iterations = 1
 	cfg.Settings.CollectStats = nil
+	compact := request.CompactSamples || len(request.Seeds) > 64
+	if compact {
+		cfg.Settings.CollectStats = compactCollectorNames()
+	}
 	report.Parameters = cfg.Copy()
 	var variableValidations []Validation
 	var automaticValidations []Validation
@@ -253,7 +303,7 @@ func Evaluate(request Request) (Report, error) {
 		program := script.Copy()
 		var roundRecorder *roundObserver
 		if request.AutoRounds && request.NativeFlow == nil {
-			program, roundRecorder, err = observeAutomaticRounds(script, file, core, seed, request.MainLoopIndex, request.RotationLineOffset)
+			program, roundRecorder, err = observeAutomaticRounds(script, file, core, seed, request.MainLoopIndex, request.RotationLineOffset, request.RoundCount)
 			if err != nil {
 				return report, err
 			}
@@ -264,6 +314,7 @@ func Evaluate(request Request) (Report, error) {
 			nativeEvaluator, err = nativeflow.New(request.NativeFlow, core)
 			evaluator = nativeEvaluator
 			if err == nil && request.AutoRounds {
+				nativeEvaluator.RoundLimit = request.RoundCount
 				roundRecorder = newNativeRoundObserver(core, seed)
 				nativeEvaluator.OnRound = roundRecorder.nativeBoundary
 			}
@@ -273,10 +324,22 @@ func Evaluate(request Request) (Report, error) {
 		if err != nil {
 			return report, err
 		}
+		if request.RoundCount > 0 && (roundRecorder == nil || roundRecorder.trace.State != "complete") {
+			return report, errors.New("round_count_unavailable：无法确定主循环，请选择有效循环或修正无法划分轮次的控制语句")
+		}
+		exhaustion := &exhaustionObserver{Evaluator: evaluator}
+		if request.RoundCount > 0 {
+			evaluator = exhaustion
+		}
 		sim, err := simulation.New(copy, evaluator, core)
 		if err != nil {
 			return report, err
 		}
+		var activeFrames []int
+		if compact {
+			activeFrames = observeCompactActiveTime(core)
+		}
+		AttachEquipmentExtensions(core, request.Equipment)
 		if report.InitialStats == nil {
 			report.InitialStats = initialStats(core)
 		}
@@ -320,8 +383,22 @@ func Evaluate(request Request) (Report, error) {
 			}, "bettergi/scored-team-damage")
 		}
 		trajectoryLimitReached := false
-		if cfg.Settings.DamageMode {
+		var quality *qualityObserver
+		if nativeEvaluator != nil {
+			quality = observeNativeQuality(core, nativeEvaluator)
+		}
+		if cfg.Settings.DamageMode || request.RoundCount > 0 {
 			core.Events.Subscribe(event.OnTick, func(...any) {
+				if request.RoundCount > 0 {
+					count, _ := roundRecorder.countStatus()
+					if count >= request.RoundCount || exhaustion.exhausted {
+						// SDK checks equality after OnTick. The fractional frame avoids
+						// floating-point round-down; this deadline comes from an actual
+						// completed iteration, never from an estimated seconds-per-loop.
+						copy.Settings.Duration = (float64(core.F) + 0.25) / 60
+						return
+					}
+				}
 				if core.F >= MaxTrajectorySeconds*60 {
 					trajectoryLimitReached = true
 					panic("owned trajectory resource limit")
@@ -329,10 +406,22 @@ func Evaluate(request Request) (Report, error) {
 			}, "bettergi/trajectory-resource-limit")
 		}
 		result, err := sim.Run()
+		if err != nil {
+			_ = evaluator.Exit()
+		}
+		if compact {
+			for i := range result.Characters {
+				result.Characters[i].ActiveTime = activeFrames[i]
+			}
+		}
 		if nativeEvaluator != nil && len(report.NativeFlowTraces) < 4 {
 			report.NativeFlowTraces = append(report.NativeFlowTraces, NativeFlowTrace{seed, nativeEvaluator.Events, nativeEvaluator.TraceTruncated})
 		}
 		if trajectoryLimitReached {
+			if request.RoundCount > 0 {
+				count, _ := roundRecorder.countStatus()
+				return report, fmt.Errorf("trajectory_limit：已完成%d/%d轮，当前循环在%d游戏秒保护上限内仍未结束；请检查等待条件或无进展分支", count, request.RoundCount, MaxTrajectorySeconds)
+			}
 			detail := ""
 			if len(report.Warnings) > 0 {
 				detail = "；" + report.Warnings[0]
@@ -342,8 +431,20 @@ func Evaluate(request Request) (Report, error) {
 		if err != nil {
 			return report, err
 		}
+		if request.RoundCount > 0 {
+			count, complete := roundRecorder.countStatus()
+			if count != request.RoundCount || !complete {
+				return report, fmt.Errorf("round_count_incomplete：已记录%d/%d轮，但脚本提前结束或包含未完成/无时间推进的轮次", count, request.RoundCount)
+			}
+			// Whole-trajectory DPS includes the SDK's final one-frame flush;
+			// per-round windows retain their actual pre-flush boundary.
+			report.TerminalFlushFrames = 1
+		}
 		if result.Duration <= 0 || math.IsNaN(result.DPS) || math.IsInf(result.DPS, 0) {
 			return report, errors.New("gcsim returned an invalid trajectory")
+		}
+		if quality != nil {
+			mergeNativeQuality(&report, quality.finish())
 		}
 		if len(request.Seeds) > 64 || request.CompactSamples {
 			trimFrameVectors(&result)
@@ -387,7 +488,7 @@ func Evaluate(request Request) (Report, error) {
 		}
 		report.MeanDPS += dps / float64(len(request.Seeds))
 		report.ScoredDPS = append(report.ScoredDPS, dps)
-		if cfg.Settings.DamageMode {
+		if cfg.Settings.DamageMode || request.RoundCount > 0 {
 			report.DurationSeconds += float64(result.Duration) / 60 / float64(len(request.Seeds))
 		}
 		if len(rounds) == 0 {
