@@ -221,7 +221,7 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
     {
         try
         {
-            await OpenBigMapForResinCheck();
+            await _returnMainUiTask.Start(_ct);
 
             OriginalResinInfo originalResin;
             try
@@ -266,45 +266,11 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
     }
 
     /// <summary>
-    /// 使用用户配置的打开地图按键进入大地图，识别右上角原粹树脂数量，并在结束后回到主界面。
+    /// 打开大地图并通过树脂详情中的全部恢复时间反推当前原粹树脂。
     /// </summary>
-    /// <returns>识别到的原粹树脂数量；识别失败时返回 null。</returns>
-    private async Task<int?> TryRecognizeOriginalResinCountInBigMap()
-    {
-        try
-        {
-            await OpenBigMapForResinCheck();
-            try
-            {
-                var originalResin = await RecognizeOriginalResinInfoFromBigMap();
-                return originalResin.Count;
-            }
-            catch (Exception e) when (e is not OperationCanceledException)
-            {
-                _logger.LogWarning("{Name}：战前原粹树脂预检失败，将继续通过领奖界面兜底，原因：{Reason}", Name, e.Message);
-                return null;
-            }
-        }
-        finally
-        {
-            await _returnMainUiTask.Start(_ct);
-        }
-    }
-
-    /// <summary>
-    /// 释放输入并打开大地图界面，用于在右上角读取原粹树脂数量。
-    /// </summary>
-    private async Task OpenBigMapForResinCheck()
-    {
-        await new TpTask(_ct).OpenBigMapUi();
-    }
-
-    /// <summary>
-    /// AutoBoss 专用大地图原粹树脂识别：点击右上角树脂图标后，通过全部恢复时间反推剩余树脂。
-    /// </summary>
-    /// <returns>当前剩余原粹树脂。</returns>
     private async Task<OriginalResinInfo> RecognizeOriginalResinInfoFromBigMap()
     {
+        await new TpTask(_ct).OpenBigMapUi();
         var iconLeft = 0;
         var iconRight = 0;
         var iconBottom = 0;
@@ -336,19 +302,28 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
             throw new InvalidOperationException("连续 4 次未找到原粹树脂图标");
         }
         await Delay(500, _ct);
+        var popupRect = ScaleRect(1180, 75, 620, 200);
+        if (!await NewRetry.WaitForElementAppear(
+                RecognitionObject.OcrMatch(popupRect.X, popupRect.Y, popupRect.Width, popupRect.Height,
+                    "全部恢复", "原粹树脂已完全恢复"), null, _ct, 4, 300))
+            throw new InvalidOperationException("未识别到原粹树脂恢复详情");
 
-        using var clickedCapture = CaptureToRectArea();
+        //根据树脂图标位置偏移，计算出体力恢复时间的弹窗位置
+        var detailRect = new Rect(iconLeft - 13, iconBottom + 29, 220, 150);
+
+        //根据弹窗位置 OCR 出当前树脂上限和全部恢复时间，反推当前原粹树脂
+        using var clickedCapture = CaptureToRectArea(forceNew: true);
         var resinLimit = RecognizeOriginalResinLimit(clickedCapture, iconRight);
-        var fullRecoveryTime = RecognizeFullRecoveryTime(clickedCapture, iconLeft, iconBottom);
+        var fullRecoveryTime = RecognizeFullRecoveryTime(clickedCapture, detailRect);
         var missingResin = (int)Math.Ceiling(fullRecoveryTime.TotalSeconds / OriginalResinRecoveryInterval.TotalSeconds);
         if (missingResin > resinLimit)
         {
             throw new InvalidOperationException($"计算缺失树脂 {missingResin} 超过树脂上限 {resinLimit}");
         }
 
-        var originalResin = resinLimit - missingResin;
-        _logger.LogInformation("{Name}：剩余树脂 {Count}", Name, originalResin);
-        return new OriginalResinInfo(originalResin, resinLimit);
+        var originalResin = new OriginalResinInfo(resinLimit - missingResin, resinLimit);
+        _logger.LogInformation("{Name}：剩余树脂 {Count}", Name, originalResin.Count);
+        return originalResin;
     }
 
     /// <summary>
@@ -378,14 +353,8 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
     /// <summary>
     /// 读取树脂详情弹窗中的全部恢复时间；已完全恢复时返回零时长。
     /// </summary>
-    private TimeSpan RecognizeFullRecoveryTime(ImageRegion capture, int resinIconLeft, int resinIconBottom)
+    private TimeSpan RecognizeFullRecoveryTime(ImageRegion capture, Rect detailRect)
     {
-        // 该偏移来自截图实际像素，不随 AssetScale 缩放。
-        var detailRect = new Rect(
-            resinIconLeft - 13,
-            resinIconBottom + 29,
-            220,
-            150);
         using var detailRegion = capture.DeriveCrop(detailRect);
         var result = OcrFactory.Paddle.OcrResult(detailRegion.SrcMat);
         var text = string.Concat(result.Regions
@@ -1598,6 +1567,13 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
         {
             _logger.LogInformation("{Name}：重新执行特殊路线靠近首领", Name);
             await NavigateToBoss();
+            return;
+        }
+
+        if (AutoBossData.ShouldRerunRoute(_taskParam.BossName))
+        {
+            _logger.LogInformation("{Name}：重新执行完整路线靠近首领", Name);
+            await RunPathingFile($"{_taskParam.BossName}前往.json");
             return;
         }
 

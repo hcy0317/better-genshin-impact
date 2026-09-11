@@ -97,7 +97,6 @@ public class TpTask
     private const int MapChooseCandidateStableChecks = 2;
     private const int MapChooseCandidatePositionTolerancePx = 4;
     private const int MapChooseCandidateClickRetryCount = 2;
-    private const int MapChooseCandidateClickDelayMs = 150;  // 点击候选列表后，等待UI变化的时间
     private const int MapChooseCandidateClickVerificationDelayMs = 600;
     private const int MapChooseCandidateClickVerificationIntervalMs = 100;
     private const double TeleportFinalZoomMinNeighborScreenDistance = 96d;
@@ -3705,8 +3704,12 @@ public class TpTask
 
     private async Task ClickMapChooseCandidate(ImageRegion imageRegion, MapChooseCandidate candidate)
     {
+        // 候选列表有个动画，识别到以后一定要再等一会点击
+        var time = TaskContext.Instance().Config.QuickTeleportConfig.TeleportListClickDelay;
+        await Delay(time < 200 ? 200 : time, ct);
+        Logger.LogInformation("点击候选列表：{Text}", candidate.Text);
         imageRegion.ClickTo(candidate.ClickRect.X, candidate.ClickRect.Y, candidate.ClickRect.Width, candidate.ClickRect.Height);
-        await Delay(MapChooseCandidateClickDelayMs, ct);
+        await Delay(150, ct);
     }
 
     private static double GetDistance(double x1, double y1, double x2, double y2)

@@ -29,6 +29,7 @@ public sealed class JsonCombatFlowExecution : IDisposable
     public IReadOnlyCollection<string> Actors { get; }
     public IReadOnlyList<string> Diagnostics { get; }
     public bool IsAtomic => _active?.Execution.IsAtomic == true;
+    public bool HasPendingConfirmation => _active?.Execution.HasPendingConfirmation == true;
     public bool IsAtRootBoundary => _active?.Execution.IsAtRootBoundary != false;
     public bool TakeFinishCheckRequest() => _battle.TakeFinishCheckRequest();
 
@@ -129,12 +130,25 @@ public sealed class JsonCombatFlowExecution : IDisposable
         {
             Root? Select() => _entries.FirstOrDefault(entry => !_unproductiveRoots.Contains(entry.Root) &&
                 entry.Root.Execution.EvaluateCondition(entry.Condition, entry.Root.Action.Character) == true)?.Root;
-            _active = Select();
+            var preparationVersion = _battle.ConditionPreparationVersion;
+            async ValueTask<Root?> SelectWithPreparationAsync()
+            {
+                foreach (var entry in _entries)
+                {
+                    if (_unproductiveRoots.Contains(entry.Root)) continue;
+                    var eligible = await entry.Root.Execution.EvaluateConditionAsync(entry.Condition, entry.Root.Action.Character, ct);
+                    // 准备已换人并清掉旧帧：从最高优先级纯重算，不连续准备多个目标。
+                    if (_battle.ConditionPreparationVersion != preparationVersion) return Select();
+                    if (eligible == true) return entry.Root;
+                }
+                return null;
+            }
+            _active = await SelectWithPreparationAsync();
             if (_active == null && _unproductiveRoots.Count != 0)
             {
                 // 其他可执行根均已获得机会；前次核心的空闲让出已完成，不再叠加固定 sleep。
                 _unproductiveRoots.Clear();
-                _active = Select();
+                _active = _battle.ConditionPreparationVersion != preparationVersion ? Select() : await SelectWithPreparationAsync();
             }
         }
         if (_active == null)

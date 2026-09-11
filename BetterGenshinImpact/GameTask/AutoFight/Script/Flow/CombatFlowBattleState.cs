@@ -12,6 +12,8 @@ internal sealed class CombatFlowBattleState(TimeProvider? clock) : IDisposable
     public CombatFlowEpisodes Episodes { get; } = new();
     public CombatConditionHistory History { get; } = new();
     public CombatFlowDiagnostics Diagnostics { get; } = new();
+    public Dictionary<string, double> NextConditionProbe { get; } = new(StringComparer.Ordinal);
+    public long ConditionPreparationVersion { get; set; }
     public bool FinishCheckRequested { get; set; }
     public bool TakeFinishCheckRequest()
     {
@@ -19,5 +21,5 @@ internal sealed class CombatFlowBattleState(TimeProvider? clock) : IDisposable
         FinishCheckRequested = false;
         return requested;
     }
-    public void Dispose() { Context.Dispose(); Once.Clear(); Calls.Clear(); Episodes.Clear(); History.Clear(); FinishCheckRequested = false; }
+    public void Dispose() { Context.Dispose(); Once.Clear(); Calls.Clear(); Episodes.Clear(); History.Clear(); NextConditionProbe.Clear(); FinishCheckRequested = false; }
 }

@@ -17,8 +17,8 @@ public class CombatSafetyIntegrationContractTests
             "AvatarRecognition.cs");
         var loop = Slice(
             source,
-            "public static async Task ContinuousTargetingLoopAsync",
-            "private static void PublishPassiveObservation");
+            "public static Task ContinuousTargetingLoopAsync",
+            "private static bool PublishPassiveObservation");
 
         Assert.DoesNotContain("MoveMouseBy", loop, StringComparison.Ordinal);
         Assert.DoesNotContain("ReleaseAllKey", loop, StringComparison.Ordinal);
