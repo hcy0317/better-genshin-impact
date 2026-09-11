@@ -1,0 +1,63 @@
+package sandrone
+
+import (
+ "github.com/genshinsim/gcsim/pkg/core/attacks"
+ "github.com/genshinsim/gcsim/pkg/core/attributes"
+ "github.com/genshinsim/gcsim/pkg/core/event"
+ "github.com/genshinsim/gcsim/pkg/core/info"
+ "github.com/genshinsim/gcsim/pkg/core/player/character"
+ "github.com/genshinsim/gcsim/pkg/modifier"
+)
+
+func(c *char) recordCooling(units int) {
+ if c.Base.Ascension<1{return}
+ if c.Core.F>=c.tacticsExpiry {c.tacticsStacks=0}
+ if units<=0{return}
+ c.coolingUnits+=units
+ gained:=c.coolingUnits/540 // 10 points, each represented by54 exact subunits.
+ c.coolingUnits%=540
+ if gained>0 {
+  c.tacticsStacks=min(10,c.tacticsStacks+gained)
+  c.tacticsExpiry=c.Core.F+60*60
+ }
+}
+
+func(c *char) consumeTactics() float64 {
+ if c.Base.Ascension<1||c.radiance()==attacks.AttackTagNone{return 1}
+ stacks:=c.tacticsStacks
+ if c.Core.F>=c.tacticsExpiry{stacks=0}
+ c.tacticsStacks=0
+ return 1+float64(stacks)*0.1
+}
+
+func(c *char) stellarBaseInit() {
+ // Unlike A4's stat conversion, this damage bonus uses total current ATK.
+ c.Core.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+  attack:=args[1].(*info.AttackEvent)
+  switch attack.Info.AttackTag {
+  case attacks.AttackTagDirectStellarConduct,attacks.AttackTagDirectStellarSwirl:
+   attack.Info.BaseDmgBonus+=min(0.14,c.TotalAtk()*0.00007)
+  }
+ },"sandrone-stellar-base")
+ // Each contribution is modified before the SDK combines Stellar Swirl damage.
+ c.Core.Events.Subscribe(event.OnSpecialReactionAttack,func(args ...any){
+  attack:=args[1].(*info.AttackEvent)
+  if attack.Info.AttackTag==attacks.AttackTagReactionStellarSwirl {
+   attack.Info.BaseDmgBonus+=min(0.14,c.TotalAtk()*0.00007)
+  }
+ },"sandrone-stellar-base-contribution")
+}
+
+func(c *char) a4Init() {
+ if c.Base.Ascension<4{return}
+ amount:=make([]float64,attributes.EndStatType)
+ c.AddStatMod(character.StatMod{
+  Base:modifier.NewBase("sandrone-a4",-1),Extra:true,AffectedStat:attributes.EM,
+  Amount:func()[]float64{
+   // Conversion buffs cannot feed another stat conversion.
+   attack:=c.SelectStat(true,attributes.BaseATK,attributes.ATKP,attributes.ATK)
+   amount[attributes.EM]=min(160,attack.TotalATK()*0.08)
+   return amount
+  },
+ })
+}

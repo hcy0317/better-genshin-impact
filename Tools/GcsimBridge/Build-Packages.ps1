@@ -38,7 +38,7 @@ try {
         $binary = Join-Path $folder $fileName
         & go build -p 2 -buildvcs=false -trimpath -ldflags $flags -o $binary ./cmd/gcsim-bridge
         if ($LASTEXITCODE -ne 0) { throw "Build failed for $platform; active engine not changed." }
-        $manifest = [ordered]@{schemaVersion=1;engineRevision=$revision;adapterVersion='1';sdkVersion=$module.Version;platform=$platform;architecture='amd64';executable=$fileName;sha256=(Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant();source='https://github.com/hcy0317/better-genshin-impact';regression='go-test-alignment-constraints-termination'}
+        $manifest = [ordered]@{schemaVersion=1;engineRevision=$revision;adapterVersion='4';sdkVersion=$module.Version;platform=$platform;architecture='amd64';executable=$fileName;sha256=(Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant();source='https://github.com/hcy0317/better-genshin-impact';regression='go-test-alignment-constraints-termination'}
         [IO.File]::WriteAllText((Join-Path $folder 'manifest.json'),($manifest | ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\..\LICENSE') -Destination (Join-Path $folder 'LICENSE')
         Copy-Item -LiteralPath (Join-Path $module.Dir 'LICENSE') -Destination (Join-Path $folder 'GCSIM-LICENSE')

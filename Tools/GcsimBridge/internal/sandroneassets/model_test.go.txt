@@ -1,0 +1,373 @@
+package sandrone_test
+
+import (
+ "testing"
+ "github.com/genshinsim/gcsim/pkg/catalog"
+ "github.com/genshinsim/gcsim/pkg/core"
+ "github.com/genshinsim/gcsim/pkg/core/keys"
+ _ "github.com/genshinsim/gcsim/internal/characters/sandrone"
+ "github.com/genshinsim/gcsim/pkg/core/event"
+ "github.com/genshinsim/gcsim/pkg/core/info"
+ "github.com/genshinsim/gcsim/pkg/core/attacks"
+ "github.com/genshinsim/gcsim/pkg/core/attributes"
+ "github.com/genshinsim/gcsim/pkg/core/combat"
+ "github.com/genshinsim/gcsim/pkg/gcs/ast"
+ "github.com/genshinsim/gcsim/pkg/gcs/eval"
+ "github.com/genshinsim/gcsim/pkg/gcs/parser"
+ "github.com/genshinsim/gcsim/pkg/simulation"
+ "github.com/genshinsim/gcsim/pkg/reactable"
+ "github.com/genshinsim/gcsim/pkg/core/player/character"
+ "github.com/genshinsim/gcsim/pkg/modifier"
+ "fmt"
+ "math"
+)
+
+func TestRegisteredIdentity(t *testing.T) {
+ if core.NewCharFuncMap[keys.Sandrone]==nil {t.Fatal("Sandrone factory missing")}
+ d:=catalog.CharacterMap[keys.Sandrone]
+ if d==nil || d.Id!=10000133 || d.Key!="sandrone" || d.Stats.BaseAtk!=26.6266 {t.Fatalf("incorrect character data: %+v",d)}
+}
+
+func TestStellarSwirlReusesItsVortexAndDetonatesAccumulatedStacksOnce(t *testing.T) {
+ reactions,detonations,maxVortices:=0,0,0
+ stacks:=[]int{}
+ source:="options duration=6 workers=1 iteration=1;\n"+
+  "target lvl=90 resist=0.1;\n"+
+  "sandrone char lvl=90/90 cons=0 talent=10,10,10;\n"+
+  "sandrone add weapon=\"wastergreatsword\" refine=1 lvl=70/70;\n"+
+  "sucrose char lvl=90/90 cons=1 talent=6,6,6;\n"+
+  "sucrose add weapon=\"apprenticesnotes\" refine=1 lvl=70/70;\n"+
+  "active sandrone; sandrone skill; sucrose skill; sucrose skill; wait(360);"
+ runScenario(t,source,func(c *core.Core){
+  c.Events.Subscribe(event.OnStellarSwirl,func(args ...any){
+   reactions++
+   c.Tasks.Add(func(){
+    count:=0
+    for _,g:=range c.Combat.Gadgets(){
+     if _,ok:=g.(*reactable.StellarVortex);ok {
+      count++
+      if g.GadgetTyp()!=info.GadgetTypStellarVortex{t.Error("vortex registered as another gadget type")}
+     }
+    }
+    maxVortices=max(maxVortices,count)
+    stacks=append(stacks,int(c.Flags.Custom[reactable.StellarSwirlKey+"-stacks"]))
+   },1)
+  },"test-vortex-reuse")
+  c.Events.Subscribe(event.OnStellarVortexDetonate,func(args ...any){detonations++},"test-vortex-detonation")
+ })
+ if reactions!=2||maxVortices!=1||detonations!=1{t.Fatalf("reactions=%d maxVortices=%d detonations=%d",reactions,maxVortices,detonations)}
+ if len(stacks)!=2||stacks[0]!=1||stacks[1]!=2{t.Fatalf("stack progression=%v",stacks)}
+}
+
+func TestStellarSwirlFullStacksDetonateEarlyAndAllowANewCycle(t *testing.T) {
+ reactions:=0
+ detonationFrames:=[]int{}
+ reactionFrames:=[]int{}
+ source:="options duration=8 workers=1 iteration=1;\n"
+ for i:=0;i<6;i++{source+="target lvl=90 resist=0.1;\n"}
+ source+=`sandrone char lvl=90/90 cons=0 talent=10,10,10;
+sandrone add weapon="wastergreatsword" refine=1 lvl=70/70;
+sucrose char lvl=90/90 cons=1 talent=6,6,6;
+sucrose add weapon="apprenticesnotes" refine=1 lvl=70/70;
+active sandrone;
+sandrone skill; sucrose skill; sucrose skill; wait(480);`
+ runScenario(t,source,func(c *core.Core){
+  c.Events.Subscribe(event.OnStellarSwirl,func(args ...any){
+   reactions++
+   reactionFrames=append(reactionFrames,c.F)
+  },"test-full-vortex-reactions")
+  c.Events.Subscribe(event.OnTick,func(args ...any){
+   raw:=c.Flags.Custom[reactable.StellarSwirlKey+"-stacks"]
+   if raw<0||raw>6{t.Errorf("raw stack storage exceeded cap: %v",raw)}
+  },"test-raw-stack-cap")
+  c.Events.Subscribe(event.OnStellarVortexDetonate,func(args ...any){
+   detonationFrames=append(detonationFrames,c.F)
+   if c.Flags.Custom[reactable.StellarSwirlKey+"-stacks"]!=0{t.Error("detonation did not reset stacks")}
+  },"test-full-vortex-detonation")
+ })
+ if reactions!=12||len(detonationFrames)!=2{t.Fatalf("reactions=%d detonation frames=%v",reactions,detonationFrames)}
+ for i,f:=range detonationFrames {
+  if f!=reactionFrames[i*6+5]{t.Errorf("cycle %d exploded at %d instead of sixth reaction at %d",i,f,reactionFrames[i*6+5])}
+ }
+}
+
+func TestSweepingFireTriggersRealBeidouBurst(t *testing.T) {
+ sweeps,bounces:=0,0
+ source:=`options duration=6 workers=1 iteration=1;
+target lvl=90 resist=0.1;
+sandrone char lvl=90/90 cons=0 talent=10,10,10;
+sandrone add weapon="wastergreatsword" refine=1 lvl=70/70;
+beidou char lvl=90/90 cons=0 talent=6,6,6;
+beidou add weapon="wastergreatsword" refine=1 lvl=70/70;
+active beidou;
+beidou burst; sandrone charge; wait(360);`
+ runScenario(t,source,func(c *core.Core){
+  c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   ai:=args[1].(*info.AttackEvent).Info
+   if ai.Abil=="Sweeping Fire" {
+    sweeps++
+    if ai.AttackTag!=attacks.AttackTagExtra{t.Error("sweep lost charged attack category")}
+   }
+   if ai.Abil=="Stormbreaker (Bounce)"{bounces++}
+  },"test-real-beidou")
+ })
+ if sweeps==0||bounces==0{t.Fatalf("sweeps=%d Beidou procs=%d",sweeps,bounces)}
+}
+
+func TestRealStellarSwirlRadianceExpiresAfterEightSeconds(t *testing.T) {
+ reactions,checks:=0,0
+ source:=`options duration=12 workers=1 iteration=1;
+target lvl=90 resist=0.1;
+sandrone char lvl=90/90 cons=0 talent=10,10,10;
+sandrone add weapon="wastergreatsword" refine=1 lvl=70/70;
+sucrose char lvl=90/90 cons=0 talent=6,6,6;
+sucrose add weapon="apprenticesnotes" refine=1 lvl=70/70;
+active sandrone;
+sandrone skill; sucrose skill; wait(700);`
+ runScenario(t,source,func(c *core.Core){
+  c.Events.Subscribe(event.OnStellarSwirl,func(args ...any){
+   reactions++
+   actor:=c.Player.ByIndex(0)
+   c.Tasks.Add(func(){checks++;if !actor.StatusIsActive("sandrone-radiance-swirl"){t.Error("radiance expired before eight seconds")}},479)
+   c.Tasks.Add(func(){checks++;if actor.StatusIsActive("sandrone-radiance-swirl"){t.Error("radiance remained after eight seconds")}},481)
+  },"test-radiance-expiry")
+ })
+ if reactions!=1||checks!=2{t.Fatalf("reactions=%d expiry checks=%d",reactions,checks)}
+}
+
+func addElectro(c *core.Core) {
+ ai:=info.AttackInfo{ActorIndex:0,Abil:"test electro aura",AttackTag:attacks.AttackTagExtra,Element:attributes.Electro,Durability:25,ICDTag:attacks.ICDTagNone,ICDGroup:attacks.ICDGroupDefault}
+ for _,frame:=range []int{1,201,401}{c.QueueAttack(ai,combat.NewCircleHitOnTarget(c.Combat.PrimaryTarget(),nil,3),frame,frame)}
+}
+
+func TestRadianceUsesRealStellarFieldAndConvertedBeamsApplyNoAura(t *testing.T) {
+ beams:=0
+ scenario(t,0,"sandrone charge;",func(c *core.Core){
+  addElectro(c)
+  c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   ai:=args[1].(*info.AttackEvent).Info
+   if ai.Abil!="Condensed Beam"{return}
+   beams++
+   if ai.AttackTag!=attacks.AttackTagDirectStellarConduct||ai.Durability!=0{t.Errorf("wrong converted beam: tag=%v aura=%v",ai.AttackTag,ai.Durability)}
+  },"test-radiance")
+ })
+ if beams!=3{t.Fatalf("beams=%d",beams)}
+}
+
+func TestSkillSecondHitAndBurstFinalHitConvertAtTheirActualHitTime(t *testing.T) {
+ for _,tc:=range []struct{action,ability string;want int}{{"skill","Prism Shot",2},{"burst","Convective Inhibition Ray",1}} {
+  t.Run(tc.action,func(t *testing.T){
+   hits:=0
+   scenario(t,0,"sandrone "+tc.action+";",func(c *core.Core){
+    addElectro(c) // The first Cryo hit creates the field after the action starts.
+    c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+     ai:=args[1].(*info.AttackEvent).Info
+     if ai.Abil!=tc.ability{return};hits++
+     if tc.action=="skill"&&hits==1{return}
+     if ai.AttackTag!=attacks.AttackTagDirectStellarConduct||ai.Durability!=0||ai.IgnoreDefPercent!=1 {
+      t.Errorf("not converted at hit: %+v",ai)
+     }
+    },"test-converted-hit")
+   })
+   if hits!=tc.want{t.Fatalf("hits=%d",hits)}
+  })
+ }
+}
+
+func TestRealFieldKeepsSixFrameStackICD(t *testing.T) {
+ scenario(t,0,"wait(12);",func(c *core.Core){
+  for _,hit:=range []struct{frame int;ele attributes.Element}{{1,attributes.Electro},{2,attributes.Cryo},{3,attributes.Cryo},{4,attributes.Cryo},{9,attributes.Cryo},{10,attributes.Cryo}} {
+   ai:=info.AttackInfo{ActorIndex:0,Abil:"field stack test",AttackTag:attacks.AttackTagExtra,Element:hit.ele,Durability:25,ICDTag:attacks.ICDTagNone,ICDGroup:attacks.ICDGroupDefault,Mult:1}
+   c.QueueAttack(ai,combat.NewCircleHitOnTarget(c.Combat.PrimaryTarget(),nil,3),hit.frame,hit.frame)
+  }
+  c.Tasks.Add(func(){if n:=c.Flags.Custom[reactable.PolestarFieldKey+"-recorded"];n!=1{t.Errorf("same ICD window recorded %v stacks",n)}},5)
+  // The pinned modifier expiry is inclusive: an entry at3 with duration6
+  // remains active at9 and becomes available at10.
+  c.Tasks.Add(func(){if n:=c.Flags.Custom[reactable.PolestarFieldKey+"-recorded"];n!=1{t.Errorf("expiry boundary recorded %v stacks",n)}},9)
+  c.Tasks.Add(func(){if n:=c.Flags.Custom[reactable.PolestarFieldKey+"-recorded"];n!=2{t.Errorf("next ICD window recorded %v stacks",n)}},11)
+ })
+}
+
+func TestA4ExcludesConvertedAttackAndCapsElementalMastery(t *testing.T) {
+ scenario(t,0,"sandrone skill;",func(c *core.Core){
+  actor:=c.Player.ByIndex(0)
+  actor.BaseStats[attributes.BaseATK]=0
+  actor.BaseStats[attributes.ATKP]=0
+  actor.BaseStats[attributes.ATK]=1000
+  actor.BaseStats[attributes.EM]=0
+  if got:=actor.Stat(attributes.EM);got!=80{t.Errorf("1000 ATK: EM=%v want80",got)}
+  extra:=make([]float64,attributes.EndStatType);extra[attributes.ATK]=1000
+  actor.AddStatMod(character.StatMod{Base:modifier.NewBase("test-converted-atk",-1),Extra:true,AffectedStat:attributes.ATK,Amount:func()[]float64{return extra}})
+  if got:=actor.Stat(attributes.EM);got!=80{t.Errorf("converted ATK fed A4: EM=%v",got)}
+  actor.BaseStats[attributes.ATK]=3000
+  if got:=actor.Stat(attributes.EM);got!=160{t.Errorf("A4 cap: EM=%v want160",got)}
+ })
+}
+
+func TestA1UsesPreCoolingPowerAndConsumesCoolingStacks(t *testing.T) {
+ second,ray:=0,0
+ scenario(t,0,"sandrone charge; sandrone skill; sandrone burst;",func(c *core.Core){
+  addElectro(c)
+  c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   ai:=args[1].(*info.AttackEvent).Info
+   if ai.AttackTag!=attacks.AttackTagDirectStellarConduct{return}
+   if ai.Abil=="Prism Shot" {second++;if math.Abs(ai.Mult-1.5552)>1e-9{t.Errorf("A1 skill multiplier=%v want1.5552",ai.Mult)}}
+   if ai.Abil=="Convective Inhibition Ray" {ray++;if math.Abs(ai.Mult-7.9392)>1e-9{t.Errorf("A1 burst multiplier=%v want7.9392",ai.Mult)}}
+  },"test-a1")
+ })
+ if second!=1||ray!=1{t.Fatalf("second=%d ray=%d",second,ray)}
+}
+
+func TestStellarBaseDamagePassiveIncludesConvertedAttack(t *testing.T) {
+ hits:=0
+ scenario(t,0,"sandrone charge;",func(c *core.Core){
+  actor:=c.Player.ByIndex(0)
+  actor.BaseStats[attributes.BaseATK]=0;actor.BaseStats[attributes.ATKP]=0;actor.BaseStats[attributes.ATK]=1000
+  extra:=make([]float64,attributes.EndStatType);extra[attributes.ATK]=500
+  actor.AddStatMod(character.StatMod{Base:modifier.NewBase("test-converted-atk",-1),Extra:true,AffectedStat:attributes.ATK,Amount:func()[]float64{return extra}})
+  addElectro(c)
+  c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   ai:=args[1].(*info.AttackEvent).Info
+   if ai.Abil!="Condensed Beam"{return};hits++
+   if math.Abs(ai.BaseDmgBonus-0.105)>1e-9{t.Errorf("base damage bonus=%v want0.105",ai.BaseDmgBonus)}
+  },"test-stellar-base")
+ })
+ if hits!=3{t.Fatalf("hits=%d",hits)}
+}
+
+func TestC2CritDamageStacksOnFiringAndResetsForANewCharge(t *testing.T) {
+ for _,tc:=range []struct{name,actions string;want []float64}{
+  {"full cycle","sandrone charge;",[]float64{1.1,1.3,1.5,1.5,1.5,1.5}},
+  {"new cycle","sandrone charge[duration=100];sandrone skill;sandrone charge[duration=100];",[]float64{1.1,1.1}},
+ } {
+  t.Run(tc.name,func(t *testing.T){
+   values:=[]float64{}
+   scenario(t,2,tc.actions,func(c *core.Core){
+    addElectro(c)
+    c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+     a:=args[1].(*info.AttackEvent)
+     if a.Info.Abil=="Condensed Beam" {values=append(values,a.Snapshot.Stats[attributes.CD])}
+    },"test-c2")
+   })
+   if len(values)!=len(tc.want){t.Fatalf("CD values=%v want%v",values,tc.want)}
+   for i,want:=range tc.want{if math.Abs(values[i]-want)>1e-9{t.Errorf("beam%d CD=%v want%v",i,values[i],want)}}
+  })
+ }
+}
+
+func TestC6CycleHasFourExtraBeamsAndSharedC4Cooldown(t *testing.T) {
+ originals,extras:=0,0;coordinated:=[]int{}
+ scenario(t,6,"sandrone charge;",func(c *core.Core){
+  addElectro(c)
+  c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   ai:=args[1].(*info.AttackEvent).Info
+   if ai.AttackTag!=attacks.AttackTagDirectStellarConduct{return}
+   if math.Abs(ai.Elevation-0.2)>1e-9{t.Errorf("C6 elevation=%v",ai.Elevation)}
+   switch ai.Abil {
+   case "Condensed Beam":
+    originals++
+    if originals==1&&math.Abs(c.Player.ByIndex(0).ReactBonus(ai)-0.3)>1e-9{t.Error("C1 reaction bonus missing during decoding")}
+    if math.Abs(ai.Mult-1.957)>1e-9{t.Errorf("C3 level13 multiplier=%v",ai.Mult)}
+   case "Condensed Cluster Beam":
+    extras++;if ai.Mult!=0.8||ai.Durability!=0{t.Errorf("C6 extra beam=%+v",ai)}
+   case "Prismatic Resonance Cannon (C4)":
+    coordinated=append(coordinated,c.F);if ai.Mult!=1.25||ai.Durability!=0{t.Errorf("C4 attack=%+v",ai)}
+   }
+  },"test-c6")
+  c.Tasks.Add(func(){if c.Player.ByIndex(0).ReactBonus(info.AttackInfo{AttackTag:attacks.AttackTagDirectStellarConduct})!=0{t.Error("C1 bonus persisted after decoding")}},410)
+ })
+ if originals!=6||extras!=4{t.Fatalf("original=%d extra=%d",originals,extras)}
+ if len(coordinated)!=2||coordinated[1]-coordinated[0]<240{t.Fatalf("C4 hit frames=%v",coordinated)}
+}
+
+func scenario(t *testing.T, cons int, actions string, attach func(*core.Core)) {
+ t.Helper()
+ scenarioTargets(t,cons,1,actions,attach)
+}
+
+func scenarioTargets(t *testing.T, cons, targets int, actions string, attach func(*core.Core)) {
+ t.Helper()
+ source:=fmt.Sprintf(`options duration=12 workers=1 iteration=1;
+sandrone char lvl=90/90 cons=%d talent=10,10,10;
+sandrone add weapon="wastergreatsword" refine=1 lvl=70/70;
+active sandrone;
+%s
+wait(700);`,cons,actions)
+ for i:=0;i<targets;i++{source="target lvl=90 resist=0.1;\n"+source}
+ runScenario(t,source,attach)
+}
+
+func TestMultipleTargetsShareParticlesAndC4Cooldown(t *testing.T) {
+ for _,targets:=range []int{1,3} {
+  t.Run(fmt.Sprintf("targets%d",targets),func(t *testing.T){
+   particles:=0
+   cannonFrames:=map[int]int{}
+   scenarioTargets(t,6,targets,"sandrone charge;",func(c *core.Core){
+    addElectro(c)
+    c.Events.Subscribe(event.OnParticleReceived,func(args ...any){particles++},"test-shared-particles")
+    c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+     if args[1].(*info.AttackEvent).Info.Abil=="Prismatic Resonance Cannon (C4)"{cannonFrames[c.F]++}
+    },"test-shared-c4")
+   })
+   if particles!=2{t.Errorf("particle batches=%d want2 independent of target count",particles)}
+   if len(cannonFrames)!=2{t.Fatalf("C4 frames=%v",cannonFrames)}
+   first,last:=10000,0
+   for frame,hits:=range cannonFrames{
+    first=min(first,frame);last=max(last,frame)
+    if hits!=targets{t.Errorf("C4 at %d hit %d targets, want%d",frame,hits,targets)}
+   }
+   if last-first<240{t.Errorf("shared C4 cooldown violated: %v",cannonFrames)}
+  })
+ }
+}
+
+func runScenario(t *testing.T, source string, attach func(*core.Core)) {
+ t.Helper()
+ file:=ast.NewFile()
+ cfg,program,err:=parser.New(file,source).Parse();if err!=nil {t.Fatal(err)}
+ if len(cfg.Errors)>0 {t.Fatal(cfg.Errors)}
+ c,err:=simulation.NewCore(17,false,cfg);if err!=nil {t.Fatal(err)}
+ evaluator,err:=eval.NewEvaluator(file,program,c);if err!=nil {t.Fatal(err)}
+ sim,err:=simulation.New(cfg,evaluator,c);if err!=nil {t.Fatal(err)}
+ if attach!=nil {attach(c)}
+ result,err:=sim.Run();if err!=nil {t.Fatal(err)}
+ if result.DPS<=0 {t.Fatalf("no actual damage: %v",result.DPS)}
+}
+
+func TestSkillUsesActualSDKDamageAndOneSharedParticle(t *testing.T) {
+ hits,particles:=0,0
+ scenario(t,0,"sandrone skill;",func(c *core.Core){
+  c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   a:=args[1].(*info.AttackEvent)
+   if a.Info.Abil=="Prism Shot" {hits++}
+  },"test-damage")
+  c.Events.Subscribe(event.OnParticleReceived,func(args ...any){particles++},"test-particles")
+ })
+ if hits!=2 || particles!=1 {t.Fatalf("hits=%d particles=%d",hits,particles)}
+}
+
+func TestBurstBombardmentsAndFinalRayAreSeparateActualHits(t *testing.T) {
+ bombardments,rays:=0,0
+ scenario(t,0,"sandrone burst;",func(c *core.Core){
+  c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+   a:=args[1].(*info.AttackEvent)
+   if a.Info.Abil=="Bombardment" {bombardments++}
+   if a.Info.Abil=="Convective Inhibition Ray" {rays++}
+  },"test-burst")
+ })
+ if bombardments!=3||rays!=1 {t.Fatalf("bombardments=%d rays=%d",bombardments,rays)}
+}
+
+func TestChargeCycleFiresThreeBeamsAtC0AndSixAtC1(t *testing.T) {
+ for _,tc:=range []struct{cons,want int}{{0,3},{1,6}} {
+  t.Run(fmt.Sprintf("C%d",tc.cons),func(t *testing.T){
+   beams:=0
+   scenario(t,tc.cons,"sandrone charge;",func(c *core.Core){
+    c.Events.Subscribe(event.OnEnemyHit,func(args ...any){
+     if args[1].(*info.AttackEvent).Info.Abil=="Condensed Beam"{beams++}
+    },"test-beams")
+   })
+   if beams!=tc.want{t.Fatalf("beams=%d want%d",beams,tc.want)}
+  })
+ }
+}

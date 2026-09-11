@@ -1,0 +1,52 @@
+package sandrone
+
+import (
+ tmpl "github.com/genshinsim/gcsim/internal/template/character"
+ "github.com/genshinsim/gcsim/pkg/core"
+ "github.com/genshinsim/gcsim/pkg/core/event"
+ "github.com/genshinsim/gcsim/pkg/core/info"
+ "github.com/genshinsim/gcsim/pkg/core/keys"
+ "github.com/genshinsim/gcsim/pkg/core/player/character"
+ "github.com/genshinsim/gcsim/pkg/shortcut"
+ "github.com/genshinsim/gcsim/pkg/reactable"
+)
+
+type char struct {
+ *tmpl.Character
+ power *Power
+ charging bool
+ chargeStart int
+ chargeEnd int
+ nextSweep int
+ beamCount int
+ coolingUnits int
+ tacticsStacks int
+ tacticsExpiry int
+ c4ReadyAt int
+}
+
+func init() {
+ core.RegisterCharFunc(keys.Sandrone, NewChar)
+ shortcut.CharNameToKey["sandrone"] = keys.Sandrone
+}
+
+func NewChar(s *core.Core, w *character.CharWrapper, p info.CharacterProfile) error {
+ c:=&char{Character:tmpl.NewWithWrapper(s,w),power:NewPower(w.Base.Cons>=1)}
+ c.EnergyMax=60
+ c.NormalHitNum=3
+ c.NormalCon=3
+ c.BurstCon=5
+ w.Character=c
+ return nil
+}
+
+func(c *char) Init()error{
+ c.a4Init()
+ c.stellarBaseInit()
+ c.constellationsInit()
+ c.Core.Flags.Custom[reactable.StellarConductEnableKey]=1
+ c.Core.Flags.Custom[reactable.StellarSwirlEnableKey]=1
+ c.Core.Events.Subscribe(event.OnStellarSwirl,func(args ...any){c.AddStatus("sandrone-radiance-swirl",8*60,false)},"sandrone-radiance")
+ c.Core.Events.Subscribe(event.OnTick,func(args ...any){c.tickPower()},"sandrone-power")
+ return nil
+}

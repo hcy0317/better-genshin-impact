@@ -6,6 +6,10 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoTrackPathTests;
 
 public class AreaSelectionClickControllerTests
 {
+
+
+
+
     [Fact]
     public async Task TimeoutReportsCapturedMapStateInsteadOfClaimingNoObservation()
     {

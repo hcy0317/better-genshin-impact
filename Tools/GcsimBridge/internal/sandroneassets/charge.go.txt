@@ -1,0 +1,82 @@
+package sandrone
+
+import (
+ "github.com/genshinsim/gcsim/pkg/core/action"
+ "github.com/genshinsim/gcsim/pkg/core/attacks"
+ "github.com/genshinsim/gcsim/pkg/core/attributes"
+ "github.com/genshinsim/gcsim/pkg/core/combat"
+ "github.com/genshinsim/gcsim/pkg/core/info"
+)
+
+const firstBeamFrames = 96 // BWIKI ~1.6s; Miyoushe ~1.5s is a sensitivity case.
+const beamIntervalFrames = 60
+
+func(c *char) ChargeAttack(p map[string]int)(action.Info,error) {
+ duration:=firstBeamFrames+2*beamIntervalFrames+2
+ if c.Base.Cons>=1 {duration=firstBeamFrames+5*beamIntervalFrames+2}
+ if p["duration"]>0 {duration=min(p["duration"],600)}
+ c.power.StartCharge() // A held charge during overdrive only sweeps until released.
+ c.charging=true
+ c.chargeStart=c.Core.F
+ c.chargeEnd=c.Core.F+duration
+ c.nextSweep=c.Core.F+20
+ c.beamCount=0
+ return actionInfo(duration,action.ChargeAttackState),nil
+}
+
+func(c *char) stopCharge(){c.charging=false;c.power.StopCharge()}
+
+func(c *char) tickPower() {
+ active:=c.Core.Player.Active()==c.Index()
+ if c.charging && (!active || c.Core.F>=c.chargeEnd || c.Core.Player.CurrentState()!=action.ChargeAttackState) {c.stopCharge()}
+ before:=c.power.Units()
+ c.power.Advance(active)
+ c.recordCooling(before-c.power.Units())
+ if c.charging {
+  if c.Core.F>=c.nextSweep {
+   c.sweep()
+   interval:=20
+   if c.power.Overheated(){interval=30}
+   c.nextSweep=c.Core.F+interval
+  }
+  elapsed:=c.Core.F-c.chargeStart
+  if elapsed>=firstBeamFrames && (elapsed-firstBeamFrames)%beamIntervalFrames==0 && c.power.FireBeam() {
+   c.beamCount++
+   c.beam()
+  }
+ }
+ c.SetTag("sandrone-power",int(c.power.Value()))
+ c.SetTag("sandrone-beams",c.beamCount)
+}
+
+func(c *char) sweep() {
+ param:="param4"
+ if c.power.Overheated(){param="param7"}
+ ai:=info.AttackInfo{ActorIndex:c.Index(),Abil:"Sweeping Fire",AttackTag:attacks.AttackTagExtra,
+  ICDTag:attacks.ICDTagExtraAttack,ICDGroup:attacks.ICDGroupDefault,Element:attributes.Cryo,Durability:25,
+  Mult:talent["combat1"][param][c.TalentLvlAttack()]}
+ // Sweep aura cadence remains a flagged model gap until its special ICD is verified.
+ c.Core.QueueAttack(ai,combat.NewCircleHitOnTarget(c.Core.Combat.PrimaryTarget(),nil,3),0,0)
+}
+
+func(c *char) beam() {
+ ai:=info.AttackInfo{ActorIndex:c.Index(),Abil:"Condensed Beam",AttackTag:attacks.AttackTagExtra,
+  ICDTag:attacks.ICDTagNone,ICDGroup:attacks.ICDGroupDefault,Element:attributes.Cryo,Durability:25,
+  StrikeType:attacks.StrikeTypeBlunt,PoiseDMG:120,Mult:talent["combat1"]["param5"][c.TalentLvlAttack()]}
+ c.convertRadiance(&ai,talent["combat1"]["param6"][c.TalentLvlAttack()],talent["combat1"]["param11"][c.TalentLvlAttack()])
+ snapshot:=c.Snapshot(&ai)
+ if c.Base.Cons>=2 && ai.AttackTag!=attacks.AttackTagExtra {
+  snapshot.Stats[attributes.CD]+=0.4+0.2*float64(min(3,c.beamCount))
+ }
+ c.Core.QueueAttackWithSnap(ai,snapshot,combat.NewCircleHitOnTarget(c.Core.Combat.PrimaryTarget(),nil,3),0,c.particle)
+ if c.Base.Cons>=6 && c.beamCount>=3 && c.beamCount<=6 {
+  // Provisional timing: one extra instance alongside each original beam3-6,
+  // four per decoding period total, not four extra instances per beam.
+  extra:=ai
+  extra.Abil="Condensed Cluster Beam"
+  extra.Mult=1
+  if extra.AttackTag==attacks.AttackTagDirectStellarConduct {extra.Mult=0.8}
+  if extra.AttackTag==attacks.AttackTagDirectStellarSwirl {extra.Mult=1.2}
+  c.Core.QueueAttackWithSnap(extra,snapshot,combat.NewCircleHitOnTarget(c.Core.Combat.PrimaryTarget(),nil,3),0)
+ }
+}

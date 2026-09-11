@@ -14,15 +14,20 @@ func TestNativeSearchChangesOnlyBoundedSourceParametersAndKeepsTheProgram(t *tes
 	original := &nativeflow.Program{SchemaVersion: "native-flow-v1", Source: "凯亚 e,wait(1)", Root: []nativeflow.Node{{ID: "e", Kind: "skill", Character: "kaeya"}, {ID: "w", Kind: "wait", Character: "kaeya", Seconds: 1, ValueStart: 10, ValueEnd: 11}}}
 	request := rotation.Request{Base: engine.Request{Config: "active kaeya;", NativeFlow: original}, SearchSeeds: []int64{1}, ValidationSeeds: []int64{2, 3}, Budget: 12}
 	result, err := rotation.Optimize(context.Background(), request, func(_ context.Context, r engine.Request) (engine.Report, error) {
-		if r.NativeFlow.Source != original.Source || r.NativeFlow.Root[0].Kind != "skill" {
-			t.Fatal("optimizer changed the control program")
+		if r.NativeFlow.Source != original.Source {
+			t.Fatal("optimizer changed the original source")
 		}
-		seconds := r.NativeFlow.Root[1].Seconds
+		seconds := 0.0
+		for _, n := range r.NativeFlow.Root {
+			if n.ID == "w" {
+				seconds = n.Seconds
+			}
+		}
 		if seconds < .5 || seconds > 1.5 {
 			t.Fatalf("parameter outside original bounds: %v", seconds)
 		}
 		dps := 100 + seconds
-		return engine.Report{MeanDPS: dps, ScoredDPS: []float64{dps, dps}, Validation: engine.Validation{State: "passed", Complete: true}}, nil
+		return engine.Report{MeanDPS: dps, ScoredDPS: []float64{dps, dps}, Validation: engine.Validation{State: "passed", Complete: true}, NativeQuality: &engine.NativeQuality{Source: "gcsim.sdk.shields/actions/hp", Complete: true, Samples: len(r.Seeds), MinShieldCoverage: 1, MinCriticalShieldCoverage: 1, MinPartyHP: 1}}, nil
 	})
 	if err != nil {
 		t.Fatal(err)

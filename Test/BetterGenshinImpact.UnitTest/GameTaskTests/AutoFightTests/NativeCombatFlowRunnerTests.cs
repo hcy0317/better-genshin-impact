@@ -9,6 +9,7 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class NativeCombatFlowRunnerTests
 {
+
     [Theory]
     [InlineData(0)]
     [InlineData(3)]

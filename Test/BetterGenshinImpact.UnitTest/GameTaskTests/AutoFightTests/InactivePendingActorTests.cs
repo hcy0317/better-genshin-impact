@@ -26,7 +26,7 @@ public class InactivePendingActorTests
     public void MorningScreenshotCannotAttributeNaviasSkillToZhongli()
     {
         using var image = new ImageRegion(Cv2.ImRead(Path.Combine(AppContext.BaseDirectory,
-            "Assets", "Ui", "inactive-zhongli-20260911.png")), 0, 0);
+            "Fixtures", "Ui", "inactive-zhongli-20260911.png")), 0, 0);
         using var index = image.Find(ElementRecognition.Get("Index1", image));
         Assert.True(index.IsExist());
         var zhongli = new Avatar(null!, "钟离", 1, default) { IndexRect = index.ToRect() };

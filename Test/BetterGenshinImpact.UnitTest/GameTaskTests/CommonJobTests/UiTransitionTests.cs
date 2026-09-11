@@ -42,6 +42,45 @@ public class UiTransitionTests
     }
 
     [Fact]
+    public void FullPartyDefeatVetoesConflictingPageEvidence()
+    {
+        UiSnapshot[] samples = [new(1) { FullPartyDefeat = true, MainHud = true },
+            new(2) { FullPartyDefeat = true, Party = true },
+            new(3) { FullPartyDefeat = true, PartyList = true },
+            new(4) { FullPartyDefeat = true, BigMap = true },
+            new(5) { FullPartyDefeat = true, Crafting = true },
+            new(6) { FullPartyDefeat = true, MenuBack = true }];
+        foreach (var snapshot in samples)
+        {
+            foreach (var target in Enum.GetValues<UiTarget>()) Assert.False(snapshot.Matches(target));
+            Assert.False(snapshot.MapReady);
+            Assert.False(snapshot.CanEscape);
+        }
+    }
+
+    [Fact]
+    public async Task FoodRevivePromptIsClosedWithoutConfirmingConsumption()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new(1) { Revive = true, Prompt = true, BlackConfirm = true },
+            new(2) { MainHud = true }, new(3) { MainHud = true });
+        await UiRecovery.ToMainAsync(driver, default, clock: clock);
+        Assert.Equal(new[] { UiAction.Escape }, driver.Actions);
+    }
+
+    [Fact]
+    public async Task FullPartyDefeatUsesReviveInsteadOfEscapeAndWaitsForStableHud()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock,
+            new(1) { Revive = true, FullPartyDefeat = true },
+            new(2), new(3) { MainHud = true }, new(4) { MainHud = true });
+        var result = await UiRecovery.ToMainAsync(driver, default, clock: clock);
+        Assert.Equal(4, result.FrameId);
+        Assert.Equal(new[] { UiAction.ReviveParty }, driver.Actions);
+    }
+
+    [Fact]
     public async Task RecognizedCommissionHandbookCanExitBeforeTrackingStarts()
     {
         var clock = new FakeTimeProvider();

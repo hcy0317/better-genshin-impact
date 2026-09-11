@@ -85,7 +85,7 @@ func containsOuterExit(node ast.Node) bool {
 	return false
 }
 
-func observeAutomaticRounds(script ast.Node, file *ast.File, c *core.Core, seed int64, index, offset int) (*ast.BlockStmt, *roundObserver, error) {
+func observeAutomaticRounds(script ast.Node, file *ast.File, c *core.Core, seed int64, index, offset, limit int) (*ast.BlockStmt, *roundObserver, error) {
 	program, ok := script.Copy().(*ast.BlockStmt)
 	if !ok {
 		return nil, nil, errors.New("gcsim did not produce a statement block")
@@ -111,8 +111,19 @@ func observeAutomaticRounds(script ast.Node, file *ast.File, c *core.Core, seed 
 			observer.trace.Issues = []string{"所选主循环已不存在，请重新选择"}
 			return program, observer, nil
 		}
-		observer.linear = true
-		return program, observer, nil
+		if limit == 0 {
+			observer.linear = true
+			return program, observer, nil
+		}
+		// With no explicit main loop, one complete linear script is one cycle.
+		_, shell, e := parser.New(ast.NewFile(), "while 1 {}").Parse()
+		if e != nil {
+			return nil, nil, e
+		}
+		outer := shell.(*ast.BlockStmt)
+		outer.List[0].(*ast.WhileStmt).WhileBlock = program
+		bodies = append(bodies, program)
+		program = outer
 	}
 	if (index == 0 && len(bodies) > 1) || index < 0 || index > len(bodies) {
 		observer.trace.State = "ambiguous"
@@ -145,8 +156,26 @@ func observeAutomaticRounds(script ast.Node, file *ast.File, c *core.Core, seed 
 	}
 	body.List = append([]ast.Node{markers.List[1]}, append(body.List, markers.List[2])...)
 	program.List = append([]ast.Node{markers.List[0]}, program.List...)
+	if limit > 0 {
+		// The final yield lets the simulation thread stop before any next-cycle
+		// action or marker. Original text, loop conditions and epilogue stay intact.
+		counter := "__bgi_count_" + key
+		_, extra, e := parser.New(ast.NewFile(), fmt.Sprintf("let %s=0; %s=%s+1; if %s >= %d {wait(1);}", counter, counter, counter, counter, limit)).Parse()
+		if e != nil {
+			return nil, nil, e
+		}
+		parts := extra.(*ast.BlockStmt).List
+		program.List = append([]ast.Node{parts[0]}, program.List...)
+		body.List = append(body.List, parts[1:]...)
+	}
 	c.Log = observer
 	return program, observer, nil
+}
+
+func (o *roundObserver) countStatus() (int, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.trace.Rounds), o.trace.State == "complete" && o.active == nil
 }
 
 func (o *roundObserver) energy() map[string]float64 {

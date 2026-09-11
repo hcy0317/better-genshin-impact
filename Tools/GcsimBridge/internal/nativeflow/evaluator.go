@@ -8,6 +8,7 @@ import (
 	"github.com/genshinsim/gcsim/pkg/core"
 	"github.com/genshinsim/gcsim/pkg/core/action"
 	"github.com/genshinsim/gcsim/pkg/core/event"
+	"github.com/genshinsim/gcsim/pkg/core/player"
 	"github.com/genshinsim/gcsim/pkg/core/player/character"
 )
 
@@ -26,7 +27,11 @@ type Evaluator struct {
 	failure                   error
 	Events                    []TraceEvent
 	TraceTruncated            bool
+	round                     int
+	FailedRounds              int
+	droppedBursts             map[string]bool
 	OnRound                   func(start, complete bool)
+	RoundLimit                int
 }
 type frame struct {
 	name                          string
@@ -39,12 +44,14 @@ type frame struct {
 	watchDemand                   int
 }
 type pendingAction struct {
+	readyAt                     int
 	node                        Node
 	deadline, until, inputFrame int
 	sent, executed              bool
 	feeding                     bool
 }
 type record struct {
+	source     Node
 	at, expiry int
 	known      bool
 }
@@ -66,10 +73,10 @@ func New(p *Program, c *core.Core) (*Evaluator, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
-	e := &Evaluator{program: p, core: c, once: map[string]bool{}, records: map[string]record{}, watches: map[string]Node{}, maintenanceAttempts: map[string]int{}, Events: []TraceEvent{}}
+	e := &Evaluator{program: p, core: c, once: map[string]bool{}, records: map[string]record{}, watches: map[string]Node{}, maintenanceAttempts: map[string]int{}, Events: []TraceEvent{}, droppedBursts: map[string]bool{}}
 	c.Events.Subscribe(event.OnActionExec, func(args ...any) {
 		pending := e.pending
-		if pending == nil || !pending.sent || pending.feeding || args[1].(action.Action) != actionKind(pending.node.Kind) || c.Player.ByIndex(args[0].(int)).Base.Key.String() != pending.node.Character {
+		if pending == nil || !pending.sent || pending.feeding || (args[1].(action.Action) != actionKind(pending.node.Kind) && !(pending.node.Kind == "attack" && args[1].(action.Action) == action.ActionHighPlunge)) || c.Player.ByIndex(args[0].(int)).Base.Key.String() != pending.node.Character {
 			return
 		}
 		pending.executed = true
@@ -100,6 +107,10 @@ func actionKind(kind string) action.Action {
 		return action.ActionBurst
 	case "charge":
 		return action.ActionCharge
+	case "dash":
+		return action.ActionDash
+	case "walk":
+		return action.ActionWalk
 	default:
 		return action.ActionAttack
 	}
@@ -117,6 +128,7 @@ func (e *Evaluator) fail(n Node, message string) (*action.Eval, error) {
 	return nil, e.failure
 }
 func (e *Evaluator) newRoot() {
+	e.round++
 	e.stack = append(e.stack, &frame{name: "$root", nodes: e.program.Root, deadline: math.MaxInt32, ok: true, admitted: true, declaration: Node{ID: "root"}})
 	if e.OnRound != nil {
 		e.OnRound(true, true)
@@ -171,15 +183,31 @@ func (e *Evaluator) finishFrame() {
 	}
 	e.trace(f.declaration, "return", fmt.Sprintf("%s:%t", f.name, f.ok))
 	if len(e.stack) == 0 {
+		if !f.ok {
+			e.FailedRounds++
+		}
 		if e.OnRound != nil {
 			e.OnRound(false, f.ok)
 		}
-		if !e.program.Loop {
+		if e.RoundLimit == 0 && !e.program.Loop || e.RoundLimit > 0 && e.round >= e.RoundLimit {
 			e.finished = true
 		}
 	} else if !f.ok && (f.watch != "" || f.caller != nil && f.caller.Options["required"] == "true") {
 		e.stack[len(e.stack)-1].ok = false
 	}
+}
+
+// CriticalOutputActive observes the actual running protected damage action,
+// never a planned command that was skipped before its input.
+func (e *Evaluator) CriticalOutputActive() bool {
+	if e.pending == nil || !e.pending.executed || e.pending.feeding || e.pending.node.Options["keep"] == "" {
+		return false
+	}
+	switch e.pending.node.Kind {
+	case "skill", "burst", "attack", "charge":
+		return true
+	}
+	return false
 }
 func (e *Evaluator) completeAction(ok bool) {
 	p := e.pending
@@ -232,12 +260,16 @@ func (e *Evaluator) NextAction() (*action.Eval, error) {
 				f.ok = false
 			}
 			if horizon > 0 {
+				produced := map[string]bool{}
 				for _, n := range e.program.Blocks[f.name].Nodes {
-					if keep := n.Options["keep"]; keep != "" {
+					if keep := n.Options["keep"]; keep != "" && !produced[keep] {
 						left, known := e.remaining(keep)
 						if !known || left <= horizon {
 							f.ok = false
 						}
+					}
+					if name := n.Options["record"]; name != "" {
+						produced[name] = true
 					}
 				}
 			}
@@ -290,14 +322,15 @@ func (e *Evaluator) NextAction() (*action.Eval, error) {
 			continue
 		}
 		if n.Kind == "check" {
-			e.trace(n, "check", "终止由gcsim敌人/场景状态决定")
+			detail := "终止由gcsim敌人/场景状态决定"
+			if e.RoundLimit > 0 {
+				detail = "终止由已完成主循环次数决定"
+			}
+			e.trace(n, "check", detail)
 			continue
 		}
 		if keep := n.Options["keep"]; keep != "" {
 			demand := e.coverage(n)
-			if f.declaration.Options["atomic"] == "true" {
-				demand = max(demand, e.estimate(f.name)+15)
-			}
 			left, known := e.remaining(keep)
 			if !known || left <= demand {
 				e.trace(n, "skipped", "keep窗口不足："+keep)
@@ -323,12 +356,23 @@ func (e *Evaluator) NextAction() (*action.Eval, error) {
 				continue
 			}
 		}
+		if name := n.Options["refresh"]; name != "" {
+			r, ok := e.records[name]
+			actor := e.char(n.Character)
+			if !ok || actor == nil || r.source.Character != "sangonomiyakokomi" || r.source.Kind != "skill" || actor.Base.Ascension < 1 || e.core.Status.Duration("kokomiskill") <= 0 {
+				e.trace(n, "failed", "水母刷新前提未满足")
+				if n.Options["required"] == "true" {
+					f.ok = false
+				}
+				continue
+			}
+		}
 		timeout := max(8.0, float64(e.coverage(n))/60)
 		if n.Kind == "skill" && n.Options["wait"] == "true" {
 			timeout = max(timeout, option(e.program.Timings[n.Options["timing"]], "cd", 15)+float64(e.coverage(n))/60)
 		}
 		deadline := min(f.deadline, e.core.F+frames(option(n.Options, "timeout", timeout)))
-		e.pending = &pendingAction{node: n, deadline: deadline, until: -1}
+		e.pending = &pendingAction{node: n, deadline: deadline, until: -1, readyAt: e.core.F + e.program.InputDelayFrames}
 	}
 	return e.fail(Node{}, "无时间进展的控制转移超过128次")
 }
@@ -350,6 +394,9 @@ func (e *Evaluator) advanceAction() (*action.Eval, error) {
 			return e.fail(n, "native_flow_indeterminate：已开始的动作无法等价中断；没有返回截断或完整命中的合格结果")
 		}
 		e.completeAction(false)
+		return e.wait(), nil
+	}
+	if e.core.F < p.readyAt {
 		return e.wait(), nil
 	}
 	target := n.Character
@@ -384,6 +431,9 @@ func (e *Evaluator) advanceAction() (*action.Eval, error) {
 			return e.wait(), nil
 		}
 		if n.Kind != "attack" || e.core.F >= p.until {
+			if (n.Kind == "charge" || n.Kind == "dash") && e.core.F < p.inputFrame+frames(n.Seconds) {
+				return e.wait(), nil
+			}
 			if n.Options["feed"] != "" {
 				p.feeding = true
 				p.until = -1
@@ -400,7 +450,19 @@ func (e *Evaluator) advanceAction() (*action.Eval, error) {
 		return e.wait(), nil
 	}
 	kind := actionKind(n.Kind)
+	if n.Kind == "burst" && e.program.DropFirstBurst && !e.droppedBursts[n.Character] {
+		e.droppedBursts[n.Character] = true
+		e.trace(n, "diagnostic-drop", "受控复评：首次Q调用未发输入")
+		e.completeAction(false)
+		return e.wait(), nil
+	}
+	if kind == action.ActionAttack && e.core.Player.Airborne() != player.Grounded {
+		kind = action.ActionHighPlunge
+	}
 	params := map[string]int{}
+	if n.Kind == "walk" {
+		params["f"] = frames(n.Seconds)
+	}
 	if n.Options["hold"] == "true" {
 		params["hold"] = 1
 	}
@@ -421,7 +483,7 @@ func (e *Evaluator) recordAction(n Node, at int) {
 	if name == "" {
 		return
 	}
-	r := record{at: at}
+	r := record{at: at, source: n}
 	if timing, ok := e.program.Timings[n.Options["timing"]]; ok && timing["duration"] != "" {
 		r.known = true
 		r.expiry = at + frames(option(timing, "duration", 0))
@@ -444,14 +506,24 @@ func (e *Evaluator) remaining(name string) (int, bool) {
 	if !ok {
 		return 0, true
 	}
+	if r.source.Options["timing"] != "" && r.known {
+		return r.expiry - e.core.F, true
+	}
+	if value, known := e.nativeRemaining(r.source); known {
+		return value, true
+	}
 	if !r.known {
 		return 0, false
 	}
 	return r.expiry - e.core.F, true
 }
 func (e *Evaluator) evaluate(expr *Expression, horizon int) Truth {
-	return expr.Evaluate(func(name, argument string) Truth {
+	return expr.EvaluateWithValues(func(name, argument string) Truth {
 		switch name {
+		case "round-odd":
+			return truth(e.round%2 == 1)
+		case "round-even":
+			return truth(e.round%2 == 0)
 		case "record-exists":
 			_, ok := e.records[argument]
 			return truth(ok)
@@ -482,6 +554,9 @@ func (e *Evaluator) evaluate(expr *Expression, horizon int) Truth {
 		}
 		// Visual low-hp cannot be derived from an unconfigured image threshold.
 		return Unknown
+	}, func(name, argument string) (float64, bool) {
+		left, known := e.remaining(argument)
+		return float64(left) / 60, known
 	})
 }
 func (e *Evaluator) coverage(n Node) int { return actionFrames(n) + 60 + 15 }
@@ -498,7 +573,7 @@ func actionFrames(n Node) int {
 		return v
 	case "burst":
 		return 120
-	case "wait", "attack":
+	case "wait", "attack", "charge", "dash", "walk":
 		return frames(n.Seconds)
 	case "call", "branch", "segment":
 		return 0

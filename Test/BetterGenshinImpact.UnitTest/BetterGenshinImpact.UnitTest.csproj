@@ -31,8 +31,7 @@
 
     <ItemGroup>
       <Folder Include="Assets\AutoFight\" />
-      <None Update="Assets\Ui\food-revive-controller-20260910.png" CopyToOutputDirectory="PreserveNewest" />
-      <None Update="Assets\Ui\inactive-zhongli-20260911.png" CopyToOutputDirectory="PreserveNewest" />
+      <None Update="Fixtures\Ui\*.png" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
 
 </Project>

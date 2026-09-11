@@ -27,7 +27,7 @@ public class ReviveScreenshotTests(ITestOutputHelper output)
     [Fact]
     public void ActualControllerScreenshotIsRecognizedAsFoodPrompt()
     {
-        var path=Path.Combine(AppContext.BaseDirectory,"Assets","Ui","food-revive-controller-20260910.png");
+        var path=Path.Combine(AppContext.BaseDirectory,"Fixtures","Ui","food-revive-controller-20260910.png");
         using var image=new ImageRegion(Cv2.ImRead(path),0,0);
         Assert.Equal(1920,image.Width);
         using var confirm=image.Find(RecognitionAssets.Get("AutoFight","Confirm",image));

@@ -29,6 +29,29 @@ func TestUnavailableCandidatesKeepBoundedActionableExamples(t *testing.T) {
 	}
 }
 
+func TestUnchangedEquipmentValidatesEachIndependentBatchOnlyOnce(t *testing.T) {
+	r := fixtureRequest()
+	r.Characters[0].Current = []int{1, 3, 5, 7, 9}
+	r.Characters[1].Current = []int{0, 2, 4, 6, 8}
+	r.ValidationSeeds = []int64{401, 503, 601}
+	validationCalls := 0
+	result, err := optimizer.Optimize(context.Background(), r, func(ctx context.Context, evaluation engine.Request) (engine.Report, error) {
+		if evaluation.Seeds[0] == 401 {
+			validationCalls++
+			if len(evaluation.Seeds) != 3 {
+				t.Fatal("validation seeds were reduced")
+			}
+		}
+		return testEvaluator(ctx, evaluation)
+	})
+	if err != nil || result.Status != "feasible_baseline" {
+		t.Fatalf("%+v / %v", result, err)
+	}
+	if validationCalls != 1 {
+		t.Fatalf("identical final equipment was validated %d times", validationCalls)
+	}
+}
+
 func fixtureRequest() optimizer.Request {
 	r := optimizer.Request{SchemaVersion: "1", Mode: "balanced", Inventory: engine.InventoryRef{UID: "fixture", ScanSessionID: "scan", CatalogVersion: "catalog", SnapshotDigest: "snapshot"}, SearchSeeds: []int64{1}, ValidationSeeds: []int64{2}, EvaluationBudget: 1000, Exact: true}
 	for i, slot := range []string{"flower", "plume", "sands", "goblet", "circlet"} {
