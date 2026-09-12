@@ -1161,7 +1161,8 @@ public partial class PathExecutor
             EndJudgment(screen);
 
             position = await GetPosition(screen, waypoint);
-            if (Navigation.GetDistance(waypoint, position) < 2)
+            var distance = Navigation.GetDistance(waypoint, position);
+            if (distance < 2)
             {
                 Logger.LogDebug("已到达路径点");
                 break;
@@ -1169,7 +1170,12 @@ public partial class PathExecutor
 
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
             var rotated = await WaitUntilRotatedTo(targetOrientation, 2, maxTryTimes: 20);
-            if (rotationPolicy.Observe(rotated))
+            var rotationFailed = rotationPolicy.Observe(rotated);
+            if (stepsTaken == 1 || stepsTaken % 5 == 0 || !rotated)
+                Logger.LogDebug("PATH_APPROACH segment={Segment} waypoint={Waypoint} step={Step}/25 targetImage=({TargetX:F1},{TargetY:F1}) currentImage=({X:F1},{Y:F1}) distance={Distance:F2} targetAngle={Angle} rotated={Rotated} consecutiveFailures={Failures}",
+                    CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, stepsTaken, waypoint.X, waypoint.Y,
+                    position.X, position.Y, distance, targetOrientation, rotated, rotationPolicy.ConsecutiveFailures);
+            if (rotationFailed)
             {
                 Logger.LogWarning(
                     "精确接近连续 {Failures} 次无法完成视角转向，停止小碎步接近，避免在错误方向空转",

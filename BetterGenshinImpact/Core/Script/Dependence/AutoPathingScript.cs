@@ -7,8 +7,18 @@ using BetterGenshinImpact.Core.Script.Utils;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask;
 using Microsoft.Extensions.Logging;
+using Microsoft.ClearScript;
 
 namespace BetterGenshinImpact.Core.Script.Dependence;
+
+/// <summary>仅在原生路线完成且任务边界仍健康时发布；失败和取消仍抛出原异常。</summary>
+public sealed class PathingRunResult
+{
+    internal PathingRunResult() { }
+
+    [ScriptMember("success")]
+    public bool Success => true;
+}
 
 public class AutoPathingScript
 {
@@ -53,12 +63,12 @@ public class AutoPathingScript
         }
     }
 
-    public async Task Run(string json)
+    public async Task<PathingRunResult> Run(string json)
     {
-        await Run(json, null);
+        return await Run(json, null);
     }
 
-    private async Task Run(string json, string? sourcePath)
+    private async Task<PathingRunResult> Run(string json, string? sourcePath)
     {
         using var owned = _taskGuard.Enter();
         try
@@ -66,6 +76,7 @@ public class AutoPathingScript
             if (!await _executePath(json, sourcePath))
                 throw new InvalidOperationException("地图追踪未完整完成，不能将本路线记为成功或写入采集冷却");
             _taskGuard.Check();
+            return new PathingRunResult();
         }
         catch (Exception e)
         {
@@ -90,7 +101,7 @@ public class AutoPathingScript
         return pathExecutor.SuccessEnd;
     }
 
-    public async Task RunFile(string path)
+    public async Task<PathingRunResult> RunFile(string path)
     {
         string json;
         try
@@ -103,17 +114,17 @@ public class AutoPathingScript
             throw;
         }
 
-        await Run(json, ScriptUtils.NormalizePath(_rootPath, path));
+        return await Run(json, ScriptUtils.NormalizePath(_rootPath, path));
     }
 
     /// <summary>
     /// 从已订阅的内容中获取文件
     /// </summary>
     /// <param name="path">在 `\User\AutoPathing` 目录下获取文件</param>
-    public async Task RunFileFromUser(string path)
+    public async Task<PathingRunResult> RunFileFromUser(string path)
     {
         var json = await AutoPathingFile.ReadTextOrThrow(path);
-        await Run(json, ScriptUtils.NormalizePath(Global.Absolute(@"User\AutoPathing"), path));
+        return await Run(json, ScriptUtils.NormalizePath(Global.Absolute(@"User\AutoPathing"), path));
     }
 
     /// <summary>

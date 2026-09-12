@@ -31,6 +31,12 @@ bld/
 # Mine
 /Tmp/
 
+# Local automation worktrees, evidence, and generated output
+/.codex-tmp/
+/.cyaness/
+/publish/
+/Test/BetterGenshinImpact.UnitTest/TestResults/
+
 # AI temporary design docs
 Docs/tmp/*
 !Docs/tmp/README.md

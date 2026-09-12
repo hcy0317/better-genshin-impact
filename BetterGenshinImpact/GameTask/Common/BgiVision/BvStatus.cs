@@ -208,6 +208,10 @@ public static partial class Bv
     /// <returns></returns>
     public static bool IsInBigMapUi(ImageRegion captureRa)
     {
+        // 派蒙菜单等页面也可能命中地图的缩放/设置图案；独立关闭按钮才形成完整地图证据。
+        using var closeRa = captureRa.Find(RecognitionAssets.Get("QuickTeleport", "MapCloseButton", captureRa));
+        if (!closeRa.IsExist()) return false;
+
         using var scaleRa = captureRa.Find(RecognitionAssets.Get("QuickTeleport", "MapScaleButton", captureRa));
         if (scaleRa.IsExist())
         {

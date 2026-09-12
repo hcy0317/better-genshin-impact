@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
@@ -54,15 +53,15 @@ public class MiningHandler : IActionHandler
 
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {
+        ct.ThrowIfCancellationRequested();
         var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
         if (combatScenes == null)
         {
-            Logger.LogError("队伍识别未初始化成功！");
-            return;
+            throw new InvalidOperationException("队伍识别未初始化成功，挖矿未执行，不能标记路线完成");
         }
 
         // 挖矿
-        Mining(combatScenes);
+        Mining(combatScenes, ct);
 
 
         if (waypointForTrack is { ActionParams: not null }
@@ -76,26 +75,28 @@ public class MiningHandler : IActionHandler
         }
     }
 
-    private void Mining(CombatScenes combatScenes)
+    private void Mining(CombatScenes combatScenes, CancellationToken ct) => RunMiningAction(
+        () => SelectMiningAction(name => combatScenes.SelectAvatar(name) != null),
+        command => command.Execute(combatScenes), ct,
+        name => Logger.LogWarning("挖矿角色 {Name} 未确认执行，停止当前挖矿动作，不回退其他角色普攻", name));
+
+    internal static void RunMiningAction(Func<string?> selectAction,
+        Func<CombatCommand, bool> execute, CancellationToken ct = default, Action<string>? warn = null)
     {
-        try
+        ct.ThrowIfCancellationRequested();
+        var selected = selectAction();
+        if (selected == null) throw new InvalidOperationException("当前队伍没有可执行的挖矿动作，不能标记路线完成");
+        var miningAction = CombatScriptParser.ParseContext(selected);
+        foreach (var command in miningAction.CombatCommands)
         {
-            var selected = SelectMiningAction(name => combatScenes.SelectAvatar(name) != null);
-            if (selected == null) return;
-            var miningAction = CombatScriptParser.ParseContext(selected);
-            foreach (var command in miningAction.CombatCommands)
+            ct.ThrowIfCancellationRequested();
+            if (!execute(command))
             {
-                if (!command.Execute(combatScenes))
-                {
-                    Logger.LogWarning("挖矿角色 {Name} 未确认执行，停止当前挖矿动作，不回退其他角色普攻", command.Name);
-                    break;
-                }
+                ct.ThrowIfCancellationRequested();
+                warn?.Invoke(command.Name);
+                throw new InvalidOperationException($"挖矿角色 {command.Name} 未确认执行，停止当前挖矿动作；本路线未完成");
             }
-        }
-        catch (Exception e)
-        {
-            Debug.WriteLine(e.Message);
-            Debug.WriteLine(e.StackTrace);
+            ct.ThrowIfCancellationRequested();
         }
     }
 }
