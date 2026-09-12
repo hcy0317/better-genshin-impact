@@ -2,6 +2,7 @@ using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoTrackPath;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.Common.Job;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using Vanara.PInvoke;
 using BetterGenshinImpact.GameTask.AutoFishing;
 using BetterGenshinImpact.ViewModel.Pages;
@@ -470,6 +471,15 @@ public class Genshin
     {
         using var ownedTask = _taskGuard.Enter();
         await new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token);
+    }
+
+    /// <summary>退出秘境并用连续新帧确认已回到秘境外主界面。</summary>
+    public async Task ExitDomain()
+    {
+        using var ownedTask = _taskGuard.Enter();
+        using var driver = new NativeUiDriver();
+        await UiRecovery.ExitDomainAsync(driver, CancellationContext.Instance.Cts.Token, _logger,
+            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
     }
 
     /// <summary>

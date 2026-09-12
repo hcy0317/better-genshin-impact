@@ -332,6 +332,23 @@ public class UiTransitionTests
     }
 
     [Fact]
+    public async Task DomainHudAfterExitConfirmationCannotCompleteBeforeLoadingFinishes()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock,
+            new(1) { MainHud = true, InDomain = true }, new(2) { MainHud = true, InDomain = true },
+            new(3) { Prompt = true, BlackConfirm = true },
+            new(4) { MainHud = true, InDomain = true }, new(5) { MainHud = true, InDomain = true },
+            new(6), new(7), new(8) { MainHud = true }, new(9) { MainHud = true });
+        Assert.Equal(9, (await UiRecovery.ExitDomainAsync(driver, default, clock: clock)).FrameId);
+        Assert.Equal(new[] { UiAction.RequestDomainExit, UiAction.ConfirmDomainExit }, driver.Actions);
+        var method = typeof(BetterGenshinImpact.Core.Script.Dependence.Genshin).GetMethod("ExitDomain");
+        Assert.NotNull(method);
+        Assert.Equal(typeof(Task), method!.ReturnType);
+        Assert.Empty(method.GetParameters());
+    }
+
+    [Fact]
     public async Task FailedExitRequestNeverAuthorizesConfirmingAFollowingDialog()
     {
         var clock = new FakeTimeProvider();
