@@ -19,6 +19,7 @@ public class BgiOnnxFactoryPredictorCacheTests
     [InlineData("BgiQClassify")]
     [InlineData("BgiAvatarSide")]
     [InlineData("BgiWorld")]
+    [InlineData("BgiTree")]
     public void RealtimeModelsUseTensorRtOnlyWithAnExistingCache(string model)
     {
         ProviderType[] configured = [ProviderType.TensorRt, ProviderType.Cuda, ProviderType.Cpu];
@@ -26,7 +27,7 @@ public class BgiOnnxFactoryPredictorCacheTests
         Assert.Equal(configured, BgiOnnxFactory.ResolveRealtimeProviderTypes(model, true, configured));
         Assert.Equal([ProviderType.Cpu], BgiOnnxFactory.ResolveRealtimeProviderTypes(model, false, [ProviderType.TensorRt]));
         Assert.Equal([ProviderType.Cpu], BgiOnnxFactory.ResolveRealtimeProviderTypes(model, false, [ProviderType.Cpu]));
-        Assert.Equal(configured, BgiOnnxFactory.ResolveRealtimeProviderTypes("BgiTree", false, configured));
+        Assert.Equal(configured, BgiOnnxFactory.ResolveRealtimeProviderTypes("OfflineModel", false, configured));
     }
     [Fact]
     public void Constructor_ShouldAllowAWorkflowToForceCpuOcr()

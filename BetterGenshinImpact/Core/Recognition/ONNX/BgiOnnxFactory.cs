@@ -330,7 +330,7 @@ public class BgiOnnxFactory : IDisposable
             _logger, initializationFailed);
     }
 
-    private static bool IsRealtimeModel(string name) => name is "BgiAvatarSide" or "BgiQClassify" or "BgiWorld";
+    private static bool IsRealtimeModel(string name) => name is "BgiAvatarSide" or "BgiQClassify" or "BgiWorld" or "BgiTree";
 
     internal static ProviderType[] ResolveRealtimeProviderTypes(string name, bool hasCache, IReadOnlyList<ProviderType> configured)
     {
