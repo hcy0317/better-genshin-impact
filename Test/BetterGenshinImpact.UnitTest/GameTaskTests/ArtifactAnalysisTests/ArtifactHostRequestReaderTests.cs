@@ -1,12 +1,81 @@
 using System.Text.Json;
 using BetterGenshinImpact.GameTask.ArtifactAnalysis;
 using BetterGenshinImpact.Helpers;
+using BetterGenshinImpact.Service;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.ArtifactAnalysisTests;
 
 public class ArtifactHostRequestReaderTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "bgi-artifact-host-" + Guid.NewGuid());
+
+    [Fact]
+    public async Task ExpiredUnclaimedRequestDoesNotAttemptAGameFailureScreenshot()
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, Guid.NewGuid() + ".json");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
+        {
+            version = 1, kind = "artifact-analysis", uid = "fixture", jobId = "expired-job", operation = "ANALYZE",
+            createdAtUtc = DateTimeOffset.UtcNow.AddMinutes(-10), expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-5)
+        }));
+        var screenshots = 0;
+        using var service = new ArtifactHostService(null!, NullLogger<ArtifactHostService>.Instance,
+            _root, (_, _) => screenshots++);
+        await service.RunObservedAsync(path);
+
+        Assert.Equal(0, screenshots);
+        Assert.True(File.Exists(path), "The rejected request remains available for audit instead of being deleted");
+    }
+
+    [Theory]
+    [InlineData("missing-expiry")]
+    [InlineData("missing-binding")]
+    public async Task MalformedRequestsAreNotReclassifiedAsBenignExpiry(string fault)
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, Guid.NewGuid() + ".json");
+        var request = new Dictionary<string, object>
+        {
+            ["version"] = 1, ["kind"] = "artifact-analysis", ["uid"] = "fixture", ["jobId"] = "invalid-job",
+            ["operation"] = fault == "missing-binding" ? "EXECUTE_EQUIP_PLAN" : "ANALYZE",
+            ["createdAtUtc"] = DateTimeOffset.UtcNow.AddMinutes(-10),
+            ["expiresAtUtc"] = DateTimeOffset.UtcNow.AddMinutes(-5)
+        };
+        if (fault == "missing-expiry") request.Remove("expiresAtUtc");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(request));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new ArtifactHostRequestReader(_root).ReadAsync(path, default, allowExpiredClaimed: true));
+    }
+
+    [Fact]
+    public async Task RecoveryFlagCannotAdmitAnExpiredUnclaimedRequest()
+    {
+        Directory.CreateDirectory(_root);
+        var path = Path.Combine(_root, Guid.NewGuid() + ".json");
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new
+        {
+            version = 1, kind = "artifact-analysis", uid = "fixture", jobId = "expired-job", operation = "ANALYZE",
+            createdAtUtc = DateTimeOffset.UtcNow.AddMinutes(-10), expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-5)
+        }));
+        await Assert.ThrowsAsync<ArtifactHostRequestExpiredException>(() =>
+            new ArtifactHostRequestReader(_root).ReadAsync(path, default, allowExpiredClaimed: true));
+    }
+
+    [Fact]
+    public async Task CancelledObservedRequestDoesNotCaptureOrExecute()
+    {
+        var screenshots = 0;
+        using var service = new ArtifactHostService(null!, NullLogger<ArtifactHostService>.Instance,
+            _root, (_, _) => screenshots++);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await service.RunObservedAsync(Path.Combine(_root, Guid.NewGuid() + ".json"), cts.Token);
+        Assert.Equal(0, screenshots);
+        Assert.False(Directory.Exists(_root));
+    }
 
     [Fact]
     public void CommandLine_ParsesArtifactHostRequestPathExactly()
@@ -68,7 +137,7 @@ public class ArtifactHostRequestReaderTests : IDisposable
             createdAtUtc = DateTimeOffset.UtcNow.AddMinutes(-10),
             expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-5)
         }));
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<ArtifactHostRequestExpiredException>(() =>
             new ArtifactHostRequestReader(_root).ReadAsync(expired, CancellationToken.None));
 
         File.Delete(outside);
@@ -92,7 +161,7 @@ public class ArtifactHostRequestReaderTests : IDisposable
         }));
         var reader = new ArtifactHostRequestReader(_root);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        await Assert.ThrowsAsync<ArtifactHostRequestExpiredException>(() =>
             reader.ReadAsync(path, CancellationToken.None));
         var recovered = await reader.ReadAsync(
             path, CancellationToken.None, allowExpiredClaimed: true);

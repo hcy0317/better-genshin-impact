@@ -34,6 +34,15 @@ public sealed class ArtifactHostService(
     private Task? _queueWorker;
     private int _watching;
     private int _disposed;
+    private readonly Action<Exception, string> _captureFailure =
+        (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context);
+
+    internal ArtifactHostService(ArtifactHostCoordinator coordinator, ILogger<ArtifactHostService> logger,
+        string requestRoot, Action<Exception, string> captureFailure) : this(coordinator, logger)
+    {
+        _requestRoot = Path.GetFullPath(requestRoot);
+        _captureFailure = captureFailure;
+    }
 
     private ArtifactHostRequestReader RequestReader => _requestReader ??= new ArtifactHostRequestReader(_requestRoot);
 
@@ -127,13 +136,17 @@ public sealed class ArtifactHostService(
             entered = true;
             await RunAsync(requestPath, linked.Token);
         }
+        catch (ArtifactHostRequestExpiredException)
+        {
+            logger.LogInformation("网页圣遗物任务请求已过期，跳过执行；未触发游戏操作或错误截图");
+        }
         catch (OperationCanceledException exception)
         {
             logger.LogInformation(exception, "网页圣遗物任务已取消");
         }
         catch (Exception exception)
         {
-            TaskFailureDiagnostics.CaptureScreenshotOnce(exception, "网页圣遗物任务执行失败");
+            _captureFailure(exception, "网页圣遗物任务执行失败");
             logger.LogError(exception, "网页圣遗物任务执行失败");
         }
         finally

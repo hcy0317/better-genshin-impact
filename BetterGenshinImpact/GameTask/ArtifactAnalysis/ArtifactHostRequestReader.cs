@@ -14,6 +14,9 @@ public sealed record ArtifactHostLaunchRequest(
     ArtifactHostRequest Request,
     bool Recovery);
 
+public sealed class ArtifactHostRequestExpiredException()
+    : InvalidOperationException("Artifact host request has expired before execution.");
+
 public sealed class ArtifactHostRequestReader
 {
     private readonly string _requestRoot;
@@ -74,11 +77,11 @@ public sealed class ArtifactHostRequestReader
                 StringComparison.OrdinalIgnoreCase);
         if (request.Version != 1
             || !string.Equals(request.Kind, "artifact-analysis", StringComparison.Ordinal)
-            || !recovery && request.ExpiresAtUtc <= DateTimeOffset.UtcNow
+            || request.ExpiresAtUtc == default
             || string.IsNullOrWhiteSpace(request.Uid)
             || string.IsNullOrWhiteSpace(request.JobId))
         {
-            throw new InvalidOperationException("Artifact host request is invalid or expired.");
+            throw new InvalidOperationException("Artifact host request is invalid.");
         }
         if (request.Operation == ArtifactHostOperation.ExecuteLockPlan
             && (request.SourceArtifactCount is null or < 0 || request.Targets is null))
@@ -105,6 +108,9 @@ public sealed class ArtifactHostRequestReader
             throw new InvalidOperationException(
                 "Character roster request is missing its activation settings.");
         }
+        // 先验证请求和授权绑定；仅合法但过期的未领取请求可作为非游戏故障忽略。
+        if (!recovery && request.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+            throw new ArtifactHostRequestExpiredException();
         return new ArtifactHostLaunchRequest(
             requestToken.ToString(), fullPath, request, recovery);
     }
