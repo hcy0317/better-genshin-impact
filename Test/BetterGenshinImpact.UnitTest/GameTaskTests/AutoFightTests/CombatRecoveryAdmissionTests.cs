@@ -9,6 +9,56 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatRecoveryAdmissionTests
 {
     [Fact]
+    public async Task WaterPartyOpeningResumesOnlyAfterExpiredSkillReadinessWithoutCreditingTheOldCast()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root != null && !File.Exists(Path.Combine(root.FullName, "BetterGenshinImpact.sln"))) root = root.Parent;
+        Assert.NotNull(root);
+        var script = File.ReadAllText(Path.Combine(root!.FullName, "BetterGenshinImpact", "User", "AutoFight", "00-水.txt"));
+        var clock = new FakeTimeProvider();
+        var game = new RecoveryReplayGame(clock, 1);
+        using var runner = NativeCombatFlowRunner.Create(CombatFlowProgram.Compile(script), game, clock);
+
+        for (var i = 0; i < 240 && runner.Context.Find("开场完成") == null; i++) await runner.StepAsync(default);
+
+        Assert.Equal(1, game.Resets);
+        Assert.NotNull(runner.Context.Find("开场完成"));
+        Assert.True(runner.Context.Find("护盾")!.OccurredAt > game.ExpiredInputAt);
+    }
+
+    [Theory]
+    [InlineData(false, 0.25)]
+    [InlineData(true, 4.0)]
+    public async Task RequiredOpeningStillStopsWhenReadinessIsUnknownOrTheProbeExpires(bool ready, double probeSeconds)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new RecoveryReplayGame(clock, 1) { ReadyEvidence = ready, ProbeSeconds = probeSeconds };
+        using var runner = NativeCombatFlowRunner.Create(CombatFlowProgram.Compile(CollectorStrategy), game, clock);
+        await Assert.ThrowsAsync<CombatNotFinishedException>(async () =>
+        {
+            for (var i = 0; i < 240; i++) await runner.StepAsync(default);
+        });
+        Assert.Null(runner.Context.Find("开场完成"));
+        Assert.Null(runner.Context.Find("护盾"));
+        Assert.Equal(0, game.OutputsAfterRecovery);
+    }
+
+    [Fact]
+    public async Task RequiredOpeningDoesNotResetForeverWhenEveryNewInputRemainsUnconfirmed()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new RecoveryReplayGame(clock, 1) { AlwaysExpire = true };
+        using var runner = NativeCombatFlowRunner.Create(CombatFlowProgram.Compile(CollectorStrategy), game, clock);
+        await Assert.ThrowsAsync<CombatNotFinishedException>(async () =>
+        {
+            for (var i = 0; i < 240; i++) await runner.StepAsync(default);
+        });
+        Assert.InRange(game.Resets, 1, 2);
+        Assert.Null(runner.Context.Find("开场完成"));
+        Assert.Equal(0, game.OutputsAfterRecovery);
+    }
+
+    [Fact]
     public async Task JsonRootUsesTheSamePhysicalResetPath()
     {
         var clock = new FakeTimeProvider();
@@ -163,6 +213,7 @@ public class CombatRecoveryAdmissionTests
         public int Resets { get; private set; }
         public int OutputsAfterRecovery { get; private set; }
         public bool ReadyEvidence { get; init; } = true;
+        public bool AlwaysExpire { get; init; }
         public double ProbeSeconds { get; init; } = .25;
         public object? Observe(string function, IReadOnlyList<object?> args, string actor) => function switch
         { "e-ready" => true, "q-ready" => false, "low-hp" => false, _ => null };
@@ -171,8 +222,9 @@ public class CombatRecoveryAdmissionTests
         public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
         {
             if (!action.TryBeginInput()) return ValueTask.FromResult(CombatFlowResult.Failed);
-            if (action.Command.Name == "钟离" && action.Command.Method == Method.Skill && ++_shieldInputs == failShieldInput)
+            if (action.Command.Name == "钟离" && action.Command.Method == Method.Skill && (++_shieldInputs == failShieldInput || AlwaysExpire))
             {
+                _slots?.Dispose();
                 _slots = new(action.BattleId);
                 _slots.TryBegin("钟离", Method.Skill, action.CommandId, action.Now, action.Now + action.RemainingBudget);
                 ExpiredInputAt = action.Now;
