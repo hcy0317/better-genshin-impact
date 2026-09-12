@@ -1,4 +1,6 @@
 using BetterGenshinImpact.Core.Script.Dependence;
+using Microsoft.ClearScript.V8;
+using BetterGenshinImpact.GameTask;
 
 namespace BetterGenshinImpact.UnitTest.CoreTests.ScriptTests;
 
@@ -9,6 +11,58 @@ public sealed class LimitedFileTests : IDisposable
     public LimitedFileTests()
     {
         Directory.CreateDirectory(_rootPath);
+    }
+
+    [Fact]
+    public async Task ConfirmedRouteCompletionIsVisibleToJavascript()
+    {
+        var script = new AutoPathingScript(_rootPath, null, new LimitedFile(_rootPath), (_, _) => { },
+            (_, _) => Task.FromResult(true), captureFailure: (_, _) => { });
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        var completed = false;
+        engine.AddHostObject("pathing", script);
+        engine.AddHostObject("receive", (Action<bool>)(value => completed = value));
+        await (Task)engine.Evaluate("(async () => { const result = await pathing.Run('{}'); receive(!!result && result.success === true); })()");
+
+        Assert.True(completed, "The caller needs the native completion result rather than another global coordinate guess");
+    }
+
+    [Theory]
+    [InlineData("json")]
+    [InlineData("file")]
+    [InlineData("user-file")]
+    public async Task AllRouteEntrypointsReturnTheSameCompletionContract(string entry)
+    {
+        File.WriteAllText(Path.Combine(_rootPath, "route.json"), "{}");
+        var script = new AutoPathingScript(_rootPath, null, new LimitedFile(_rootPath), (_, _) => { },
+            (_, _) => Task.FromResult(true), captureFailure: (_, _) => { });
+        var result = await (entry switch
+        {
+            "file" => script.RunFile("route.json"),
+            "user-file" => script.RunFileFromUser("route.json"),
+            _ => script.Run("{}")
+        });
+        Assert.True(result.Success);
+    }
+
+    [Fact]
+    public async Task AFailureReportedBeforeReturnCannotPublishCompletion()
+    {
+        using var owned = TaskExecutionScope.BeginOwned();
+        var failure = new CombatNotFinishedException("battle not finished");
+        var script = new AutoPathingScript(_rootPath, null, new LimitedFile(_rootPath), (_, _) => { },
+            (_, _) => { TaskExecutionScope.Capture().Report(failure); return Task.FromResult(true); },
+            captureFailure: (_, _) => { });
+        Assert.Same(failure, await Record.ExceptionAsync(() => script.Run("{}")));
+    }
+
+    [Fact]
+    public async Task NativeCancellationNeverPublishesCompletion()
+    {
+        var failure = new OperationCanceledException("cancelled");
+        var script = new AutoPathingScript(_rootPath, null, new LimitedFile(_rootPath), (_, _) => { },
+            (_, _) => Task.FromException<bool>(failure), captureFailure: (_, _) => { });
+        Assert.Same(failure, await Record.ExceptionAsync(() => script.Run("{}")));
     }
 
     [Fact]
