@@ -531,7 +531,12 @@ public sealed partial class CombatFlowExecution : IDisposable
         var frame = PopFrame("frame-" + _frames.Peek().Result.ToString().ToLowerInvariant());
         if (frame.Block.Atomic || _frames.Count == 0) _game.ReleaseHeldInput();
         if (frame.Result == CombatFlowResult.Deferred)
+        {
             foreach (var objective in frame.Episodes) _episodes.Defer(objective);
+            // call 型 watch 在入栈时单独消费 coverage；等待已知 CD 不是一次新施放失败。
+            // 只退还这次尝试，不能把 coverage 放入成功即 Resolve 的 Episodes 或延长原截止时间。
+            if (frame.WatchFor != null) _episodes.Defer("coverage:" + frame.WatchFor);
+        }
         if (frame.Result == CombatFlowResult.Succeeded)
         {
             foreach (var objective in frame.Episodes) _episodes.Resolve(objective);
