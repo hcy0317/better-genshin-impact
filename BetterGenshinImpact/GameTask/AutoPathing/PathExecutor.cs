@@ -174,6 +174,7 @@ public partial class PathExecutor
         foreach (var waypoints in waypointsList) // 按传送点分割的路径
         {
             CurWaypoints = (waypointsList.FindIndex(wps => wps == waypoints), waypoints);
+            var capturedRetryFailure = false;
             var endedEarly = await ExecuteSegmentWithRetriesAsync(async () =>
             {
                 await ResolveAnomalies(); // 异常场景处理
@@ -247,6 +248,12 @@ public partial class PathExecutor
 
             }, exception =>
             {
+                if (!capturedRetryFailure && exception is not CombatRecoveryCompletedException)
+                {
+                    capturedRetryFailure = true;
+                    TaskFailureDiagnostics.CaptureScreenshotOnce(exception,
+                        $"地图追踪分段 {CurWaypoints.Item1 + 1} 点位 {CurWaypoint.Item1 + 1} 原始失败，尚未重试：{exception.GetType().Name}");
+                }
                 StartSkipOtherOperations();
                 Logger.LogWarning("地图追踪分段 {Segment} 点位 {Waypoint} 将重试：{Reason}",
                     CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, exception.Message);

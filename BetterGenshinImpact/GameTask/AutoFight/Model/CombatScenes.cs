@@ -7,6 +7,7 @@ using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -219,6 +220,22 @@ public class CombatScenes : IDisposable
             // 静默模式下完全不抛出、不记录异常
         }
         return this;
+    }
+
+    internal ReviveRecoveryFrame ReadRecoveryFrame(ImageRegion image, long frameId)
+    {
+        // 读取真实侧栏，不使用手工TeamNames或创建Avatar（其构造器会修改战斗状态）。
+        var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        var status = PartyAvatarSideIndexHelper.DetectedMultiGameStatus(image, _autoFightAssets, logger);
+        var (indices, icons) = PartyAvatarSideIndexHelper.GetAllIndexRects(image, status, logger, _systemInfo);
+        var names = new Dictionary<int, string>();
+        for (var i = 0; i < icons.Count; i++)
+        {
+            using var icon = image.DeriveCrop(icons[i]);
+            names[i + 1] = ClassifyAvatarCnName(icon.CacheImage, i + 1).Item1;
+        }
+        var active = PartyAvatarSideIndexHelper.GetAvatarIndexIsActiveWithContext(image, indices.ToArray(), new AvatarActiveCheckContext());
+        return new(frameId, Bv.IsInMainUi(image), Bv.ReadReviveState(image), active, names);
     }
 
 
