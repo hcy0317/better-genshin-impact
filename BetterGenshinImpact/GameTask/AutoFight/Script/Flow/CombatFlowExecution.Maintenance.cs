@@ -12,6 +12,33 @@ public sealed partial class CombatFlowExecution
     private readonly Dictionary<string, (long Generation, long EffectVersion)> _deferredMaintenance = new(StringComparer.Ordinal);
     public string? LastMaintenanceDecision { get; private set; }
 
+    private async ValueTask<bool> TryRecoverRequiredOpeningAsync(CombatCommand caller,
+        CombatFlowBlock block, double ancestorDeadline, CancellationToken ct)
+    {
+        // 只恢复未完成的单必需技能开场；不能重放任意 once 片段中的其他副作用。
+        if (_requiredOpening != block.Name || _once.Contains(block.Name) ||
+            caller.Options.GetValueOrDefault("once") != "battle" || !caller.HasFlag("required") ||
+            IsAtomic || block.Atomic || block.Nodes.Count != 1 || block.Nodes[0].Block != null)
+            return false;
+        var command = block.Nodes[0].Command;
+        var goal = "call:" + block.Name;
+        if (!command.HasFlag("required") || command.Method != Method.Skill && command.Method != Method.Burst ||
+            Context.Now >= ancestorDeadline || !_episodes.CanTrySkillReset(goal, Context.Now)) return false;
+
+        LastMaintenanceDecision = $"必需开场 {block.Name} 预算已耗尽，核实原技能请求是否已过期并重新就绪";
+        var probe = new CombatFlowAction(command, Context, () => !_closed,
+            Math.Min(ancestorDeadline, Context.Now + 3));
+        var reset = await _game.TryRecoverExpiredSkillAsync(probe, ct);
+        ct.ThrowIfCancellationRequested();
+        if (probe.DiagnosticReason is { } reason) LastMaintenanceDecision = $"必需开场 {block.Name}：{reason}";
+        if (reset == null || !probe.CanStart || _closed || Context.Now >= ancestorDeadline ||
+            reset.BattleId != Context.BattleId || reset.Actor != command.Name || reset.Skill != command.Method ||
+            reset.Deadline > Context.Now || !_episodes.TryReopenAfterSkillReset(goal, reset.AttemptId, Context.Now))
+            return false;
+        LastMaintenanceDecision = $"必需开场 {block.Name} 取得双新帧就绪证据，已释放过期请求并有界重新准入；未补记旧施放或开场成功";
+        return true;
+    }
+
     private async ValueTask<double?> TrySpendCoverageAsync(string name, CombatCommand command,
         double ancestorDeadline, double demand, CancellationToken ct)
     {

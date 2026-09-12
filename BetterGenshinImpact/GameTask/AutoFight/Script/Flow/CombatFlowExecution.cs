@@ -280,9 +280,14 @@ public sealed partial class CombatFlowExecution : IDisposable
                     if (!_episodes.TrySpend(objective, Context.Now, CombatFlowPolicy.Timeout(command),
                             CombatFlowPolicy.Attempts(command), out var deadline))
                     {
-                        frame.Episodes.Remove(objective);
-                        CompleteNode(frame, command, CombatFlowResult.Failed);
-                        continue;
+                        if (!await TryRecoverRequiredOpeningAsync(command, block, frame.Deadline, ct) ||
+                            !_episodes.TrySpend(objective, Context.Now, CombatFlowPolicy.Timeout(command),
+                                CombatFlowPolicy.Attempts(command), out deadline))
+                        {
+                            frame.Episodes.Remove(objective);
+                            CompleteNode(frame, command, CombatFlowResult.Failed);
+                            continue;
+                        }
                     }
                     child.Deadline = Math.Min(child.Deadline, deadline);
                     if (command.Options.GetValueOrDefault("resume") == "entry")
