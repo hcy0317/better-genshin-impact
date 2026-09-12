@@ -208,16 +208,19 @@ public static partial class Bv
     /// <returns></returns>
     public static bool IsInBigMapUi(ImageRegion captureRa)
     {
-        // 派蒙菜单等页面也可能命中地图的缩放/设置图案；独立关闭按钮才形成完整地图证据。
-        using var closeRa = captureRa.Find(RecognitionAssets.Get("QuickTeleport", "MapCloseButton", captureRa));
-        if (!closeRa.IsExist()) return false;
-
+        // 派蒙菜单的侧栏可能命中缩放模板；先用菜单返回按钮排除这个已知重叠页。
+        using var menuBack = captureRa.Find(RecognitionAssets.Get("UseRedeemCode", "MenuBack", captureRa));
+        if (menuBack.IsExist()) return false;
+        // 地图重叠地点候选列表会隐藏关闭按钮，但仍保留左侧缩放控件。
         using var scaleRa = captureRa.Find(RecognitionAssets.Get("QuickTeleport", "MapScaleButton", captureRa));
         if (scaleRa.IsExist())
         {
             return true;
         }
 
+        // 派蒙菜单也可能命中设置图案；此回退分支仍需独立关闭按钮佐证。
+        using var closeRa = captureRa.Find(RecognitionAssets.Get("QuickTeleport", "MapCloseButton", captureRa));
+        if (!closeRa.IsExist()) return false;
         using var settingsRa = captureRa.Find(RecognitionAssets.Get("QuickTeleport", "MapSettingsButton", captureRa));
         return settingsRa.IsExist();
     }

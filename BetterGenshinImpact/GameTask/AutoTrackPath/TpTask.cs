@@ -1065,6 +1065,7 @@ public class TpTask
         var observedLoadingState = false;
         var consecutiveNonUiChecks = 0;
         var consecutiveMainUiChecks = 0;
+        long frame = 0;
         long nextBlessingCheckAt = BlessingCheckIntervalMs;
         while (stopwatch.ElapsedMilliseconds < TeleportTimeoutMs)
         {
@@ -1073,6 +1074,10 @@ public class TpTask
             var capture = CaptureToRectArea();
             using var ownedCapture = capture;
             var isInMainUi = Bv.IsInMainUi(capture);
+            var isInBigMapUi = Bv.IsInBigMapUi(capture);
+            UiOperation.Current?.Observe("传送加载后主界面连续三帧就绪",
+                $"phase=teleport-loading,hud={isInMainUi},map={isInBigMapUi},loadingObserved={observedLoadingState},stableHud={consecutiveMainUiChecks}",
+                ++frame);
 
             if (isInMainUi)
             {
@@ -1089,8 +1094,6 @@ public class TpTask
                 consecutiveMainUiChecks = 0;
                 if (!observedLoadingState)
                 {
-                    var isInBigMapUi = Bv.IsInBigMapUi(capture);
-
                     // 地图关闭后出现的黑屏、白屏或加载界面均不属于大地图和主界面。
                     // 必须先观察到这个中间态，避免把传送尚未开始时短暂出现的主界面误判为完成。
                     consecutiveNonUiChecks = isInBigMapUi ? 0 : consecutiveNonUiChecks + 1;
@@ -1108,7 +1111,7 @@ public class TpTask
             }
         }
 
-        Logger.LogWarning("传送等待超时，换台电脑吧");
+        throw new TimeoutException("传送等待超时：未确认加载后稳定返回主界面");
     }
 
     private bool IsGameRegionPointInClickableArea(double clickX, double clickY, double requiredVisibleRadius = 0)
@@ -2636,21 +2639,11 @@ public class TpTask
         ImageRegion imageRegion,
         GiTpPosition? targetTp)
     {
-        // 1. 判断是否在地图界面；已离开大地图视为传送已确认。
-        var isInBigMapUi = Bv.IsInBigMapUi(imageRegion);
-        if (!isInBigMapUi)
+        if (await TeleportPanelConfirmation.TryConfirmAsync(imageRegion, _ => PressTeleportConfirmKey(), ct))
         {
             return TeleportPanelResult.Confirmed;
         }
-
-        // 2. 判断是否已经点出传送按钮。
-        var teleportButton = imageRegion.Find(GetQuickTeleportRecognitionObject("TeleportButton", imageRegion));
-        using var ownedTeleportButton = teleportButton;
-        if (!teleportButton.IsEmpty())
-        {
-            await PressTeleportConfirmKey();
-            return TeleportPanelResult.Confirmed; // 可以传送了，结束
-        }
+        if (!Bv.IsInBigMapUi(imageRegion)) return TeleportPanelResult.Waiting;
 
         var candidate = await CheckMapChooseIcon(imageRegion, targetTp, 1);
         if (candidate == null)
@@ -2700,21 +2693,11 @@ public class TpTask
 
             var screen = CaptureToRectArea();
             using var ownedScreen = screen;
-            var isInBigMapUi = Bv.IsInBigMapUi(screen);
-
-            if (!isInBigMapUi)
+            if (await TeleportPanelConfirmation.TryConfirmAsync(screen, _ => PressTeleportConfirmKey(), ct))
             {
                 return TeleportPanelResult.Confirmed;
             }
-
-            // 点完候选后出现传送按钮，或选项本身就是可传送点。
-            var teleportButton = screen.Find(GetQuickTeleportRecognitionObject("TeleportButton", screen));
-            using var ownedTeleportButton = teleportButton;
-            if (!teleportButton.IsEmpty())
-            {
-                await PressTeleportConfirmKey();
-                return TeleportPanelResult.Confirmed;
-            }
+            if (!Bv.IsInBigMapUi(screen)) continue;
 
             if (stopwatch.ElapsedMilliseconds >= nextCandidateVerificationAt)
             {
