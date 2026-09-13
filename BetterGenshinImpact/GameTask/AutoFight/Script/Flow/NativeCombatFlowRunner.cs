@@ -26,6 +26,7 @@ internal sealed class NativeCombatFlowRunner : IDisposable
     private readonly JsonCombatFlowExecution? _jsonExecution;
     private readonly ILogger _diagnosticLogger;
     private readonly CombatFlowDiagnosticWriter _diagnosticWriter;
+    private readonly Func<CombatFlowStatistics> _readDiagnosticStatistics;
     private string? _pendingDiagnosticBoundary;
     private IDisposable? _exclusive;
     private bool _disposed;
@@ -50,10 +51,11 @@ internal sealed class NativeCombatFlowRunner : IDisposable
 
     private NativeCombatFlowRunner(CombatFlowProgram program, CombatScenes scenes) : this(program, new NativeGame(new NativeCombatIo(scenes)), null) { }
 
-    private NativeCombatFlowRunner(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock)
+    private NativeCombatFlowRunner(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock, ILogger? logger = null)
     {
-        _diagnosticLogger = game is NativeGame native ? native.DiagnosticLogger : NullLogger.Instance;
-        _diagnosticWriter = new(_diagnosticLogger);
+        _diagnosticLogger = logger ?? (game is NativeGame native ? native.DiagnosticLogger : NullLogger.Instance);
+        _diagnosticWriter = new(_diagnosticLogger, clock);
+        _readDiagnosticStatistics = () => RuntimeStatistics;
         _game = game;
         _execution = new(program, _game, clock);
         if (game is NativeGame)
@@ -65,14 +67,15 @@ internal sealed class NativeCombatFlowRunner : IDisposable
 
     internal static ICombatFlowGame CreateAdapter(INativeCombatIo io) => new NativeGame(io);
 
-    internal static NativeCombatFlowRunner Create(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock = null) =>
-        new(program, game, clock);
+    internal static NativeCombatFlowRunner Create(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock = null, ILogger? logger = null) =>
+        new(program, game, clock, logger);
 
     private NativeCombatFlowRunner(JsonCombatStrategy strategy, ICombatFlowGame game,
         SkillCatalogSnapshot? database, TimeProvider? clock, ILogger? logger = null)
     {
         _diagnosticLogger = logger ?? (game is NativeGame native ? native.DiagnosticLogger : NullLogger.Instance);
-        _diagnosticWriter = new(_diagnosticLogger);
+        _diagnosticWriter = new(_diagnosticLogger, clock);
+        _readDiagnosticStatistics = () => RuntimeStatistics;
         _game = game;
         _jsonExecution = new(strategy, game, database, clock);
         if (game is NativeGame)
@@ -217,6 +220,10 @@ internal sealed class NativeCombatFlowRunner : IDisposable
         {
             _pendingDiagnosticBoundary = null;
             WriteDiagnosticTrace(boundary);
+        }
+        else if (!_disposed && !IsAtomic)
+        {
+            _diagnosticWriter.WritePeriodic(Context.BattleId, _readDiagnosticStatistics);
         }
     }
 

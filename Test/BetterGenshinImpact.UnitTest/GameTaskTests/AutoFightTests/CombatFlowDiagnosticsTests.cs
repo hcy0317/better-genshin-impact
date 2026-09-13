@@ -3,11 +3,192 @@ using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.AutoFight;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.Extensions.Logging;
+using System.Diagnostics;
+using Xunit.Abstractions;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
-public class CombatFlowDiagnosticsTests
+public class CombatFlowDiagnosticsTests(ITestOutputHelper output)
 {
+    [Fact]
+    public async Task PeriodicLoggingMeasuresInMemorySinkCostSeparatelyFromGameWork()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLogger();
+        var writer = new CombatFlowDiagnosticWriter(logger, clock);
+        using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("琴 attack(0.1)"),
+            new DiagnosticGame(clock), clock);
+        var milliseconds = new List<double>();
+        for (var period = 0; period < 64; period++)
+        {
+            for (var action = 0; action < 8; action++) await execution.RunRoundAsync();
+            clock.Advance(TimeSpan.FromSeconds(30));
+            var started = Stopwatch.GetTimestamp();
+            writer.WritePeriodic(execution.Context.BattleId, () => execution.RuntimeStatistics);
+            milliseconds.Add(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        }
+        var ordered = milliseconds.Order().ToArray();
+        output.WriteLine($"S21 periodic logging: samples=64 first={milliseconds[0]:F3}ms p50={ordered[31]:F3}ms p95={ordered[60]:F3}ms max={ordered[^1]:F3}ms; in-memory logger only, includes snapshot/formatting, excludes game work and production file I/O.");
+        Assert.Equal(64, logger.Messages.Count(m => m.StartsWith("FIGHT_PROGRESS ")));
+        Assert.Equal(512, logger.Messages.Count(m => m.StartsWith("FIGHT_ACTION ")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AContinuouslyRunningBattleReportsBoundedActionEvidenceBeforeDisposal(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLogger();
+        var game = new SamplingGame(clock);
+        using var runner = CreateRunner(json, "attack(0.1,required)", game, clock, logger);
+
+        for (var i = 0; i < 5000 && game.InputCalls < 350; i++) await runner.StepAsync(default);
+
+        Assert.Equal(350, game.InputCalls);
+        Assert.Single(logger.Messages.Where(message => message.StartsWith("FIGHT_PROGRESS ")));
+        var actions = logger.Messages.Where(message => message.StartsWith("FIGHT_ACTION ") &&
+            message.Contains("boundary=periodic")).ToArray();
+        Assert.Equal(8, actions.Length);
+        Assert.All(actions, message => Assert.DoesNotContain("samples=", message));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("boundary=dispose"));
+    }
+
+    [Fact]
+    public void PeriodicDiagnosticsDoNotReadSnapshotsUntilDueOrWhenDisabledAndDoNotRetryFaultedSinks()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLogger();
+        var writer = new CombatFlowDiagnosticWriter(logger, clock);
+        var snapshots = 0;
+        CombatFlowStatistics Read()
+        {
+            snapshots++;
+            return new(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, []);
+        }
+        var battle = Guid.NewGuid();
+        clock.Advance(TimeSpan.FromSeconds(29));
+        writer.WritePeriodic(battle, Read);
+        Assert.Equal(0, snapshots);
+        logger.Enabled = false;
+        clock.Advance(TimeSpan.FromSeconds(1));
+        writer.WritePeriodic(battle, Read);
+        Assert.Equal(0, snapshots);
+        logger.Enabled = true;
+        writer.WritePeriodic(battle, Read);
+        Assert.Equal(1, snapshots);
+        Assert.Contains("sampled=0 dropped=0", Assert.Single(logger.Messages));
+        logger.ThrowOnWrite = true;
+        clock.Advance(TimeSpan.FromSeconds(30));
+        writer.WritePeriodic(battle, Read);
+        for (var i = 0; i < 100; i++) writer.WritePeriodic(battle, Read);
+        Assert.Equal(2, snapshots);
+        logger.ThrowOnLevelCheck = true;
+        clock.Advance(TimeSpan.FromSeconds(30));
+        writer.WritePeriodic(battle, Read);
+        Assert.Equal(2, snapshots);
+        logger.ThrowOnLevelCheck = false;
+        writer.WritePeriodic(battle, () => { snapshots++; throw new InvalidOperationException("快照故障"); });
+        writer.WritePeriodic(battle, Read);
+        Assert.Equal(3, snapshots);
+    }
+
+    [Fact]
+    public async Task PeriodicSamplingAccountsForDroppedHistoryAndNeverRepeatsItAtLaterBoundaries()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLogger();
+        var writer = new CombatFlowDiagnosticWriter(logger, clock);
+        using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("琴 attack(0.1)"),
+            new DiagnosticGame(clock), clock);
+        for (var i = 0; i < 70; i++) await execution.RunRoundAsync();
+        clock.Advance(TimeSpan.FromSeconds(30));
+        writer.WritePeriodic(execution.Context.BattleId, () => execution.RuntimeStatistics);
+        Assert.Contains("sampled=8 dropped=62", Assert.Single(logger.Messages.Where(m => m.StartsWith("FIGHT_PROGRESS "))));
+        Assert.Equal(8, logger.Messages.Count(m => m.StartsWith("FIGHT_ACTION ")));
+        writer.Write(execution.Context.BattleId, execution.RuntimeStatistics, "failed-pass");
+        Assert.Equal(8, logger.Messages.Count(m => m.StartsWith("FIGHT_ACTION ")));
+        await execution.RunRoundAsync();
+        writer.Write(execution.Context.BattleId, execution.RuntimeStatistics, "dispose");
+        Assert.Contains("seq=71 ", logger.Messages.Last());
+        Assert.Equal(9, logger.Messages.Count(m => m.StartsWith("FIGHT_ACTION ")));
+
+        using var next = new CombatFlowExecution(CombatFlowProgram.Compile("琴 attack(0.1)"), new DiagnosticGame(clock), clock);
+        var nextWriter = new CombatFlowDiagnosticWriter(logger, clock);
+        await next.RunRoundAsync();
+        nextWriter.WritePeriodic(next.Context.BattleId, () => throw new Exception("下一场尚未到周期"));
+        clock.Advance(TimeSpan.FromSeconds(30));
+        nextWriter.WritePeriodic(next.Context.BattleId, () => next.RuntimeStatistics);
+        Assert.Contains("seq=1 ", logger.Messages.Last());
+        Assert.Contains("sampled=1 dropped=0", logger.Messages.Last(m => m.StartsWith("FIGHT_PROGRESS ")));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DuePeriodicEvidenceWaitsForTheAtomicBoundaryWithoutChangingGameCalls(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLogger();
+        var game = new SamplingGame(clock);
+        using var runner = CreateRunner(json,
+            "segment(start,atomic,timeout=120),attack(0.1,required),attack(0.1,required),segment(end)", game, clock, logger);
+        for (var i = 0; i < 100 && game.InputCalls == 0; i++) await runner.StepAsync(default);
+        Assert.True(runner.IsAtomic);
+        Assert.Equal(1, game.InputCalls);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        var checkedInside = false;
+        for (var i = 0; i < 100 && runner.IsAtomic; i++)
+        {
+            await runner.StepAsync(default);
+            if (runner.IsAtomic)
+            {
+                checkedInside = true;
+                Assert.DoesNotContain(logger.Messages, m => m.StartsWith("FIGHT_PROGRESS "));
+            }
+        }
+        Assert.True(checkedInside);
+        Assert.False(runner.IsAtomic);
+        Assert.Equal(2, game.InputCalls);
+        Assert.Single(logger.Messages.Where(m => m.StartsWith("FIGHT_PROGRESS ")));
+    }
+
+    private static NativeCombatFlowRunner CreateRunner(bool json, string action, ICombatFlowGame game,
+        FakeTimeProvider clock, ILogger logger)
+    {
+        if (json)
+            return NativeCombatFlowRunner.Create(new JsonCombatStrategy
+            {
+                Actions = [new() { Character = "琴", Action = action }]
+            }, game, clock: clock, logger: logger)!;
+        var program = CombatFlowProgram.Compile(new CombatScript(["琴"], CombatScriptParser.ParseLineCommands(action, "琴")));
+        program.AllowHostLoop(true);
+        return NativeCombatFlowRunner.Create(program, game, clock, logger);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task APeriodicSinkFailureCannotReplaceLaterCancellationOrChangeGameInputCount(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLogger { ThrowOnWrite = true };
+        var game = new SamplingGame(clock);
+        using var runner = CreateRunner(json, "attack(0.1,required)", game, clock, logger);
+        for (var i = 0; i < 5000 && game.InputCalls < 350; i++) await runner.StepAsync(default);
+        Assert.Equal(350, game.InputCalls);
+        var expected = new OperationCanceledException("周期日志失败之后取消");
+        game.Failure = expected;
+        var actual = await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+        {
+            for (var i = 0; i < 40; i++) await runner.StepAsync(default);
+        });
+        Assert.Same(expected, actual);
+        runner.Dispose();
+        Assert.Equal(351, game.InputCalls);
+        Assert.True(game.Disposed);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
