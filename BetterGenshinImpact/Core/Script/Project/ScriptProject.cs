@@ -80,32 +80,47 @@ public class ScriptProject
     private IScriptEngine BuildScriptEngine(PathingPartyConfig? partyConfig)
     {
         V8ScriptEngine engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding | V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        try
+        {
+            // packages 依赖和资源重载
+            var loader = new PackageDocumentLoader(ProjectPath);
+            engine.DocumentSettings.Loader = loader;
 
-        // packages 依赖和资源重载
-        var loader = new PackageDocumentLoader(ProjectPath);
-        engine.DocumentSettings.Loader = loader;
-
-        // 添加 packages 到搜索路径
-        var libraries = new HashSet<string>(Manifest.Library ?? Array.Empty<string>())
+            // 添加 packages 到搜索路径
+            var libraries = new HashSet<string>(Manifest.Library ?? Array.Empty<string>())
         {
             ".",
             "./packages"
         };
 
-        var libraryList = libraries.ToList();
+            var libraryList = libraries.ToList();
 
-        EngineExtend.InitHost(engine, ProjectPath, libraryList.ToArray(), partyConfig);
-        return engine;
+            EngineExtend.InitHost(engine, ProjectPath, libraryList.ToArray(), partyConfig);
+            return engine;
+        }
+        catch
+        {
+            engine.Dispose();
+            throw;
+        }
     }
 
     public async Task ExecuteAsync(dynamic? context = null, PathingPartyConfig? partyConfig = null)
+    {
+        ScriptExecutionResult result = await ExecuteWithOutcomeAsync((object?)context, partyConfig);
+        result.ThrowIfFailure();
+        if (result.Kind != ScriptOutcomeKind.Completed)
+            TaskControl.Logger.LogInformation("脚本未完成目标：{Outcome}，{Reason}", result.Kind, result.Reason);
+    }
+
+    public async Task<ScriptExecutionResult> ExecuteWithOutcomeAsync(dynamic? context = null, PathingPartyConfig? partyConfig = null)
     {
         TaskExecutionScope.ThrowIfFailed();
         // 默认值
         GlobalMethod.SetGameMetrics(1920, 1080);
         // 加载代码
         var code = await LoadCode();
-        var engine = BuildScriptEngine(partyConfig);
+        using var engine = BuildScriptEngine(partyConfig);
 
         // 使用自定义加载器解析脚本文件
         var loader = (PackageDocumentLoader)engine.DocumentSettings.Loader;
@@ -122,24 +137,26 @@ public class ScriptProject
                              code.Contains("import ", StringComparison.Ordinal) ||
                              code.Contains("export ", StringComparison.Ordinal);
 
-            if (useModule)
+            var result = await ScriptOutcomeHost.RunAsync(engine, () =>
             {
-                // 清除Document缓存
-                DocumentLoader.Default.DiscardCachedDocuments();
+                if (useModule)
+                {
+                    // 清除Document缓存
+                    DocumentLoader.Default.DiscardCachedDocuments();
 
-                string mainScriptPath = Path.Combine(ProjectPath, Manifest.Main);
-                string runtimeCode = loader.RewriteScriptCode(code, mainScriptPath);
-                
-                var documentInfo = new DocumentInfo(new Uri(mainScriptPath)) { Category = ModuleCategory.Standard };
-                var evaluation = engine.Evaluate(documentInfo, runtimeCode);
-                if (evaluation is Task task) await task;
-            }
-            else
-            {
-                var evaluation = engine.Evaluate(code);
-                if (evaluation is Task task) await task;
-            }
+                    string mainScriptPath = Path.Combine(ProjectPath, Manifest.Main);
+                    string runtimeCode = loader.RewriteScriptCode(code, mainScriptPath);
+
+                    var documentInfo = new DocumentInfo(new Uri(mainScriptPath)) { Category = ModuleCategory.Standard };
+                    return engine.Evaluate(documentInfo, runtimeCode);
+                }
+                else
+                {
+                    return engine.Evaluate(code);
+                }
+            }, CancellationContext.Instance.Cts.Token);
             TaskExecutionScope.ThrowIfFailed();
+            return result;
         }
         catch (Exception e)
         {
@@ -160,7 +177,6 @@ public class ScriptProject
                 TaskControl.Logger.LogError(e, "中断脚本执行异常：" + e.Message);
             }
 
-            engine.Dispose();
         }
     }
 
