@@ -19,18 +19,22 @@ public class CombatScriptHandler : IActionHandler
             var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
             if (combatScenes == null)
             {
-                Logger.LogError("队伍识别未初始化成功！");
-                return;
+                throw new InvalidOperationException("队伍识别未初始化成功，不能将简易策略标为完成");
             }
 
             combatScenes.BeforeTask(ct);
-            await CombatScriptExecutor.ExecuteAsync(combatScript, ct, Logger, combatScenes);
+            var result = await CombatScriptExecutor.ExecuteAsync(combatScript, ct, Logger, combatScenes,
+                CombatScriptExecutionMode.LegacyPartyTemplate);
+            EnsureFragmentCompleted(result);
+            Logger.LogDebug("简易策略结果 {Kind}：{Reason}", result.Kind, result.Reason);
         }
         else
         {
-            Logger.LogError("策略脚本action_params内容为空");
+            throw new InvalidOperationException("策略脚本action_params内容为空");
         }
     }
+
+    internal static void EnsureFragmentCompleted(CombatExecutionResult result) => result.EnsureCanContinue();
 
     // private static bool IsOnlyCurrentAvatar(CombatScript combatScript)
     // {

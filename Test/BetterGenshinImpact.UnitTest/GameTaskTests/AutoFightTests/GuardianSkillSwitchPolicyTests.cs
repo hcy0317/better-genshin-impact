@@ -178,7 +178,9 @@ public class GuardianSkillSwitchPolicyTests
         Assert.Contains("AvatarSwitchConfirmationPolicy.TryConfirm", selectionSource, StringComparison.Ordinal);
         Assert.Contains("public bool Execute(CombatScenes", commandSource,
             StringComparison.Ordinal);
-        Assert.Contains("if (!avatar.TrySwitch(10)) return false;", commandSource,
+        Assert.Contains("ExecuteWithResult(combatScenes, lastCommand).CanContinue", commandSource,
+            StringComparison.Ordinal);
+        Assert.Contains("if (!avatar.TrySwitch(10)) return new(CombatExecutionKind.Failed", commandSource,
             StringComparison.Ordinal);
         Assert.Contains("GuardianSkillSwitchPolicy.ShouldRetryBlock", taskSource,
             StringComparison.Ordinal);
