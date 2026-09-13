@@ -7,6 +7,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.View.Drawable;
 using OpenCvSharp;
+using Fischless.GameCapture;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -451,11 +452,13 @@ public static class AvatarRecognition
     {
         var visConfig = GetVisualRecognitionConfig();
         var frameIntervalMs = visConfig.TargetingDetectionInterval;
-        var drawResults = visConfig.DrawRecognitionResults;
+        var drawResults = visConfig.DrawRecognitionResults && (_currentAutoFightParam.Value?.EnableCombatTargeting ?? true);
         EnemySeekVisual? indicatorCandidate = null;
         DateTime indicatorCandidateSince = default;
         long indicatorEpoch = -1;
         var diagnostics = new CombatDecisionDiagnostics(Logger);
+        var battleId = Guid.TryParse(diagnosticBattleId, out var boundBattle) ? boundBattle : Guid.Empty;
+        CaptureFrameStamp lastSource = default;
         long suppressedFrames = 0, capturedFrames = 0, publishedFrames = 0, rejectedFrames = 0, nonMainFrames = 0;
         void Trace(bool force = false) => diagnostics.Write("FIGHT_PERCEPTION", diagnosticBattleId ?? "unbound", () =>
             $"captured={capturedFrames} skippedExclusive={suppressedFrames} published={publishedFrames} rejectedEpochOrExclusive={rejectedFrames} nonMain={nonMainFrames}", force);
@@ -488,14 +491,18 @@ public static class AvatarRecognition
                 var frameStopwatch = Stopwatch.StartNew();
                 using (var capture = CaptureToRectArea())
                 {
-                    var capturedAtUtc = DateTime.UtcNow;
+                    var capturedAtUtc = capture.FrameStamp.CapturedAt.UtcDateTime;
+                    lastSource = capture.FrameStamp;
                     capturedFrames++;
                     int preAimX = (int)(capture.Width * 0.5);
                     int preAimY = (int)(capture.Height * (480.0 / 1080.0));
 
                     // 不在主界面时跳过本轮（避免菜单/地图/对话等界面下误操作）
-                    if (!Bv.IsInMainUi(capture))
+                    if (!Bv.IsCombatHud(capture))
                     {
+                        PublishPassiveObservation(false, false, null, capture.Width, capture.Height,
+                            capturedAtUtc, observationEpoch, source: capture.FrameStamp, battleId: battleId,
+                            quality: CombatObservationQuality.Unavailable);
                         nonMainFrames++;
                         Trace();
                         CombatRuntimeMetrics.Shared.Record(
@@ -514,7 +521,17 @@ public static class AvatarRecognition
                     bool hasLegendaryBar = valid.Any(b => IsLegendaryBar(b.x, b.y));
 
                     // 2. 血条追踪：持续感知只发布观察，不直接发送战斗输入。
-                    if (valid.Count > 0 && !hasLegendaryBar)
+                    if (hasLegendaryBar)
+                    {
+                        indicatorCandidate = null;
+                        var bar = valid.First(b => IsLegendaryBar(b.x, b.y));
+                        var visual = new EnemySeekVisual(bar.x, bar.y, bar.width, bar.height, bar.width * bar.height);
+                        RecordPublication(PublishPassiveObservation(false, false, visual, capture.Width, capture.Height,
+                            capturedAtUtc, observationEpoch, new EnemySeekDecision(
+                                AutoFightSeekAction.ApproachFixedTopHealthTarget, EnemyIndicatorDirection.None,
+                                visual, 1, SeekCueKind.FixedTopHealth), capture.FrameStamp, battleId));
+                    }
+                    else if (valid.Count > 0)
                     {
                         indicatorCandidate = null;
                         var nearest = valid.OrderBy(b =>
@@ -532,7 +549,7 @@ public static class AvatarRecognition
                             capture.Width,
                             capture.Height,
                             capturedAtUtc,
-                            observationEpoch));
+                            observationEpoch, source: capture.FrameStamp, battleId: battleId));
 
                         // 叠加层：最近血条绿色粗框，其余红色细框
                         if (drawResults)
@@ -558,14 +575,16 @@ public static class AvatarRecognition
                         {
                             indicatorCandidate = null;
                             var (_, _, _, dx, dy, dw, dh) = damageResult.Value;
+                            var damageVisual = new EnemySeekVisual(dx, dy, dw, dh, dw * dh);
                             RecordPublication(PublishPassiveObservation(
                                 hasNormalHealthBar: false,
                                 hasDamageCue: true,
-                                new EnemySeekVisual(dx, dy, dw, dh, dw * dh),
+                                damageVisual,
                                 capture.Width,
                                 capture.Height,
                                 capturedAtUtc,
-                                observationEpoch));
+                                observationEpoch, source: capture.FrameStamp, battleId: battleId,
+                                cueFingerprint: FingerprintDamageCue(capture, damageVisual)));
 
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
@@ -607,7 +626,7 @@ public static class AvatarRecognition
                                 capture.Height,
                                 capturedAtUtc,
                                 observationEpoch,
-                                confirmedIndicator));
+                                confirmedIndicator, capture.FrameStamp, battleId));
                         }
                     }
 
@@ -625,6 +644,13 @@ public static class AvatarRecognition
             }
         }
         catch (OperationCanceledException) { }
+        catch (Exception)
+        {
+            var gate = PassiveCaptureGate;
+            PublishPassiveObservation(false, false, null, 0, 0, lastSource.CapturedAt.UtcDateTime,
+                gate.Epoch, source: lastSource, battleId: battleId, quality: CombatObservationQuality.Faulted);
+            throw;
+        }
         finally
         {
             Trace(force: true);
@@ -640,7 +666,9 @@ public static class AvatarRecognition
         int imageHeight,
         DateTime capturedAtUtc,
         long captureEpoch,
-        EnemySeekDecision? indicatorDecision = null)
+        EnemySeekDecision? indicatorDecision = null,
+        CaptureFrameStamp source = default, Guid battleId = default,
+        CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0)
     {
         lock (_seekLock)
         {
@@ -660,7 +688,9 @@ public static class AvatarRecognition
                     visual,
                     imageWidth,
                     imageHeight,
-                    indicatorDecision);
+                    indicatorDecision)
+                { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
+                    CueFingerprint = cueFingerprint };
             }
             return true;
         }
@@ -673,6 +703,35 @@ public static class AvatarRecognition
     {
         return captureEpoch == currentEpoch && activeExclusiveOperations == 0;
     }
+
+    /// <summary>复用已识别ROI的32个像素，不新增OCR；读取时间不能制造新的伤害内容。</summary>
+    private static ulong FingerprintDamageCue(ImageRegion image, EnemySeekVisual visual)
+    {
+        var mat = image.SrcMat;
+        if (visual.Width <= 0 || visual.Height <= 0 || mat.Empty() || mat.Channels() is not (3 or 4)) return 0;
+        ulong hash = 14695981039346656037UL;
+        for (var row = 0; row < 4; row++)
+        for (var column = 0; column < 8; column++)
+        {
+            var x = Math.Clamp(visual.X + column * visual.Width / 8, 0, mat.Width - 1);
+            var y = Math.Clamp(visual.Y + row * visual.Height / 4, 0, mat.Height - 1);
+            byte b, g, r;
+            if (mat.Channels() == 3)
+            {
+                var pixel = mat.At<Vec3b>(y, x);
+                (b, g, r) = (pixel.Item0, pixel.Item1, pixel.Item2);
+            }
+            else
+            {
+                var pixel = mat.At<Vec4b>(y, x);
+                (b, g, r) = (pixel.Item0, pixel.Item1, pixel.Item2);
+            }
+            hash = unchecked((hash ^ b) * 1099511628211UL);
+            hash = unchecked((hash ^ g) * 1099511628211UL);
+            hash = unchecked((hash ^ r) * 1099511628211UL);
+        }
+        return hash;
+    }
 }
 
 internal readonly record struct PassiveTargetObservation(
@@ -682,4 +741,11 @@ internal readonly record struct PassiveTargetObservation(
     EnemySeekVisual? Visual,
     int ImageWidth,
     int ImageHeight,
-    EnemySeekDecision? IndicatorDecision = null);
+    EnemySeekDecision? IndicatorDecision = null)
+{
+    public CaptureFrameStamp Source { get; init; }
+    public Guid BattleId { get; init; }
+    public long CaptureEpoch { get; init; }
+    public CombatObservationQuality Quality { get; init; }
+    public ulong CueFingerprint { get; init; }
+}

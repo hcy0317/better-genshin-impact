@@ -41,6 +41,21 @@ internal sealed class NativeCombatFlowRunner : IDisposable
     public bool IsAtomic => _execution?.IsAtomic ?? _jsonExecution!.IsAtomic;
     public bool HasPendingConfirmation => _execution?.HasPendingConfirmation ?? _jsonExecution!.HasPendingConfirmation;
     public bool IsAtRootBoundary => _execution?.IsAtRootBoundary ?? _jsonExecution!.IsAtRootBoundary;
+    internal ValueTask RunHostOperationAsync(Func<CancellationToken, ValueTask> operation, CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (IsAtomic || HasPendingConfirmation)
+            throw new InvalidOperationException("宿主不能中断原子宏或待确认施放");
+        return _game is NativeGame native
+            ? native.RunHostOperationAsync(Context.BattleId, operation, ct)
+            : operation(ct);
+    }
+    internal void ReleaseHostInput()
+    {
+        if (_game is NativeGame native) native.ReleaseHeldInput();
+        else _game.ReleaseHeldInput();
+    }
+    internal void InspectDefeat(CancellationToken ct) => _game.CheckDefeated(ct);
     public bool TakeFinishCheckRequest()
     {
         var requested = _execution?.TakeFinishCheckRequest() ?? _jsonExecution!.TakeFinishCheckRequest();
@@ -309,6 +324,17 @@ internal sealed class NativeCombatFlowRunner : IDisposable
         private ILogger Logger => io.Logger;
         internal ILogger DiagnosticLogger => io.Logger;
         internal IDisposable BeginExclusive() => io.BeginExclusive(allowPassiveObservation: true);
+        internal async ValueTask RunHostOperationAsync(Guid battleId, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _input ??= io.InputCoordinator.TryAcquire(battleId, ReleaseOwnedInput)
+                ?? throw new InvalidOperationException("另一场战斗仍持有输入，禁止宿主接管");
+            using var input = _input.EnterOperation();
+            using var observation = io.BeginExclusive(allowPassiveObservation: false);
+            InvalidateActorConfirmation();
+            await operation(ct);
+        }
         private NativeCombatActor? FindActor(string actor) => io.Actors.FirstOrDefault(item => item.Name == actor);
         private string? CurrentActor()
         {

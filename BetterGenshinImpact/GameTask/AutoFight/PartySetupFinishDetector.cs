@@ -1,13 +1,18 @@
 using System;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
 
 internal readonly record struct PartySetupFinishObservation(long FrameId, DateTimeOffset CapturedAt,
-    int Width, int Height, bool BarVisible, ulong Fingerprint);
+    int Width, int Height, bool BarVisible, ulong Fingerprint)
+{
+    public CaptureFrameStamp Source { get; init; }
+}
 
 /// <summary>一次打开编队请求内的结束证据；重复截图、背景颜色和单帧闪烁均不能完成确认。</summary>
 internal sealed class PartySetupFinishDetector(PartySetupFinishObservation before, DateTimeOffset requestedAt)
 {
+    public CaptureFrameFence? Fence { get; init; }
     private long _lastFrame = before.FrameId;
     private DateTimeOffset _lastTime = before.CapturedAt;
     private ulong _lastFingerprint = before.Fingerprint;
@@ -17,6 +22,11 @@ internal sealed class PartySetupFinishDetector(PartySetupFinishObservation befor
 
     public bool Observe(PartySetupFinishObservation sample)
     {
+        if (Fence is { } fence && !fence.Accepts(sample.Source))
+        {
+            Reason = "source-frame-before-input";
+            return false;
+        }
         if (sample.FrameId <= _lastFrame || sample.CapturedAt <= _lastTime || sample.CapturedAt <= requestedAt)
         {
             Reason = "stale-frame";

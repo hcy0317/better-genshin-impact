@@ -321,6 +321,7 @@ public class AutoFightTask : ISoloTask
 
         combatScenes.BeforeTask(cts2.Token);
         using var flow = Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
+        using var battleHost = flow == null ? null : NativeCombatBattleHostIo.Create(flow, combatScenes, _taskParam);
         if (flow != null) _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
         _finishDetectConfig.Diagnostics = new(Logger);
         var fightTimeoutEnabled = AutoFightParam.IsTimeTimeoutEnabled(_taskParam.Timeout);
@@ -408,18 +409,9 @@ public class AutoFightTask : ISoloTask
                 {
                     if (flow != null)
                     {
-                        if (AutoFightParam.ShouldStopForCombatTimeout(fightTimeoutEnabled, timeoutStopwatch.Elapsed, fightTimeout, AutoFightSeek.RotationCount))
-                        {
-                            skipPostFightPickupFlag = true;
-                            break;
-                        }
-                        await flow.StepAsync(cts2.Token);
-                        if (flow.TakeFinishCheckRequest() && _taskParam.FightFinishDetectEnabled) finishCheckRequested = true;
-                        periodicFinishCheckRequested = _taskParam.FightFinishDetectEnabled;
-                        TraceFlowHost(_finishDetectConfig, flow, finishCheckRequested,
-                            periodicFinishCheckRequested && checkFightFinishStopwatch.Elapsed >= checkFightFinishTime);
-                        if (!flow.IsAtomic && !flow.HasPendingConfirmation && (!_finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || !flow.HasVisibleTarget)
-                            && await RunPendingFinishCheckAsync(allowSeek: flow.IsAtRootBoundary)) break;
+                        var hostResult = await battleHost!.AdvanceAsync(flow, cts2.Token);
+                        TraceFlowHost(_finishDetectConfig, flow, false, false, battleHost);
+                        if (NativeCombatBattleHostIo.ApplyResult(battleHost, hostResult, _finishDetectConfig)) break;
                         continue;
                     }
                     // 所有战斗角色都可以被取消
@@ -745,7 +737,7 @@ public class AutoFightTask : ISoloTask
         // 使用独立的 CancellationTokenSource，以便在战后独立取消索敌循环，不影响 cts2 关联的其他组件（如 expDetector）
         using var targetingCts = CancellationTokenSource.CreateLinkedTokenSource(cts2.Token);
         Task? targetingTask = null;
-        if (_taskParam.EnableCombatTargeting)
+        if (flow != null || _taskParam.EnableCombatTargeting)
         {
             targetingTask = Task.Run(async () =>
             {
@@ -777,6 +769,7 @@ public class AutoFightTask : ISoloTask
                 await targetingCts.CancelAsync();
                 try { await targetingTask; } catch (OperationCanceledException) { }
             }
+            battleHost?.Dispose();
             flow?.Dispose();
             FightStatusFlag = false;
         }
@@ -1241,9 +1234,9 @@ public class AutoFightTask : ISoloTask
 
     private static readonly AsyncLocal<DateTime> LastPassiveCameraFrame = new();
 
-    private static PartySetupFinishObservation ObservePartySetupBar(ImageRegion image, long frame)
+    internal static PartySetupFinishObservation ObservePartySetupBar(ImageRegion image, long frame)
     {
-        // 截图接口没有底层帧编号；局部图像指纹额外拒绝重复缓存帧，不能仅靠调用次数称为新证据。
+        // 使用捕获源签发的身份；frame参数仅保留旧调用兼容，不得续期旧图。
         ulong fingerprint = 14695981039346656037UL;
         var mat = image.SrcMat;
         var scale = mat.Width / 1920d;
@@ -1258,7 +1251,8 @@ public class AutoFightTask : ISoloTask
                 fingerprint = unchecked((fingerprint ^ pixel.Item2) * 1099511628211UL);
             }
         }
-        return new(frame, DateTimeOffset.UtcNow, mat.Width, mat.Height, IsPartySetupProgressBarVisible(image), fingerprint);
+        return new(image.FrameStamp.Sequence, image.FrameStamp.CapturedAt, mat.Width, mat.Height,
+            IsPartySetupProgressBarVisible(image), fingerprint) { Source = image.FrameStamp };
     }
 
     private static void SaveFightEndEvidence(TaskFightFinishDetectConfig config, string check, string reason,
@@ -1287,7 +1281,7 @@ public class AutoFightTask : ISoloTask
     }
 
     internal static void TraceFlowHost(TaskFightFinishDetectConfig config, Script.Flow.NativeCombatFlowRunner flow,
-        bool requested, bool periodicDue)
+        bool requested, bool periodicDue, CombatBattleHost? host = null)
     {
         if (config.Diagnostics is not { } diagnostics) return;
         if (flow.IsAtomic)
@@ -1303,7 +1297,9 @@ public class AutoFightTask : ISoloTask
             var age = observation.CapturedAtUtc == default ? -1 : (now - observation.CapturedAtUtc).TotalMilliseconds;
             return $"root={flow.IsAtRootBoundary} atomic=False pendingConfirmation={flow.HasPendingConfirmation} atomicSteps={diagnostics.AtomicSteps} requested={requested} periodicDue={periodicDue} " +
                 $"freshTarget={fresh} ageMs={age:F0} healthBar={observation.HasNormalHealthBar} skipVisible={config.SkipFightEndCheckWhenEnemyVisible} rotate={config.RotateFindEnemyEnabled} mode={config.CombatTargetingMode} " +
-                $"seekCalls={diagnostics.SeekCalls} lastSeek={diagnostics.LastSeek} cameraPulse={diagnostics.LastCameraPulse} approachInput=False";
+                (host != null
+                    ? $"hostState={host.State} hostReason={host.Reason} cameraRequests={host.CameraRequests} approachRequests={host.ApproachRequests} actualMotion=unknown"
+                    : $"seekCalls={diagnostics.SeekCalls} lastSeek={diagnostics.LastSeek} cameraPulse={diagnostics.LastCameraPulse} approachInput=False");
         });
     }
 
