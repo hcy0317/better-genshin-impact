@@ -222,20 +222,23 @@ public class CombatScenes : IDisposable
         return this;
     }
 
-    internal ReviveRecoveryFrame ReadRecoveryFrame(ImageRegion image, long frameId)
+    internal ReviveRecoveryFrame ReadRecoveryFrame(ImageRegion image, ReviveTarget target)
     {
         // 读取真实侧栏，不使用手工TeamNames或创建Avatar（其构造器会修改战斗状态）。
         var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
         var status = PartyAvatarSideIndexHelper.DetectedMultiGameStatus(image, _autoFightAssets, logger);
         var (indices, icons) = PartyAvatarSideIndexHelper.GetAllIndexRects(image, status, logger, _systemInfo);
         var names = new Dictionary<int, string>();
-        for (var i = 0; i < icons.Count; i++)
+        // 布局必须完整，但非目标头像不参与目标恢复的身份确认。
+        if (indices.Count == Avatars.Length && icons.Count == indices.Count &&
+            target.Index > 0 && target.Index <= icons.Count)
         {
-            using var icon = image.DeriveCrop(icons[i]);
-            names[i + 1] = ClassifyAvatarCnName(icon.CacheImage, i + 1).Item1;
+            using var icon = image.DeriveCrop(icons[target.Index - 1]);
+            names[target.Index] = ClassifyAvatarCnName(icon.CacheImage, target.Index).Item1;
         }
         var active = PartyAvatarSideIndexHelper.GetAvatarIndexIsActiveWithContext(image, indices.ToArray(), new AvatarActiveCheckContext());
-        return new(frameId, Bv.IsInMainUi(image), Bv.ReadReviveState(image), active, names);
+        return new ReviveRecoveryFrame(image.FrameStamp.Sequence, Bv.IsInMainUi(image), Bv.ReadReviveState(image), active, names)
+            .WithSource(image.FrameStamp, TimeProvider.System);
     }
 
 
@@ -487,7 +490,8 @@ public class CombatScenes : IDisposable
             return Avatars[LastActiveAvatarIndex - 1].Name;
         }
 
-        using var imageRegion = region ?? TaskControl.CaptureToRectArea();
+        using var ownedRegion = region == null ? TaskControl.CaptureToRectArea() : null;
+        var imageRegion = region ?? ownedRegion!;
 
         var rectArray = Avatars.Select(t => t.IndexRect).ToArray();
         int index = PartyAvatarSideIndexHelper.GetAvatarIndexIsActiveWithContext(imageRegion, rectArray, new AvatarActiveCheckContext());

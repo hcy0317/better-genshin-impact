@@ -18,6 +18,7 @@ public sealed record CombatFlowDiagnosticEvent(double At, string Actor, string A
     public double RemainingBudget { get; init; }
     public IReadOnlyList<string> Observations { get; init; } = Array.Empty<string>();
     public string? Reason { get; init; }
+    internal IReadOnlyList<CombatCallContext> CallPath { get; init; } = Array.Empty<CombatCallContext>();
 }
 
 public sealed record CombatFlowStatistics(long CoreSteps, long CompletedPasses, long FailedPasses,
@@ -63,9 +64,9 @@ internal sealed class CombatFlowDiagnostics
             action.Command.SourceLine, reportedResult, action.InputAt != null, milliseconds)
         {
             Reason = action.DiagnosticReason, CommandId = action.CommandId,
-            AttemptId = action.DiagnosticAttemptId, InputAt = action.InputAt,
+            AttemptId = action.DiagnosticAttemptId ?? action.PendingAttempt?.AttemptId, InputAt = action.InputAt,
             EffectiveInputAt = action.EffectiveInputAt, RemainingBudget = action.RemainingBudget,
-            Observations = action.DiagnosticSamples
+            Observations = action.DiagnosticSamples, CallPath = action.CallPath
         });
     }
 

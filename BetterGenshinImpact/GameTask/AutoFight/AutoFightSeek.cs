@@ -3282,7 +3282,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 {
                     var skillArea = AutoFightAssets.Get(image).AvatarQRectListMap[guardianAvatar.Index - 1];//Q技能区域
                     // 首先对图像进行预处理，转为灰度图
-                    using var grayImage = image.DeriveCrop(skillArea).SrcMat.CvtColor(ColorConversionCodes.BGR2GRAY);
+                    using var skillRegion = image.DeriveCrop(skillArea);
+                    using var grayImage = skillRegion.SrcMat.CvtColor(ColorConversionCodes.BGR2GRAY);
                 
                     //调试用
                     // grayImage.SaveImage("D:\\Images\\grayImage.png");

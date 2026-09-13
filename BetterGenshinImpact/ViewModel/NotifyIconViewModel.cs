@@ -54,7 +54,7 @@ public partial class NotifyIconViewModel : ObservableObject
     }
 
     [RelayCommand]
-    public void Exit()
+    public async Task Exit()
     {
         if (_childSessionService.HasActiveChildSession())
         {
@@ -65,7 +65,8 @@ public partial class NotifyIconViewModel : ObservableObject
         }
 
         App.GetService<IConfigService>()?.Save();
-        Application.Current.Shutdown();
+        try { await App.RequestShutdownAsync(); }
+        catch (Exception error) { await ThemedMessageBox.ErrorAsync("关闭尚未安全完成：" + error.Message); }
     }
 
     [RelayCommand]

@@ -22,6 +22,21 @@ public class TaskControl
     public static ILogger Logger => LoggerFactory.Value;
 
     public static readonly SemaphoreSlim TaskSemaphore = new(1, 1);
+    private static readonly TaskAdmissionGate Admission = new();
+    internal static bool IsShuttingDown => Admission.IsClosing;
+    internal static void SetShuttingDown(bool requested) => Admission.SetClosing(requested);
+    internal static void CheckTaskAdmission() => Admission.Check();
+    internal static IDisposable PauseTaskAdmission() => Admission.Pause();
+    internal static IDisposable EnterTaskActivity() => Admission.EnterActivity();
+    internal static async Task WaitForTaskDrainAsync(TimeSpan timeout)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        await Admission.WaitForActivitiesAsync().WaitAsync(timeout);
+        var remaining = timeout - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        if (!await TaskSemaphore.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero))
+            throw new TimeoutException("活动任务尚未释放输入，保留截图和服务资源");
+    }
+    internal static void InitializeTaskCancellation() => Admission.Initialize(Core.Script.CancellationContext.Instance.Set);
 
 
     public static void CheckAndSleep(int millisecondsTimeout)
@@ -407,14 +422,17 @@ public class TaskControl
         return gameCapture?.Capture()?.Frame;
     }
 
+    internal static GameCaptureFrame? CaptureGameFrameNoRetry(IGameCapture? gameCapture) => gameCapture?.Capture();
+
     /// <summary>
     /// 自动判断当前运行上下文中截图方式，并选择合适的截图方式返回
     /// </summary>
     /// <returns></returns>
     public static ImageRegion CaptureToRectArea(bool forceNew = false)
     {
-        var image = CaptureGameImage(TaskTriggerDispatcher.GlobalGameCapture);
-        var content = new CaptureContent(image, 0, 0);
+        var frame = GameCaptureRetry.CaptureFrame(TaskTriggerDispatcher.GlobalGameCapture,
+            Thread.Sleep, message => Logger.LogWarning(message));
+        var content = new CaptureContent(frame, 0, 0);
         return content.CaptureRectArea;
     }
 }

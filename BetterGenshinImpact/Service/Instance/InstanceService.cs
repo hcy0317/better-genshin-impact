@@ -717,7 +717,7 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
             return;
         }
 
-        _ = application.Dispatcher.BeginInvoke(new Action(application.Shutdown));
+        App.RequestShutdown();
     }
 
     private static void EnsureSuccessfulResponse(InstanceIpcEnvelope response)

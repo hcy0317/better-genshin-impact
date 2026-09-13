@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.GameTask.AutoPathing;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
+using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Map.Maps;
 using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
@@ -21,7 +22,7 @@ namespace BetterGenshinImpact.GameTask.MapMask;
 /// <summary>
 /// 地图遮罩触发器
 /// </summary>
-public class MapMaskTrigger : ITaskTrigger
+public class MapMaskTrigger : ITaskTrigger, IAsyncDisposable
 {
     private readonly ILogger<MapMaskTrigger> _logger = App.GetLogger<MapMaskTrigger>();
 
@@ -72,10 +73,22 @@ public class MapMaskTrigger : ITaskTrigger
         }
     }
 
-    private ComputeWorkItem? _pendingBigMapCompute;
-    private int _bigMapWorkerRunning;
-    private ComputeWorkItem? _pendingMiniMapCompute;
-    private int _miniMapWorkerRunning;
+    private readonly LatestOwnedWork<ComputeWorkItem> _bigMapWork;
+    private readonly LatestOwnedWork<ComputeWorkItem> _miniMapWork;
+    private int _stopping;
+
+    public MapMaskTrigger()
+    {
+        _bigMapWork = new(ProcessBigMapCompute, error => _logger.LogDebug(error, "地图遮罩异步计算时发生异常"));
+        _miniMapWork = new(ProcessMiniMapCompute, error => _logger.LogDebug(error, "地图遮罩异步计算时发生异常"));
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Interlocked.Exchange(ref _stopping, 1);
+        Interlocked.Exchange(ref _pendingUiUpdate, null);
+        await Task.WhenAll(_bigMapWork.DisposeAsync().AsTask(), _miniMapWork.DisposeAsync().AsTask()).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// 初始化触发器状态，并在关闭时同步隐藏遮罩UI
@@ -87,15 +100,14 @@ public class MapMaskTrigger : ITaskTrigger
         // 关闭时隐藏UI
         if (!IsEnabled)
         {
-            var pendingBigMapCompute = Interlocked.Exchange(ref _pendingBigMapCompute, null);
-            pendingBigMapCompute?.Dispose();
-            var pendingMiniMapCompute = Interlocked.Exchange(ref _pendingMiniMapCompute, null);
-            pendingMiniMapCompute?.Dispose();
+            _bigMapWork.DiscardPending();
+            _miniMapWork.DiscardPending();
 
             Interlocked.Exchange(ref _pendingUiUpdate, null);
 
             UIDispatcherHelper.BeginInvoke(() =>
             {
+                if (Volatile.Read(ref _stopping) != 0) return;
                 if (MaskWindow.InstanceNullable() != null)
                 {
                     var window = MaskWindow.Instance();
@@ -117,6 +129,7 @@ public class MapMaskTrigger : ITaskTrigger
     /// <param name="content">捕获到的画面内容</param>
     public void OnCapture(CaptureContent content)
     {
+        if (Volatile.Read(ref _stopping) != 0) return;
         if ((DateTime.Now - _prevExecute).TotalMilliseconds <= 50)
         {
             return;
@@ -211,13 +224,7 @@ public class MapMaskTrigger : ITaskTrigger
     /// <param name="workItem">计算任务</param>
     private void EnqueueBigMapCompute(ComputeWorkItem workItem)
     {
-        var previous = Interlocked.Exchange(ref _pendingBigMapCompute, workItem);
-        previous?.Dispose();
-
-        if (Interlocked.Exchange(ref _bigMapWorkerRunning, 1) == 0)
-        {
-            _ = Task.Run(BigMapWorkerLoop);
-        }
+        _bigMapWork.Enqueue(workItem);
     }
 
     /// <summary>
@@ -226,81 +233,7 @@ public class MapMaskTrigger : ITaskTrigger
     /// <param name="workItem">计算任务</param>
     private void EnqueueMiniMapCompute(ComputeWorkItem workItem)
     {
-        var previous = Interlocked.Exchange(ref _pendingMiniMapCompute, workItem);
-        previous?.Dispose();
-
-        if (Interlocked.Exchange(ref _miniMapWorkerRunning, 1) == 0)
-        {
-            _ = Task.Run(MiniMapWorkerLoop);
-        }
-    }
-
-    /// <summary>
-    /// 大地图计算工作线程循环
-    /// </summary>
-    private void BigMapWorkerLoop()
-    {
-        while (true)
-        {
-            var workItem = Interlocked.Exchange(ref _pendingBigMapCompute, null);
-            if (workItem == null)
-            {
-                Interlocked.Exchange(ref _bigMapWorkerRunning, 0);
-                if (Volatile.Read(ref _pendingBigMapCompute) != null && Interlocked.Exchange(ref _bigMapWorkerRunning, 1) == 0)
-                {
-                    continue;
-                }
-
-                return;
-            }
-
-            try
-            {
-                ProcessBigMapCompute(workItem);
-            }
-            catch (Exception e)
-            {
-                _logger.LogDebug(e, "地图遮罩异步计算时发生异常");
-            }
-            finally
-            {
-                workItem.Dispose();
-            }
-        }
-    }
-
-    /// <summary>
-    /// 小地图计算工作线程循环
-    /// </summary>
-    private void MiniMapWorkerLoop()
-    {
-        while (true)
-        {
-            var workItem = Interlocked.Exchange(ref _pendingMiniMapCompute, null);
-            if (workItem == null)
-            {
-                Interlocked.Exchange(ref _miniMapWorkerRunning, 0);
-                if (Volatile.Read(ref _pendingMiniMapCompute) != null && Interlocked.Exchange(ref _miniMapWorkerRunning, 1) == 0)
-                {
-                    continue;
-                }
-
-                return;
-            }
-
-            try
-            {
-                ProcessMiniMapCompute(workItem);
-            }
-            catch (Exception e)
-            {
-                _logger.LogDebug(e, "地图遮罩异步计算时发生异常");
-            }
-            finally
-            {
-                workItem.Dispose();
-            }
-        }
+        _miniMapWork.Enqueue(workItem);
     }
 
     /// <summary>
@@ -383,6 +316,7 @@ public class MapMaskTrigger : ITaskTrigger
     /// <param name="update">待应用的UI更新</param>
     private void QueueUiUpdate(PendingUiUpdate update)
     {
+        if (Volatile.Read(ref _stopping) != 0) return;
         Interlocked.Exchange(ref _pendingUiUpdate, update);
         TryScheduleUiApply();
     }
@@ -403,6 +337,8 @@ public class MapMaskTrigger : ITaskTrigger
     /// </summary>
     private void ApplyPendingUiUpdate()
     {
+        // 已投递但尚未执行的UI回调必须在访问MaskWindow/DI前拒绝。
+        if (Volatile.Read(ref _stopping) != 0) return;
         var update = Interlocked.Exchange(ref _pendingUiUpdate, null);
         if (update != null)
         {

@@ -1,11 +1,24 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 public readonly record struct CombatSkillObservation(Guid BattleId, long FrameId, double CapturedAt,
-    bool? CoolingDown, bool? Ready);
+    bool? CoolingDown, bool? Ready)
+{
+    internal CaptureFrameStamp SourceStamp { get; private init; }
+    internal bool SourceBound { get; private init; }
+    internal bool SourceAcceptedFresh { get; private init; }
+    internal CombatSkillObservation WithSource(CaptureFrameStamp source, TimeProvider clock) => this with
+    {
+        SourceBound = true, SourceStamp = source, FrameId = source.Sequence,
+        SourceAcceptedFresh = source.IsFresh(clock, TimeSpan.FromMilliseconds(150)),
+        CapturedAt = source.IsKnown && source.TimestampFrequency == clock.TimestampFrequency
+            ? CapturedAt - clock.GetElapsedTime(source.CapturedTimestamp).TotalSeconds : CapturedAt
+    };
+}
 public sealed record CombatSkillAttempt(Guid AttemptId, Guid BattleId, string Actor, Method Skill,
     string CommandId, double InputAt, double Deadline);
 internal enum CombatSkillAttemptState { Empty, Pending, Confirmed, Expired }
@@ -23,7 +36,23 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         public long FrameId = -1;
         public double ObservedAt = attempt.InputAt;
         public double? ReadySince;
+        public CaptureFrameFence? InputFence;
+        public CaptureFrameStamp LastSource;
     }
+
+    internal void MarkInputCompleted(Guid attemptId, CaptureFrameFence fence)
+    {
+        lock (_gate)
+        {
+            var slot = _slots.Values.FirstOrDefault(value => value.Attempt.AttemptId == attemptId);
+            if (!_closed && slot != null && slot.InputFence == null) slot.InputFence = fence;
+        }
+    }
+
+    private static bool AcceptsSource(Slot slot, CombatSkillObservation sample) =>
+        (!sample.SourceBound || sample.SourceAcceptedFresh &&
+            (!slot.LastSource.IsKnown || sample.SourceStamp.IsAfter(slot.LastSource))) &&
+        (slot.InputFence == null || sample.SourceBound && slot.InputFence.Value.Accepts(sample.SourceStamp));
     private readonly object _gate = new();
     private readonly Dictionary<(string Actor, Method Skill), Slot> _slots = new();
     private bool _closed;
@@ -52,10 +81,11 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         lock (_gate)
         {
             if (_closed || sample.BattleId != battleId || !_slots.TryGetValue((actor, skill), out var slot) ||
-                sample.FrameId <= slot.FrameId || !double.IsFinite(sample.CapturedAt) || sample.CapturedAt <= slot.ObservedAt)
+                !AcceptsSource(slot, sample) || sample.FrameId <= slot.FrameId || !double.IsFinite(sample.CapturedAt) || sample.CapturedAt <= slot.ObservedAt)
                 return false;
             slot.FrameId = sample.FrameId;
             slot.ObservedAt = sample.CapturedAt;
+            slot.LastSource = sample.SourceStamp;
             if (sample.CoolingDown == true)
             {
                 slot.ReadySince = null;
@@ -100,6 +130,9 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         {
             if (_closed || !_slots.TryGetValue((actor, skill), out var slot) || slot.CreditTaken ||
                 first.BattleId != battleId || second.BattleId != battleId ||
+                !AcceptsSource(slot, first) || !AcceptsSource(slot, second) ||
+                (first.SourceBound || second.SourceBound) &&
+                    (!first.SourceBound || !second.SourceBound || !second.SourceStamp.IsAfter(first.SourceStamp)) ||
                 first.FrameId <= slot.FrameId || second.FrameId <= first.FrameId ||
                 !double.IsFinite(first.CapturedAt) || !double.IsFinite(second.CapturedAt) ||
                 first.CapturedAt <= slot.ObservedAt || first.CapturedAt < slot.Attempt.Deadline ||

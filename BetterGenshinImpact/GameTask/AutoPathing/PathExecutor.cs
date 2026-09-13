@@ -672,8 +672,18 @@ public partial class PathExecutor
         }
 
         using var region = CaptureToRectArea();
-        if (Bv.CurrentAvatarIsLowHp(region) && !(await TryPartyHealing() && Bv.CurrentAvatarIsLowHp(region)))
+        if (Bv.CurrentAvatarIsLowHp(region))
         {
+            if (await TryPartyHealing())
+            {
+                var fence = new Fischless.GameCapture.CaptureFrameFence(region.FrameStamp, TimeProvider.System.GetTimestamp());
+                var healed = await HealingObservation.WaitAsync(fence, () =>
+                {
+                    using var fresh = CaptureToRectArea();
+                    return new(fresh.FrameStamp, Bv.IsInMainUi(fresh), Bv.CurrentAvatarIsLowHp(fresh));
+                }, ms => Delay(ms, ct), ct);
+                if (healed) return;
+            }
             Logger.LogInformation("当前角色血量过低，去七天神像恢复");
             await TpStatueOfTheSeven();
             throw new RetryException("回血完成后重试路线");

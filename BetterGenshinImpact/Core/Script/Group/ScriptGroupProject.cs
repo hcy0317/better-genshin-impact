@@ -249,7 +249,9 @@ public partial class ScriptGroupProject : ObservableObject
                 // 当前可运行项目由脚本结合本次扫描结果判断，持久化选择保持不变。
 
                 var pathingPartyConfig = GroupInfo?.Config.PathingConfig;
-                await Project.ExecuteAsync(JsScriptSettingsObject, pathingPartyConfig);
+                ScriptExecutionResult outcome = await Project.ExecuteWithOutcomeAsync((object?)JsScriptSettingsObject, pathingPartyConfig);
+                outcome.ApplyTo(executionRecord);
+                outcome.ThrowIfFailure();
             }
             else if (Type == "KeyMouse")
             {
@@ -342,13 +344,19 @@ public partial class ScriptGroupProject : ObservableObject
             }
 
             TaskExecutionScope.ThrowIfFailed();
-            if (Type != "Pathing")
+            if (Type != "Pathing" && Type != "Javascript")
             {
                 executionRecord.IsSuccessful = true;
             }
         }
         catch (Exception exception)
         {
+            executionRecord.IsSuccessful = false;
+            if (executionRecord.Outcome is null or "Completed")
+            {
+                executionRecord.Outcome = exception is OperationCanceledException ? "Cancelled" : "Failed";
+                executionRecord.OutcomeReason = exception.Message;
+            }
             TaskExecutionScope.Capture().Report(exception);
             executionFailure = exception;
             throw;

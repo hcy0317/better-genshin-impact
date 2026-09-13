@@ -13,6 +13,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using Fischless.GameCapture;
 using Image = SixLabors.ImageSharp.Image;
 using Point = OpenCvSharp.Point;
 
@@ -22,9 +23,23 @@ public class ImageRegion : Region
 {
     private Mat? _cacheGreyMat;
     private Image<Rgb24>? _cacheImage;
+    private Dictionary<object, object>? _observations;
     private bool _disposed;
 
     public Mat SrcMat { get; }
+
+    public CaptureFrameStamp FrameStamp { get; internal set; }
+
+    // 与灰度/Image缓存一样只属于本区域。裁剪/新帧不继承判断；不得缓存资源或修改原像素。
+    internal T ReadOnce<T>(object key, Func<T> read) where T : struct
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _observations ??= new();
+        if (_observations.TryGetValue(key, out var value)) return (T)value;
+        var result = read();
+        _observations.Add(key, result);
+        return result;
+    }
 
     public Mat CacheGreyMat
     {
@@ -46,7 +61,7 @@ public class ImageRegion : Region
                 return _cacheImage;
 
             using var mat = SrcMat.CvtColor(ColorConversionCodes.BGR2RGB);
-            var bufferSize = (int)SrcMat.Step() * SrcMat.Height;
+            var bufferSize = (int)mat.Step() * mat.Height;
             using var image = Image.WrapMemory<Rgb24>(mat.DataPointer, bufferSize, mat.Width, mat.Height);
             _cacheImage = image.Clone();
 
@@ -58,6 +73,7 @@ public class ImageRegion : Region
         DrawContent? drawContent = null) : base(x, y, mat.Width, mat.Height, owner, converter, drawContent)
     {
         SrcMat = mat;
+        FrameStamp = owner is ImageRegion imageOwner ? imageOwner.FrameStamp : default;
     }
 
     /// <summary>
@@ -593,6 +609,7 @@ public class ImageRegion : Region
         }
 
         _disposed = true;
+        _observations?.Clear();
         _cacheImage?.Dispose();
         _cacheGreyMat?.Dispose();
         SrcMat.Dispose();

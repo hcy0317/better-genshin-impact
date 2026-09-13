@@ -1,10 +1,19 @@
 namespace Fischless.GameCapture.Graphics;
 
-internal sealed class FrameCallbackLifetime
+public sealed class FrameCallbackLifetime
 {
     private readonly object _sync = new();
     private int _activeCallbacks;
     private bool _stopping;
+    private readonly AsyncLocal<int> _depth = new();
+    private TaskCompletionSource? _drained;
+
+    public bool IsCurrentCallback => _depth.Value > 0;
+
+    public Task WaitForCallbacksAsync()
+    {
+        lock (_sync) return _activeCallbacks == 0 ? Task.CompletedTask : _drained!.Task;
+    }
 
     public bool IsStopping
     {
@@ -26,7 +35,9 @@ internal sealed class FrameCallbackLifetime
                 return false;
             }
 
+            if (_activeCallbacks == 0) _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             _activeCallbacks++;
+            _depth.Value++;
             return true;
         }
     }
@@ -41,8 +52,10 @@ internal sealed class FrameCallbackLifetime
             }
 
             _activeCallbacks--;
+            _depth.Value = Math.Max(0, _depth.Value - 1);
             if (_activeCallbacks == 0)
             {
+                _drained?.TrySetResult();
                 Monitor.PulseAll(_sync);
             }
         }
@@ -83,6 +96,7 @@ internal sealed class FrameCallbackLifetime
             }
 
             _stopping = false;
+            _drained = null;
         }
     }
 }

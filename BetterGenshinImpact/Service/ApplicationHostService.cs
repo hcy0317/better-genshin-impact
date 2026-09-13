@@ -165,8 +165,8 @@ public class ApplicationHostService(
         var application = Application.Current;
         if (application == null || application.Dispatcher.HasShutdownStarted || application.Dispatcher.HasShutdownFinished)
             return;
-        // 使用WPF Shutdown而非窗口Close，避免托盘最小化逻辑取消退出；沿用OnExit的正常资源清理。
-        _ = application.Dispatcher.BeginInvoke(new Action(() => application.Shutdown(exitCode)));
+        // 协调器先排空任务与服务，再执行WPF Shutdown，避免托盘最小化逻辑取消退出。
+        App.RequestShutdown(exitCode);
     }
 
     private async Task ObserveCommandLineTaskAsync(Task task, string taskName)

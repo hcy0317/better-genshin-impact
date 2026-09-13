@@ -14,17 +14,19 @@ public sealed partial class CombatFlowExecution
             _frames.TryPeek(out var frame) ? frame : CreateFrame(_root), ct);
 
     private async ValueTask<bool?> EvaluateWithPreparationAsync(ConditionEvaluator.CompiledCondition condition,
-        string actor, Frame frame, CancellationToken ct, CombatFlowBlock? child = null)
+        string actor, Frame frame, CancellationToken ct, CombatFlowBlock? child = null, bool allowPreparation = true)
     {
         string? unknownActor = null;
+        string? unknownFunction = null;
         object? Resolve(string function, IReadOnlyList<object?> args)
         {
             var value = Observe(function, args, frame, actor, !_roundStarted && _hasRootRounds ? Round + 1 : Round);
-            if (value == null && function == "e-ready" && unknownActor == null)
+            if (value == null && function is "e-ready" or "low-hp" or "q-ready" or "q-energy-low" or "q-cd" && unknownActor == null)
             {
                 var target = args.FirstOrDefault()?.ToString() ?? actor;
                 if (DefaultAutoFightConfig.CombatAvatarAliasToNameMap.TryGetValue(target, out var canonical)) target = canonical;
-                if (!string.IsNullOrWhiteSpace(target) && target != CombatScriptParser.CurrentAvatarName) unknownActor = target;
+                if (!string.IsNullOrWhiteSpace(target) && target != CombatScriptParser.CurrentAvatarName)
+                { unknownActor = target; unknownFunction = function; }
             }
             return value;
         }
@@ -39,9 +41,9 @@ public sealed partial class CombatFlowExecution
                     remaining > guarded.Block.EstimatedSeconds + CombatFlowPolicy.RecoverySeconds) &&
                 RequirementsFit(guarded, guarded.Block.EstimatedSeconds + CombatFlowPolicy.RecoverySeconds);
         }
-        if (result != null || unknownActor == null || !CanPrepare()) return result;
+        if (result != null || !allowPreparation || unknownActor == null || !CanPrepare()) return result;
         var targetActor = unknownActor;
-        var goal = "condition:e-ready:" + targetActor;
+        var goal = "condition:" + unknownFunction + ":" + targetActor;
         if (_battle.NextConditionProbe.TryGetValue(goal, out var next) && Context.Now < next) return null;
         if (!_episodes.TrySpend(goal, Context.Now, CombatFlowPolicy.EpisodeTimeoutSeconds,
                 CombatFlowPolicy.EpisodeAttempts, out var deadline)) return null;
@@ -50,11 +52,11 @@ public sealed partial class CombatFlowExecution
         var probe = new CombatFlowAction(new CombatCommand(targetActor, "e"), Context, CanPrepare,
             Math.Min(frame.Deadline, Math.Min(deadline, Context.Now + 3)), continuation: CanPrepare);
         _battle.ConditionPreparationVersion++;
-        await _game.PrepareObservationAsync(probe, "e-ready", ct);
+        await _game.PrepareObservationAsync(probe, unknownFunction!, ct);
         ct.ThrowIfCancellationRequested();
         _game.BeginStep(); // 不复用切人之前的条件缓存。
         if (!probe.CanStart) return null;
-        if (Observe("e-ready", [targetActor], frame, targetActor) is bool) _episodes.Resolve(goal);
+        if (Observe(unknownFunction!, [targetActor], frame, targetActor) is bool) _episodes.Resolve(goal);
         // 同一次求值不连环切换多个角色，也不拼接不同角色的旧帧证据。
         return condition.EvaluateBoolean((function, args) => Observe(function, args, frame, actor,
             !_roundStarted && _hasRootRounds ? Round + 1 : Round));

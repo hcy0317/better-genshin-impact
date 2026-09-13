@@ -51,6 +51,47 @@ namespace BetterGenshinImpact;
 
 public partial class App : Application
 {
+    private ApplicationShutdownSequence? _shutdownSequence;
+    public static bool ShutdownPrepared => (Current as App)?._shutdownSequence?.Prepared == true;
+
+    public static Task RequestShutdownAsync(int exitCode = 0)
+    {
+        if (Current is not App app) return Task.CompletedTask;
+        if (!app.Dispatcher.CheckAccess())
+            return app.Dispatcher.InvokeAsync(() => RequestShutdownAsync(exitCode)).Task.Unwrap();
+        app._shutdownSequence ??= new ApplicationShutdownSequence(app.DrainBeforeExitAsync, () => app.Shutdown(exitCode));
+        return app._shutdownSequence.RequestAsync();
+    }
+
+    public static void RequestShutdown(int exitCode = 0)
+    {
+        // 任务自身的finally可请求退出，但不能等待自己持有的TaskSemaphore。
+        _ = RequestShutdownAsync(exitCode).ContinueWith(task =>
+            Log.Error(task.Exception, "应用关闭未能安全排空，保留服务以避免访问已释放资源"),
+            TaskContinuationOptions.OnlyOnFaulted);
+    }
+
+    private async Task DrainBeforeExitAsync()
+    {
+        GameTask.Common.TaskControl.SetShuttingDown(true);
+        TaskTriggerDispatcher.Existing?.StopTimer();
+        Core.Script.CancellationContext.Instance.Cancel();
+        try { await GameTask.Common.TaskControl.WaitForTaskDrainAsync(TimeSpan.FromSeconds(20)); }
+        catch
+        {
+            GameTask.Common.TaskControl.SetShuttingDown(false);
+            throw;
+        }
+        try
+        {
+            if (TaskTriggerDispatcher.Existing is { } dispatcher) await dispatcher.DisposeAsync();
+            // WPF仍能调度时完成Host停止；不能把异步排空留给Shutdown后的async-void OnExit。
+            await _host.StopAsync();
+            TempManager.CleanUp();
+            _host.Dispose();
+        }
+        finally { GameTask.Common.TaskControl.TaskSemaphore.Release(); }
+    }
     // The.NET Generic Host provides dependency injection, configuration, logging, and other services.
     // https://docs.microsoft.com/dotnet/core/extensions/generic-host
     // https://docs.microsoft.com/dotnet/core/extensions/dependency-injection
@@ -324,23 +365,28 @@ public partial class App : Application
             }
 
             // 启动失败 = 无可用的主界面，直接退出，避免留下无窗口的残留进程。
-            Shutdown();
+            await RequestShutdownAsync();
         }
     }
 
     /// <summary>
     /// Occurs when the application is closing.
     /// </summary>
-    protected override async void OnExit(ExitEventArgs e)
+    protected override void OnExit(ExitEventArgs e)
     {
         base.OnExit(e);
 
         ConsoleHelper.WriteLine("BetterGI 应用程序正在关闭...");
 
-        TempManager.CleanUp();
-
-        await _host.StopAsync();
-        _host.Dispose();
+        try
+        {
+            if (!ShutdownPrepared)
+                Log.Error("应用绕过正常关闭协调器退出，未验证任务排空，不在此阶段释放仍可能使用的服务");
+        }
+        catch (Exception error)
+        {
+            Log.Error(error, "退出排空失败，不在仍有工作时释放DI服务");
+        }
         Log.CloseAndFlush();
 
         // 释放控制台窗口

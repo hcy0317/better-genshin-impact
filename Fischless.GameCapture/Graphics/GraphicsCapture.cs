@@ -36,6 +36,8 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
 
     // 最新帧的存储
     private Mat? _latestFrame;
+    private CaptureFrameStamp _latestStamp;
+    private readonly CaptureFrameSource _frameSource = new();
     private readonly ReaderWriterLockSlim _frameAccessLock = new();
     private readonly FrameCallbackLifetime _frameCallbackLifetime = new();
     private readonly object _captureLifecycleSync = new();
@@ -63,6 +65,7 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
         {
             Stop();
             _frameCallbackLifetime.Reset();
+            _frameSource.Restart();
             try
             {
                 _hWnd = hWnd;
@@ -252,6 +255,9 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
                     _surfaceWidth = captureSize.Width;
                     _surfaceHeight = captureSize.Height;
                     (_region, _captureRect) = GetGameScreenInfo(_hWnd);
+                    _frameSource.Restart();
+                    DisposeAndClear(ref _latestFrame);
+                    _latestStamp = default;
                     return;
                 }
 
@@ -268,6 +274,11 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
                     // 新帧构造成功后再替换，异常时保留上一帧
                     var oldFrame = _latestFrame;
                     _latestFrame = newFrame;
+                    // WinRT给出的采集时点与QPC同源；不能把队列延迟后的读取时点签成新帧。
+                    var capturedTimestamp = frame.SystemRelativeTime is { } relativeTime
+                        ? (long)(relativeTime.TotalSeconds * Stopwatch.Frequency) : -1;
+                    _latestStamp = capturedTimestamp >= 0 && capturedTimestamp <= Stopwatch.GetTimestamp()
+                        ? _frameSource.Next(capturedTimestamp) : default;
                     oldFrame?.Dispose();
                 }
                 catch (SharpDXException e)
@@ -296,7 +307,7 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
             var frame = _latestFrame?.Clone();
             return frame == null
                 ? null
-                : new GameCaptureFrame(frame, _captureRect);
+                : new GameCaptureFrame(frame, _latestStamp, _captureRect);
         }
         finally
         {
@@ -349,6 +360,7 @@ public class GraphicsCapture(bool captureHdr = false) : IGameCapture
         try
         {
             DisposeAndClear(ref _latestFrame);
+            _latestStamp = default;
             _captureRect = null;
             _region = null;
         }

@@ -7,6 +7,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
+using Fischless.GameCapture;
 using Vanara.PInvoke;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
@@ -14,8 +15,8 @@ namespace BetterGenshinImpact.GameTask.Common.Ui;
 /// <summary>仅在关键UI边界抓图，所有图像在单次读取/输入调用结束前释放。</summary>
 internal sealed class NativeUiDriver : IUiDriver, IDisposable
 {
-    private static long _frameSequence;
     private readonly IDisposable _exclusive = AvatarRecognition.BeginExclusiveOperation();
+    private CaptureFrameFence? _inputFence;
     private bool _disposed;
 
     public UiSnapshot Capture()
@@ -23,7 +24,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         UiOperation.Current?.Check();
         using var image = TaskControl.CaptureToRectArea();
-        return Read(image);
+        var snapshot = Read(image);
+        return _inputFence is { } fence ? snapshot.AfterInput(fence) : snapshot;
     }
 
     internal static UiSnapshot Read(ImageRegion image)
@@ -35,9 +37,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         using var menuBack = image.Find(RecognitionAssets.Get("UseRedeemCode", "MenuBack", image));
         var revive = Bv.ReadReviveState(image);
-        var snapshot = new UiSnapshot(Interlocked.Increment(ref _frameSequence))
+        var snapshot = new UiSnapshot(image.FrameStamp.Sequence)
         {
-            CapturedAt = DateTimeOffset.UtcNow,
             MainHud = Has("PaimonMenu") || Has("FriendChat"),
             BigMap = Bv.IsInBigMapUi(image),
             Party = Bv.IsInPartyViewUi(image),
@@ -54,10 +55,13 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         };
         if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
             snapshot = snapshot with { Handbook = HandbookUiRecognition.Read(image) };
-        return snapshot;
+        return snapshot.WithSource(image.FrameStamp, TimeProvider.System, UiSnapshot.RecoveryMaximumAge);
     }
 
     public Task DelayAsync(int milliseconds, CancellationToken ct) => TaskControl.Delay(milliseconds, ct);
+
+    public void MarkInputCompleted(UiSnapshot before) =>
+        _inputFence = new(before.SourceStamp, TimeProvider.System.GetTimestamp());
 
     public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
     {
@@ -72,17 +76,25 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             operation.Observe(current, target, "pre-input");
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
+        if (!observed.SourceBound || !observed.HasUsableEvidence || !current.HasUsableEvidence ||
+            observed.SourceStamp.SessionId != current.SourceStamp.SessionId ||
+            (_inputFence is { } fence && !fence.Accepts(current.SourceStamp))) return Task.FromResult(false);
+        bool Completed(bool applied)
+        {
+            if (applied) MarkInputCompleted(current);
+            return applied;
+        }
         switch (action)
         {
             case UiAction.ReviveParty when observed.FullPartyDefeat && current.FullPartyDefeat:
-                return Task.FromResult(Bv.ClickIfInReviveModal(image));
+                return Task.FromResult(Completed(Bv.ClickIfInReviveModal(image)));
             case UiAction.Escape when observed.CanEscape && current.CanEscape:
             case UiAction.RequestDomainExit when observed.Matches(UiTarget.DomainMain) && current.Matches(UiTarget.DomainMain):
                 Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-                return Task.FromResult(true);
+                return Task.FromResult(Completed(true));
             case UiAction.ConfirmDomainExit when observed.Prompt && observed.BlackConfirm && !observed.Revive
                 && current.Prompt && current.BlackConfirm && !current.Revive:
-                return Task.FromResult(Bv.ClickBlackConfirmButton(image));
+                return Task.FromResult(Completed(Bv.ClickBlackConfirmButton(image)));
             default:
                 return Task.FromResult(false);
         }

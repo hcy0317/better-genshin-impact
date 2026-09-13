@@ -1,11 +1,34 @@
 using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using Microsoft.Extensions.Time.Testing;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatSkillAttemptTests
 {
+    [Fact]
+    public void NativeSkillReceiptsRejectOldPixelsAndRetainTheOriginalInputBoundary()
+    {
+        var clock = new FakeTimeProvider();
+        var producer = new CaptureFrameSource(clock);
+        var battle = Guid.NewGuid();
+        var before = producer.Next();
+        using var attempts = new CombatSkillAttempts(battle);
+        var attempt = attempts.TryBegin("琴", Method.Skill, "e", 0, 8)!;
+        clock.Advance(TimeSpan.FromMilliseconds(50));
+        var queued = producer.Next();
+        clock.Advance(TimeSpan.FromMilliseconds(50));
+        attempts.MarkInputCompleted(attempt.AttemptId, new(before, clock.GetTimestamp()));
+        var old = new CombatSkillObservation(battle, 0, 0.1, true, false).WithSource(queued, clock);
+        Assert.False(attempts.Observe("琴", Method.Skill, old));
+        clock.Advance(TimeSpan.FromMilliseconds(10));
+        var fresh = new CombatSkillObservation(battle, 0, 0.11, true, false).WithSource(producer.Next(), clock);
+        Assert.True(attempts.Observe("琴", Method.Skill, fresh));
+        Assert.False(attempts.Observe("琴", Method.Skill, fresh with { CapturedAt = 0.12 }));
+        Assert.Equal(attempt, attempts.TakeConfirmation("琴", Method.Skill, "e", .12));
+    }
+
     [Fact]
     public void ExpiredUnconfirmedInputCanRecoverOnlyAfterTwoFreshExplicitReadyFrames()
     {

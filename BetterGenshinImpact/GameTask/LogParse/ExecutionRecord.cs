@@ -43,6 +43,10 @@ public class ExecutionRecord
     /// </summary>
     [JsonProperty("is_successful")]
     public bool IsSuccessful { get; set; } = false;
+    [JsonProperty("outcome", NullValueHandling = NullValueHandling.Ignore)]
+    public string? Outcome { get; set; }
+    [JsonProperty("outcome_reason", NullValueHandling = NullValueHandling.Ignore)]
+    public string? OutcomeReason { get; set; }
 }
 
 internal static class ExecutionRecordFinalizer

@@ -4,6 +4,8 @@ using System.Runtime.CompilerServices;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
+internal sealed record CombatCallContext(Guid Id, string Name, double EnteredAt);
+
 /// <summary>游戏边界必须在切人/等待之后、发送真实输入之前取得一次准入。</summary>
 public sealed class CombatFlowAction
 {
@@ -19,7 +21,8 @@ public sealed class CombatFlowAction
 
     internal CombatFlowAction(CombatCommand command, CombatFlowContext context, Func<bool> validate, double deadline,
         Func<bool>? shouldYield = null, Func<bool>? continuation = null, bool canReuseConfirmedActor = false,
-        CombatSkillAttempt? confirmationAttempt = null)
+        CombatSkillAttempt? confirmationAttempt = null, IReadOnlyList<CombatCallContext>? callPath = null,
+        Guid? atomicObservationId = null)
     {
         Command = command;
         CommandId = CommandIdentities.GetValue(command, _ => new()).Value;
@@ -31,10 +34,14 @@ public sealed class CombatFlowAction
         CanReuseConfirmedActor = canReuseConfirmedActor;
         IsConfirmationOnly = confirmationAttempt != null;
         PendingAttempt = confirmationAttempt;
+        CallPath = callPath ?? Array.Empty<CombatCallContext>();
+        AtomicObservationId = atomicObservationId;
     }
 
     public CombatCommand Command { get; }
     public string CommandId { get; }
+    internal IReadOnlyList<CombatCallContext> CallPath { get; }
+    internal Guid? AtomicObservationId { get; }
     internal CombatSkillAttempt? PendingAttempt { get; private set; }
     internal bool IsConfirmationOnly { get; }
     internal double AbsoluteDeadline => Math.Min(_deadline, _confirmationDeadline);

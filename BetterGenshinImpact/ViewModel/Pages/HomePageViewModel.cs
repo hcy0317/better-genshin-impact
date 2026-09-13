@@ -3,6 +3,7 @@ using BetterGenshinImpact.Core.Monitor;
 using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.AutoFishing;
 using BetterGenshinImpact.Genshin.Paths;
 using BetterGenshinImpact.Helpers;
@@ -59,10 +60,12 @@ public partial class HomePageViewModel : ViewModel, IDisposable
 
     [ObservableProperty] private bool _taskDispatcherEnabled = false;
 
-    [ObservableProperty] [NotifyCanExecuteChangedFor(nameof(StartTriggerCommand))]
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(StartTriggerCommand))]
     private bool _startButtonEnabled = true;
 
-    [ObservableProperty] [NotifyCanExecuteChangedFor(nameof(StopTriggerCommand))]
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(StopTriggerCommand))]
     private bool _stopButtonEnabled = true;
 
     public AllConfig Config { get; set; }
@@ -126,14 +129,12 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             }
             else if (msg.PropertyName == "SwitchTriggerStatus")
             {
-                if (_taskDispatcherEnabled)
+                UIDispatcherHelper.BeginInvoke(new Action(async () =>
                 {
-                    OnStopTrigger();
-                }
-                else
-                {
-                    _ = OnStartTriggerAsync();
-                }
+                    if (_disposed) return;
+                    if (_taskDispatcherEnabled) await OnStopTrigger();
+                    else await OnStartTriggerAsync();
+                }));
             }
         });
     }
@@ -178,8 +179,8 @@ public partial class HomePageViewModel : ViewModel, IDisposable
     private void OnClosed()
     {
         CancelBannerDownload();
-        OnStopTrigger();
-        // 等待任务结束
+        // 关闭协调器已排空任务/截图器。Dispose不能再启动一个等待自身关闭锁的异步停止。
+        TaskDispatcherEnabled = false;
         _maskWindow?.Close();
     }
 
@@ -206,7 +207,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
         if (TaskDispatcherEnabled)
         {
             _logger.LogInformation("► 切换捕获模式至[{Mode}]，截图器自动重启...", Config.CaptureMode);
-            OnStopTrigger();
+            await StopAsync();
             await OnStartTriggerAsync();
         }
     }
@@ -299,7 +300,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             }
         }
 
-        Start(hWnd);
+        await StartAsync(hWnd);
     }
 
     private Task DisableGenshinHdrIfNeededAsync()
@@ -318,6 +319,15 @@ public partial class HomePageViewModel : ViewModel, IDisposable
         _logger.LogWarning(
             "检测到原神 HDR 已开启并已自动关闭。如游戏已在运行，请重启游戏后生效。");
         return Task.CompletedTask;
+    }
+
+    private async Task StartAsync(IntPtr hWnd)
+    {
+        TaskControl.CheckTaskAdmission();
+        if (_stopTask != null) await _stopTask;
+        TaskControl.CheckTaskAdmission();
+        lock (this) _stopTask = null;
+        Start(hWnd);
     }
 
     private void Start(IntPtr hWnd)
@@ -365,44 +375,69 @@ public partial class HomePageViewModel : ViewModel, IDisposable
     private bool CanStopTrigger() => StopButtonEnabled;
 
     [RelayCommand(CanExecute = nameof(CanStopTrigger))]
-    private void OnStopTrigger()
+    private async Task OnStopTrigger()
     {
-        Stop();
+        try { await StopAsync(); }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "停止实时任务失败");
+            await ThemedMessageBox.ErrorAsync("停止任务尚未安全完成：" + error.Message);
+        }
     }
 
-    private void Stop()
+    private Task? _stopTask;
+    private Task StopAsync()
     {
         lock (this)
         {
-            if (TaskDispatcherEnabled)
-            {
-                CancellationContext.Instance.Cancel(); // 取消独立任务的运行
-                _taskDispatcher.Stop();
-                if (_maskWindow != null && _maskWindow.IsExist())
-                {
-                    _maskWindow?.Hide();
-                }
-                else
-                {
-                    _maskWindow?.Close();
-                    _maskWindow = null;
-                }
-
-                TaskDispatcherEnabled = false;
-                _mouseKeyMonitor.Unsubscribe();
-                TaskContext.Instance().IsInitialized = false;
-            }
+            if (_stopTask?.IsFaulted == true) _stopTask = null;
+            return _stopTask ??= StopCoreAsync();
         }
+    }
+
+    private async Task StopCoreAsync()
+    {
+        if (TaskDispatcherEnabled)
+        {
+            using var admission = TaskControl.PauseTaskAdmission();
+            _mouseKeyMonitor.Unsubscribe();
+            _taskDispatcher.StopTimer();
+            CancellationContext.Instance.Cancel();
+            // 停止按钮和真正退出一样，先等任务释放输入，再释放它使用的截图器。
+            await TaskControl.WaitForTaskDrainAsync(TimeSpan.FromSeconds(20));
+            try { await _taskDispatcher.StopAsync(); }
+            finally { TaskControl.TaskSemaphore.Release(); }
+            TaskDispatcherEnabled = false;
+            if (_maskWindow != null && _maskWindow.IsExist())
+                _maskWindow.Hide();
+            else
+            {
+                _maskWindow?.Close();
+                _maskWindow = null;
+            }
+            TaskContext.Instance().IsInitialized = false;
+        }
+    }
+
+    private async void ObserveStopOnUi()
+    {
+        try { await StopAsync(); }
+        catch (Exception error) { _logger.LogError(error, "停止实时任务失败"); }
     }
 
     private void OnUiTaskStopTick(object? sender, EventArgs e)
     {
-        UIDispatcherHelper.Invoke(Stop);
+        // 不从tick同步等待UI，再让UI同步等待同一tick。
+        Application.Current.Dispatcher.BeginInvoke(new Action(ObserveStopOnUi));
     }
 
     private void OnUiTaskStartTick(object? sender, EventArgs e)
     {
-        UIDispatcherHelper.Invoke(() => Start(_hWnd));
+        Application.Current.Dispatcher.BeginInvoke(new Action(async () =>
+        {
+            try { await StartAsync(_hWnd); }
+            catch (Exception error) { _logger.LogError(error, "恢复实时任务失败"); }
+        }));
     }
 
     [RelayCommand]
@@ -717,7 +752,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             if (openFileDialog.ShowDialog() == true)
             {
                 ResetBannerImage();
-                
+
                 var selectedFile = openFileDialog.FileName;
 
                 // 确保目标目录存在
@@ -735,7 +770,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
                 bitmap.BeginInit();
                 bitmap.UriSource = new Uri(Path.GetFullPath(_customBannerImagePath));
                 bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache; 
+                bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
                 bitmap.EndInit();
                 BannerImageSource = bitmap;
                 Toast.Success("背景图片更换成功！");
@@ -815,10 +850,10 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             defaultBitmap.BeginInit();
             defaultBitmap.UriSource = new Uri(DefaultBannerImagePath, UriKind.Absolute);
             defaultBitmap.CacheOption = BitmapCacheOption.OnLoad;
-            defaultBitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache; 
+            defaultBitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
             defaultBitmap.EndInit();
             BannerImageSource = defaultBitmap;
-            
+
             if (File.Exists(customImageFullPath))
             {
                 File.Delete(customImageFullPath);

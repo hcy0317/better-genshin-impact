@@ -25,8 +25,9 @@ internal static class UiRecovery
         TimeProvider? clock = null) =>
         UiOperation.RunAsync("party-confirm", TimeSpan.FromSeconds(20), ct, async operation =>
         {
-            await UiTransition.WaitAsync(operation, UiTarget.PartyList, driver);
+            var list = await UiTransition.WaitAsync(operation, UiTarget.PartyList, driver);
             var selected = await select(operation.Token);
+            if (selected) driver.MarkInputCompleted(list);
             operation.Check();
             operation.Action(UiAction.SelectParty, selected, 1, 1);
             if (!selected) throw new InvalidOperationException("未找到或未点击队伍选择确认按钮，不能记录切队成功");
@@ -34,6 +35,7 @@ internal static class UiRecovery
             // 秘境调用方拥有“开始挑战”，不能在通用切队过程中提前触发加载。
             if (deferApplyToCaller) return party;
             var applied = await apply(operation.Token);
+            if (applied) driver.MarkInputCompleted(party);
             operation.Check();
             operation.Action(UiAction.ApplyParty, applied, 1, 1);
             if (!applied) throw new InvalidOperationException("未找到或未点击队伍出战按钮，不能记录切队成功");
@@ -51,9 +53,10 @@ internal static class UiRecovery
             if (before.InDomain || before.Revive)
                 throw new InvalidOperationException("传送前仍识别到秘境或复苏界面，禁止继续打开大地图");
             if (!before.MapReady)
-                await ToMainAsync(driver, operation.Token, requireOverworld: true, logger: logger, clock: clock);
+                before = await ToMainAsync(driver, operation.Token, requireOverworld: true, logger: logger, clock: clock);
             operation.Check();
             var result = await teleport(operation.Token);
+            driver.MarkInputCompleted(before);
             await UiTransition.WaitAsync(operation, UiTarget.Overworld, driver);
             return result;
         }, logger, clock, captureFailure);
@@ -119,12 +122,12 @@ internal static class UiRecovery
         var requested = false;
         var confirmed = false;
         var domainFrames = 0;
-        long requestFrame = 0;
+        UiSnapshot? requestFrame = null;
         return UiTransition.WaitAsync("exit-domain", UiTarget.Overworld, driver, ct, TimeSpan.FromSeconds(20),
             observed =>
             {
                 if (requested)
-                    return !confirmed && observed.FrameId > requestFrame && observed.Prompt && observed.BlackConfirm && !observed.Revive
+                    return !confirmed && requestFrame != null && observed.IsAfter(requestFrame) && observed.Prompt && observed.BlackConfirm && !observed.Revive
                         ? UiAction.ConfirmDomainExit : null;
                 domainFrames = observed.Matches(UiTarget.DomainMain) ? domainFrames + 1 : 0;
                 if (domainFrames >= 2) return UiAction.RequestDomainExit;
@@ -133,7 +136,7 @@ internal static class UiRecovery
             actionCompleted: (action, applied, observed) =>
             {
                 if (!applied) return;
-                if (action == UiAction.RequestDomainExit) { requested = true; requestFrame = observed.FrameId; }
+                if (action == UiAction.RequestDomainExit) { requested = true; requestFrame = observed; }
                 if (action == UiAction.ConfirmDomainExit) confirmed = true;
             });
     }

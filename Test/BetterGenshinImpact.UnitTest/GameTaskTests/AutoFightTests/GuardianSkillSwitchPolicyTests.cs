@@ -171,8 +171,11 @@ public class GuardianSkillSwitchPolicyTests
             "AutoStygianOnslaught",
             "AutoStygianOnslaughtTask.cs"));
 
-        Assert.Contains("AvatarSwitchConfirmationPolicy.TryConfirm", avatarSource,
+        Assert.Contains("AvatarSelectionProtocol.Select", avatarSource,
             StringComparison.Ordinal);
+        var selectionSource = File.ReadAllText(Path.Combine(root, "BetterGenshinImpact", "GameTask",
+            "AutoFight", "Model", "AvatarSelectionProtocol.cs"));
+        Assert.Contains("AvatarSwitchConfirmationPolicy.TryConfirm", selectionSource, StringComparison.Ordinal);
         Assert.Contains("public bool Execute(CombatScenes", commandSource,
             StringComparison.Ordinal);
         Assert.Contains("if (!avatar.TrySwitch(10)) return false;", commandSource,

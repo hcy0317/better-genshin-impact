@@ -1,6 +1,8 @@
 ﻿using BetterGenshinImpact.GameTask.Model.Area;
 using System;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
+using BetterGenshinImpact.GameTask.Model;
+using Fischless.GameCapture;
 using OpenCvSharp;
 
 namespace BetterGenshinImpact.GameTask;
@@ -22,13 +24,31 @@ public class CaptureContent : IDisposable
     public GameUiCategory CurrentGameUiCategory;
 
     public CaptureContent(Mat image, int frameIndex, double interval)
+        : this(image, frameIndex, interval, TaskContext.Instance().SystemInfo, default) { }
+
+    public CaptureContent(GameCaptureFrame frame, int frameIndex, double interval)
+        : this(frame, frameIndex, interval, TaskContext.Instance().SystemInfo) { }
+
+    internal CaptureContent(GameCaptureFrame frame, int frameIndex, double interval, ISystemInfo systemInfo)
+        : this(frame.Frame, frameIndex, interval, systemInfo, frame.Stamp) { }
+
+    private CaptureContent(Mat image, int frameIndex, double interval, ISystemInfo systemInfo, CaptureFrameStamp stamp)
     {
         FrameIndex = frameIndex;
         TimerInterval = interval;
-        var systemInfo = TaskContext.Instance().SystemInfo;
-
-        var gameCaptureRegion = systemInfo.DesktopRectArea.Derive(image, systemInfo.CaptureAreaRect.X, systemInfo.CaptureAreaRect.Y);
-        CaptureRectArea = gameCaptureRegion.DeriveTo1080P();
+        GameCaptureRegion? gameCaptureRegion = null;
+        try
+        {
+            gameCaptureRegion = systemInfo.DesktopRectArea.Derive(image, systemInfo.CaptureAreaRect.X, systemInfo.CaptureAreaRect.Y);
+            gameCaptureRegion.FrameStamp = stamp;
+            CaptureRectArea = gameCaptureRegion.DeriveTo1080P();
+        }
+        catch
+        {
+            if (gameCaptureRegion != null) gameCaptureRegion.Dispose();
+            else image.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

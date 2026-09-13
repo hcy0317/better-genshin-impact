@@ -51,6 +51,7 @@ public class AutoTrackTask(AutoTrackParam param) : BaseIndependentTask
                 return;
             }
 
+            CheckTaskAdmission();
             SystemControl.ActivateWindow();
 
             Logger.LogInformation("→ {Text}", "自动追踪，启动！");
@@ -70,12 +71,17 @@ public class AutoTrackTask(AutoTrackParam param) : BaseIndependentTask
         }
         finally
         {
-            VisionContext.Instance().DrawContent.ClearAll();
-            Logger.LogInformation("→ {Text}", "自动追踪结束");
-
-            if (hasLock)
+            try
             {
-                TaskSemaphore.Release();
+                VisionContext.Instance().DrawContent.ClearAll();
+                Logger.LogInformation("→ {Text}", "自动追踪结束");
+            }
+            finally
+            {
+                if (hasLock)
+                {
+                    TaskSemaphore.Release();
+                }
             }
         }
     }

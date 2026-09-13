@@ -111,7 +111,7 @@ public class CombatSafetyIntegrationContractTests
         var confirm = Slice(
             avatar,
             "internal void ConfirmSkillUsed",
-            "private void SimulateSwitchAction");
+            "internal void SimulateSwitchAction");
         var ordinarySkill = Slice(
             avatar,
             "public double AfterUseSkill",

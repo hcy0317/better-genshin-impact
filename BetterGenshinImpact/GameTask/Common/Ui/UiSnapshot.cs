@@ -1,4 +1,5 @@
 using System;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
@@ -8,6 +9,31 @@ internal enum UiAction { Escape, RequestDomainExit, ConfirmDomainExit, SelectPar
 /// <summary>同一次截图的特征证据；主HUD与秘境上下文是不同维度。</summary>
 internal sealed record UiSnapshot(long FrameId)
 {
+    internal static readonly TimeSpan RecoveryMaximumAge = TimeSpan.FromSeconds(2);
+    internal static readonly TimeSpan CombatMaximumAge = TimeSpan.FromMilliseconds(150);
+    private TimeProvider? EvidenceClock { get; init; }
+    private TimeSpan MaximumAge { get; init; }
+    private bool MeetsInputFence { get; init; } = true;
+    public CaptureFrameStamp SourceStamp { get; private init; }
+    public bool SourceBound => EvidenceClock != null;
+    // 未绑定的特征用于逻辑回放；原生驱动必须绑定，未知来源不能授予输入。
+    public bool HasUsableEvidence => MeetsInputFence && (SourceBound
+        ? SourceStamp.IsFresh(EvidenceClock!, MaximumAge)
+        : FrameId > 0);
+
+    public UiSnapshot AfterInput(CaptureFrameFence fence) => this with
+    { MeetsInputFence = SourceBound && fence.Accepts(SourceStamp) };
+
+    public UiSnapshot WithSource(CaptureFrameStamp source, TimeProvider clock, TimeSpan maximumAge) => this with
+    {
+        SourceStamp = source, FrameId = source.Sequence, CapturedAt = source.CapturedAt,
+        EvidenceClock = clock, MaximumAge = maximumAge
+    };
+
+    public bool IsAfter(UiSnapshot earlier) => SourceBound || earlier.SourceBound
+        ? SourceBound && earlier.SourceBound && SourceStamp.IsAfter(earlier.SourceStamp)
+        : FrameId > earlier.FrameId;
+
     public DateTimeOffset CapturedAt { get; init; }
     public bool MainHud { get; init; }
     public bool BigMap { get; init; }
@@ -25,12 +51,12 @@ internal sealed record UiSnapshot(long FrameId)
     public bool Crafting { get; init; }
     public bool Handbook { get; init; }
 
-    public bool MainReady => MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
+    public bool MainReady => HasUsableEvidence && MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
         && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook;
-    public bool MapReady => BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
+    public bool MapReady => HasUsableEvidence && BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
         && !FullPartyDefeat && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook;
-    public bool CanEscape => !FullPartyDefeat && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook);
-    public bool Matches(UiTarget target) => FrameId > 0 && !FullPartyDefeat && target switch
+    public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook);
+    public bool Matches(UiTarget target) => HasUsableEvidence && !FullPartyDefeat && target switch
     {
         UiTarget.Main => MainReady,
         UiTarget.Overworld => MainReady && !InDomain,

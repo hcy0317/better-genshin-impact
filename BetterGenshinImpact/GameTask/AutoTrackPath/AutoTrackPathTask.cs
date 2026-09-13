@@ -69,6 +69,7 @@ public class AutoTrackPathTask
                 return;
             }
 
+            CheckTaskAdmission();
             _ct = CancellationContext.Instance.Cts.Token;
 
             Init();
@@ -88,12 +89,17 @@ public class AutoTrackPathTask
         }
         finally
         {
-            VisionContext.Instance().DrawContent.ClearAll();
-            Logger.LogInformation("→ {Text}", "自动路线结束");
-
-            if (hasLock)
+            try
             {
-                TaskSemaphore.Release();
+                VisionContext.Instance().DrawContent.ClearAll();
+                Logger.LogInformation("→ {Text}", "自动路线结束");
+            }
+            finally
+            {
+                if (hasLock)
+                {
+                    TaskSemaphore.Release();
+                }
             }
         }
     }

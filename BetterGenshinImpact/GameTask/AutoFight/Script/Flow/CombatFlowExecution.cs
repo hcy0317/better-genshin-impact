@@ -33,6 +33,8 @@ public sealed partial class CombatFlowExecution : IDisposable
     private sealed class Frame(CombatFlowBlock block, CombatCommand? caller = null)
     {
         public CombatFlowBlock Block { get; } = block;
+        public Guid Id { get; } = Guid.NewGuid();
+        public double EnteredAt;
         public CombatCommand? Caller { get; } = caller;
         public int Index;
         public CombatFlowResult Result = CombatFlowResult.Succeeded;
@@ -55,6 +57,9 @@ public sealed partial class CombatFlowExecution : IDisposable
         public bool PendingEndReported;
         public string? WatchFor;
         public double WatchDemand;
+        public ConditionEvaluator.CompiledCondition? SelectionCondition;
+        public bool SelectionNeedsRevalidation;
+        public bool HasSkillInput;
     }
 
     private readonly CombatFlowProgram _program;
@@ -222,6 +227,7 @@ public sealed partial class CombatFlowExecution : IDisposable
             }
             var node = frame.Block.Nodes[frame.Index++];
             var command = node.Command;
+            var commandStartedAt = Context.Now;
             var confirming = ReferenceEquals(frame.PendingCommand, command) && frame.PendingAttempt != null;
             if (confirming && Context.Now >= frame.PendingDeadline)
             {
@@ -237,14 +243,17 @@ public sealed partial class CombatFlowExecution : IDisposable
             }
             if (command.Method == Method.Branch)
             {
-                var selected = node.Condition!.EvaluateBoolean((name, args) => Observe(name, args, frame, command.Name));
+                var selected = await EvaluateWithPreparationAsync(node.Condition!, command.Name, frame, ct,
+                    allowPreparation: !command.Options.ContainsKey("unknown"));
                 var key = selected == true ? "then" : selected == false ? "else" : "unknown";
                 if (command.Options.TryGetValue(key, out var target))
                 {
                     if (!AdmitAtomicChild(_program.Blocks[target])) continue;
                     if (_frames.Count >= 32) throw new InvalidOperationException("片段调用深度超过上限");
                     _calls[target] = _calls.GetValueOrDefault(target) + 1;
-                    _frames.Push(CreateFrame(_program.Blocks[target], command, frame.Deadline));
+                    var branch = CreateFrame(_program.Blocks[target], command, frame.Deadline, commandStartedAt);
+                    branch.SelectionCondition = node.Condition;
+                    _frames.Push(branch);
                 }
                 else CompleteNode(frame, command, selected == null ? CombatFlowResult.Unknown : CombatFlowResult.Skipped);
                 continue;
@@ -255,7 +264,8 @@ public sealed partial class CombatFlowExecution : IDisposable
                 var alreadyCompleted = calledBlock != null && command.Options.GetValueOrDefault("once") == "battle" && _once.Contains(calledBlock.Name);
                 var eligible = alreadyCompleted
                     ? node.Condition.EvaluateBoolean((name, args) => Observe(name, args, frame, command.Name))
-                    : await EvaluateWithPreparationAsync(node.Condition, command.Name, frame, ct, calledBlock);
+                    : await EvaluateWithPreparationAsync(node.Condition, command.Name, frame, ct, calledBlock,
+                        allowPreparation: command.Method != Method.Burst || Required(command) || _program.Recharge(command) != null);
                 if (eligible != true)
                 {
                     CompleteNode(frame, command, CombatFlowResult.Skipped);
@@ -272,7 +282,7 @@ public sealed partial class CombatFlowExecution : IDisposable
                 }
                 if (!AdmitAtomicChild(block)) continue;
                 if (_frames.Count >= 32) throw new InvalidOperationException("片段调用深度超过上限");
-                var child = CreateFrame(block, command, frame.Deadline);
+                var child = CreateFrame(block, command, frame.Deadline, commandStartedAt);
                 if (command.Options.GetValueOrDefault("resume") == "entry" || command.Options.ContainsKey("once") ||
                     command.Options.ContainsKey("timeout") || command.Options.ContainsKey("attempts"))
                 {
@@ -357,8 +367,9 @@ public sealed partial class CombatFlowExecution : IDisposable
             string? actionEpisode = null;
             if (!confirming && command.Options.TryGetValue("maintain", out var maintain))
             {
+                var watchFrame = _frames.FirstOrDefault(active => active.WatchFor == maintain);
                 var demand = Math.Max(_program.CoverageAfter(frame.Block, frame.Index, maintain),
-                    _coverageRequests.GetValueOrDefault(maintain)?.Seconds ?? 0);
+                    Math.Max(_coverageRequests.GetValueOrDefault(maintain)?.Seconds ?? 0, watchFrame?.WatchDemand ?? 0));
                 if (AtomicRemainingSeconds(includeCurrent: false) is { } remainingAtomic && frame.Block.CoverageRecords.Contains(maintain))
                     demand = Math.Max(demand, remainingAtomic + CombatFlowPolicy.RecoverySeconds);
                 if (Context.Remaining(maintain) is { } remaining &&
@@ -371,7 +382,6 @@ public sealed partial class CombatFlowExecution : IDisposable
                     CompleteNode(frame, command, CombatFlowResult.SatisfiedExisting);
                     continue;
                 }
-                var watchFrame = _frames.FirstOrDefault(active => active.WatchFor == maintain);
                 var deadline = watchFrame?.Deadline ?? double.PositiveInfinity;
                 if (watchFrame == null)
                 {
@@ -405,6 +415,8 @@ public sealed partial class CombatFlowExecution : IDisposable
             }
             var keepRecord = keep == null ? null : Context.Find(keep);
             var requiredWindow = CombatFlowPolicy.CoverageSeconds(command);
+            if (keep != null && (command.Method == Method.Skill || command.Method == Method.Burst))
+                requiredWindow = Math.Max(requiredWindow, _program.CoverageAfter(frame.Block, frame.Index - 1, keep));
             var atomicRemainder = AtomicRemainingSeconds(includeCurrent: true);
             if (atomicRemainder is { } remainingAtomicSeconds)
                 requiredWindow = Math.Max(requiredWindow, remainingAtomicSeconds + CombatFlowPolicy.RecoverySeconds);
@@ -412,6 +424,8 @@ public sealed partial class CombatFlowExecution : IDisposable
             {
                 if (Context.HasScopedEffects && _game.ObserveScope() is { } latestScope) Context.ObserveScope(latestScope);
                 return !_closed && LiveRequirementsHold(frame) &&
+                    (node.Condition == null || node.Condition.EvaluateBoolean((function, args) => Observe(function, args, frame, command.Name)) == true) &&
+                    RevalidatedSelectionsHold() &&
                     (atomicRemainder == null || RequirementsFit(frame, atomicRemainder.Value + CombatFlowPolicy.RecoverySeconds)) &&
                     (keep == null || keepRecord != null && Context.CanConsume(keep, keepRecord, requiredWindow));
             }
@@ -428,7 +442,8 @@ public sealed partial class CombatFlowExecution : IDisposable
                     Math.Min(actionDeadline, Context.Now + CombatFlowPolicy.ActionTimeout(command, _program.Timing(command))),
                 command.Method == Method.Skill || command.Method == Method.Burst ? null : MaintenanceIsDue, CanContinue,
                 canReuseConfirmedActor: IsAtomic && (command.Method == Method.Wait || command.Method == Method.MoveBy || command.Method == Method.KeyUp),
-                confirmationAttempt: confirming ? frame.PendingAttempt : null);
+                confirmationAttempt: confirming ? frame.PendingAttempt : null, callPath: CurrentCallPath(),
+                atomicObservationId: frame.Block.RawAtomicPlan != null ? frame.Id : null);
             if (!action.CanStart)
             {
                 CompleteNode(frame, command, CombatFlowResult.Skipped);
@@ -462,6 +477,11 @@ public sealed partial class CombatFlowExecution : IDisposable
             if (!confirming && !hasPendingSkill && await TryBeginRechargeAsync(frame, command, keep, action, ct)) continue;
             var actionResult = await _game.ExecuteAsync(action, ct);
             ct.ThrowIfCancellationRequested();
+            if (action.InputAt != null && (command.Method == Method.Skill || command.Method == Method.Burst) &&
+                !_frames.Any(active => active.WatchFor != null))
+                foreach (var active in _frames) { active.HasSkillInput = true; active.SelectionNeedsRevalidation = false; }
+            if (frame.Block.RawAtomicPlan != null && actionResult != CombatFlowResult.Succeeded)
+                frame.Result = CombatFlowResult.Failed;
             if (actionEpisode != null && actionResult is CombatFlowResult.Pending or CombatFlowResult.Deferred)
                 _episodes.Defer(actionEpisode);
             if (actionResult == CombatFlowResult.Pending && action.PendingAttempt is { } pendingAttempt)
@@ -517,7 +537,8 @@ public sealed partial class CombatFlowExecution : IDisposable
                     var feedAction = new CombatFlowAction(feed, Context, () => !_closed && LiveRequirementsHold(frame) &&
                         (keep == null || Context.Remaining(keep) > CombatFlowPolicy.CoverageSeconds(feed)),
                         Math.Min(actionDeadline, Context.Now + action.RemainingBudget),
-                        continuation: () => !_closed && LiveRequirementsHold(frame) && (keep == null || Context.Remaining(keep) > 0));
+                        continuation: () => !_closed && LiveRequirementsHold(frame) && (keep == null || Context.Remaining(keep) > 0),
+                        callPath: CurrentCallPath());
                     actionResult = await _game.ExecuteAsync(feedAction, ct);
                     ct.ThrowIfCancellationRequested();
                     if (actionResult == CombatFlowResult.Succeeded && feedAction.InputAt == null) actionResult = CombatFlowResult.Unknown;
@@ -569,9 +590,28 @@ public sealed partial class CombatFlowExecution : IDisposable
             }
             else CompleteNode(parent, frame.Caller, result);
         }
-        if (frame.WatchFor != null && result != CombatFlowResult.Succeeded && _frames.TryPeek(out var interrupted))
-            interrupted.Result = result is CombatFlowResult.Transferred or CombatFlowResult.Deferred ? result : CombatFlowResult.Failed;
+        if (frame.WatchFor != null)
+        {
+            if (result != CombatFlowResult.Succeeded && _frames.TryPeek(out var interrupted))
+                interrupted.Result = result is CombatFlowResult.Transferred or CombatFlowResult.Deferred ? result : CombatFlowResult.Failed;
+            else if (result == CombatFlowResult.Succeeded)
+                foreach (var active in _frames.Where(active => active.SelectionCondition != null && !active.HasSkillInput))
+                    active.SelectionNeedsRevalidation = true;
+        }
         return result;
+    }
+
+    private bool RevalidatedSelectionsHold()
+    {
+        foreach (var selected in _frames.Where(active => active.SelectionNeedsRevalidation && !active.HasSkillInput &&
+                     active.Result == CombatFlowResult.Succeeded && !active.FailureHandled))
+        {
+            var choice = selected.SelectionCondition!.EvaluateBoolean((function, args) =>
+                Observe(function, args, selected, selected.Caller!.Name));
+            var key = choice == true ? "then" : choice == false ? "else" : "unknown";
+            if (selected.Caller!.Options.GetValueOrDefault(key) != selected.Block.Name) return false;
+        }
+        return true;
     }
 
     private async ValueTask<bool> TryBeginRechargeAsync(Frame frame, CombatCommand command, string? keep,
@@ -671,6 +711,12 @@ public sealed partial class CombatFlowExecution : IDisposable
             var before = CombatFlowProgram.Number(producer.Block.Nodes[producer.Index].Command, "before") ?? 0;
             var active = _frames.Peek();
             var demand = _program.CoverageAfter(active.Block, active.Index, name);
+            if (active.PendingAttempt is { } attempt && active.Index == active.PendingIndex)
+            {
+                // 已发送请求只保留尚未流逝的确认及后续输出窗口，不再重复索要切人/施放的全额预算。
+                demand = _program.CoverageAfter(active.Block, active.Index + 1, name) +
+                    Math.Max(0, CombatFlowPolicy.ActionSeconds(active.PendingCommand!) - (Context.Now - attempt.InputAt));
+            }
             if (_coverageRequests.TryGetValue(name, out var pending))
             {
                 var current = Context.Find(name);
@@ -834,8 +880,11 @@ public sealed partial class CombatFlowExecution : IDisposable
             _ => Observe(name, args, frame, frame.Caller?.Name ?? CombatScriptParser.CurrentAvatarName)
         }) == true;
 
-    private Frame CreateFrame(CombatFlowBlock block, CombatCommand? caller = null, double deadline = double.PositiveInfinity) =>
-        new(block, caller) { Deadline = Math.Min(deadline, Context.Now + block.Timeout) };
+    private IReadOnlyList<CombatCallContext> CurrentCallPath() => Array.AsReadOnly(_frames.Reverse()
+        .Select(frame => new CombatCallContext(frame.Id, frame.Block.Name, frame.EnteredAt)).ToArray());
+
+    private Frame CreateFrame(CombatFlowBlock block, CombatCommand? caller = null, double deadline = double.PositiveInfinity, double? enteredAt = null) =>
+        new(block, caller) { Deadline = Math.Min(deadline, Context.Now + block.Timeout), EnteredAt = enteredAt ?? Context.Now };
 
     private static bool Required(CombatCommand command) => command.HasFlag("required") || command.HasFlag("refresh");
 

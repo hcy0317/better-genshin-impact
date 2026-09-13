@@ -13,6 +13,7 @@ public class BitBltCapture : IGameCapture
     private volatile nint _hWnd; // 需要加锁
     private BitBltSession? _session; // 需要加锁
     private RECT? _captureRect;
+    private readonly CaptureFrameSource _frameSource = new();
 
     private volatile bool _lastCaptureFailed;
 
@@ -108,6 +109,7 @@ public class BitBltCapture : IGameCapture
             }
 
             _session = new BitBltSession(_hWnd, width, height);
+            _frameSource.Restart();
         }
         catch (Exception e)
         {
@@ -148,10 +150,11 @@ public class BitBltCapture : IGameCapture
         try
         {
             _lockSlim.EnterReadLock();
+            var stamp = _frameSource.Next();
             var mat = Capture0();
             var result = mat == null
                 ? null
-                : new GameCaptureFrame(mat, _captureRect);
+                : new GameCaptureFrame(mat, stamp, _captureRect);
             if (result is not null)
             {
                 // 成功截图

@@ -22,6 +22,10 @@ public partial class SharedSurfaceCapture : IGameCapture
     // 截图区域
     private ResourceRegion? _region;
     private RECT? _captureRect;
+    private readonly CaptureFrameSource _frameSource = new();
+    private long? _lastSurfaceUpdate;
+    private nint _lastSurface;
+    private CaptureFrameStamp _lastStamp;
 
     // 暂存贴图
     private Texture2D? _stagingTexture;
@@ -44,12 +48,19 @@ public partial class SharedSurfaceCapture : IGameCapture
 
     public void Start(nint hWnd, Dictionary<string, object>? settings = null)
     {
+        lock (LockObject)
+        {
+        Stop();
         _hWnd = hWnd;
         User32.ShowWindow(hWnd, ShowWindowCommand.SW_RESTORE);
         (_region, _captureRect) = GetGameScreenInfo(hWnd);
         _d3dDevice = new Device(SharpDX.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport); // Software/Hardware
+        _frameSource.Restart();
+        _lastSurfaceUpdate = null;
+        _lastStamp = default;
 
         IsCapturing = true;
+        }
     }
 
     /// <summary>
@@ -96,7 +107,7 @@ public partial class SharedSurfaceCapture : IGameCapture
                 return null;
             }
 
-            if (!DwmGetDxSharedSurface(_hWnd, out var phSurface, out _, out _, out _, out _))
+            if (!DwmGetDxSharedSurface(_hWnd, out var phSurface, out _, out _, out _, out var updateId))
             {
                 return null;
             }
@@ -107,6 +118,8 @@ public partial class SharedSurfaceCapture : IGameCapture
 
             try
             {
+                var stamp = _lastSurfaceUpdate == updateId && _lastSurface == phSurface
+                    ? _lastStamp : _frameSource.Next();
                 using var surfaceTexture = _d3dDevice.OpenSharedResource<Texture2D>(phSurface);
 
                 if (_stagingTexture == null || _surfaceWidth != surfaceTexture.Description.Width ||
@@ -114,6 +127,13 @@ public partial class SharedSurfaceCapture : IGameCapture
                 {
                     if (User32.IsIconic(_hWnd))
                         return null;
+
+                    if (_lastStamp.IsKnown)
+                    {
+                        _frameSource.Restart();
+                        _lastSurfaceUpdate = null;
+                        stamp = _frameSource.Next();
+                    }
 
                     _stagingTexture?.Dispose();
                     _stagingTexture = null;
@@ -129,13 +149,21 @@ public partial class SharedSurfaceCapture : IGameCapture
                     return null;
                 }
 
-                return new GameCaptureFrame(mat, _captureRect);
+                _lastSurfaceUpdate = updateId;
+                _lastSurface = phSurface;
+                _lastStamp = stamp;
+                return new GameCaptureFrame(mat, stamp, _captureRect);
             }
             catch (SharpDXException e)
             {
                 Debug.WriteLine($"SharpDXException: {e.Descriptor}");
+                _stagingTexture?.Dispose();
+                _stagingTexture = null;
                 _d3dDevice?.Dispose();
                 _d3dDevice = new Device(SharpDX.Direct3D.DriverType.Hardware, DeviceCreationFlags.BgraSupport);
+                _frameSource.Restart();
+                _lastSurfaceUpdate = null;
+                _lastStamp = default;
             }
 
             return null;
@@ -149,6 +177,8 @@ public partial class SharedSurfaceCapture : IGameCapture
             _stagingTexture?.Dispose();
             _stagingTexture = null;
             _captureRect = null;
+            _lastSurfaceUpdate = null;
+            _lastStamp = default;
             _d3dDevice?.Dispose();
             _d3dDevice = null;
             _hWnd = 0;

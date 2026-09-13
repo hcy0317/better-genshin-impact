@@ -229,7 +229,7 @@ public partial class CheckUpdateWindow : FluentWindow
         Process.Start(updaterExePath, parameters);
 
         // 退出程序
-        Application.Current.Shutdown();
+        await App.RequestShutdownAsync();
     }
 
     [RelayCommand]
