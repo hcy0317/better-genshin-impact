@@ -8,6 +8,8 @@ using System.Text.Json;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
+using System.Threading;
+using System.Diagnostics;
 using BetterGenshinImpact.GameTask;
 using Microsoft.Extensions.Logging;
 
@@ -16,6 +18,11 @@ namespace BetterGenshinImpact.Core.Script.Dependence;
 public class Http
 {
     private readonly ILogger<Http> _logger = App.GetLogger<Http>();
+    private static readonly HttpClient SharedClient = new(new SocketsHttpHandler
+    {
+        UseCookies = false,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+    }) { Timeout = Timeout.InfiniteTimeSpan };
 
     private void CheckHttpPermission(string url)
     {
@@ -33,14 +40,13 @@ public class Http
         {
             // fuzzy match
             var pattern = "^" + System.Text.RegularExpressions.Regex.Escape(allowedUrl).Replace("\\*", ".*") + "$";
-            _logger.LogDebug($"[HTTP] 检查URL {url} 是否符合: {pattern}");
             var regex = new System.Text.RegularExpressions.Regex(pattern);
             return regex.IsMatch(url);
         }))
         {
             return;
         }
-        throw new UnauthorizedAccessException($"当前JS脚本不允许请求此URL: {url}，请在脚本的manifest.json中配置http_allowed_urls，当前允许的URL列表: [{string.Join(", ", allowedUrls)}]");
+        throw new UnauthorizedAccessException($"当前JS脚本不允许请求 {SafeAddress(url)}，请检查manifest.json中的http_allowed_urls");
     }
 
     public class HttpReponse
@@ -61,17 +67,45 @@ public class Http
     /// <returns></returns>
     public async Task<HttpReponse> Request(string method, string url, string? body = null, string? headersJson = null)
     {
-        _logger.LogDebug($"[HTTP] 发送HTTP请求: {method} {url} Body: {(body != null ? body : "null")} Headers: {(headersJson != null ? headersJson : "null")}");
+        var ct = CancellationContext.Instance.GetTokenOrNone();
+        ct.ThrowIfCancellationRequested();
         CheckHttpPermission(url);
-
+        var requestId = Guid.NewGuid();
+        var started = Stopwatch.GetTimestamp();
         using var request = CreateRequest(method, url, body, headersJson);
-        using var httpClient = new HttpClient();
-        using var response = await httpClient.SendAsync(request);
+        _logger.LogDebug("HTTP_REQUEST request={Request} method={Method} endpoint={Endpoint} phase=send", requestId, method, SafeAddress(url));
+        try
+        {
+            var result = await SendAsync(SharedClient, request, ct, TimeSpan.FromSeconds(100));
+            _logger.LogDebug("HTTP_REQUEST request={Request} phase=complete status={Status} ms={Milliseconds:F1}",
+                requestId, result.status_code, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            return result;
+        }
+        catch (Exception error)
+        {
+            _logger.LogDebug("HTTP_REQUEST request={Request} phase=failed errorType={Type} cancelled={Cancelled} ms={Milliseconds:F1}",
+                requestId, error.GetType().Name, ct.IsCancellationRequested, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            throw;
+        }
+    }
+
+    internal static string SafeAddress(string url) => Uri.TryCreate(url, UriKind.Absolute, out var address)
+        ? address.GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped)
+        : "invalid-url";
+
+    internal static async Task<HttpReponse> SendAsync(HttpClient client, HttpRequestMessage request,
+        CancellationToken ct, TimeSpan timeout)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(deadline.Token).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
         return new HttpReponse
         {
             status_code = (int)response.StatusCode,
             headers = response.Headers.ToDictionary(h => h.Key, h => h.Value.First()),
-            body = await response.Content.ReadAsStringAsync(),
+            body = body
         };
     }
 
