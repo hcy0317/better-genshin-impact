@@ -259,11 +259,13 @@ public class AutoFightTask : ISoloTask
 
         for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            var combatScenes = new CombatScenes().InitializeTeam(CaptureToRectArea());
+            using var capture = CaptureToRectArea();
+            var combatScenes = new CombatScenes().InitializeTeam(capture);
             if (combatScenes.CheckTeamInitialized())
             {
                 return combatScenes;
             }
+            combatScenes.Dispose();
         
             if (attempt < maxRetries)
             {
