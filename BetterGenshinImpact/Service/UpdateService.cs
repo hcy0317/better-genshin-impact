@@ -138,7 +138,7 @@ public class UpdateService : IUpdateService
                         Process.Start(updaterExePath, "-I");
 
                         // 退出程序
-                        Application.Current.Shutdown();
+                        await App.RequestShutdownAsync();
                     }
                         break;
 

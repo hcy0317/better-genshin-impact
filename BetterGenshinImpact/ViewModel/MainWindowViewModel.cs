@@ -309,8 +309,9 @@ public partial class MainWindowViewModel : ObservableObject, IViewModel
     }
 
     [RelayCommand]
-    private void OnClosing(CancelEventArgs e)
+    private async Task OnClosing(CancelEventArgs e)
     {
+        if (App.ShutdownPrepared) return;
         if (_childSessionService.HasActiveChildSession())
         {
             e.Cancel = true;
@@ -324,7 +325,11 @@ public partial class MainWindowViewModel : ObservableObject, IViewModel
         {
             e.Cancel = true;
             OnHide();
+            return;
         }
+        e.Cancel = true;
+        try { await App.RequestShutdownAsync(); }
+        catch (Exception error) { await ThemedMessageBox.ErrorAsync("关闭尚未安全完成：" + error.Message); }
     }
 
     [RelayCommand]
@@ -512,7 +517,7 @@ public partial class MainWindowViewModel : ObservableObject, IViewModel
                     // 删除旧目录
                     DirectoryHelper.DeleteReadOnlyDirectory(embeddedPath);
                     await ThemedMessageBox.InformationAsync("迁移配置成功, 软件将自动退出，请手动重新启动 BetterGI！");
-                    Application.Current.Shutdown();
+                    await App.RequestShutdownAsync();
                 }
             }
         }

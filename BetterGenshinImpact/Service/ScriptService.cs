@@ -122,10 +122,11 @@ public partial class ScriptService : IScriptService
 
     public async Task RunMulti(IEnumerable<ScriptGroupProject> projectList, string? groupName = null, TaskProgress? taskProgress = null, bool propagateExceptions = false)
     {
+        using var activity = TaskControl.EnterTaskActivity();
         groupName ??= "默认";
 
         // 启动等待之前先进行取消操作的初始化，便于在任务开始前终止任务.
-        CancellationContext.Instance.Set();
+        TaskControl.InitializeTaskCancellation();
 
         var list = ReloadScriptProjects(projectList);
 

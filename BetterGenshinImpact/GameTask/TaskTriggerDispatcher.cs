@@ -11,6 +11,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.GameLoading;
@@ -23,7 +24,7 @@ using Rect = OpenCvSharp.Rect;
 
 namespace BetterGenshinImpact.GameTask
 {
-    public class TaskTriggerDispatcher : IDisposable
+    public class TaskTriggerDispatcher : IDisposable, IAsyncDisposable
     {
         private readonly ILogger<TaskTriggerDispatcher> _logger = App.GetLogger<TaskTriggerDispatcher>();
         private readonly OverlayMetricsService? _metricsService = App.GetService<OverlayMetricsService>();
@@ -33,6 +34,10 @@ namespace BetterGenshinImpact.GameTask
         private static TaskTriggerDispatcher? _instance;
 
         private readonly System.Timers.Timer _timer = new();
+        private readonly DispatcherDrainController _lifetime;
+        private readonly object _lifecycleGate = new();
+        private Task? _disposeTask;
+        private bool _disposed;
         private List<ITaskTrigger>? _triggers;
 
         public IGameCapture? GameCapture { get; private set; }
@@ -43,7 +48,6 @@ namespace BetterGenshinImpact.GameTask
         private RECT _gameRect = RECT.Empty;
         private bool _prevGameActive;
 
-        private DateTime _prevManualGc = DateTime.MinValue;
 
         private static readonly object _triggerListLocker = new();
 
@@ -66,6 +70,12 @@ namespace BetterGenshinImpact.GameTask
 
         public TaskTriggerDispatcher()
         {
+            _lifetime = new(() => _timer.Stop(), async () =>
+            {
+                ClearTriggers();
+                await GameTaskManager.DrainRetiredTriggersAsync().ConfigureAwait(false);
+                ReleaseStoppedCapture();
+            });
             _instance = this;
             _timer.Elapsed += Tick;
             //_timer.Tick += Tick;
@@ -80,6 +90,8 @@ namespace BetterGenshinImpact.GameTask
 
             return _instance;
         }
+
+        internal static TaskTriggerDispatcher? Existing => _instance;
 
         public static IGameCapture GlobalGameCapture
         {
@@ -129,83 +141,121 @@ namespace BetterGenshinImpact.GameTask
 
         public void Start(IntPtr hWnd, CaptureModes mode, int interval = 50)
         {
-            // 初始化截图器
-            ChatUiHotkeyGuard.Reset();
-            _failureScreenshotFrameCache.Clear();
-            GameCapture = GameCaptureFactory.Create(mode);
-            // 激活窗口 保证后面能够正常获取窗口信息
-            SystemControl.ActivateWindow(hWnd);
-
-            // 初始化任务上下文(一定要在初始化触发器前完成)
-            TaskContext.Instance().Init(hWnd);
-
-            // 初始化触发器(一定要在任务上下文初始化完毕后使用)
-            _triggers = GameTaskManager.LoadInitialTriggers();
-            GameLoadingTrigger.GlobalEnabled = TaskContext.Instance().Config.GenshinStartConfig.AutoEnterGameEnabled;
-
-            // if (GraphicsCapture.IsHdrEnabled(hWnd))
-            // {
-            //     _logger.LogError("游戏窗口在HDR模式下无法获取正常颜色的截图，请关闭HDR模式！");
-            // }
-
-            // 启动截图
-            GameCapture.Start(hWnd,
-                new Dictionary<string, object>()
-                {
-                    { "autoFixWin11BitBlt", OsVersionHelper.IsWindows11_OrGreater && TaskContext.Instance().Config.AutoFixWin11BitBlt }
-                }
-            );
-
-            // 使用 SetWinEventHook 监听窗口移动和大小变化事件
-            _winEventProc = WinEventCallback;
-            var flags = (User32.WINEVENT)(WINEVENT_SKIPOWNPROCESS | WINEVENT_SKIPOWNTHREAD);
-            _winEventHookMoveSize = User32.SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, default, _winEventProc, 0, 0, flags);
-            _winEventHookLocation = User32.SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, default, _winEventProc, 0, 0, flags);
-
-            // 启动定时器
-            _frameIndex = 0;
-            _timer.Interval = interval;
-            if (!_timer.Enabled)
+            lock (_lifecycleGate)
             {
-                _timer.Start();
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _lifetime.PrepareStart();
+                try
+                {
+                    // 初始化截图器
+                    ChatUiHotkeyGuard.Reset();
+                    _failureScreenshotFrameCache.Clear();
+                    GameCapture = GameCaptureFactory.Create(mode);
+                    // 激活窗口 保证后面能够正常获取窗口信息
+                    SystemControl.ActivateWindow(hWnd);
+
+                    // 初始化任务上下文(一定要在初始化触发器前完成)
+                    TaskContext.Instance().Init(hWnd);
+
+                    // 初始化触发器(一定要在任务上下文初始化完毕后使用)
+                    _triggers = GameTaskManager.LoadInitialTriggers();
+                    GameLoadingTrigger.GlobalEnabled = TaskContext.Instance().Config.GenshinStartConfig.AutoEnterGameEnabled;
+
+                    // if (GraphicsCapture.IsHdrEnabled(hWnd))
+                    // {
+                    //     _logger.LogError("游戏窗口在HDR模式下无法获取正常颜色的截图，请关闭HDR模式！");
+                    // }
+
+                    // 启动截图
+                    GameCapture.Start(hWnd,
+                        new Dictionary<string, object>()
+                        {
+                    { "autoFixWin11BitBlt", OsVersionHelper.IsWindows11_OrGreater && TaskContext.Instance().Config.AutoFixWin11BitBlt }
+                        }
+                    );
+
+                    // 使用 SetWinEventHook 监听窗口移动和大小变化事件
+                    _winEventProc = WinEventCallback;
+                    var flags = (User32.WINEVENT)(WINEVENT_SKIPOWNPROCESS | WINEVENT_SKIPOWNTHREAD);
+                    _winEventHookMoveSize = User32.SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, default, _winEventProc, 0, 0, flags);
+                    _winEventHookLocation = User32.SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, default, _winEventProc, 0, 0, flags);
+
+                    // 启动定时器
+                    _frameIndex = 0;
+                    _timer.Interval = interval;
+                    _lifetime.Activate();
+                    if (!_timer.Enabled)
+                    {
+                        _timer.Start();
+                    }
+                }
+                catch
+                {
+                    ObserveStop(_lifetime.StopAsync());
+                    throw;
+                }
             }
         }
 
         public void Stop()
         {
-            _timer.Stop();
+            var stopped = StopAsync();
+            if (_lifetime.IsCurrentCallback || Application.Current?.Dispatcher.CheckAccess() == true)
+                ObserveStop(stopped);
+            else stopped.GetAwaiter().GetResult();
+        }
+
+        public Task StopAsync()
+        {
+            lock (_lifecycleGate) return _lifetime.StopAsync();
+        }
+
+        private void ObserveStop(Task task)
+        {
+            _ = task.ContinueWith(failed => _logger.LogError(failed.Exception, "停止截图调度器失败"),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
+
+        private void ReleaseStoppedCapture()
+        {
             ChatUiHotkeyGuard.Reset();
-            GameCapture?.Stop();
             _gameRect = RECT.Empty;
             _prevGameActive = false;
-            PictureInPictureService.Hide(resetManual: true);
-            HtmlMaskWindow.CloseAll();
-            if (_winEventHookMoveSize != default)
-            {
-                User32.UnhookWinEvent(_winEventHookMoveSize);
-                _winEventHookMoveSize = default;
-            }
-
-            if (_winEventHookLocation != default)
-            {
-                User32.UnhookWinEvent(_winEventHookLocation);
-                _winEventHookLocation = default;
-            }
+            var failures = TaskRunnerCleanup.RunAll(
+            [
+                ("截图器", () => { GameCapture?.Dispose(); GameCapture = null; }),
+                ("画中画", () => PictureInPictureService.Hide(resetManual: true)),
+                ("HTML遮罩", HtmlMaskWindow.CloseAll),
+                ("窗口移动钩子", () =>
+                {
+                    if (_winEventHookMoveSize == default) return;
+                    if (!User32.UnhookWinEvent(_winEventHookMoveSize)) throw new InvalidOperationException("移除窗口移动钩子失败");
+                    _winEventHookMoveSize = default;
+                }),
+                ("窗口位置钩子", () =>
+                {
+                    if (_winEventHookLocation == default) return;
+                    if (!User32.UnhookWinEvent(_winEventHookLocation)) throw new InvalidOperationException("移除窗口位置钩子失败");
+                    _winEventHookLocation = default;
+                })
+            ], (step, error) => _logger.LogError(error, "调度器清理失败: {Step}", step));
+            TaskRunnerFailurePolicy.ThrowCleanupFailures(failures);
         }
 
         public void StartTimer()
         {
-            if (!_timer.Enabled)
+            lock (_lifecycleGate)
             {
-                _timer.Start();
+                if (_disposed || _lifetime.IsStopping) return;
+                if (!_timer.Enabled) _timer.Start();
             }
         }
 
         public void StopTimer()
         {
-            if (_timer.Enabled)
+            lock (_lifecycleGate)
             {
-                _timer.Stop();
+                if (!_disposed && _timer.Enabled) _timer.Stop();
             }
 
             ChatUiHotkeyGuard.Reset();
@@ -218,16 +268,37 @@ namespace BetterGenshinImpact.GameTask
 
         public void Dispose()
         {
-            Stop();
+            var disposed = DisposeAsync().AsTask();
+            if (_lifetime.IsCurrentCallback || Application.Current?.Dispatcher.CheckAccess() == true) ObserveStop(disposed);
+            else disposed.GetAwaiter().GetResult();
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            lock (_lifecycleGate)
+            {
+                _disposed = true;
+                if (_disposeTask?.IsFaulted == true) _disposeTask = null;
+                return new(_disposeTask ??= DisposeCoreAsync());
+            }
+        }
+        private async Task DisposeCoreAsync()
+        {
+            await StopAsync().ConfigureAwait(false);
+            _timer.Elapsed -= Tick;
+            _timer.Dispose();
             _failureScreenshotFrameCache.Dispose();
+            GameCapture?.Dispose();
         }
 
         public void Tick(object? sender, EventArgs e)
         {
+            if (!_lifetime.TryEnter()) return;
             var hasLock = false;
-            var tickMetrics = new DispatcherTickMetrics();
+            DispatcherTickMetrics? tickMetrics = null;
             try
             {
+                tickMetrics = new DispatcherTickMetrics();
                 // 上一帧还没处理完时只记录跳过次数，不等待锁；等待时间不应混入本轮处理耗时。
                 Monitor.TryEnter(_locker, ref hasLock);
                 if (!hasLock)
@@ -335,6 +406,7 @@ namespace BetterGenshinImpact.GameTask
                     // {
                     maskWindow.BeginInvoke(() =>
                     {
+                        if (_lifetime.IsStopping) return;
                         if (maskWindow.IsExist())
                         {
                             maskWindow.Show();
@@ -412,7 +484,7 @@ namespace BetterGenshinImpact.GameTask
                 }
 
                 // 循环执行所有触发器 有独占状态的触发器的时候只执行独占触发器
-                using var content = new CaptureContent(bitmap, _frameIndex, _timer.Interval);
+                using var content = new CaptureContent(captureFrame!, _frameIndex, _timer.Interval);
                 ChatUiHotkeyGuard.UpdateVisualState(Bv.DetectChatUi(content.CaptureRectArea));
 
                 if (!hasEnabledTriggers)
@@ -470,24 +542,18 @@ namespace BetterGenshinImpact.GameTask
             }
             finally
             {
-                tickMetrics.EndProcessing();
-
-                if ((DateTime.Now - _prevManualGc).TotalSeconds > 2)
+                try
                 {
-                    GC.Collect();
-                    _prevManualGc = DateTime.Now;
-                }
+                    try { tickMetrics?.EndProcessing(); }
+                    finally { if (hasLock) Monitor.Exit(_locker); }
 
-                if (hasLock)
-                {
-                    Monitor.Exit(_locker);
+                    if (tickMetrics?.IsEnabled == true)
+                    {
+                        // 释放调度锁后再发布指标，避免 UI 订阅回调参与实时触发器锁竞争。
+                        tickMetrics.Publish(_metricsService);
+                    }
                 }
-
-                if (tickMetrics.IsEnabled)
-                {
-                    // 释放调度锁后再发布指标，避免 UI 订阅回调参与实时触发器锁竞争。
-                    tickMetrics.Publish(_metricsService);
-                }
+                finally { _lifetime.Exit(); }
             }
         }
 
@@ -537,22 +603,27 @@ namespace BetterGenshinImpact.GameTask
 
         private void WinEventCallback(User32.HWINEVENTHOOK hWinEventHook, uint @event, HWND hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
         {
-            var target = TaskContext.Instance().GameHandle;
-            if (target == IntPtr.Zero)
+            if (!_lifetime.TryEnter()) return;
+            try
             {
-                return;
-            }
+                var target = TaskContext.Instance().GameHandle;
+                if (target == IntPtr.Zero)
+                {
+                    return;
+                }
 
-            if (idObject != 0)
-            {
-                return;
-            }
+                if (idObject != 0)
+                {
+                    return;
+                }
 
-            var hwndPtr = hwnd.DangerousGetHandle();
-            if (hwndPtr == target)
-            {
-                SyncMaskWindowPosition();
+                var hwndPtr = hwnd.DangerousGetHandle();
+                if (hwndPtr == target)
+                {
+                    SyncMaskWindowPosition();
+                }
             }
+            finally { _lifetime.Exit(); }
         }
 
         public void TakeScreenshot()
@@ -567,6 +638,7 @@ namespace BetterGenshinImpact.GameTask
 
         private void SaveScreenshot(string context, string fileNamePrefix)
         {
+            if (!_lifetime.TryEnter()) return;
             try
             {
                 var path = Global.Absolute($@"log\screenshot\");
@@ -629,6 +701,7 @@ namespace BetterGenshinImpact.GameTask
                 _logger.LogError("截图保存失败: {Message}", e.Message);
                 _logger.LogDebug("截图保存失败: {StackTrace}", e.StackTrace);
             }
+            finally { _lifetime.Exit(); }
         }
     }
 }

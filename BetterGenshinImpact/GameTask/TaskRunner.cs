@@ -66,6 +66,7 @@ public class TaskRunner
         bool propagateExceptions,
         bool taskSemaphoreAlreadyOwned)
     {
+        if (!taskSemaphoreAlreadyOwned) CheckTaskAdmission();
         // 加锁
         var hasLock = taskSemaphoreAlreadyOwned || await TaskSemaphore.WaitAsync(0);
         if (!hasLock)
@@ -82,17 +83,17 @@ public class TaskRunner
         TaskExecutionScope? executionScope = null;
         try
         {
+            CheckTaskAdmission();
+            if (resetCancellationContext) InitializeTaskCancellation();
             executionScope = TaskExecutionScope.BeginOwned();
             _logger.LogInformation("→ {Text}", _name + "任务启动！");
 
             // 初始化
             Init();
-            if (resetCancellationContext)
-            {
-                CancellationContext.Instance.Set();
-            }
             RunnerContext.Instance.Clear();
 
+            CheckTaskAdmission();
+            CancellationContext.Instance.GetTokenOrNone().ThrowIfCancellationRequested();
             await action();
             TaskExecutionScope.ThrowIfFailed();
         }
@@ -168,9 +169,10 @@ public class TaskRunner
 
     public async Task RunSoloTaskAsync(ISoloTask soloTask, bool propagateExceptions = false)
     {
+        CheckTaskAdmission();
         var ownsTaskSemaphore = await TaskRunnerStartupGate.TryAcquireAsync(
             TaskSemaphore,
-            CancellationContext.Instance.Set);
+            InitializeTaskCancellation);
         if (!ownsTaskSemaphore)
         {
             _logger.LogError("任务启动失败：当前存在正在运行中的独立任务，请不要重复执行任务！");

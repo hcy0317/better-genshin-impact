@@ -20,11 +20,14 @@ using BetterGenshinImpact.GameTask.AutoSkip;
 using BetterGenshinImpact.GameTask.MapMask;
 using BetterGenshinImpact.GameTask.SkillCd;
 using System;
+using System.Threading.Tasks;
 
 namespace BetterGenshinImpact.GameTask;
 
 internal class GameTaskManager
 {
+    private static readonly object RetirementGate = new();
+    private static readonly HashSet<Task> RetiredTriggers = [];
     public static ConcurrentDictionary<string, ITaskTrigger>? TriggerDictionary { get; set; }
 
     /// <summary>
@@ -33,6 +36,7 @@ internal class GameTaskManager
     /// <returns></returns>
     public static List<ITaskTrigger> LoadInitialTriggers()
     {
+        ClearTriggers();
         ReloadAssets();
         TriggerDictionary = new ConcurrentDictionary<string, ITaskTrigger>();
 
@@ -70,7 +74,27 @@ internal class GameTaskManager
 
     public static void ClearTriggers()
     {
+        if (TriggerDictionary != null)
+            foreach (var trigger in TriggerDictionary.Values.OfType<IAsyncDisposable>())
+            {
+                Task drain;
+                try { drain = trigger.DisposeAsync().AsTask(); }
+                catch (Exception error) { drain = Task.FromException(error); }
+                lock (RetirementGate)
+                {
+                    RetiredTriggers.RemoveWhere(task => task.IsCompletedSuccessfully);
+                    if (!drain.IsCompletedSuccessfully) RetiredTriggers.Add(drain);
+                }
+            }
         TriggerDictionary?.Clear();
+    }
+
+    internal static async Task DrainRetiredTriggersAsync()
+    {
+        Task[] pending;
+        lock (RetirementGate) pending = RetiredTriggers.ToArray();
+        await Task.WhenAll(pending).ConfigureAwait(false);
+        lock (RetirementGate) RetiredTriggers.RemoveWhere(task => task.IsCompletedSuccessfully);
     }
 
     /// <summary>

@@ -22,6 +22,21 @@ public class TaskControl
     public static ILogger Logger => LoggerFactory.Value;
 
     public static readonly SemaphoreSlim TaskSemaphore = new(1, 1);
+    private static readonly TaskAdmissionGate Admission = new();
+    internal static bool IsShuttingDown => Admission.IsClosing;
+    internal static void SetShuttingDown(bool requested) => Admission.SetClosing(requested);
+    internal static void CheckTaskAdmission() => Admission.Check();
+    internal static IDisposable PauseTaskAdmission() => Admission.Pause();
+    internal static IDisposable EnterTaskActivity() => Admission.EnterActivity();
+    internal static async Task WaitForTaskDrainAsync(TimeSpan timeout)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        await Admission.WaitForActivitiesAsync().WaitAsync(timeout);
+        var remaining = timeout - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        if (!await TaskSemaphore.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero))
+            throw new TimeoutException("活动任务尚未释放输入，保留截图和服务资源");
+    }
+    internal static void InitializeTaskCancellation() => Admission.Initialize(Core.Script.CancellationContext.Instance.Set);
 
 
     public static void CheckAndSleep(int millisecondsTimeout)

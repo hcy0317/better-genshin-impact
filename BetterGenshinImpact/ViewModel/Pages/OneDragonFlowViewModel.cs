@@ -15,6 +15,7 @@ using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.Core.Script.Group;
 using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Job;
@@ -582,10 +583,11 @@ public partial class OneDragonFlowViewModel : ViewModel
 
     private async Task RunOneDragonCoreAsync(bool propagateExceptions, Action completionAction)
     {
+        using var activity = TaskControl.EnterTaskActivity();
         _logger.LogInformation($"启用一条龙配置：{SelectedConfig.Name}");
 
         // 启动等待之前先进行取消操作的初始化，便于在任务开始前终止任务.
-        CancellationContext.Instance.Set();
+        TaskControl.InitializeTaskCancellation();
 
         var taskListCopy = new List<OneDragonTaskItem>(TaskList);//避免执行过程中修改TaskList
 
@@ -825,7 +827,7 @@ public partial class OneDragonFlowViewModel : ViewModel
             return;
         }
 
-        Application.Current.Dispatcher.Invoke(() => { Application.Current.Shutdown(); });
+        App.RequestShutdown();
     }
 
     public async Task RunManagedAutomationAsync(
@@ -833,6 +835,7 @@ public partial class OneDragonFlowViewModel : ViewModel
         string runId,
         string resultPath)
     {
+        using var activity = TaskControl.EnterTaskActivity();
         await _managedAutomationSemaphore.WaitAsync();
         var status = "failed";
         string? message = null;
@@ -903,8 +906,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                 _managedAutomationSemaphore.Release();
                 if (shutdownRequested)
                 {
-                    _ = Application.Current.Dispatcher.BeginInvoke(
-                        new Action(Application.Current.Shutdown));
+                    App.RequestShutdown();
                 }
             }
         }
