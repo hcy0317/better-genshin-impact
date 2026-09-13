@@ -107,26 +107,8 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
         Notify.Event("AutoBoss").Success($"{Name}启动");
         try
         {
-            var retryCount = 0;
-            while (true)
-            {
-                try
-                {
-                    await RunBossLoop();
-                    break;
-                }
-                catch (RetryException e) when (retryCount < _taskParam.ReviveRetryCount)
-                {
-                    retryCount++;
-                    _logger.LogWarning("{Name}：第 {Retry}/{MaxRetry} 次重试当前首领讨伐，原因：{Reason}", Name, retryCount, _taskParam.ReviveRetryCount, e.Message);
-                    await Delay(2000, _ct);
-                }
-                catch (RetryException e)
-                {
-                    _logger.LogWarning("{Name}：角色死亡后重试次数已达上限 {MaxRetry}，结束任务，原因：{Reason}", Name, _taskParam.ReviveRetryCount, e.Message);
-                    throw;
-                }
-            }
+            var progress = new BossRunProgress(_taskParam.SpecifyRunCount ? _taskParam.RunCount : null, _taskParam.ReviveRetryCount);
+            await RunBossLoop(progress);
         }
         finally
         {
@@ -141,52 +123,28 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
     /// <summary>
     /// 执行完整讨伐循环：准备环境、前往首领、战斗、寻找奖励、领奖并决定是否继续下一轮。
     /// </summary>
-    private async Task RunBossLoop()
+    private async Task RunBossLoop(BossRunProgress progress)
     {
-        // 1.切换队伍
-        await Prepare();
-        
-        var rewardCount = 0;
         var shouldNavigateToBoss = true;
-        //2.根据剩余次数判断是否继续
-        while (ShouldContinueBeforeRound(rewardCount))
+        await progress.RunAsync(async () =>
+        {
+            await Prepare();
+            shouldNavigateToBoss = true;
+        }, async () =>
         {
             _ct.ThrowIfCancellationRequested();
-            _logger.LogInformation("{Name}：开始第 {Round} 次讨伐 {Boss}", Name, rewardCount + 1, _taskParam.BossName);
-            
-            //3.树脂不足则退出
+            _logger.LogInformation("{Name}：开始第 {Round} 次讨伐 {Boss}", Name, progress.CompletedClaims + 1, _taskParam.BossName);
             if (!await EnsureResinBeforeRound())
             {
                 _logger.LogInformation("{Name}：原粹树脂不足或补充失败，结束任务", Name);
-                break;
+                return false;
             }
-            
-            //4.首次讨伐 or 回过七天神像 则需要重新寻路到首领
-            if (shouldNavigateToBoss)
-            {
-                await NavigateToBoss();
-            }
-            
-            //5.开始战斗
+            if (shouldNavigateToBoss) await NavigateToBoss();
             await RunAutoFight();
-            
-            //6.寻路到征讨之花
             await NavigateToReward();
-            
-            //7.交互征讨之花
-            var rewardSuccess = await TakeReward();
-            if (!rewardSuccess)
-            {
-                _logger.LogInformation("{Name}：原粹树脂不足或无法领取奖励，结束任务", Name);
-                break;
-            }
-
-            rewardCount++;
-            if (!ShouldContinueBeforeRound(rewardCount))
-            {
-                break;
-            }
-            
+            return await TakeReward(progress);
+        }, async () =>
+        {
             if (_taskParam.ReturnToStatueAfterEachRound)
             {
                 _logger.LogInformation("{Name}：返回七天神像", Name);
@@ -196,21 +154,15 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
             }
             else
             {
-                // 就近回到首领附近继续讨伐
                 await RepositionAfterFight();
                 shouldNavigateToBoss = false;
             }
-        }
-    }
-
-    /// <summary>
-    /// 判断本轮开始前是否还有继续讨伐的次数。
-    /// </summary>
-    /// <param name="rewardCount">本次任务已成功领取奖励的次数。</param>
-    /// <returns>树脂耗尽模式始终返回 true；指定次数模式下未达到目标次数时返回 true。</returns>
-    private bool ShouldContinueBeforeRound(int rewardCount)
-    {
-        return !_taskParam.SpecifyRunCount || rewardCount < _taskParam.RunCount;
+        }, async (attempt, error) =>
+        {
+            _logger.LogWarning("{Name}：第 {Retry}/{MaxRetry} 次重试首领，已领奖 {Completed} 次，原因：{Reason}",
+                Name, attempt, _taskParam.ReviveRetryCount, progress.CompletedClaims, error.Message);
+            await Delay(2000, _ct);
+        }, _ct);
     }
 
     /// <summary>
@@ -1183,7 +1135,7 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
                     throw failure;
                 }
 
-                var completedTask = await Task.WhenAny(Task.Delay(500, _ct),adjustCameraTask,moveToRewardTask,monitorRewardPromptTask);
+                var completedTask = await Task.WhenAny(Task.Delay(500, _ct), adjustCameraTask, moveToRewardTask, monitorRewardPromptTask);
 
                 if (completedTask == monitorRewardPromptTask)
                 {
@@ -1383,17 +1335,20 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
     /// 与征讨之花交互，并在世界 Boss 专用领奖界面点击“使用原粹树脂”领取奖励。
     /// </summary>
     /// <returns>成功领取奖励并回到主界面时返回 true；原粹树脂不足或无法领取时返回 false。</returns>
-    private async Task<bool> TakeReward()
+    private async Task<bool> TakeReward(BossRunProgress progress)
     {
         var page = new BvPage(_ct);
 
-        if (!await TryUseOriginalResinOnRewardPrompt(page))
+        if (!await TryUseOriginalResinOnRewardPrompt(page, progress))
         {
             await CloseResinSupplementPrompt(page);
             await _returnMainUiTask.Start(_ct);
             return false;
         }
 
+        if (!await WaitForRewardResultReady(page))
+            throw new BossRewardUncertainException("使用树脂后未确认奖励结果页，不允许重复领奖");
+        progress.ConfirmClaim();
         await TryRecognizeRewardResult(page);
         await CloseRewardResult();
         Notify.Event("AutoBoss").Success($"{Name}奖励领取");
@@ -1461,12 +1416,17 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
     /// </summary>
     /// <param name="page">当前视觉定位页面。</param>
     /// <returns>成功点击并等待使用按钮消失时返回 true；识别到补充原粹树脂或超时时返回 false。</returns>
-    private async Task<bool> TryUseOriginalResinOnRewardPrompt(BvPage page)
+    private async Task<bool> TryUseOriginalResinOnRewardPrompt(BvPage page, BossRunProgress progress)
     {
         var useRect = ScaleRect(850, 740, 250, 35);
 
         try
         {
+            var visible = await page.Locator("使用原粹树脂", useRect).TryWaitFor(1000);
+            var hasButton = visible.Count > 0;
+            foreach (var region in visible) region.Dispose();
+            if (!hasButton) return false;
+            progress.BeginClaim();
             await page.Locator("使用原粹树脂", useRect).ClickUntilDisappears(3000);
             await Delay(1000, _ct);
             return true;
@@ -1474,13 +1434,17 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
         catch (TimeoutException e)
         {
             var supplementRegions = await page.Locator("补充原粹树脂", useRect).TryWaitFor(1000);
-            if (supplementRegions.Count > 0)
+            var isSupplement = supplementRegions.Count > 0;
+            foreach (var region in supplementRegions) region.Dispose();
+            if (isSupplement)
             {
+                progress.ConfirmNoConsumption();
                 _logger.LogInformation("{Name}：领奖界面提示补充原粹树脂，当前原粹树脂不足", Name);
             }
             else
             {
                 _logger.LogWarning("{Name}：未能在世界 Boss 领奖界面点击“使用原粹树脂”，原因：{Reason}", Name, e.Message);
+                if (progress.ClaimPending) throw new BossRewardUncertainException("领奖按钮状态不明，需先复核消费", e);
             }
 
             return false;
@@ -1530,16 +1494,20 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
                 return;
             }
 
-            var closeRegion = capture.FindMulti(RecognitionObject.Ocr(closeRect))
-                .FirstOrDefault(r => r.Text.Contains("点击空白区域继续", StringComparison.Ordinal));
-            if (closeRegion != null)
+            var closeRegions = capture.FindMulti(RecognitionObject.Ocr(closeRect));
+            try
             {
-                closeRegion.Click();
+                var closeRegion = closeRegions.FirstOrDefault(r => r.Text.Contains("点击空白区域继续", StringComparison.Ordinal));
+                if (closeRegion != null)
+                {
+                    closeRegion.Click();
+                }
+                else if (i > 5)
+                {
+                    page.Click(960, 540);
+                }
             }
-            else if (i > 5)
-            {
-                page.Click(960, 540);
-            }
+            finally { foreach (var region in closeRegions) region.Dispose(); }
 
             await Delay(300, _ct);
         }
