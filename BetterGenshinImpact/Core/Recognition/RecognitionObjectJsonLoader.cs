@@ -29,7 +29,10 @@ public static class RecognitionObjectJsonLoader
 {
     private sealed class LoggerTag;
 
-    private static readonly ILogger Logger = App.GetLogger<LoggerTag>();
+    // 离线解析/测试不拥有应用生命周期，不能为日志触发App静态宿主和提权重启。
+    private static ILogger? Logger => System.Windows.Application.Current is App
+        ? App.GetLogger<LoggerTag>()
+        : null;
 
     public static RecognitionObject LoadFromFile(string filePath, string objectName, RecognitionObjectJsonLoadContext context)
     {
