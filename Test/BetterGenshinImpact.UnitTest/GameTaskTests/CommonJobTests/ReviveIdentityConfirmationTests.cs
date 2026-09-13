@@ -1,6 +1,8 @@
 using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
+using Fischless.GameCapture;
+using Microsoft.Extensions.Time.Testing;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
@@ -108,4 +110,40 @@ public class ReviveIdentityConfirmationTests
     }
 
     private sealed class ReviveObserved : Exception;
+
+    [Fact]
+    public async Task UnknownFramesDoNotSpendTheRemainingRecoveryDeadline()
+    {
+        var clock = new FakeTimeProvider();
+        var producer = new CaptureFrameSource(clock);
+        var samples = new Queue<int>([2, -1, -1, -1, -1, 1, 1]);
+        var result = await RecoveredAvatarConfirmation.WaitAsync(Target, () =>
+        {
+            var active = samples.Dequeue();
+            return new ReviveRecoveryFrame(0, active > 0, ReviveUiState.None, active, Party)
+                .WithSource(producer.Next(), clock);
+        }, _ => { }, milliseconds =>
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            return Task.CompletedTask;
+        }, TimeSpan.FromSeconds(8), default, clock);
+        Assert.True(result.Confirms(Target));
+        Assert.Empty(samples);
+    }
+
+    [Fact]
+    public async Task FrozenCaptureNeverAuthorizesRecoveryAndConsumesOnlyTheOriginalDeadline()
+    {
+        var clock = new FakeTimeProvider();
+        var producer = new CaptureFrameSource(clock);
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        ReviveRecoveryFrame? frozen = null;
+        var started = clock.GetTimestamp();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => RecoveredAvatarConfirmation.WaitAsync(Target,
+            () => frozen ??= new ReviveRecoveryFrame(0, true, ReviveUiState.None, 1, Party).WithSource(producer.Next(), clock),
+            _ => throw new InvalidOperationException("不应重选已经在场的角色"),
+            ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; },
+            TimeSpan.FromSeconds(8), default, clock));
+        Assert.Equal(TimeSpan.FromSeconds(8), clock.GetElapsedTime(started));
+    }
 }

@@ -35,13 +35,14 @@ using Microsoft.Extensions.DependencyInjection;
 
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.Common.Ui;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Model;
 
 /// <summary>
 /// 队伍内的角色
 /// </summary>
-public class Avatar
+public partial class Avatar
 {
     private sealed record KnownReviveTarget(ReviveTarget Identity, CombatScenes Scene);
     /// <summary>
@@ -121,6 +122,14 @@ public class Avatar
     private static readonly Lazy<BgiYoloPredictor> QBurstClassifierLazy = new(() =>
         App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiQClassify));
 
+    internal static async Task PrepareCombatVisionAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        await QBurstClassifierLazy.Value.WarmUpAsync(Logger, ct);
+        _ = OcrFactory.Paddle;
+        ct.ThrowIfCancellationRequested();
+    }
+
 
     public Avatar(CombatScenes combatScenes, string name, int index, Rect nameRect, double manualSkillCd = -1)
     {
@@ -142,8 +151,15 @@ public class Avatar
     /// <param name="region"></param>
     /// <param name="ct"></param>
     /// <returns></returns>
-    public static void ThrowWhenDefeated(ImageRegion region, CancellationToken ct) =>
+    public static void ThrowWhenDefeated(ImageRegion region, CancellationToken ct)
+    {
+        var swimming = AutoFightParam.SwimmingEnabled && AutoFightTask.FightStatusFlag && SwimmingConfirm(region);
+        if (Bv.IsCombatHud(region) && !swimming) return;
+        ct.ThrowIfCancellationRequested();
+        Simulation.ReleaseAllKey();
+        using var suspension = CombatActionScope.Suspend();
         ThrowWhenDefeated(region, ct, null);
+    }
 
     private static void ThrowWhenDefeated(ImageRegion region, CancellationToken ct, KnownReviveTarget? target)
     {
@@ -282,35 +298,28 @@ public class Avatar
 
     private static void TpForRecover(CancellationToken ct, Exception ex, KnownReviveTarget? target)
     {
-        long frameId = 0;
-        CombatRecoveryCompletedException.RecoverAsync(
-            async () =>
-            {
-                await RecoverAtStatueOfTheSeven(ct);
-                if (target != null) await VerifyRecoveredTarget(target, ct);
-                else Logger.LogInformation("复苏目标身份未知，本次只核实恢复后的主界面，不签发指定角色或全队复活证明");
-            },
-            () => CaptureRecoveryFrame(target, ++frameId, ct), target?.Identity,
-            () => Delay(250, ct), ct).GetAwaiter().GetResult();
+        CombatRecoveryCompletedException.RecoverVerifiedAsync(
+            () => RecoverAtStatueOfTheSeven(ct), () => VerifyRecoveredTarget(target, ct), ct).GetAwaiter().GetResult();
     }
 
     private static ImageRegion? CaptureFreshUiFrame()
     {
-        var image = CaptureGameImageNoRetry(TaskTriggerDispatcher.GlobalGameCapture);
-        if (image == null) return null;
-        if (image.Empty()) { image.Dispose(); return null; }
-        return new CaptureContent(image, 0, 0).CaptureRectArea;
+        var frame = CaptureGameFrameNoRetry(TaskTriggerDispatcher.GlobalGameCapture);
+        if (frame == null) return null;
+        if (frame.Frame.Empty()) { frame.Dispose(); return null; }
+        return new CaptureContent(frame, 0, 0).CaptureRectArea;
     }
 
-    private static ReviveRecoveryFrame CaptureRecoveryFrame(KnownReviveTarget? target, long frameId, CancellationToken ct)
+    private static ReviveRecoveryFrame CaptureRecoveryFrame(KnownReviveTarget? target, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
         using var frame = CaptureFreshUiFrame();
         if (frame == null) return new(0, false, ReviveUiState.None, -1, new Dictionary<int, string>());
         if (target == null)
-            return new(frameId, Bv.IsInMainUi(frame), Bv.ReadReviveState(frame), -1, new Dictionary<int, string>());
-        try { return target.Scene.ReadRecoveryFrame(frame, frameId); }
+            return new ReviveRecoveryFrame(frame.FrameStamp.Sequence, Bv.IsInMainUi(frame), Bv.ReadReviveState(frame), -1, new Dictionary<int, string>())
+                .WithSource(frame.FrameStamp, TimeProvider.System);
+        try { return target.Scene.ReadRecoveryFrame(frame, target.Identity); }
         catch (Exception error) when (error is not OperationCanceledException and not CombatNotFinishedException and not CombatActionInterruptedException)
         {
             Logger.LogDebug(error, "神像恢复角色身份读取失败，保留未知");
@@ -318,35 +327,27 @@ public class Avatar
         }
     }
 
-    private static Task VerifyRecoveredTarget(KnownReviveTarget target, CancellationToken ct) =>
-        UiOperation.RunAsync("statue-revive-confirm", TimeSpan.FromSeconds(8), ct, operation =>
+    private static Task VerifyRecoveredTarget(KnownReviveTarget? target, CancellationToken ct) =>
+        UiOperation.RunAsync("statue-revive-confirm", TimeSpan.FromSeconds(8), ct, async operation =>
         {
             using var exclusive = AvatarRecognition.BeginExclusiveOperation();
-            long frameId = 0;
             ReviveRecoveryFrame? last = null;
-            var confirmed = AvatarSwitchConfirmationPolicy.TryConfirm(target.Identity.Index, 6, () =>
+            await RecoveredAvatarConfirmation.WaitAsync(target?.Identity, () =>
             {
-                last = CaptureRecoveryFrame(target, ++frameId, operation.Token);
+                last = CaptureRecoveryFrame(target, operation.Token);
                 operation.Observe("原败北角色恢复并可出战",
-                    $"actor={target.Identity.Name},slot={target.Identity.Index},mapped={last.HasTarget(target.Identity)},active={last.ActiveIndex},hud={last.MainReady},revive={last.Revive}", last.FrameId);
-                if (last.Revive != ReviveUiState.None)
-                {
-                    var error = new InvalidOperationException($"神像恢复后仍出现复苏提示，未确认 {target.Identity.Name} 恢复，不允许重试路线");
-                    TaskFailureDiagnostics.CaptureScreenshotOnce(error, "神像恢复验证失败，关闭弹窗前现场");
-                    if (last.Revive == ReviveUiState.FoodPrompt) Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-                    throw error;
-                }
-                return last.MainReady && last.HasTarget(target.Identity) ? last.ActiveIndex : -1;
+                    $"actor={target?.Identity.Name ?? "未知"},slot={target?.Identity.Index},mapped={target != null && last.HasTarget(target.Identity)},active={last.ActiveIndex},hud={last.MainReady},revive={last.Revive}", last.FrameId);
+                return last;
             }, index =>
             {
                 operation.Check();
-                if (last is { MainReady: true, Revive: ReviveUiState.None } && last.HasTarget(target.Identity))
+                if (target != null && last is { MainReady: true, Revive: ReviveUiState.None } && last.HasTarget(target.Identity))
                     SimulateSwitchKey(index);
-            }, ms => Sleep(ms, operation.Token), operation.Token);
+            }, ms => operation.DelayAsync(ms, ct), operation.Remaining, operation.Token);
             operation.Check();
-            if (!confirmed) throw new InvalidOperationException($"神像恢复后未取得 {target.Identity.Name} 的稳定出战证据，不允许重试路线");
-            Logger.LogInformation("神像恢复已确认原角色 {Actor} 可出战", target.Identity.Name);
-            return Task.FromResult(true);
+            if (target != null) Logger.LogInformation("神像恢复已确认原角色 {Actor} 可出战", target.Identity.Name);
+            else Logger.LogInformation("复苏目标身份未知，本次只核实恢复后的主界面，不签发指定角色或全队复活证明");
+            return true;
         }, Logger, captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
 
     public static async Task RecoverAtStatueOfTheSeven(CancellationToken ct)
@@ -375,78 +376,44 @@ public class Avatar
     /// <returns></returns>
     public bool TrySwitch(int tryTimes = 4)
     {
+        using var result = Select(tryTimes);
+        if (result.Recovery != null) ResolveSelectionRecovery(result.Recovery, Ct);
+        return result.Confirmed;
+    }
+
+    internal AvatarSelectionResult Select(int tryTimes)
+    {
         var context = new AvatarActiveCheckContext();
-        ImageRegion? beforeInput = null;
-        long frameId = 0, beforeFrameId = 0;
-        var submitted = false;
-        var canSwitch = false;
         var requested = new ReviveTarget(Name, Index);
-        try
-        {
-            var confirmed = AvatarSwitchConfirmationPolicy.TryConfirm(Index, tryTimes, () =>
-            {
-                canSwitch = false;
-                using var region = CaptureFreshUiFrame();
-                if (region == null) { submitted = false; return -1; }
-                frameId++;
-                KnownReviveTarget? target = null;
-                var revive = Bv.IsInRevivePrompt(region);
-                if (revive && submitted && beforeInput != null)
-                {
-                    using var recoveryScope = CombatActionScope.Suspend();
-                    try
-                    {
-                        var before = CombatScenes.ReadRecoveryFrame(beforeInput, beforeFrameId);
-                        var after = CombatScenes.ReadRecoveryFrame(region, frameId);
-                        var identity = ReviveTarget.FromSelection(requested, submitted, before, after);
-                        if (identity != null) target = new(identity, CombatScenes);
-                    }
-                    catch (Exception error) when (error is not OperationCanceledException and not CombatNotFinishedException and not CombatActionInterruptedException)
-                    {
-                        Logger.LogDebug(error, "复苏选角因果证据不足，角色身份保持未知");
-                    }
-                }
-                ThrowWhenDefeated(region, Ct, target);
-                if (revive) return -1;
-                var observed = CombatScenes.GetActiveAvatarIndex(region, context);
-                canSwitch = Bv.IsInMainUi(region);
-                submitted = false;
-                if (canSwitch && observed != Index)
-                {
-                    beforeInput?.Dispose();
-                    beforeInput = new ImageRegion(region.SrcMat.Clone(), 0, 0);
-                    beforeFrameId = frameId;
-                }
-                CombatActionScope.Current?.Trace("switch-frame", $"expected={Index} observed={observed}");
-                return observed;
-            }, index =>
+        using var result = AvatarSelectionProtocol.Select(requested.Index, tryTimes, CaptureFreshUiFrame,
+            region => region.FrameStamp, Bv.IsCombatHud,
+            region => region.ReadOnce((CombatScenes, typeof(AvatarActiveCheckContext)),
+                () => CombatScenes.GetActiveAvatarIndex(region, context)),
+            region => new ImageRegion(region.SrcMat.Clone(), 0, 0) { FrameStamp = region.FrameStamp },
+            index =>
             {
                 CombatActionScope.Current?.Check();
                 Ct.ThrowIfCancellationRequested();
-                if (!canSwitch || beforeInput == null) return;
                 SimulateSwitchAction(index);
-                submitted = true;
-            }, milliseconds => Sleep(milliseconds, Ct), Ct, (i, currentIndex) =>
+            }, milliseconds => Sleep(milliseconds, Ct), Ct,
+            maximumAge: CombatActionScope.Current != null ? UiSnapshot.CombatMaximumAge : UiSnapshot.RecoveryMaximumAge,
+            onMismatch: (attempt, observed) =>
             {
-                if (!canSwitch) return;
-                if (i == tryTimes - 1 && tryTimes == 4)
+                if (attempt == tryTimes - 1 && tryTimes == 4)
+                    Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", observed, requested.Index);
+                else if (attempt == 9 && AutoFightTask.FightStatusFlag)
                 {
-                    Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", currentIndex, Index);
-                }
-                else if (i == 9 && AutoFightTask.FightStatusFlag)
-                {
-                    // 脱困含跳跃/攻击，不能再把随后弹窗归因于单一选角输入。
-                    submitted = false;
-                    canSwitch = false;
-                    beforeInput?.Dispose();
-                    beforeInput = null;
                     PerformUnstuckAction(Ct);
+                    return true;
                 }
-            });
-            if (!confirmed && !Ct.IsCancellationRequested) Logger.LogWarning("切换角色失败:{Name}", Name);
-            return confirmed;
-        }
-        finally { beforeInput?.Dispose(); }
+                return false;
+            },
+            trace: observed => CombatActionScope.Current?.Trace("switch-frame", $"expected={requested.Index} observed={observed}"));
+        var frame = result.TakeFrame();
+        if (result.NeedsRecovery && frame != null)
+            return new(false, result.Source, new(requested, CombatScenes, result.TakeBefore(), frame, result.InputFence));
+        if (!result.Confirmed && !Ct.IsCancellationRequested) Logger.LogWarning("切换角色失败:{Name}", requested.Name);
+        return new(result.Confirmed, result.Source, null, frame);
     }
 
     internal void QueueSkillCooldownObservation()
@@ -488,7 +455,7 @@ public class Avatar
         ESkillCdTracker.RecordConfirmedCast(Name, effectiveCd + (now - castAt).TotalSeconds, castAt);
     }
 
-    private void SimulateSwitchAction(int index)
+    internal void SimulateSwitchAction(int index)
     {
         Simulation.SendInput.SimulateAction(GIActions.Drop); //反正会重试就不等落地了
         SimulateSwitchKey(index);
@@ -521,7 +488,7 @@ public class Avatar
     /// <summary>
     /// 战斗中切换角色卡住时的脱困动作：跳跃 → 随机方向移动+切换 → 攻击 → 释放按键
     /// </summary>
-    private void PerformUnstuckAction(CancellationToken ct)
+    internal void PerformUnstuckAction(CancellationToken ct)
     {
         var direction = UnstuckDirections[UnstuckRandom.Next(4)];
         Logger.LogWarning("切换角色卡住，执行脱困（方向：{Dir}）", direction);
@@ -737,6 +704,22 @@ public class Avatar
         }
     }
 
+    internal void SendSkillInput(bool hold)
+    {
+        Ct.ThrowIfCancellationRequested();
+        if (!AvatarSpecialAction.ExecuteSpecializedAction(this, "UseSkill", Name, new ActionArgs(Hold: hold)))
+        {
+            if (hold) Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
+            else Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+        }
+    }
+
+    internal void SendBurstInput()
+    {
+        Ct.ThrowIfCancellationRequested();
+        Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
+    }
+
     /// <summary>
     /// 使用完元素战技的回调,注意,不会在这里检测是不是需要跑七天神像 <br/>
     /// UseSkill 方法内会调用，如果没有使用UseSkill但是释放了技能之后记得调用一下这个方法
@@ -750,8 +733,9 @@ public class Avatar
             return GetSkillCdSeconds();
         }
 
-        using var region = givenRegion ?? CaptureToRectArea();
-        return GetSkillCurrentCd(region);
+        if (givenRegion != null) return GetSkillCurrentCd(givenRegion);
+        using var ownedRegion = CaptureToRectArea();
+        return GetSkillCurrentCd(ownedRegion);
     }
 
     /// <summary>
@@ -763,10 +747,9 @@ public class Avatar
         ImageRegion imageRegion,
         bool updateState = true)
     {
-        using var eRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).ECooldownRect);
-        using var eRaWhite = OpenCvCommonHelper.InRangeHsv(eRa.SrcMat, new Scalar(0, 0, 235), new Scalar(0, 25, 255));
-        var text = OcrFactory.Paddle.OcrWithoutDetector(eRaWhite);
-        var cd = StringUtils.TryParseDouble(text);
+        var reading = CombatHudReader.ReadCooldown(imageRegion, OcrFactory.Paddle);
+        var text = reading.Raw;
+        var cd = reading.Seconds;
         CombatActionScope.Current?.Trace("e-ocr", $"actor={Name} raw={text} parsed={cd:F3}");
         if (updateState && cd > 0 && cd <= CombatAvatar.SkillCd)
         {
@@ -811,11 +794,10 @@ public class Avatar
 
     internal static BurstObservation ObserveBurst(ImageRegion imageRegion, bool? expectedActorActive = null)
     {
-        using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
-        var top = QBurstClassifierLazy.Value.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());
-        var observation = BurstObservation.FromClassifier(top.Name.Name, top.Confidence);
+        var reading = CombatHudReader.ReadBurst(imageRegion, QBurstClassifierLazy.Value);
+        var observation = reading.Observation;
         CombatActionScope.Current?.Trace("q-classifier",
-            $"label={top.Name.Name} confidence={top.Confidence:F4} energy={observation.EnergyFull} cooling={observation.CoolingDown} ready={observation.Ready} actorActive={expectedActorActive}");
+            $"label={reading.Label} confidence={reading.Confidence:F4} energy={observation.EnergyFull} cooling={observation.CoolingDown} ready={observation.Ready} actorActive={expectedActorActive}");
         return observation;
     }
 
@@ -1002,8 +984,7 @@ public class Avatar
             return false;
         }
         // 复用现有 E 冷却色块检测；只检查一次，不等待也不重复切人。
-        var ready = !AutoFightSkill.AvatarSkillAsync(Logger, this, false, 1, Ct,
-            capture, assumeActive: true).GetAwaiter().GetResult();
+        var ready = !CombatHudReader.HasCooldownPixels(capture, burst: false);
         CombatActionScope.Current?.Trace("e-ready", $"actor={Name} ready={ready} cd={cooldown:F3}");
         return ready;
     }

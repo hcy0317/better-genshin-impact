@@ -407,14 +407,17 @@ public class TaskControl
         return gameCapture?.Capture()?.Frame;
     }
 
+    internal static GameCaptureFrame? CaptureGameFrameNoRetry(IGameCapture? gameCapture) => gameCapture?.Capture();
+
     /// <summary>
     /// 自动判断当前运行上下文中截图方式，并选择合适的截图方式返回
     /// </summary>
     /// <returns></returns>
     public static ImageRegion CaptureToRectArea(bool forceNew = false)
     {
-        var image = CaptureGameImage(TaskTriggerDispatcher.GlobalGameCapture);
-        var content = new CaptureContent(image, 0, 0);
+        var frame = GameCaptureRetry.CaptureFrame(TaskTriggerDispatcher.GlobalGameCapture,
+            Thread.Sleep, message => Logger.LogWarning(message));
+        var content = new CaptureContent(frame, 0, 0);
         return content.CaptureRectArea;
     }
 }

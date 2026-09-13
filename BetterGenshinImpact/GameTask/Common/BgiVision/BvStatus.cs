@@ -282,36 +282,18 @@ public static partial class Bv
             : bottomButton ? ReviveUiState.FullPartyDefeat : ReviveUiState.None;
 
     internal static ReviveUiState ReadReviveState(ImageRegion region)
+        => CreateReviveDetector(region).Read(region);
+
+    internal static bool IsCombatHud(ImageRegion region) => CreateReviveDetector(region).IsCombatHud(region);
+
+    private static ReviveUiDetector CreateReviveDetector(ImageRegion region)
     {
-        using var confirmRectArea = region.Find(RecognitionAssets.Get("AutoFight", "Confirm", region));
         var culture = new CultureInfo(TaskContext.Instance().Config.OtherConfig.GameCultureInfoName);
         var localizer = App.GetService<IStringLocalizer<BvResxHelper>>() ?? throw new Exception();
         var revival = localizer.WithCultureGet(culture, "复苏");
         var foodTitle = localizer.WithCultureGet(culture, "使用道具复苏角色");
-        if (!confirmRectArea.IsEmpty())
-        {
-            var list = region.FindMulti(new RecognitionObject
-            {
-                RecognitionType = RecognitionTypes.Ocr,
-                RegionOfInterest = new Rect(0, 0, region.Width, region.Height / 2)
-            });
-
-            try
-            {
-                // 确认弹框未读到标题时保持未知，不能把下方“复苏”当成免费全队复苏。
-                return ClassifyReviveEvidence(true, list.Any(r => IsReviveFoodTitle(r.Text, revival, foodTitle)), false);
-            }
-            finally { foreach (var item in list) item.Dispose(); }
-        }
-
-        // 全队倒下的复苏按钮位于下方，没有食物弹窗的确认图标。
-        var buttons = region.FindMulti(RecognitionObject.Ocr(region.Width / 4d,
-            region.Height * 2d / 3, region.Width / 2d, region.Height / 3d));
-        try
-        {
-            return ClassifyReviveEvidence(false, false, buttons.Any(r => IsReviveText(r.Text, revival)));
-        }
-        finally { foreach (var item in buttons) item.Dispose(); }
+        return new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", region),
+            static () => Core.Recognition.OCR.OcrFactory.Paddle, revival, foodTitle);
     }
 
     /// <summary>

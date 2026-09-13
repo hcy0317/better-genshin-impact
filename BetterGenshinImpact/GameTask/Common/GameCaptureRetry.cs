@@ -9,13 +9,18 @@ internal static class GameCaptureRetry
     internal static Mat Capture(
         IGameCapture? gameCapture,
         Action<int> retryDelay,
+        Action<string>? logWarning = null) => CaptureFrame(gameCapture, retryDelay, logWarning).Frame;
+
+    internal static GameCaptureFrame CaptureFrame(
+        IGameCapture? gameCapture,
+        Action<int> retryDelay,
         Action<string>? logWarning = null)
     {
         var captureFrame = gameCapture?.Capture();
         var image = captureFrame?.Frame;
         if (image != null)
         {
-            return image;
+            return captureFrame!;
         }
 
         captureFrame?.Dispose();
@@ -27,7 +32,7 @@ internal static class GameCaptureRetry
             image = captureFrame?.Frame;
             if (image != null)
             {
-                return image;
+                return captureFrame!;
             }
 
             captureFrame?.Dispose();

@@ -10,6 +10,7 @@ internal interface IUiDriver
     UiSnapshot Capture();
     Task DelayAsync(int milliseconds, CancellationToken ct);
     Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct);
+    void MarkInputCompleted(UiSnapshot before) { }
 }
 
 internal static class UiTransition
@@ -26,7 +27,7 @@ internal static class UiTransition
         Func<UiSnapshot, UiAction?>? chooseAction = null, int maxActions = 8,
         Action<UiAction, bool, UiSnapshot>? actionCompleted = null)
     {
-        long lastFrame = 0;
+        UiSnapshot? last = null;
         var confirmed = 0;
         int? confirmedSignature = null;
         var attempts = 0;
@@ -36,9 +37,21 @@ internal static class UiTransition
             var observed = driver.Capture();
             operation.Check();
             operation.Observe(observed, target);
-            if (observed.FrameId > lastFrame)
+            if (last is { SourceBound: true } && observed.SourceBound &&
+                last.SourceStamp.SessionId != observed.SourceStamp.SessionId)
             {
-                lastFrame = observed.FrameId;
+                last = null;
+                confirmed = 0;
+                confirmedSignature = null;
+            }
+            if (!observed.HasUsableEvidence)
+            {
+                confirmed = 0;
+                confirmedSignature = null;
+            }
+            else if (last == null || observed.IsAfter(last))
+            {
+                last = observed;
                 if (observed.Matches(target))
                 {
                     confirmed = confirmedSignature == observed.Signature ? confirmed + 1 : 1;
