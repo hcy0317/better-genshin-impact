@@ -7,6 +7,55 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatFlowExecutionTests
 {
     [Fact]
+    public async Task MaintenanceRechecksTheSelectedBranchBeforeItsFirstSkillInput()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new FakeGame { Ready = true };
+        var observed = false;
+        game.OnObserve = function => { if (function == "q-ready" && !observed) { observed = true; clock.Advance(TimeSpan.FromSeconds(5)); } };
+        game.BeforeInput = () => { if (game.Actions.Count == 1) game.Ready = false; };
+        using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("""
+            timing(盾,cd=1,duration=8)
+            钟离 e(required,timing=盾,record=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4)
+            branch(if=q-ready(琴),then=Q段,else=保底,unknown=保底)
+            segment(Q段,define,onfail=保底) { 琴 q(required,keep=护盾) }
+            segment(补盾,define) { 钟离 e(required,timing=盾,maintain=护盾,record=护盾) }
+            segment(保底,define) { 那维莱特 attack(0.1) }
+            """), game, clock);
+        await execution.RunRoundAsync();
+        Assert.Equal(new[] { "钟离", "钟离", "那维莱特" }, game.Actions);
+    }
+
+    [Fact]
+    public async Task AConditionThatChangedDuringSelectionCannotAuthorizePhysicalInput()
+    {
+        var game = new FakeGame { Ready = true };
+        game.BeforeInput = () => game.Ready = false;
+        using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("琴 attack(0.1,if=low-hp(琴))"), game);
+        await execution.RunRoundAsync();
+        Assert.Empty(game.Actions);
+    }
+
+    [Fact]
+    public async Task TwoMacroCallsRetainOneBranchOriginAndDifferentCallIdentities()
+    {
+        var game = new FakeGame { Ready = true };
+        using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("""
+            call(Q双喷)
+            segment(Q双喷,define) {
+                琴 q
+                call(喷)
+                call(喷)
+            }
+            segment(喷,define,atomic) { 琴 keydown(VK_LBUTTON),wait(0.08),keyup(VK_LBUTTON) }
+            """), game, new FakeTimeProvider());
+        await execution.RunRoundAsync();
+        var branch = Assert.Single(game.CallPaths[0].Where(call => call.Name == "Q双喷"));
+        Assert.All(game.CallPaths, path => Assert.Equal(branch.Id, Assert.Single(path.Where(call => call.Name == "Q双喷")).Id));
+        Assert.Equal(2, game.CallPaths.SelectMany(path => path).Where(call => call.Name == "喷").Select(call => call.Id).Distinct().Count());
+    }
+
+    [Fact]
     public async Task CompiledBattleDoesNotObserveLaterEditsToSourceCommands()
     {
         var script = CombatScriptParser.ParseContext("钟离 e(record=护盾)");
@@ -167,16 +216,26 @@ public class CombatFlowExecutionTests
 
     private sealed class FakeGame : ICombatFlowGame
     {
-        public bool? Ready { get; init; }
+        public bool? Ready { get; set; }
+        public Action? BeforeInput { get; set; }
+        public Action<string>? OnObserve { get; set; }
         public List<string> Actions { get; } = [];
+        public List<IReadOnlyList<CombatCallContext>> CallPaths { get; } = [];
         public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
         {
             action.ReportActiveActor(action.Command.Name);
+            BeforeInput?.Invoke();
             if (!action.TryBeginInput()) return ValueTask.FromResult(CombatFlowResult.Skipped);
             Actions.Add(action.Command.Name);
+            CallPaths.Add(action.CallPath);
             return ValueTask.FromResult(CombatFlowResult.Succeeded);
         }
-        public object? Observe(string function, IReadOnlyList<object?> args, string actor) => Ready;
+        public object? Observe(string function, IReadOnlyList<object?> args, string actor)
+        {
+            var ready = Ready;
+            OnObserve?.Invoke(function);
+            return ready;
+        }
         public ValueTask YieldAsync(CancellationToken ct) => ValueTask.CompletedTask;
     }
 }

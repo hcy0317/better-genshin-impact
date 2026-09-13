@@ -7,6 +7,37 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatConditionalReadinessTests
 {
     [Fact]
+    public async Task ExplicitUnknownBranchAndOptionalBurstDoNotForceOffFieldProbes()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReadinessGame(clock);
+        using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("""
+            枫原万叶 q(if=q-ready(枫原万叶))
+            branch(if=e-ready(枫原万叶),then=就绪,unknown=保底)
+            segment(就绪,define) { 枫原万叶 e }
+            segment(保底,define) { 琴 attack(0.1) }
+            """), game, clock);
+        await execution.RunRoundAsync();
+        Assert.Empty(game.Prepared);
+        Assert.Equal(new[] { "琴:attack" }, game.Inputs);
+    }
+
+    [Theory]
+    [InlineData("low-hp")]
+    [InlineData("q-energy-low")]
+    [InlineData("q-cd")]
+    public async Task OffFieldHealingAndEnergyPredicatesCanReachTheirDeclaredAction(string predicate)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReadinessGame(clock) { ActiveActor = "钟离" };
+        using var execution = new CombatFlowExecution(
+            CombatFlowProgram.Compile($"琴 attack(0.1,if={predicate}(琴))"), game, clock);
+        await execution.RunRoundAsync();
+        Assert.Equal(new[] { "琴" }, game.Prepared);
+        Assert.Equal(new[] { "琴:attack" }, game.Inputs);
+    }
+
+    [Fact]
     public async Task CompletedOnceCallNeverSwitchesActorJustToPrepareItsOldCondition()
     {
         var clock = new FakeTimeProvider();
@@ -143,7 +174,7 @@ public class CombatConditionalReadinessTests
         public object? Observe(string function, IReadOnlyList<object?> args, string actor)
         {
             var target = args.FirstOrDefault()?.ToString() ?? actor;
-            return function switch { "e-ready" => ActiveActor == target && !NeverReady ? Ready : null,
+            return function switch { "e-ready" or "low-hp" or "q-energy-low" or "q-cd" => ActiveActor == target && !NeverReady ? Ready : null,
                 "onfield" => ActiveActor == target, _ => null };
         }
         public ValueTask PrepareObservationAsync(CombatFlowAction action, string function, CancellationToken ct)

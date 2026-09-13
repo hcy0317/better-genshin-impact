@@ -24,6 +24,7 @@ internal sealed class CombatFlowBlock(string name)
     public bool Atomic { get; init; }
     public double Timeout { get; init; } = double.PositiveInfinity;
     public double EstimatedSeconds { get; set; }
+    public CombatRawAtomicPlan? RawAtomicPlan { get; set; }
     public HashSet<string> CoverageRecords { get; } = new(StringComparer.Ordinal);
     public HashSet<string> EntryCoverageRecords { get; } = new(StringComparer.Ordinal);
     public HashSet<string> ProducedRecords { get; } = new(StringComparer.Ordinal);
@@ -233,22 +234,49 @@ public sealed partial class CombatFlowProgram
 
     internal double CoverageAfter(CombatFlowBlock block, int index, string record)
     {
-        // 只看到下一个实际动作/安全边界；不会把整条主轴都算作不可中断窗口。
+        if (block.RawAtomicPlan != null && block.EntryCoverageRecords.Contains(record))
+            return block.RawAtomicPlan.Estimate(index) + CombatFlowPolicy.RecoverySeconds;
+        // 仅沿已选调用体前瞻下一个完整输出，不探查未选择的分支或跨越第二个atomic。
+        double waits = 0;
         for (; index < block.Nodes.Count; index++)
         {
             var node = block.Nodes[index];
             if (node.Command.Method == Method.Record) continue;
             var target = node.Block ?? (node.Command.Method == Method.Call ? Blocks[node.Command.Args![0]] : null);
-            if (target != null) return target.Atomic && target.EntryCoverageRecords.Contains(record)
-                ? target.EstimatedSeconds + CombatFlowPolicy.RecoverySeconds : CoverageAfter(target, 0, record);
+            if (target != null) return waits + (target.Atomic && target.EntryCoverageRecords.Contains(record)
+                ? target.EstimatedSeconds + CombatFlowPolicy.RecoverySeconds : CoverageAfter(target, 0, record));
+            if (node.Command.Method == Method.Wait && node.Condition == null)
+            {
+                waits += CombatFlowPolicy.ActionSeconds(node.Command);
+                continue;
+            }
+            if (node.Command.Options.GetValueOrDefault("keep") == record &&
+                (node.Command.Method == Method.Skill || node.Command.Method == Method.Burst))
+                return waits + CombatFlowPolicy.CoverageSeconds(node.Command) + NextAtomicCoverage(block, index + 1, record);
             return node.Command.Options.GetValueOrDefault("keep") == record
-                ? CombatFlowPolicy.CoverageSeconds(node.Command) : 0;
+                ? waits + CombatFlowPolicy.CoverageSeconds(node.Command) : 0;
+        }
+        return 0;
+    }
+
+    private double NextAtomicCoverage(CombatFlowBlock block, int index, string record)
+    {
+        double waits = 0;
+        for (; index < block.Nodes.Count; index++)
+        {
+            var node = block.Nodes[index];
+            if (node.Condition != null) return 0;
+            if (node.Command.Method == Method.Record) continue;
+            if (node.Command.Method == Method.Wait) { waits += CombatFlowPolicy.ActionSeconds(node.Command); continue; }
+            var target = node.Block ?? (node.Command.Method == Method.Call ? Blocks[node.Command.Args![0]] : null);
+            return target?.Atomic == true && target.EntryCoverageRecords.Contains(record) ? waits + target.EstimatedSeconds : 0;
         }
         return 0;
     }
 
     internal double EstimateRemaining(CombatFlowBlock block, int index)
     {
+        if (block.RawAtomicPlan != null) return block.RawAtomicPlan.Estimate(index);
         double seconds = 0;
         string? actor = null;
         foreach (var node in block.Nodes.Skip(index))
@@ -342,6 +370,8 @@ public sealed partial class CombatFlowProgram
                 }
             }
             if (block.CompletionRecord is { } completion) block.ProducedRecords.Add(completion);
+            block.RawAtomicPlan = CombatRawAtomicPlan.Create(block);
+            if (block.RawAtomicPlan != null) block.EstimatedSeconds = block.RawAtomicPlan.Estimate(0);
             if (block.Atomic && block.EstimatedSeconds > block.Timeout)
                 throw block.Error("atomic 片段超过有界执行预算，请拆分动作或显式调整 timeout：" + block.Name);
             complete.Add(block);

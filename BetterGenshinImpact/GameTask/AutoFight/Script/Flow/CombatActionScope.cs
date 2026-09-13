@@ -61,6 +61,28 @@ public sealed class CombatActionScope : IDisposable
     }
 
     public void Sleep(int milliseconds) => WaitAsync(milliseconds).GetAwaiter().GetResult();
+
+    internal async Task WaitWithObservationAsync(int milliseconds, Action observe, Func<int, CancellationToken, Task> delay)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(milliseconds);
+        var end = _action.Now + milliseconds / 1000d;
+        var observed = false;
+        Check();
+        while (_action.Now < end)
+        {
+            var remaining = end - _action.Now;
+            if (!observed && remaining <= 0.150000001)
+            {
+                observed = true;
+                // 同一执行链的一次纯观察；原截止不变，其耗时抵扣本来就要等待的时间。
+                observe();
+                Check();
+                continue;
+            }
+            await delay(Math.Max(1, (int)Math.Ceiling(Math.Min(0.05, remaining) * 1000)), _ct).ConfigureAwait(false);
+            Check();
+        }
+    }
     internal void Trace(string phase, string detail)
     {
         if (!_disposed) _action.Trace(phase, detail);
