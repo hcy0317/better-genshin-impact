@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -120,7 +121,7 @@ public partial class ScriptService : IScriptService
     //优先执行的配置组，统计每个project执行次数
     private readonly Dictionary<string, int> _projectExecutionCount = new();
 
-    public async Task RunMulti(IEnumerable<ScriptGroupProject> projectList, string? groupName = null, TaskProgress? taskProgress = null, bool propagateExceptions = false)
+    public async Task<ScriptExecutionResult> RunMulti(IEnumerable<ScriptGroupProject> projectList, string? groupName = null, TaskProgress? taskProgress = null, bool propagateExceptions = false)
     {
         using var activity = TaskControl.EnterTaskActivity();
         groupName ??= "默认";
@@ -154,7 +155,7 @@ public partial class ScriptService : IScriptService
             TaskRunnerFailurePolicy.ThrowIfStartupCancelled(
                 CancellationContext.Instance.Cts.Token,
                 propagateExceptions);
-            return;
+            return new(ScriptOutcomeKind.Cancelled, "GROUP_START_CANCELLED");
         }
 
 
@@ -172,6 +173,9 @@ public partial class ScriptService : IScriptService
 
 
         bool fisrt = true;
+        var outcomes = new ScriptOutcomeAccumulator();
+        var loopCompleted = false;
+        Exception? loopFailure = null;
 
 
         //非优先执行配置下，清空执行计数
@@ -184,8 +188,9 @@ public partial class ScriptService : IScriptService
         await new TaskRunner()
             .RunThreadAsync(async () =>
             {
+                try
+                {
                 var stopwatch = new Stopwatch();
-                var managedFailures = new ManagedTaskFailureCollector();
                 int projectIndex = -1;
                 for (int x = 0; x < list.Count; x++)
                 {
@@ -323,6 +328,7 @@ public partial class ScriptService : IScriptService
                                 Name = exeProject.Name,
                                 FolderName = exeProject.FolderName,
                                 Index = projectIndex,
+                                Status = 0,
                                 GroupName = taskProgress?.CurrentScriptGroupName ?? ""
                             };
                             TaskProgressManager.SaveTaskProgress(taskProgress);
@@ -343,55 +349,59 @@ public partial class ScriptService : IScriptService
                         }
 
 
-                        var projectFailed = false;
-                        Exception? projectFailure = null;
                         for (var i = 0; i < exeProject.RunNum; i++)
                         {
                             try
                             {
-                                TaskTriggerDispatcher.Instance().ClearTriggers();
-
-
                                 _logger.LogInformation("------------------------------");
-
                                 stopwatch.Reset();
                                 stopwatch.Start();
 
                                 var projectCancellationToken = CancellationContext.Instance.Cts.Token;
-                                await ExecuteProject(exeProject);
-                                TaskExecutionScope.ThrowIfFailed();
-                                TaskRunnerFailurePolicy.ThrowIfTaskCancelled(
-                                    projectCancellationToken,
-                                    propagateExceptions,
-                                    RunnerContext.Instance.IsContinuousRunGroup);
-
-                                //多次执行时及时中断
-                                if (exeProject.RunNum > 1 && ShouldSkipTask(exeProject))
+                                var step = await ScriptStepOutcomeRunner.RunAsync(async () =>
                                 {
-                                    continue;
+                                    TaskTriggerDispatcher.Instance().ClearTriggers();
+                                    return await ExecuteProject(exeProject);
+                                }, async failure =>
+                                {
+                                    var recoveryStarted = Stopwatch.GetTimestamp();
+                                    try { _logger.LogWarning("脚本 {Name} 尚未完成，保持任务锁并恢复主界面: {Reason}", exeProject.Name, failure.Message); }
+                                    catch { /* 日志不能阻止恢复。 */ }
+                                    await new ReturnMainUiTask().Start(projectCancellationToken, requireOverworld: true);
+                                    try { _logger.LogInformation("脚本 {Name} 已验证回到大世界主界面，恢复耗时 {Milliseconds:F1} ms", exeProject.Name, Stopwatch.GetElapsedTime(recoveryStarted).TotalMilliseconds); }
+                                    catch { /* 诊断不能改变已验证的恢复结果。 */ }
+                                }, projectCancellationToken, _logger,
+                                    (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
+                                        $"{context} 配置组 {groupName} / 脚本 {exeProject.Name}"));
+                                var outcome = step.Outcome;
+                                outcomes.Add(exeProject.Name, outcome);
+                                if (!RunnerContext.Instance.IsPreExecution && taskProgress?.CurrentScriptGroupProjectInfo != null)
+                                {
+                                    taskProgress.CurrentScriptGroupProjectInfo.Outcome = outcome.Kind.ToString();
+                                    taskProgress.CurrentScriptGroupProjectInfo.OutcomeReason = outcome.Reason;
+                                    if (step.RecoveredFailure != null) taskProgress.CurrentScriptGroupProjectInfo.Status = 2;
                                 }
-                            }
-                            catch (NormalEndException e)
-                            {
-                                throw;
+                                // 未闭合/合法跳过均不能在RunNum内重复；完成CD同样终止剩余次数。
+                                if (outcome.Kind != ScriptOutcomeKind.Completed || (exeProject.RunNum > 1 && ShouldSkipTask(exeProject))) break;
                             }
                             catch (OperationCanceledException e)
                             {
+                                outcomes.Add(exeProject.Name, new(ScriptOutcomeKind.Cancelled, "GROUP_CANCELLED"));
                                 _logger.LogInformation("取消执行配置组: {Msg}", e.Message);
                                 throw;
                             }
                             catch (Exception e)
                             {
+                                outcomes.Add(exeProject.Name, new(ScriptOutcomeKind.Failed, e.Message));
                                 TaskExecutionScope.Capture().Report(e);
-                                TaskExecutionScope.ThrowIfFailed();
-                                _logger.LogDebug(e, "执行脚本时发生异常");
-                                _logger.LogError("执行脚本时发生异常: {Msg}", e.Message);
                                 if (!RunnerContext.Instance.IsPreExecution && taskProgress != null && taskProgress.CurrentScriptGroupProjectInfo != null)
                                 {
                                     taskProgress.CurrentScriptGroupProjectInfo.Status = 2;
+                                    taskProgress.CurrentScriptGroupProjectInfo.Outcome = ScriptOutcomeKind.Failed.ToString();
+                                    taskProgress.CurrentScriptGroupProjectInfo.OutcomeReason = e.Message;
                                 }
-                                projectFailure = e;
-                                projectFailed = true;
+                                // 普通可恢复失败已由step处理；到这里的是终止/恢复/基础设施失败。
+                                throw;
                             }
                             finally
                             {
@@ -403,43 +413,7 @@ public partial class ScriptService : IScriptService
                                 _logger.LogInformation("------------------------------");
                             }
 
-                            if (projectFailed)
-                            {
-                                _logger.LogWarning(
-                                    "脚本 {Name} 执行失败，开始恢复主界面；恢复失败将停止配置组，避免后续任务在错误界面空转",
-                                    exeProject.Name);
-                                var recoveryStopwatch = Stopwatch.StartNew();
-                                try
-                                {
-                                    await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
-                                        projectFailure!,
-                                        () => new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token, requireOverworld: true),
-                                        CancellationContext.Instance.Cts.Token, _logger,
-                                        captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
-                                            $"{context} 配置组 {groupName} / 脚本 {exeProject.Name}"));
-                                    _logger.LogInformation(
-                                        "脚本 {Name} 失败后已验证回到大世界主界面，耗时 {ElapsedSeconds:0.000} 秒",
-                                        exeProject.Name,
-                                        recoveryStopwatch.Elapsed.TotalSeconds);
-                                }
-                                catch (Exception recoveryException) when (TaskFailureRecoveryPolicy.IsRecoveryFailure(recoveryException))
-                                {
-                                    _logger.LogError(
-                                        recoveryException,
-                                        "脚本 {Name} 失败后的主界面恢复失败，耗时 {ElapsedSeconds:0.000} 秒，停止配置组",
-                                        exeProject.Name,
-                                        recoveryStopwatch.Elapsed.TotalSeconds);
-                                    throw;
-                                }
-
-                                if (propagateExceptions)
-                                {
-                                    managedFailures.Add(projectFailure!);
-                                }
-                                break;
-                            }
-
-                            await Task.Delay(1000);
+                            await Task.Delay(1000, CancellationContext.Instance.GetTokenOrNone());
                         }
 
                         if (!RunnerContext.Instance.IsPreExecution && taskProgress != null)
@@ -471,12 +445,27 @@ public partial class ScriptService : IScriptService
                     }
                 }
 
-                managedFailures.ThrowIfAny($"配置组 {groupName} 中有脚本执行失败。");
+                loopCompleted = true;
+                // 已确认恢复的普通失败通过typed结果交回父层，避免丢子结果或再次恢复。
+                }
+                catch (Exception error)
+                {
+                    loopFailure = error;
+                    throw;
+                }
             }, propagateExceptions);
 
 
         // 还原定时器
         // TaskTriggerDispatcher.Instance().SetTriggers(GameTaskManager.LoadInitialTriggers());
+
+        if (!loopCompleted)
+        {
+            // 外层runner的GUI兼容吞错不能授权下一个配置组继续输入；保留原终止类型。
+            if (loopFailure != null) ExceptionDispatchInfo.Capture(loopFailure).Throw();
+            throw new InvalidOperationException("[BGI_GROUP_NOT_STARTED] 配置组未取得执行机会或在初始化中断");
+        }
+        var groupOutcome = outcomes.Complete();
 
         if (!string.IsNullOrEmpty(groupName) && !RunnerContext.Instance.IsPreExecution)
         {
@@ -487,7 +476,10 @@ public partial class ScriptService : IScriptService
         {
             if (CancellationContext.Instance.IsManualStop is false)
             {
-                Notify.Event(NotificationEvent.GroupEnd).Success($"配置组{groupName}结束");
+                if (groupOutcome.Kind == ScriptOutcomeKind.Completed)
+                    Notify.Event(NotificationEvent.GroupEnd).Success($"配置组{groupName}完成");
+                else
+                    Notify.Event(NotificationEvent.GroupEnd).Error($"配置组{groupName}未全部完成：{groupOutcome.Kind}");
             }
         }
 
@@ -495,7 +487,7 @@ public partial class ScriptService : IScriptService
         {
             taskProgress.Next = null;
         }
-
+        return groupOutcome;
     }
 
     private List<ScriptGroupProject> ReloadScriptProjects(IEnumerable<ScriptGroupProject> projectList)
@@ -561,7 +553,7 @@ public partial class ScriptService : IScriptService
     //     return jsProjects;
     // }
 
-    private async Task ExecuteProject(ScriptGroupProject project)
+    private async Task<ScriptExecutionResult> ExecuteProject(ScriptGroupProject project)
     {
         TaskExecutionScope.ThrowIfFailed();
         TaskContext.Instance().CurrentScriptProject = project;
@@ -577,7 +569,7 @@ public partial class ScriptService : IScriptService
             var hasSettingsBeforeRun = project.JsScriptSettingsObject != null;
             try
             {
-                await project.Run();
+                return await project.Run();
             }
             finally
             {
@@ -588,20 +580,21 @@ public partial class ScriptService : IScriptService
         {
             _logger.LogInformation("→ 开始执行键鼠脚本: {Name}", project.Name);
             if (RunnerContext.Instance.IsPreExecution) _logger.LogInformation("此任务为优先执行任务！");
-            await project.Run();
+            return await project.Run();
         }
         else if (project.Type == "Pathing")
         {
             _logger.LogInformation("→ 开始执行地图追踪任务: {Name}", project.Name);
             if (RunnerContext.Instance.IsPreExecution) _logger.LogInformation("此任务为优先执行任务！");
-            await project.Run();
+            return await project.Run();
         }
         else if (project.Type == "Shell")
         {
             _logger.LogInformation("→ 开始执行shell: {Name}", project.Name);
             if (RunnerContext.Instance.IsPreExecution) _logger.LogInformation("此任务为优先执行任务！");
-            await project.Run();
+            return await project.Run();
         }
+        return new(ScriptOutcomeKind.Failed, "UNKNOWN_SCRIPT_TYPE");
     }
 
     private void SaveScriptGroupAfterJsRun(ScriptGroupProject project, bool hasSettingsBeforeRun)
@@ -852,15 +845,36 @@ internal static class ScriptTaskProgressFinalizer
 
         projectInfo.TaskEnd = true;
         projectInfo.EndTime = endTime;
+        if (projectInfo.Status != 2 && projectInfo.Outcome != null)
+        {
+            projectInfo.Status = projectInfo.Outcome switch
+            {
+                nameof(ScriptOutcomeKind.Completed) => 1,
+                nameof(ScriptOutcomeKind.Skipped) => 4,
+                _ => 3
+            };
+        }
         if (projectInfo.Status == 1)
         {
             taskProgress.ConsecutiveFailureCount = 0;
-            taskProgress.LastSuccessScriptGroupProjectInfo = projectInfo;
-            taskProgress.LastScriptGroupName = taskProgress.CurrentScriptGroupName;
+            var earlierIncomplete = taskProgress.History?
+                .Where(item => item.GroupName != projectInfo.GroupName || item.Name != projectInfo.Name || item.FolderName != projectInfo.FolderName)
+                .GroupBy(item => (item.GroupName, item.Name, item.FolderName))
+                .Any(attempts => attempts.Last().Status is 2 or 3) == true;
+            if (!earlierIncomplete)
+            {
+                taskProgress.LastSuccessScriptGroupProjectInfo = projectInfo;
+                taskProgress.LastScriptGroupName = taskProgress.CurrentScriptGroupName;
+            }
         }
         else if (projectInfo.Status == 2)
         {
             taskProgress.ConsecutiveFailureCount++;
+        }
+        else
+        {
+            // 等待/待复核不是异常，不把它计入自动重启阈值。
+            taskProgress.ConsecutiveFailureCount = 0;
         }
 
         taskProgress.History?.Add(projectInfo);

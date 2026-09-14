@@ -657,6 +657,7 @@ public partial class OneDragonFlowViewModel : ViewModel
 
         Notify.Event(NotificationEvent.DragonStart).Success("一条龙启动");
         var managedFailures = new ManagedTaskFailureCollector();
+        var outcomes = new ScriptOutcomeAccumulator();
         foreach (var task in taskListCopy)
         {
             if (task is { IsEnabled: true, Action: not null })
@@ -667,7 +668,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                     {
                         _logger.LogInformation($"一条龙任务执行: {finishOneTaskcount++}/{enabledoneTaskCount}");
                         CancellationToken taskCancellationToken = default;
-                        var recoveredFailure = await OneDragonStepRunner.RunAsync(propagateExceptions,
+                        var recoveredFailure = await OneDragonStepRunner.RunAsync(true,
                             (action, propagate) => new TaskRunner().RunThreadAsync(action, propagate),
                             async () =>
                             {
@@ -676,7 +677,10 @@ public partial class OneDragonFlowViewModel : ViewModel
                                 await Task.Delay(1000, taskCancellationToken);
                             }, exception => RecoverOneDragonStepAsync(exception, task.Name, taskCancellationToken));
                         taskCancellationToken.ThrowIfCancellationRequested();
-                        if (recoveredFailure is not null)
+                        outcomes.Add(task.Name, recoveredFailure == null
+                            ? new(ScriptOutcomeKind.Completed, "NATIVE_TASK_COMPLETED")
+                            : new(ScriptOutcomeKind.Failed, recoveredFailure.Message));
+                        if (recoveredFailure is not null && propagateExceptions)
                         {
                             managedFailures.Add(recoveredFailure);
                         }
@@ -708,14 +712,15 @@ public partial class OneDragonFlowViewModel : ViewModel
                         string filePath = Path.Combine(_basePath, _scriptGroupPath, $"{task.Name}.json");
                         var group = ScriptGroup.FromJson(await File.ReadAllTextAsync(filePath));
                         IScriptService? scriptService = App.GetService<IScriptService>();
-                        await scriptService!.RunMulti(
+                        var groupOutcome = await scriptService!.RunMulti(
                             ScriptControlViewModel.GetNextProjects(group),
                             group.Name,
                             propagateExceptions: true);
+                        outcomes.Add(task.Name, groupOutcome);
+                        if (groupOutcome.Kind == ScriptOutcomeKind.Cancelled) groupOutcome.ThrowIfFailure();
                         await Task.Delay(1000);
                     }
-                    catch (Exception e) when (e is OperationCanceledException or NormalEndException
-                        || TaskFailureRecoveryPolicy.IsRecoveryFailure(e) || TaskExecutionScope.IsUnconfirmedCombat(e))
+                    catch (Exception e) when (TaskFailureRecoveryPolicy.IsTerminalFailure(e))
                     {
                         throw;
                     }
@@ -725,7 +730,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                         Toast.Error("执行配置组任务时失败");
                         // RunMulti 已释放自己的任务锁；外层恢复必须重新取得所有权，不能裸发输入。
                         CancellationToken recoveryToken = default;
-                        var recoveredFailure = await OneDragonStepRunner.RunAsync(propagateExceptions,
+                        var recoveredFailure = await OneDragonStepRunner.RunAsync(true,
                             (action, propagate) => new TaskRunner().RunThreadAsync(action, propagate),
                             () =>
                             {
@@ -733,7 +738,8 @@ public partial class OneDragonFlowViewModel : ViewModel
                                 return Task.FromException(e);
                             }, error => RecoverOneDragonStepAsync(error, task.Name, recoveryToken));
                         recoveryToken.ThrowIfCancellationRequested();
-                        if (recoveredFailure is not null) managedFailures.Add(recoveredFailure);
+                        outcomes.Add(task.Name, new(ScriptOutcomeKind.Failed, e.Message));
+                        if (recoveredFailure is not null && propagateExceptions) managedFailures.Add(recoveredFailure);
                     }
                 }
                 // 如果任务已经被取消，中断所有任务
@@ -742,7 +748,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                     _logger.LogInformation("任务被取消，退出执行");
                     if (CancellationContext.Instance.IsManualStop is false)
                     {
-                        Notify.Event(NotificationEvent.DragonEnd).Success("一条龙和配置组任务结束");
+                        Notify.Event(NotificationEvent.DragonEnd).Error("一条龙已取消，任务未全部完成");
                     }
                     return; // 后续的检查任务也不执行
                 }
@@ -760,11 +766,16 @@ public partial class OneDragonFlowViewModel : ViewModel
                     await Task.Delay(500);
                     if (CancellationContext.Instance.IsManualStop is false)
                     {
-                        Notify.Event(NotificationEvent.DragonEnd).Success("一条龙和配置组任务结束");
+                        var outcome = outcomes.Complete();
+                        if (outcome.Kind == ScriptOutcomeKind.Completed)
+                            Notify.Event(NotificationEvent.DragonEnd).Success("一条龙和配置组任务完成");
+                        else
+                            Notify.Event(NotificationEvent.DragonEnd).Error($"一条龙未全部完成：{outcome.Kind}");
                     }
                     _logger.LogInformation("一条龙和配置组任务结束");
                 }, completionAction, exception =>
                 {
+                    outcomes.Add("收尾检查", new(ScriptOutcomeKind.Failed, exception.Message));
                     _logger.LogError(exception, "一条龙收尾检查失败，将按配置执行完成动作");
                     if (propagateExceptions)
                     {
@@ -779,6 +790,7 @@ public partial class OneDragonFlowViewModel : ViewModel
         }
 
         managedFailures.ThrowIfAny("一条龙中有任务执行失败，后续任务已继续完成。");
+        if (propagateExceptions) outcomes.Complete().ThrowIfIncomplete();
     }
 
     private async Task RecoverOneDragonStepAsync(Exception exception, string taskName, CancellationToken ct)

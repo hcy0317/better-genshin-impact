@@ -149,7 +149,9 @@ public partial class MapPathingViewModel : ViewModel
 
         var fileInfo = new FileInfo(item.FilePath);
         var project = ScriptGroupProject.BuildPathingProject(fileInfo.Name, fileInfo.DirectoryName!);
-        await _scriptService.RunMulti([project]);
+        try { await _scriptService.RunMulti([project]); }
+        catch (OperationCanceledException) { _logger.LogInformation("地图追踪已取消"); }
+        catch (Exception error) { _logger.LogError(error, "地图追踪未完成"); Toast.Error("地图追踪未完成：" + error.Message); }
     }
 
     [RelayCommand]
