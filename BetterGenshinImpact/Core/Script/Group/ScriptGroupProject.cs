@@ -216,7 +216,7 @@ public partial class ScriptGroupProject : ObservableObject
         return string.Join("|", Project.Manifest.HttpAllowedUrls);
     }
 
-    public async Task Run()
+    public async Task<ScriptExecutionResult> Run()
     {
         TaskExecutionScope.ThrowIfFailed();
         //执行记录
@@ -235,6 +235,7 @@ public partial class ScriptGroupProject : ObservableObject
         };
         ExecutionRecordStorage.SaveExecutionRecord(executionRecord);
         Exception? executionFailure = null;
+        ScriptExecutionResult outcome = new(ScriptOutcomeKind.Completed, "NATIVE_TASK_COMPLETED");
         try
         {
             if (Type == "Javascript")
@@ -249,7 +250,7 @@ public partial class ScriptGroupProject : ObservableObject
                 // 当前可运行项目由脚本结合本次扫描结果判断，持久化选择保持不变。
 
                 var pathingPartyConfig = GroupInfo?.Config.PathingConfig;
-                ScriptExecutionResult outcome = await Project.ExecuteWithOutcomeAsync((object?)JsScriptSettingsObject, pathingPartyConfig);
+                outcome = await Project.ExecuteWithOutcomeAsync((object?)JsScriptSettingsObject, pathingPartyConfig);
                 outcome.ApplyTo(executionRecord);
                 outcome.ThrowIfFailure();
             }
@@ -265,7 +266,7 @@ public partial class ScriptGroupProject : ObservableObject
                 var task = PathingTask.BuildFromFilePath(Path.Combine(MapPathingViewModel.PathJsonPath, FolderName, Name));
                 if (task == null)
                 {
-                    return;
+                    throw new InvalidOperationException("[BGI_PATH_NOT_LOADED] 地图追踪文件未能加载");
                 }
                 var pathingTask = new PathExecutor(CancellationContext.Instance.Cts.Token);
                 pathingTask.PartyConfig = GroupInfo?.Config.PathingConfig;
@@ -277,6 +278,8 @@ public partial class ScriptGroupProject : ObservableObject
 
 
                 executionRecord.IsSuccessful = pathingTask.SuccessEnd;
+                outcome = new(pathingTask.SuccessEnd ? ScriptOutcomeKind.Completed : ScriptOutcomeKind.Failed,
+                    pathingTask.SuccessEnd ? "PATH_COMPLETED" : "PATH_NOT_COMPLETED");
                 OtherConfig.AutoRestart autoRestart = TaskContext.Instance().Config.OtherConfig.AutoRestartConfig;
                 if (!pathingTask.SuccessEnd)
                 {
@@ -342,19 +345,21 @@ public partial class ScriptGroupProject : ObservableObject
                 var task = new ShellTask(ShellTaskParam.BuildFromConfig(Name, shellConfig ?? new ShellConfig()));
                 await task.Start(CancellationContext.Instance.Cts.Token);
             }
+            else
+            {
+                throw new InvalidOperationException("[BGI_SCRIPT_TYPE_UNKNOWN] 不支持的脚本类型：" + Type);
+            }
 
             TaskExecutionScope.ThrowIfFailed();
-            if (Type != "Pathing" && Type != "Javascript")
-            {
-                executionRecord.IsSuccessful = true;
-            }
+            outcome.ApplyTo(executionRecord);
+            return outcome;
         }
         catch (Exception exception)
         {
             executionRecord.IsSuccessful = false;
             if (executionRecord.Outcome is null or "Completed")
             {
-                executionRecord.Outcome = exception is OperationCanceledException ? "Cancelled" : "Failed";
+                executionRecord.Outcome = TaskFailureRecoveryPolicy.IsCancellation(exception) ? "Cancelled" : "Failed";
                 executionRecord.OutcomeReason = exception.Message;
             }
             TaskExecutionScope.Capture().Report(exception);

@@ -177,8 +177,9 @@ public class MatchTemplateHelper
         try
         {
             // 模板必须能够完整地在源图中滑动，否则 OpenCV 无法生成有效的匹配结果矩阵。
-            if (srcMat.Empty() || template.Empty()
-                || srcMat.Width < template.Width || srcMat.Height < template.Height)
+            if (srcMat.Empty() || template.Empty())
+                throw new InvalidOperationException("模板识别不可用：源图或模板为空");
+            if (srcMat.Width < template.Width || srcMat.Height < template.Height)
             {
                 return matches;
             }
@@ -262,8 +263,9 @@ public class MatchTemplateHelper
         }
         catch (Exception ex)
         {
-            Logger?.LogError(ex.Message);
-            Logger?.LogDebug(ex, ex.Message);
+            try { Logger?.LogError(ex, "模板识别故障，不能将部分/空匹配作为有效观察返回"); }
+            catch { /* 保留原识别异常，不被诊断接收器故障替换。 */ }
+            throw;
         }
 
         return matches;

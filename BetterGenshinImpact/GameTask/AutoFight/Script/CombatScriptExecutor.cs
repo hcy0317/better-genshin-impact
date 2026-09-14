@@ -2,6 +2,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -21,11 +22,12 @@ public static class CombatScriptExecutor
     /// 可选。传了则使用现成的 CombatScenes（由调用方管理生命周期）；
     /// 不传则在内部通过截图自动创建并管理生命周期。
     /// </param>
-    public static async Task ExecuteAsync(
+    public static async Task<CombatExecutionResult> ExecuteAsync(
         CombatScript combatScript,
         CancellationToken ct,
         ILogger logger,
-        CombatScenes? combatScenes = null)
+        CombatScenes? combatScenes = null,
+        CombatScriptExecutionMode mode = CombatScriptExecutionMode.RequiredSequence)
     {
         var ownsScenes = false;
         try
@@ -38,8 +40,7 @@ public static class CombatScriptExecutor
                 combatScenes.InitializeTeam(capture);
                 if (!combatScenes.CheckTeamInitialized())
                 {
-                    logger.LogError("队伍识别未初始化成功！");
-                    return;
+                    throw new InvalidOperationException("队伍识别未初始化成功，简易策略未执行");
                 }
             }
 
@@ -49,36 +50,20 @@ public static class CombatScriptExecutor
                 combatScenes.BeforeTask(ct);
             }
 
-            // 增强流程使用完整校验，不把无角色 record/call 当成缺队伍而静默返回。
-            if (!combatScript.IsAvailableForParty(combatScenes.GetAvatars().Select(avatar => avatar.Name)))
-            {
-                logger.LogError("简易策略脚本要求的角色不存在！队伍中需要存在下面角色中的一个或多个：{AvatarNames}", string.Join(", ", combatScript.AvatarNames));
-                return;
-            }
-
             try
             {
                 using var flow = Flow.NativeCombatFlowRunner.Create(combatScript.CombatCommands, combatScenes, loop: false);
                 if (flow != null)
                 {
                     var result = await flow.RunRoundAsync(ct);
-                    if (result == Flow.CombatFlowResult.Failed) throw new InvalidOperationException("增强策略关键要求未满足，单次流程已停止");
-                    return;
+                    var outcome = FromFlowResult(result);
+                    outcome.EnsureCanContinue();
+                    return outcome;
                 }
-                // 通用化战斗策略
-                for (var i = 0; i < combatScript.CombatCommands.Count; i++)
-                {
-                    var command = combatScript.CombatCommands[i];
-                    var lastCommand = i == 0 ? null : combatScript.CombatCommands[i - 1];
-                    ct.ThrowIfCancellationRequested();
-                    if (!command.Execute(combatScenes, lastCommand))
-                    {
-                        logger.LogWarning(
-                            "角色 {Avatar} 未确认切换成功，终止本轮策略剩余动作并等待下一轮重试",
-                            command.Name);
-                        break;
-                    }
-                }
+                var legacy = await ExecuteLegacyAsync(combatScript, combatScenes.GetAvatars().Select(a => a.Name),
+                    (command, previous, _) => command.ExecuteWithResult(combatScenes, previous), mode, logger, ct);
+                legacy.EnsureCanContinue();
+                return legacy;
             }
             catch (OperationCanceledException)
             {
@@ -91,13 +76,13 @@ public static class CombatScriptExecutor
             }
             catch (RetryException e)
             {
-                logger.LogWarning("简易策略脚本执行时出现重试异常，原因：{Msg}，重试中...", e.Message);
+                logger.LogWarning("简易策略未完成，交回调用方处理重试：{Msg}", e.Message);
                 throw;
             }
             catch (Exception e)
             {
                 logger.LogError(e, "执行简易策略脚本时发生错误！");
-                if (combatScript.HasFlowCommands) throw;
+                throw;
             }
         }
         finally
@@ -107,6 +92,50 @@ public static class CombatScriptExecutor
                 SafeDispose(combatScenes!, logger);
             }
         }
+    }
+
+    internal static CombatExecutionResult FromFlowResult(Flow.CombatFlowResult result) => result switch
+    {
+        Flow.CombatFlowResult.Succeeded or Flow.CombatFlowResult.SatisfiedExisting => new(CombatExecutionKind.Completed, result.ToString()),
+        Flow.CombatFlowResult.Skipped => new(CombatExecutionKind.Skipped, "FLOW_OPTIONAL_SKIPPED"),
+        Flow.CombatFlowResult.Failed => new(CombatExecutionKind.Failed, "FLOW_REQUIREMENT_FAILED"),
+        _ => new(CombatExecutionKind.Deferred, "FLOW_NOT_COMPLETED:" + result)
+    };
+
+    /// <summary>旧脚本真实顺序执行边界；execute是游戏输入/观测端口，不参与角色筛选或结果汇总。</summary>
+    internal static Task<CombatExecutionResult> ExecuteLegacyAsync(CombatScript script, IEnumerable<string> party,
+        Func<CombatCommand, CombatCommand?, CancellationToken, CombatExecutionResult> execute,
+        CombatScriptExecutionMode mode, ILogger logger, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var available = party.ToHashSet(StringComparer.Ordinal);
+        var named = script.CombatCommands.Where(c => c.Name != CombatScriptParser.CurrentAvatarName && !c.Method.IsFlowControl)
+            .Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+        CombatExecutionResult Fail(string reason) => new(CombatExecutionKind.Failed, reason);
+        if (script.CombatCommands.Count == 0) return Task.FromResult(Fail("EMPTY_FRAGMENT"));
+        if (available.Count == 0) return Task.FromResult(Fail("PARTY_NOT_INITIALIZED"));
+        if (named.Count > 0 && !named.Overlaps(available)) return Task.FromResult(Fail("NO_APPLICABLE_ACTOR"));
+        if (script.HasFlowCommands) throw new InvalidOperationException("增强策略必须由完整流程校验，不能套用旧模板过滤");
+        if (mode == CombatScriptExecutionMode.RequiredSequence && !named.IsSubsetOf(available))
+            return Task.FromResult(Fail("REQUIRED_ACTOR_MISSING:" + string.Join(",", named.Except(available))));
+        var anyCompleted = false;
+        CombatCommand? previous = null;
+        foreach (var command in script.CombatCommands)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (command.Name != CombatScriptParser.CurrentAvatarName && !available.Contains(command.Name))
+            {
+                logger.LogDebug("旧路线模板跳过不在队的角色 {Actor}", command.Name);
+                continue;
+            }
+            var result = execute(command, previous, ct);
+            ct.ThrowIfCancellationRequested();
+            if (!result.CanContinue) return Task.FromResult(result);
+            anyCompleted |= result.Kind == CombatExecutionKind.Completed;
+            if (result.Kind == CombatExecutionKind.Completed) previous = command;
+        }
+        return Task.FromResult(new CombatExecutionResult(anyCompleted ? CombatExecutionKind.Completed : CombatExecutionKind.Skipped,
+            anyCompleted ? "FRAGMENT_COMPLETED" : "ALL_OPTIONAL_ACTIONS_SKIPPED"));
     }
 
     /// <summary>

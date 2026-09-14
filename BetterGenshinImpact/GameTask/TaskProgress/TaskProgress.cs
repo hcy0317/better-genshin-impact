@@ -19,6 +19,8 @@ public partial class TaskProgress : ObservableObject
     [ObservableProperty] private string _name = DateTime.Now.ToString("yyyyMMddHHmmss");
     [ObservableProperty] private DateTime _startTime = DateTime.Now;
     [ObservableProperty] private DateTime? _endTime = null;
+    [ObservableProperty] private string? _outcome;
+    [ObservableProperty] private string? _outcomeReason;
     [ObservableProperty] private List<ScriptGroupProjectInfo>? _history = new();
     [ObservableProperty] private bool _loop = false;
     //记录完成了几圈
@@ -61,8 +63,10 @@ public partial class TaskProgress : ObservableObject
         [ObservableProperty] private string _folderName  = string.Empty;
         [ObservableProperty] private DateTime _startTime = DateTime.Now;
         [ObservableProperty] private DateTime? _endTime = null;
-        //状态 1 成功  2 失败
+        //状态 1 成功  2 异常失败  3 未完成  4 跳过；旧记录保持原值语义。
         [ObservableProperty] private int _status  = 1;
+        [ObservableProperty] private string? _outcome;
+        [ObservableProperty] private string? _outcomeReason;
     }
     public string ToJson()
     {

@@ -51,14 +51,7 @@ namespace BetterGenshinImpact.GameTask
 
         private static readonly object _triggerListLocker = new();
 
-        private User32.HWINEVENTHOOK _winEventHookMoveSize;
-        private User32.HWINEVENTHOOK _winEventHookLocation;
-        private User32.WinEventProc _winEventProc;
-        private const uint EVENT_SYSTEM_MOVESIZESTART = 0x000A;
-        private const uint EVENT_SYSTEM_MOVESIZEEND = 0x000B;
-        private const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
-        private const uint WINEVENT_SKIPOWNTHREAD = 0x0001;
-        private const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
+        private WinEventHookOwner? _winEventHooks;
 
         public event EventHandler? UiTaskStopTickEvent;
 
@@ -74,7 +67,7 @@ namespace BetterGenshinImpact.GameTask
             {
                 ClearTriggers();
                 await GameTaskManager.DrainRetiredTriggersAsync().ConfigureAwait(false);
-                ReleaseStoppedCapture();
+                await ReleaseStoppedCaptureAsync().ConfigureAwait(false);
             });
             _instance = this;
             _timer.Elapsed += Tick;
@@ -175,10 +168,14 @@ namespace BetterGenshinImpact.GameTask
                     );
 
                     // 使用 SetWinEventHook 监听窗口移动和大小变化事件
-                    _winEventProc = WinEventCallback;
-                    var flags = (User32.WINEVENT)(WINEVENT_SKIPOWNPROCESS | WINEVENT_SKIPOWNTHREAD);
-                    _winEventHookMoveSize = User32.SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, default, _winEventProc, 0, 0, flags);
-                    _winEventHookLocation = User32.SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, default, _winEventProc, 0, 0, flags);
+                    _winEventHooks = new WinEventHookOwner(Application.Current.Dispatcher, WinEventCallback,
+                        observation => _logger.LogDebug(
+                            "CAPTURE_HOOK id={Registration} phase={Phase} hook={Hook} ownerThread={OwnerThread} currentThread={CurrentThread} ownerManaged={OwnerManaged} currentManaged={CurrentManaged} success={Success} win32={Win32} ms={Milliseconds:F1} suppressed={Suppressed}",
+                            observation.RegistrationId, observation.Phase, observation.Hook,
+                            observation.OwnerThreadId, observation.CurrentThreadId, observation.OwnerManagedThreadId,
+                            observation.CurrentManagedThreadId, observation.Succeeded, observation.Win32Error,
+                            observation.Milliseconds, observation.Suppressed));
+                    _winEventHooks.Register();
 
                     // 启动定时器
                     _frameIndex = 0;
@@ -216,29 +213,32 @@ namespace BetterGenshinImpact.GameTask
                 CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
         }
 
-        private void ReleaseStoppedCapture()
+        private async Task ReleaseStoppedCaptureAsync()
         {
             ChatUiHotkeyGuard.Reset();
             _gameRect = RECT.Empty;
             _prevGameActive = false;
-            var failures = TaskRunnerCleanup.RunAll(
+            List<Exception> failures = [];
+            if (_winEventHooks != null)
+            {
+                try
+                {
+                    await _winEventHooks.ReleaseAsync().ConfigureAwait(false);
+                    _winEventHooks = null;
+                }
+                catch (Exception error)
+                {
+                    failures.Add(error);
+                    try { _logger.LogError(error, "调度器窗口钩子清理失败，保留原owner以便重试"); }
+                    catch { /* 后续资源仍须尽力清理。 */ }
+                }
+            }
+            failures.AddRange(TaskRunnerCleanup.RunAll(
             [
                 ("截图器", () => { GameCapture?.Dispose(); GameCapture = null; }),
                 ("画中画", () => PictureInPictureService.Hide(resetManual: true)),
-                ("HTML遮罩", HtmlMaskWindow.CloseAll),
-                ("窗口移动钩子", () =>
-                {
-                    if (_winEventHookMoveSize == default) return;
-                    if (!User32.UnhookWinEvent(_winEventHookMoveSize)) throw new InvalidOperationException("移除窗口移动钩子失败");
-                    _winEventHookMoveSize = default;
-                }),
-                ("窗口位置钩子", () =>
-                {
-                    if (_winEventHookLocation == default) return;
-                    if (!User32.UnhookWinEvent(_winEventHookLocation)) throw new InvalidOperationException("移除窗口位置钩子失败");
-                    _winEventHookLocation = default;
-                })
-            ], (step, error) => _logger.LogError(error, "调度器清理失败: {Step}", step));
+                ("HTML遮罩", HtmlMaskWindow.CloseAll)
+            ], (step, error) => _logger.LogError(error, "调度器清理失败: {Step}", step)));
             TaskRunnerFailurePolicy.ThrowCleanupFailures(failures);
         }
 

@@ -2130,7 +2130,9 @@ public partial class ScriptControlViewModel : ViewModel
         RunnerContext.Instance.taskProgress = taskProgress;
         taskProgress.CurrentScriptGroupName = SelectedScriptGroup.Name;
         TaskProgressManager.SaveTaskProgress(taskProgress);
-        await _scriptService.RunMulti(GetNextProjects(SelectedScriptGroup), SelectedScriptGroup.Name, taskProgress);
+        try { await _scriptService.RunMulti(GetNextProjects(SelectedScriptGroup), SelectedScriptGroup.Name, taskProgress); }
+        catch (OperationCanceledException) { _logger.LogInformation("配置组已取消"); }
+        catch (Exception error) { _logger.LogError(error, "配置组未完成"); Toast.Error("配置组未完成：" + error.Message); }
     }
 
     [RelayCommand]
@@ -2583,6 +2585,7 @@ public partial class ScriptControlViewModel : ViewModel
             }
 
             RunnerContext.Instance.taskProgress = taskProgress;
+            var outcomes = new ScriptOutcomeAccumulator();
             var sg = GetNextScriptGroups(scriptGroups);
             foreach (var scriptGroup in sg)
             {
@@ -2595,14 +2598,26 @@ public partial class ScriptControlViewModel : ViewModel
                 }
                 taskProgress.CurrentScriptGroupName = scriptGroup.Name;
                 TaskProgressManager.SaveTaskProgress(taskProgress);
-                await _scriptService.RunMulti(
+                var groupOutcome = await _scriptService.RunMulti(
                     GetNextProjects(scriptGroup),
                     scriptGroup.Name,
                     taskProgress,
                     propagateExceptions);
+                outcomes.Add(scriptGroup.Name, groupOutcome);
+                if (groupOutcome.Kind == ScriptOutcomeKind.Cancelled) groupOutcome.ThrowIfFailure();
                 await Task.Delay(2000);
             }
 
+            var cycleOutcome = outcomes.Complete();
+            taskProgress.Outcome = cycleOutcome.Kind.ToString();
+            taskProgress.OutcomeReason = cycleOutcome.Reason;
+            TaskProgressManager.SaveTaskProgress(taskProgress);
+            if (cycleOutcome.Kind is not (ScriptOutcomeKind.Completed or ScriptOutcomeKind.Skipped))
+            {
+                // 一次有未闭合行动的批次不能凭“没有抛异常”进入下一轮重复消费。
+                if (propagateExceptions) cycleOutcome.ThrowIfIncomplete();
+                return;
+            }
             taskProgress.LoopCount++;
             if (taskProgress is { Loop: true })
             {

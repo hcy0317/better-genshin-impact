@@ -93,11 +93,13 @@ public class AutoFightJsonTask : ISoloTask
 
         for (int attempt = 1; attempt <= maxRetries; attempt++)
         {
-            var combatScenes = new CombatScenes().InitializeTeam(CaptureToRectArea());
+            using var capture = CaptureToRectArea();
+            var combatScenes = new CombatScenes().InitializeTeam(capture);
             if (combatScenes.CheckTeamInitialized())
             {
                 return combatScenes;
             }
+            combatScenes.Dispose();
 
             if (attempt < maxRetries)
             {
@@ -155,6 +157,7 @@ public class AutoFightJsonTask : ISoloTask
             Logger.LogInformation("JSON 策略：当前队伍角色：{Names}", string.Join(", ", _teamCharacterNames));
             // 增强 JSON 一次编译全部根，缺角色或不合法依赖不能经旧过滤器静默裁剪。
             using var flow = NativeCombatFlowRunner.Create(_strategy, combatScenes);
+            using var battleHost = flow == null ? null : NativeCombatBattleHostIo.Create(flow, combatScenes, _taskParam);
             if (flow != null) _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
             _finishDetectConfig.Diagnostics = new(Logger);
 
@@ -324,6 +327,14 @@ public class AutoFightJsonTask : ISoloTask
 
                     while (!cts2.Token.IsCancellationRequested)
                     {
+                        if (flow != null)
+                        {
+                            var hostResult = await battleHost!.AdvanceAsync(flow, cts2.Token);
+                            AutoFightTask.TraceFlowHost(_finishDetectConfig, flow, false, false, battleHost);
+                            fightEndFlag = NativeCombatBattleHostIo.ApplyResult(battleHost, hostResult, _finishDetectConfig);
+                            if (fightEndFlag || _fightEndFlag) break;
+                            continue;
+                        }
                         if (AutoFightParam.ShouldStopForCombatTimeout(
                                 fightTimeoutEnabled,
                                 timeoutStopwatch.Elapsed,
@@ -341,21 +352,6 @@ public class AutoFightJsonTask : ISoloTask
                                 fightTimeout,
                                 AutoFightSeek.RotationCount);
                             break;
-                        }
-
-                        if (flow != null)
-                        {
-                            await flow.StepAsync(cts2.Token);
-                            if (flow.TakeFinishCheckRequest() && _taskParam.FightFinishDetectEnabled) _finishCheckRequested = true;
-                            if (AutoFightParam.ShouldRunPeriodicFinishCheck(fightTimeoutEnabled,
-                                    _taskParam.FightFinishDetectEnabled, periodicFinishCheckStopwatch.Elapsed,
-                                    periodicFinishCheckInterval)) _periodicFinishCheckRequested = true;
-                            AutoFightTask.TraceFlowHost(_finishDetectConfig, flow, _finishCheckRequested,
-                                _periodicFinishCheckRequested && periodicFinishCheckStopwatch.Elapsed >= periodicFinishCheckInterval);
-                            if (!flow.IsAtomic && !flow.HasPendingConfirmation && (!_finishDetectConfig.SkipFightEndCheckWhenEnemyVisible || !flow.HasVisibleTarget))
-                                fightEndFlag = await RunPendingFinishCheckAsync(allowSeek: flow.IsAtRootBoundary);
-                            if (fightEndFlag || _fightEndFlag) break;
-                            continue;
                         }
 
                         fightEndFlag = await RunPendingFinishCheckAsync();
@@ -598,7 +594,7 @@ public class AutoFightJsonTask : ISoloTask
             // 使用独立的 CancellationTokenSource，以便在战后独立取消索敌循环，不影响 cts2 关联的其他组件（如 expDetector）
             using var targetingCts = CancellationTokenSource.CreateLinkedTokenSource(cts2.Token);
             Task? targetingTask = null;
-            if (_taskParam.EnableCombatTargeting)
+            if (flow != null || _taskParam.EnableCombatTargeting)
             {
                 targetingTask = Task.Run(async () =>
                 {
@@ -630,6 +626,7 @@ public class AutoFightJsonTask : ISoloTask
                     await targetingCts.CancelAsync();
                     try { await targetingTask; } catch (OperationCanceledException) { }
                 }
+                battleHost?.Dispose();
                 flow?.Dispose();
                 AutoFightTask.FightStatusFlag = false;
             }

@@ -1,6 +1,5 @@
 using System;
 using System.Threading.Tasks;
-using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 
 namespace BetterGenshinImpact.GameTask;
 
@@ -17,8 +16,7 @@ internal static class OneDragonStepRunner
             await runOwned(async () =>
             {
                 try { await action(); TaskExecutionScope.ThrowIfFailed(); }
-                catch (Exception error) when (error is not OperationCanceledException and not NormalEndException
-                    && !TaskFailureRecoveryPolicy.IsRecoveryFailure(error) && !TaskExecutionScope.IsUnconfirmedCombat(error))
+                catch (Exception error) when (!TaskFailureRecoveryPolicy.IsTerminalFailure(error))
                 {
                     await recover(error);
                     recoveredFailure = error;

@@ -127,7 +127,9 @@ public partial class JsListViewModel : ViewModel
             _logger.LogWarning("此脚本存在配置，可能无法直接从脚本界面运行，建议请添加至【调度器】，并右键修改配置后使用！");
         }
 
-        await _scriptService.RunMulti([new ScriptGroupProject(item)]);
+        try { await _scriptService.RunMulti([new ScriptGroupProject(item)]); }
+        catch (OperationCanceledException) { _logger.LogInformation("脚本已取消"); }
+        catch (Exception error) { _logger.LogError(error, "脚本未完成"); Toast.Error("脚本未完成：" + error.Message); }
     }
 
     [RelayCommand]

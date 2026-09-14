@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask;
@@ -11,6 +12,9 @@ public enum ScriptOutcomeKind { Completed, Skipped, Deferred, NeedsReconcile, Fa
 
 public sealed record ScriptExecutionResult(ScriptOutcomeKind Kind, string Reason)
 {
+    public string? TaskName { get; init; }
+    public IReadOnlyList<ScriptExecutionResult> Children { get; init; } = Array.Empty<ScriptExecutionResult>();
+
     internal void ApplyTo(ExecutionRecord record)
     {
         record.Outcome = Kind.ToString();
@@ -23,6 +27,43 @@ public sealed record ScriptExecutionResult(ScriptOutcomeKind Kind, string Reason
         if (Kind == ScriptOutcomeKind.Cancelled) throw new OperationCanceledException("[BGI_TASK_CANCELLED] " + Reason);
         if (Kind == ScriptOutcomeKind.Failed) throw new InvalidOperationException("[BGI_SCRIPT_FAILED] " + Reason);
     }
+    internal void ThrowIfIncomplete()
+    {
+        ThrowIfFailure();
+        if (Kind is ScriptOutcomeKind.Deferred or ScriptOutcomeKind.NeedsReconcile)
+            throw new InvalidOperationException($"[BGI_SCRIPT_INCOMPLETE] {Kind}: {Reason}");
+    }
+}
+
+/// <summary>父调度保留各子结果；后续完成只能增加进展，不能抹掉先前未闭合的行动。</summary>
+internal sealed class ScriptOutcomeAccumulator
+{
+    private readonly List<ScriptExecutionResult> _children = [];
+
+    internal void Add(string taskName, ScriptExecutionResult result) =>
+        _children.Add(result with { TaskName = taskName });
+
+    internal ScriptExecutionResult Complete()
+    {
+        var kind = ScriptOutcomeKind.Skipped;
+        foreach (var child in _children)
+            if (Priority(child.Kind) > Priority(kind)) kind = child.Kind;
+        return new(kind, _children.Count == 0 ? "NO_ACTIONS" : $"CHILDREN_{kind.ToString().ToUpperInvariant()}")
+        {
+            Children = Array.AsReadOnly(_children.ToArray())
+        };
+    }
+
+    private static int Priority(ScriptOutcomeKind kind) => kind switch
+    {
+        ScriptOutcomeKind.Skipped => 0,
+        ScriptOutcomeKind.Completed => 1,
+        ScriptOutcomeKind.Deferred => 2,
+        ScriptOutcomeKind.NeedsReconcile => 3,
+        ScriptOutcomeKind.Failed => 4,
+        ScriptOutcomeKind.Cancelled => 5,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind))
+    };
 }
 
 /// <summary>每次脚本独有的终态入口；不暴露重置/重开，迟到回调不能修改下一脚本。</summary>

@@ -18,6 +18,18 @@ internal sealed class TaskFailureRecoveryException : AggregateException
 
 internal static class TaskFailureRecoveryPolicy
 {
+    internal static bool IsCancellation(Exception failure)
+    {
+        if (failure is OperationCanceledException or NormalEndException) return true;
+        if (failure is AggregateException aggregate)
+            foreach (var inner in aggregate.InnerExceptions)
+                if (IsCancellation(inner)) return true;
+        return failure.InnerException != null && IsCancellation(failure.InnerException);
+    }
+
+    internal static bool IsTerminalFailure(Exception failure) =>
+        IsCancellation(failure) || IsRecoveryFailure(failure) || TaskExecutionScope.IsUnconfirmedCombat(failure);
+
     internal static bool IsRecoveryFailure(Exception failure)
     {
         if (failure is TaskFailureRecoveryException) return true;
@@ -35,8 +47,7 @@ internal static class TaskFailureRecoveryPolicy
         TimeSpan? budget = null,
         Action<Exception, string>? captureFailure = null)
     {
-        if (taskFailure is OperationCanceledException or NormalEndException || IsRecoveryFailure(taskFailure)
-            || TaskExecutionScope.IsUnconfirmedCombat(taskFailure))
+        if (IsTerminalFailure(taskFailure))
         {
             ExceptionDispatchInfo.Capture(taskFailure).Throw();
         }

@@ -1,0 +1,298 @@
+using BetterGenshinImpact.GameTask.AutoFight;
+using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
+using Fischless.GameCapture;
+using Microsoft.Extensions.Time.Testing;
+
+namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
+
+public class CombatBattleHostTests
+{
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SuccessfulStrategyCallsCannotKeepATargetlessBattleAliveForever(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(json, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new CombatBattleHostOptions());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 5000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+
+        Assert.True(game.Inputs > 0);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Contains(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Camera);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+        Assert.False(io.PartyOpen);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 1, 120);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RealHealthChangesKeepALongBattleRunningAcrossSuccessiveTargets(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(json, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp =>
+        {
+            var elapsed = clock.GetElapsedTime(started).TotalSeconds;
+            var width = 240 - (int)(elapsed % 60) * 3;
+            return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+                new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                    new(900, 400, width, 4, width * 4), 1, SeekCueKind.HealthBar), 1920, 1080);
+        };
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 25000 && clock.GetElapsedTime(started).TotalSeconds < 180 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Continue, result);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 180, 181);
+        Assert.Empty(io.Inputs);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RepeatedOrForeignSourceFramesCannotExtendObservationAvailability(bool foreignBattle)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { RepeatSource = !foreignBattle };
+        if (foreignBattle) io.TargetFactory = stamp => new(stamp, Guid.NewGuid(), CombatObservationQuality.Available, null, 1920, 1080);
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.InRange(game.Inputs, 0, 2); // 未过期帧可供纯调度复用，但不能续期或无界推进。
+        Assert.Empty(io.Inputs);
+    }
+
+    [Fact]
+    public async Task CancellationInThePartyWaitClosesTheOwnedUiBeforeReturning()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new());
+        for (var i = 0; i < 1000 && !io.PartyOpen; i++) await host.AdvanceAsync(flow, default);
+        Assert.True(io.PartyOpen);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await host.AdvanceAsync(flow, cts.Token));
+        Assert.False(io.PartyOpen);
+    }
+
+    [Fact]
+    public async Task AStationaryUnreachableTargetGetsOnlyBoundedApproachAndCannotBecomeCompleted()
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080);
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.InRange(io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.Approach), 1, 12);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 45, 120);
+        Assert.False(io.PartyOpen);
+    }
+
+    [Fact]
+    public async Task HealthBarGeometryChangedByOurOwnCameraCannotResetTheSearchBudget()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp =>
+        {
+            var width = 200 - (io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.Camera) % 50) * 2;
+            return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+                new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                    new(400, 400, width, 4, width * 4), 1, SeekCueKind.HealthBar), 1920, 1080);
+        };
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.InRange(host.CameraRequests, 1, 24);
+    }
+
+    [Fact]
+    public async Task OnlyFreshIndependentPostInputPartyEvidenceCompletesAndClosesTheUi()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(true, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.PartyFactory = stamp => new(stamp.Sequence, stamp.CapturedAt, 1920, 1080,
+            io.PartyOpen, (ulong)stamp.Sequence) { Source = stamp };
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Completed, result);
+        Assert.False(io.PartyOpen);
+        Assert.Equal(1, io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.OpenParty));
+        Assert.Equal(1, io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.CloseParty));
+    }
+
+    [Fact]
+    public async Task StalePartyCandidatesNeitherCompleteNorAuthorizeASecondMenuToggle()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        CaptureFrameStamp before = default;
+        io.PartyFactory = stamp =>
+        {
+            if (!io.PartyOpen) before = stamp;
+            return new(before.Sequence, before.CapturedAt, 1920, 1080, io.PartyOpen, (ulong)stamp.Sequence) { Source = before };
+        };
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 5000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.All(io.Inputs.Where(x => x.Kind == CombatBattleHostInputKind.CloseParty), input => Assert.False(input.PartyEvidence));
+    }
+
+    [Fact]
+    public async Task AFixedTopBossBarNeverAuthorizesWalkingTowardAScreenCoordinate()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachFixedTopHealthTarget, EnemyIndicatorDirection.None,
+                new(700, 20, 500, 8, 4000), 1, SeekCueKind.FixedTopHealth), 1920, 1080);
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.DoesNotContain(io.Inputs, x => x.Kind is CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.Camera);
+    }
+
+    [Fact]
+    public async Task ChangingDamageEvidenceSupportsLongCombatWithoutAVisibleHealthBar()
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                new(700, 400, 80, 30, 2400), 1, SeekCueKind.DamageNumber), 1920, 1080,
+            (ulong)(clock.GetElapsedTime(started).TotalSeconds / 2) + 1);
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 20000 && clock.GetElapsedTime(started).TotalSeconds < 120 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Continue, result);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 120, 121);
+        Assert.Empty(io.Inputs);
+    }
+
+    [Fact]
+    public async Task FreshSharedObservationDoesNotThrottlePureStrategySteps()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new());
+        for (var i = 0; i < 100 && game.Inputs < 10; i++) await host.AdvanceAsync(flow, default);
+        Assert.Equal(10, game.Inputs);
+        Assert.Equal(0, io.DelayCalls);
+    }
+
+    private static NativeCombatFlowRunner CreateFlow(bool json, ICombatFlowGame game, FakeTimeProvider clock)
+    {
+        if (json)
+            return NativeCombatFlowRunner.Create(new JsonCombatStrategy
+            {
+                Actions = [new() { Character = "琴", Action = "attack(0.1,required)" }]
+            }, game, clock: clock)!;
+        return NativeCombatFlowRunner.Create(CombatFlowProgram.Compile("strategy(loop=battle)\n琴 attack(0.1,required)"), game, clock);
+    }
+
+    private sealed class ReturningGame(FakeTimeProvider clock) : ICombatFlowGame
+    {
+        public int Inputs { get; private set; }
+        public object? Observe(string function, IReadOnlyList<object?> args, string actor) => true;
+        public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            action.TryBeginInput();
+            Inputs++;
+            clock.Advance(TimeSpan.FromMilliseconds(100));
+            return ValueTask.FromResult(CombatFlowResult.Succeeded);
+        }
+        public ValueTask YieldAsync(CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    private sealed class ReplayIo(FakeTimeProvider clock, Guid battleId) : ICombatBattleHostIo
+    {
+        private readonly CaptureFrameSource _source = new(clock);
+        public TimeProvider Clock => clock;
+        public Guid BattleId => battleId;
+        public List<CombatBattleHostInput> Inputs { get; } = [];
+        public bool PartyOpen { get; private set; }
+        public bool RepeatSource { get; init; }
+        public int SourcePeriodMilliseconds { get; init; }
+        public int DelayCalls { get; private set; }
+        public Func<CaptureFrameStamp, CombatBattleObservation>? TargetFactory { get; set; }
+        public Func<CaptureFrameStamp, PartySetupFinishObservation>? PartyFactory { get; set; }
+        private CaptureFrameStamp _first;
+        private CaptureFrameStamp _produced;
+        public CombatBattleObservation ObserveTarget()
+        {
+            if (!_produced.IsKnown || clock.GetElapsedTime(_produced.CapturedTimestamp).TotalMilliseconds >= SourcePeriodMilliseconds)
+                _produced = _source.Next();
+            var stamp = _produced;
+            if (!_first.IsKnown) _first = stamp;
+            if (RepeatSource) stamp = _first;
+            return TargetFactory?.Invoke(stamp) ?? new(stamp, battleId,
+                CombatObservationQuality.Available, null, 1920, 1080);
+        }
+        public PartySetupFinishObservation ObservePartyBar()
+        {
+            var stamp = _source.Next();
+            if (PartyFactory != null) return PartyFactory(stamp);
+            return new(stamp.Sequence, stamp.CapturedAt, 1920, 1080, false, (ulong)stamp.Sequence)
+            { Source = stamp };
+        }
+        public ValueTask SendAsync(CombatBattleHostInput input, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            Inputs.Add(input);
+            if (input.Kind == CombatBattleHostInputKind.OpenParty) PartyOpen = true;
+            if (input.Kind == CombatBattleHostInputKind.CloseParty) PartyOpen = false;
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+            return ValueTask.CompletedTask;
+        }
+        public ValueTask DelayAsync(int milliseconds, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            DelayCalls++;
+            clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            return ValueTask.CompletedTask;
+        }
+        public void ReleaseInput() { PartyOpen = false; }
+    }
+}

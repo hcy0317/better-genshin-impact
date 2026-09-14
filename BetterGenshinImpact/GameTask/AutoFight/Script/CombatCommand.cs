@@ -44,6 +44,7 @@ public class CombatCommand
         (ActivatingRound == null || ActivatingRound.Count == 0 || ActivatingRound.Contains(round));
 
     public BurstCastResult? LastBurstResult { get; private set; }
+    public CombatExecutionResult LastExecutionResult { get; private set; } = new(CombatExecutionKind.Failed, "NOT_EXECUTED");
 
     internal CombatCommand(CombatCommand source)
     {
@@ -150,13 +151,17 @@ public class CombatCommand
     }
 
     public bool Execute(CombatScenes combatScenes, CombatCommand? lastCommand = null)
+        => ExecuteWithResult(combatScenes, lastCommand).CanContinue;
+
+    public CombatExecutionResult ExecuteWithResult(CombatScenes combatScenes, CombatCommand? lastCommand = null)
     {
         LastBurstResult = null;
         Avatar? avatar;
         if (Name == CombatScriptParser.CurrentAvatarName)
         {
             var currentName = combatScenes.CurrentAvatar(true);
-            avatar = currentName != null ? combatScenes.SelectAvatar(currentName) : combatScenes.SelectAvatar(1);
+            avatar = currentName != null ? combatScenes.SelectAvatar(currentName) : null;
+            if (avatar == null) return new(CombatExecutionKind.Failed, "CURRENT_ACTOR_UNKNOWN");
         }
         else
         {
@@ -164,21 +169,22 @@ public class CombatCommand
             avatar = combatScenes.SelectAvatar(Name);
             if (avatar == null)
             {
-                return false;
+                return new(CombatExecutionKind.Failed, "REQUIRED_ACTOR_MISSING:" + Name);
             }
 
             if (lastCommand == null || lastCommand.Name != Name || combatScenes.LastActiveAvatarIndex != avatar.Index)
             {
                 // 新角色块（包括首条宏指令）才确认切人；连续动作复用已确认结果。
-                if (!avatar.TrySwitch(10)) return false;
+                if (!avatar.TrySwitch(10)) return new(CombatExecutionKind.Failed, "ACTOR_SWITCH_UNCONFIRMED:" + Name);
             }
         }
         Execute(avatar);
-        return Method != Method.Burst || !HasFlag("required") || LastBurstResult == BurstCastResult.Confirmed;
+        return LastExecutionResult;
     }
 
     public void Execute(Avatar avatar)
     {
+        LastExecutionResult = new(CombatExecutionKind.Completed, "LEGACY_INPUT_RETURNED");
         if (Method.IsFlowControl || Options.Count != 0 || RoundParity != null || HasFlag("refresh") || Flags.Count != 0 && Method != Method.Burst)
             throw new InvalidOperationException("增强策略必须通过统一流程执行器运行");
         if (Method == Method.Skill)
@@ -191,6 +197,7 @@ public class CombatCommand
                 // 快速跳过e
                 if (!avatar.IsSkillReadyFromCurrentFrame())
                 {
+                    LastExecutionResult = new(CombatExecutionKind.Skipped, "FAST_E_NOT_READY");
                     return;
                 }
             }
@@ -205,6 +212,12 @@ public class CombatCommand
         else if (Method == Method.Burst)
         {
             LastBurstResult = avatar.TryUseBurst();
+            LastExecutionResult = LastBurstResult switch
+            {
+                BurstCastResult.Confirmed => new(CombatExecutionKind.Completed, "BURST_CONFIRMED"),
+                BurstCastResult.NotReady when !HasFlag("required") => new(CombatExecutionKind.Skipped, "OPTIONAL_BURST_NOT_READY"),
+                _ => new(HasFlag("required") ? CombatExecutionKind.Failed : CombatExecutionKind.Deferred, "BURST_UNCONFIRMED")
+            };
         }
         else if (Method == Method.Attack)
         {
