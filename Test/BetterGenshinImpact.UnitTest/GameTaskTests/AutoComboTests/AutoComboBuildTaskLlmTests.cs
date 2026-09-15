@@ -9,11 +9,11 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoComboTests;
 /// 从已知队伍角色名开始调用 LLM 构建连招行为树
 /// 全程不触及主程序静态初始化（TaskControl.Logger / App host 等），日志直接打进测试输出
 /// LLM 配置取自主项目 User/config.json 的 autoComboBuildConfig 节点（MainProjectConfigFixture 定位），
-/// 未找到配置或 LLM 参数未配置时输出提示并跳过
+/// 默认不执行；显式设置 BGI_TEST_ENABLE_LLM=1 后才读取配置并发送真实请求。
 /// 说明：xunit v2 的测试类不支持注入 IMessageSink（v3 特性），因此日志只能在测试结束后于该用例的输出中查看
 /// </summary>
-[Collection("Init Collection")]
-public class AutoComboBuildTaskLlmTests
+[Trait("Category", "ExternalIntegration")]
+public class AutoComboBuildTaskLlmTests : IClassFixture<MainProjectConfigFixture>
 {
     /// <summary>测试队伍（标准角色名，写死即可）</summary>
     private static readonly string[] Team = ["安柏", "凯亚", "丽莎", "可莉"];
@@ -28,27 +28,20 @@ public class AutoComboBuildTaskLlmTests
 
     private MainProjectConfigFixture Fixture { get; }
 
-    [Fact]
+    [ExternalLlmFact]
     public async Task BuildTree_FromKnownTeam_PrintsTree()
     {
         var config = Fixture.AutoComboBuildConfig;
-        if (config == null)
-        {
-            _output.WriteLine(Fixture.LoadError + "，跳过");
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(config.PlanningLlmEndpoint) || string.IsNullOrWhiteSpace(config.ModelName))
-        {
-            _output.WriteLine($"主项目 config.json（{Fixture.ConfigPath}）中 autoComboBuildConfig 未配置 LLM 参数，请先在主程序【自动连招】设置里配置，跳过");
-            return;
-        }
+        Assert.True(config != null, Fixture.LoadError);
+        Assert.False(string.IsNullOrWhiteSpace(config!.PlanningLlmEndpoint), "LLM 服务地址未配置");
+        Assert.False(string.IsNullOrWhiteSpace(config.ModelName), "LLM 模型未配置");
 
         _output.WriteLine("使用配置：{0}（{1}）", config.PlanningLlmEndpoint, config.ModelName);
         _output.WriteLine("测试队伍：{0}", string.Join("、", Team));
 
         var logger = new TestOutputLogger(_output);
-        var session = await AutoComboBuildTask.BuildComboTreeAsync(Team.ToList(), config, logger, CancellationToken.None);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var session = await AutoComboBuildTask.BuildComboTreeAsync(Team.ToList(), config, logger, deadline.Token);
         var root = session.Builder.Build();
 
         _output.WriteLine("生成的行为树：\n{0}", Display.AsciiTree(root));

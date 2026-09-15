@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace BetterGenshinImpact.UnitTest;
 
 /// <summary>
-/// 读取主项目编译输出中的 User/config.json（注册于 InitCollection，需要读取主项目配置的测试统一注入）。
+/// 仅在显式启用的 LLM 集成测试中读取主项目编译输出的 User/config.json。
 /// 只做纯文件解析：按节点单独反序列化所需配置（如 autoComboBuildConfig），全程不触及 ConfigService 实例链与 App 静态初始化，
 /// 否则会连带主程序启动副作用（提权重启弹 UAC、占用单实例命名管道等）。
 /// 定位失败或解析失败均不抛异常，由测试方根据 LoadError 决定跳过并提示
@@ -24,6 +24,12 @@ public class MainProjectConfigFixture
 
     public MainProjectConfigFixture()
     {
+        if (!ExternalLlmFactAttribute.IsEnabled)
+        {
+            LoadError = "未启用真实 LLM 集成测试，不读取主项目配置";
+            return;
+        }
+
         var path = FindConfigPath();
         if (path == null)
         {
