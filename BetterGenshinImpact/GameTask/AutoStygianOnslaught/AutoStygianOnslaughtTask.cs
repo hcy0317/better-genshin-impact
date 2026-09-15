@@ -967,31 +967,18 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
         combatScenes.BeforeTask(cts.Token);
         using var flow = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
+        using var host = NativeCombatBattleHostIo.CreateForExternalScene(flow, combatScenes);
 
-        Task CombatAsync()
+        async Task CombatAsync()
         {
             try
             {
                 AutoFightTask.FightStatusFlag = true;
                 while (!cts.Token.IsCancellationRequested)
                 {
-                    if (flow != null) { flow.Step(cts.Token); continue; }
-                    var strategyBlockSucceeded = true;
-                    for (var i = 0; i < combatCommands.Count; i++)
-                    {
-                        var command = combatCommands[i];
-                        var lastCommand = i == 0 ? command : combatCommands[i - 1];
-                        if (command.Execute(combatScenes, lastCommand)) continue;
-                        Logger.LogWarning(
-                            "幽境危战角色 {Avatar} 未确认切换成功，后推当前策略块",
-                            command.Name);
-                        strategyBlockSucceeded = false;
-                        break;
-                    }
-                    if (!strategyBlockSucceeded)
-                    {
-                        Sleep(250, cts.Token);
-                    }
+                    var result = await host.AdvanceAsync(flow, cts.Token);
+                    if (result == CombatBattleHostResult.Unconfirmed)
+                        TaskExecutionScope.StopUnconfirmedCombat("场景战斗宿主未取得可靠进展：" + host.Reason);
                 }
             }
             catch (NormalEndException e)
@@ -1011,10 +998,11 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
                 Simulation.SendInput.Mouse.LeftButtonUp();
                 AutoFightTask.FightStatusFlag = false;
             }
-            return Task.CompletedTask;
         }
 
-        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts));
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts),
+            () => AvatarRecognition.ContinuousTargetingLoopAsync(cts.Token, () => cts.IsCancellationRequested,
+                flow.Context.BattleId.ToString()));
     }
 
     /// <summary>
@@ -1028,6 +1016,7 @@ public class AutoStygianOnslaughtTask : StateMachineBase<StygianState, BvPage>, 
         var jsonParam = new AutoFightParam
         {
             CombatStrategyPath = _jsonCombatStrategyPath!,
+            ExternalCompletionAuthority = true,
             FightFinishDetectEnabled = false,
             ExpBasedPickupEnabled = false,
             KazuhaPickupEnabled = false,

@@ -132,70 +132,18 @@ public class AutoFightJsonTask : ISoloTask
             }
             Logger.LogInformation("JSON 策略：当前队伍角色：{Names}", string.Join(", ", _teamCharacterNames));
             // 增强 JSON 一次编译全部根，缺角色或不合法依赖不能经旧过滤器静默裁剪。
-            using var flow = NativeCombatFlowRunner.Create(_strategy, combatScenes);
-            using var battleHost = flow == null ? null : NativeCombatBattleHostIo.Create(flow, combatScenes, _taskParam);
-            if (flow != null) _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
+            using var flow = NativeCombatFlowRunner.Create(_strategy, combatScenes, _taskParam)!;
+            using var battleHost = NativeCombatBattleHostIo.Create(flow, combatScenes, _taskParam);
+            _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
             _finishDetectConfig.Diagnostics = new(Logger);
 
-            // 过滤可用动作：Character 为空（通用）或在当前队伍中
-            var filteredActions = _strategy.Actions
-                .Where(a => string.IsNullOrEmpty(a.Character) || _teamCharacterNames.Contains(a.Character))
-                .ToList();
-
-            // 展开为优先级条目：每个动作产生 1个主条目 + N个 morePriorities 条目
-            var validActions = new List<PrioritizedAction>();
-            foreach (var action in filteredActions)
-            {
-                validActions.Add(new PrioritizedAction
-                {
-                    Action = action,
-                    Expression = action.Condition.Expression,
-                    Priority = action.Index
-                });
-
-                foreach (var morePriority in action.MorePriorities)
-                {
-                    validActions.Add(new PrioritizedAction
-                    {
-                        Action = action,
-                        Expression = morePriority.Expression,
-                        Priority = morePriority.Priority
-                    });
-                }
-            }
-            // 按优先级排序（LINQ OrderBy 为稳定排序）：同优先级条目保持策略中的出现顺序，
-            // 即动作声明顺序（每个动作的主条件条目在前、morePriorities 紧随其后，添加顺序即出现顺序）
-            validActions = validActions
-                .OrderBy(p => p.Priority)
-                .ToList();
-
-            Logger.LogInformation("JSON 策略：共 {Total} 个动作，展开为 {Expanded} 个优先级条目",
-                _strategy.Actions.Count, validActions.Count);
-
-            if (flow == null && validActions.Count == 0)
-            {
-                AutoFightTask.EnsureFightFinishConfirmed(_taskParam.FightFinishDetectEnabled, false, "JSON策略没有可用动作");
-                Logger.LogWarning("JSON 策略：没有可用的动作节点，跳过战斗");
-                return;
-            }
+            // 角色过滤和全部优先级由JsonCombatFlowExecution一次编译，避免两个维护来源。
 
             // 新的取消token
             cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             combatScenes.BeforeTask(cts2.Token);
             // 设置初始当前角色名（用于无 Character 字段的通用 action 回退）
-            _currentAvatarName = combatScenes.GetAvatars().FirstOrDefault()?.Name ?? _currentAvatarName;
-            var guardianAvatar = string.IsNullOrWhiteSpace(_taskParam.GuardianAvatar)
-                ? null
-                : combatScenes.SelectAvatar(int.Parse(_taskParam.GuardianAvatar));
-            _finishDetectConfig.SeekBudgetProvider = () => AutoFightSkill.GetSafeSeekBudget(
-                guardianAvatar,
-                _taskParam.GuardianShieldDurationSeconds);
-            var fightTimeoutEnabled = AutoFightParam.IsTimeTimeoutEnabled(_taskParam.Timeout);
-            TimeSpan fightTimeout = fightTimeoutEnabled ? TimeSpan.FromSeconds(_taskParam.Timeout) : TimeSpan.Zero;
-            Stopwatch timeoutStopwatch = Stopwatch.StartNew();
-            var periodicFinishCheckInterval = AutoFightParam.NormalizeFinishCheckInterval(
-                TimeSpan.FromSeconds(_finishDetectConfig.CheckTime),
-                _finishDetectConfig.RotateFindEnemyEnabled);
+            _currentAvatarName = CombatScriptParser.CurrentAvatarName;
 
             AutoFightSeek.ResetSeekState();
             AutoFightTask.FightStatusFlag = true;
@@ -206,9 +154,6 @@ public class AutoFightJsonTask : ISoloTask
             var fightEndFlag = false;
             var skipPostFightPickupFlag = false;
             string lastFightName = "";
-            // 初始化条件求值器（传入策略动作名，供条件词法按名称合并连字符）
-            var evaluator = new ConditionEvaluator(combatScenes, () => CaptureToRectArea(),
-                _strategy.Actions.Where(a => !string.IsNullOrEmpty(a.Name)).Select(a => a.Name));
             // 基于经验值的战后拾取检测
             if (_taskParam.KazuhaPickupEnabled && _taskParam.ExpBasedPickupEnabled)
             {
@@ -219,335 +164,20 @@ public class AutoFightJsonTask : ISoloTask
             }
 
             // 战斗前动作
-            await RunPreActions(combatScenes, evaluator);
-            Stopwatch periodicFinishCheckStopwatch = Stopwatch.StartNew();
-
-            async Task<bool> RunPendingFinishCheckAsync(bool allowSeek = false)
-            {
-                var shouldRunPeriodicCheck = _periodicFinishCheckRequested &&
-                                             periodicFinishCheckStopwatch.Elapsed >= periodicFinishCheckInterval;
-                if (!_finishCheckRequested && !shouldRunPeriodicCheck)
-                {
-                    return false;
-                }
-
-                _finishCheckRequested = false;
-                _periodicFinishCheckRequested = false;
-                periodicFinishCheckStopwatch.Restart();
-                var detected = await AutoFightTask.CheckFightFinish(
-                    _finishDetectConfig,
-                    _ct,
-                    _finishDetectConfig.DelayTime,
-                    _finishDetectConfig.DetectDelayTime,
-                    allowSeek);
-                _fightEndFlag = detected;
-                return detected;
-            }
-
-            // 战斗操作
+            await RunPreActions(combatScenes);
             var fightTask = Task.Run(async () =>
             {
                 try
                 {
-                    JsonAction? lastExecutedAction = null;
-                    // 战斗开始时重置最近一次检查时间，供更快触发战斗结束检查判断间隔使用
                     AutoFightTask.LastFightFinishCheckTime = DateTime.Now;
-                    // 记录开战时间，供"开战后一段时间阻断战斗结束检查"使用
                     AutoFightTask.FightStartTime = DateTime.Now;
-                    // 每场新战斗重置"敌人可见时跳过战斗结束检查"的连续跳过计数
-                    AutoFightTask.ResetSkipCheckCounter();
-                    TimeSpan checkFightFinishTime = TimeSpan.FromSeconds(_finishDetectConfig.CheckTime); //检查战斗结束的超时时间
-
-                    // 更快触发战斗结束检查（参照 txt 逻辑）：满足时间/人名条件时触发一次检查，无论是否发生换人；
-                    // 未发生换人时没有切人动作提供后摇等待，因此仍需要应用前摇等待
-                    // 返回是否检测到战斗结束
-                    async Task<bool> FastCheckFightFinishAsync(string prevName, string actionName, bool afterSwitch = false)
-                    {
-                        if (_taskParam is not { FightFinishDetectEnabled: true } || !_finishDetectConfig.FastCheckEnabled)
-                            return false;
-
-                        // 本动作执行后的实际角色（无 Character 时沿用当前角色）
-                        var checkAvatarName = string.IsNullOrEmpty(actionName) ? _currentAvatarName : actionName;
-
-                        if ((_finishDetectConfig.CheckTime > 0 &&
-                             (DateTime.Now - AutoFightTask.LastFightFinishCheckTime) > checkFightFinishTime)
-                            || _finishDetectConfig.CheckNames.Contains(prevName))
-                        {
-                            // LastFightFinishCheckTime 由 CheckFightFinish 内部更新（动作中的 check 指令也会更新）
-                            // 切人后检查：切人动作已包含上一个动作后摇的等待，前置延时缩短为 50ms，仅保留检测界面打开后的 DetectDelayTime；
-                            // 若本动作未发生换人，则没有切人动作提供后摇等待，仍需应用前摇等待
-                            int delayTime = _finishDetectConfig.DelayTime;
-                            if (afterSwitch && checkAvatarName != prevName)
-                            {
-                                delayTime = 50;
-                            }
-                            else if (_finishDetectConfig.DelayTimes.TryGetValue(prevName, out var characterDelayTime))
-                            {
-                                delayTime = characterDelayTime;
-                            }
-
-                            var endFlag = await AutoFightTask.CheckFightFinish(_finishDetectConfig, _ct,
-                                delayTime,
-                                _finishDetectConfig.DetectDelayTime,
-                                allowSeek: false);
-                            periodicFinishCheckStopwatch.Restart();
-                            _periodicFinishCheckRequested = false;
-                            if (endFlag)
-                            {
-                                Logger.LogInformation("{Name} 检测到战斗结束", actionName);
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
 
                     while (!cts2.Token.IsCancellationRequested)
                     {
-                        if (flow != null)
-                        {
-                            var hostResult = await battleHost!.AdvanceAsync(flow, cts2.Token);
-                            AutoFightTask.TraceFlowHost(_finishDetectConfig, flow, false, false, battleHost);
-                            fightEndFlag = NativeCombatBattleHostIo.ApplyResult(battleHost, hostResult, _finishDetectConfig);
-                            if (fightEndFlag || _fightEndFlag) break;
-                            continue;
-                        }
-                        if (AutoFightParam.ShouldStopForCombatTimeout(
-                                fightTimeoutEnabled,
-                                timeoutStopwatch.Elapsed,
-                                fightTimeout,
-                                AutoFightSeek.RotationCount))
-                        {
-                            Logger.LogInformation(
-                                AutoFightParam.IsSeekRotationLimitReached(AutoFightSeek.RotationCount)
-                                    ? "旋转次数达到上限，战斗结束"
-                                    : "战斗超时结束");
-                            fightEndFlag = true;
-                            skipPostFightPickupFlag = AutoFightParam.ShouldSkipPostFightPickupAfterForcedStop(
-                                fightTimeoutEnabled,
-                                timeoutStopwatch.Elapsed,
-                                fightTimeout,
-                                AutoFightSeek.RotationCount);
-                            break;
-                        }
-
-                        fightEndFlag = await RunPendingFinishCheckAsync();
-                        if (fightEndFlag)
-                        {
-                            break;
-                        }
-
-                        // 每次循环开始：截图一次，供所有条件求值复用
-                        using var capture = CaptureToRectArea();
-                        evaluator.SetCachedCapture(capture);
-
-                        var anyExecuted = false;
-
-                        // 记录本轮循环开始时的角色，用于检测是否发生换人
-                        var prevAvatarName = _currentAvatarName;
-                        foreach (var prioritizedAction in validActions)
-                        {
-                            if (cts2.Token.IsCancellationRequested) break;
-
-                            var action = prioritizedAction.Action;
-
-                            // MorePriority 只影响排序；条件历史仍按动作自身索引和名称查询。
-                            var conditionMet = evaluator.Evaluate(
-                                prioritizedAction.Expression,
-                                action.Index,
-                                action.Character,
-                                action.Name);
-
-                            if (!conditionMet)
-                            {
-                                continue;
-                            }
-
-                            var guardianSkillHandledForAction = false;
-                            if (guardianAvatar != null)
-                            {
-                                var guardianAction = await AutoFightSkill.EnsureGuardianBoundaryAsync(
-                                    guardianAvatar,
-                                    _taskParam.GuardianAvatar,
-                                    _taskParam.GuardianAvatarHold,
-                                    _taskParam.GuardianCoverageMode,
-                                    _taskParam.GuardianShieldDurationSeconds,
-                                    cts2.Token,
-                                    _taskParam.GuardianCombatSkip,
-                                    _taskParam.BurstEnabled);
-                                if (guardianAction == GuardianBoundaryAction.Cancel)
-                                {
-                                    cts2.Token.ThrowIfCancellationRequested();
-                                }
-                                if (guardianAction == GuardianBoundaryAction.FailCombat)
-                                {
-                                    throw new InvalidOperationException(
-                                        $"盾奶位 {guardianAvatar.Name} 未能建立严格护盾覆盖");
-                                }
-                                guardianSkillHandledForAction =
-                                    guardianAction == GuardianBoundaryAction.ProceedProtected;
-                            }
-
-                            var fightEndDetected = false;
-                            if (!_finishDetectConfig.CheckAfterSwitchAvatar)
-                            {
-                                fightEndDetected = await FastCheckFightFinishAsync(
-                                    prevAvatarName,
-                                    action.Character ?? string.Empty);
-                            }
-
-                            // 指定角色的动作：执行前确保切换到该角色。
-                            if (!fightEndDetected && !string.IsNullOrEmpty(action.Character))
-                            {
-                                var avatar = combatScenes.SelectAvatar(action.Character);
-                                if (avatar == null) continue;
-
-                                if (!avatar.TrySwitch(10))
-                                {
-                                    Logger.LogWarning(
-                                        "角色 {Avatar} 未确认切换成功，后推本轮 JSON 策略剩余动作",
-                                        action.Character);
-                                    break;
-                                }
-                                _currentAvatarName = action.Character;
-                            }
-
-                            if (_finishDetectConfig.CheckAfterSwitchAvatar)
-                            {
-                                fightEndDetected = await FastCheckFightFinishAsync(
-                                    prevAvatarName,
-                                    action.Character ?? string.Empty,
-                                    afterSwitch: true);
-                            }
-
-                            if (fightEndDetected)
-                            {
-                                _fightEndFlag = true;
-                                break;
-                            }
-
-                            if (ShouldRequestFinishCheckBeforeAction(action))
-                            {
-                                _finishCheckRequested = true;
-                            }
-
-                            fightEndFlag = await RunPendingFinishCheckAsync();
-                            if (fightEndFlag)
-                            {
-                                break;
-                            }
-
-                            // 执行动作
-                            var actionExecuted = await ExecuteAction(
-                                combatScenes,
-                                action,
-                                () => RunPendingFinishCheckAsync(),
-                                guardianAvatar,
-                                guardianSkillHandledForAction);
-                            if (!actionExecuted)
-                            {
-                                Logger.LogWarning(
-                                    "自动战斗动作 {Name} 未确认执行成功，后推时间线并等待下一轮重试",
-                                    action.Name);
-                                await Delay(250, _ct);
-                                break;
-                            }
-
-                            if (_fightEndFlag)
-                            {
-                                break;
-                            }
-
-                            // 确保E技能释放成功
-                            var actionConfirmed = true;
-                            if (action.EnsureCast)
-                            {
-                                var characterName = string.IsNullOrEmpty(action.Character)
-                                    ? _currentAvatarName
-                                    : action.Character;
-                                var avatar = combatScenes.SelectAvatar(characterName);
-                                if (avatar != null)
-                                {
-                                    var imageAfterAction = CaptureToRectArea();
-                                    try
-                                    {
-                                        var retry = 5;
-                                        var cooldownConfirmed = await AutoFightSkill.AvatarSkillAsync(
-                                            Logger, avatar, false, 1, _ct, imageAfterAction);
-                                        while (!cooldownConfirmed && retry > 0)
-                                        {
-                                            Logger.LogWarning("{Name} 未检测到技能冷却，重新执行", action.Name);
-                                            Simulation.ReleaseAllKey();
-                                            Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
-                                            Simulation.SendInput.SimulateAction(GIActions.Drop);
-                                            await Delay(200, _ct);
-                                            if (!await ExecuteAction(
-                                                    combatScenes,
-                                                    action,
-                                                    () => RunPendingFinishCheckAsync(),
-                                                    guardianAvatar,
-                                                    guardianSkillHandledForAction))
-                                            {
-                                                actionConfirmed = false;
-                                                break;
-                                            }
-                                            var previousImage = imageAfterAction;
-                                            imageAfterAction = CaptureToRectArea();
-                                            previousImage.Dispose();
-                                            await Task.Delay(30, _ct);
-                                            retry--;
-                                            cooldownConfirmed = await AutoFightSkill.AvatarSkillAsync(
-                                                Logger, avatar, false, 1, _ct, imageAfterAction);
-                                        }
-                                        actionConfirmed &= cooldownConfirmed;
-                                    }
-                                    finally
-                                    {
-                                        imageAfterAction.Dispose();
-                                    }
-                                }
-                            }
-
-                            if (!actionConfirmed)
-                            {
-                                Logger.LogWarning(
-                                    "自动战斗动作 {Name} 未确认技能进入冷却，后推时间线并等待下一轮重试",
-                                    action.Name);
-                                await Delay(250, _ct);
-                                break;
-                            }
-
-                            evaluator.UpdateLastExecTime(action.Index, action.Name);
-                            lastExecutedAction = action;
-                            anyExecuted = true;
-                            lastFightName = action.Character ?? "";
-
-                            if (_fightEndFlag) break;
-
-                            // 执行完第一个满足条件的动作后重新判断
-                            break;
-                        }
-
-                        if (fightEndFlag || _fightEndFlag) break;
-
-                        if (!_fightEndFlag && AutoFightParam.ShouldRunPeriodicFinishCheck(
-                                fightTimeoutEnabled,
-                                _taskParam.FightFinishDetectEnabled,
-                                periodicFinishCheckStopwatch.Elapsed,
-                                periodicFinishCheckInterval))
-                        {
-                            _periodicFinishCheckRequested = true;
-                        }
-
-                        fightEndFlag = await RunPendingFinishCheckAsync(
-                            BoundedSeekPolicy.CanSeekAtJsonActionBoundary(
-                                actionCompleted: true));
-
-                        if (fightEndFlag || _fightEndFlag) break;
-
-                        if (!anyExecuted)
-                        {
-                            await Delay(200, _ct);
-                        }
+                        var hostResult = await battleHost.AdvanceAsync(flow, cts2.Token);
+                        lastFightName = flow.Context.LastObservedActor ?? lastFightName;
+                        AutoFightTask.TraceFlowHost(_finishDetectConfig, flow, false, false, battleHost);
+                        if (NativeCombatBattleHostIo.ApplyResult(battleHost, hostResult, _finishDetectConfig)) break;
                     }
                 }
                 catch (Exception e)
@@ -714,117 +344,14 @@ public class AutoFightJsonTask : ISoloTask
         return command.Method == Method.Burst || command.Args.Contains("q") || command.Args.Contains("Q");
     }
 
-    /// <summary>执行单个 JSON 动作节点</summary>
-    private async Task<bool> ExecuteAction(
-        CombatScenes combatScenes,
-        JsonAction action,
-        Func<Task<bool>> runPendingFinishCheckAsync,
-        Avatar? guardianAvatar = null,
-        bool guardianSkillHandled = false)
-    {
-        try
-        {
-            var character = string.IsNullOrEmpty(action.Character)
-                ? _currentAvatarName
-                : action.Character;
-
-            var commands = CombatScriptParser.ParseLinePart(action.Action, character);
-
-            // 执行前输出日志
-            LogActionOnce(action.Name);
-
-            CombatCommand? lastSubCmd = null;
-            foreach (var cmd in commands)
-            {
-                if (_ct.IsCancellationRequested) return false;
-
-                if (GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill(
-                        guardianSkillHandled,
-                        cmd.Name == guardianAvatar?.Name,
-                        cmd.Method == Method.Skill,
-                        guardianAvatar?.LastConfirmedSkillCastAtUtc ?? default,
-                        _taskParam.GuardianShieldDurationSeconds,
-                        DateTime.UtcNow,
-                        refreshRequested: cmd.Args?.Contains("refresh") == true))
-                {
-                    Logger.LogInformation(
-                        "盾奶位 {GuardianAvatar} 当前护盾仍在持续，跳过 JSON 策略中重复 E 子命令",
-                        guardianAvatar!.Name);
-                    continue;
-                }
-
-                if (!cmd.Execute(combatScenes, lastSubCmd))
-                {
-                    Logger.LogWarning(
-                        "自动战斗动作 {Name} 的角色切换未确认成功，停止剩余子命令",
-                        action.Name);
-                    return false;
-                }
-                lastSubCmd = cmd;
-
-                // 条件执行历史只能记录确认的 Q，不能让 since/count 把漏放当成已施放。
-                if (cmd.Method == Method.Burst && cmd.LastBurstResult != BurstCastResult.Confirmed)
-                    return false;
-
-                if (_fightEndFlag) break;
-
-                // 仅由 check 指令触发战斗结束检测
-                if (cmd.Method == Method.Check && _taskParam.FightFinishDetectEnabled)
-                {
-                    _finishCheckRequested = true;
-                    if (await runPendingFinishCheckAsync())
-                    {
-                        Logger.LogInformation("{Name} 检测到战斗结束", action.Name);
-                        break;
-                    }
-                }
-            }
-
-            // 更新当前角色名，供后续无指定角色动作使用
-            _currentAvatarName = character;
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (RetryException)
-        {
-            // 复活/恢复信号必须传递给 PathExecutor，以便重跑当前路径段。
-            throw;
-        }
-        catch (Exception e)
-        {
-            Logger.LogError("自动战斗：{Name} 执行失败：{Msg}", action.Name, e.Message);
-            throw;
-        }
-        finally
-        {
-            Simulation.ReleaseAllKey();
-        }
-    }
-
-    /// <summary>日志防刷：同一动作名在1秒内至多输出一次日志</summary>
-    private void LogActionOnce(string actionName)
-    {
-        if (actionName == _lastLoggedActionName && (DateTime.Now - _lastLogTime).TotalSeconds < 1)
-        {
-            return;
-        }
-        _lastLoggedActionName = actionName;
-        _lastLogTime = DateTime.Now;
-        Logger.LogInformation("自动战斗：{Name}", actionName);
-    }
 
     /// <summary>执行战斗前动作</summary>
-    private async Task RunPreActions(CombatScenes combatScenes, ConditionEvaluator evaluator)
+    private async Task RunPreActions(CombatScenes combatScenes)
     {
         if (_strategy.Info.PreActions == null || _strategy.Info.PreActions.Count == 0)
             return;
 
         Logger.LogInformation("JSON 策略：执行战斗前动作");
-        using var capture = CaptureToRectArea();
-        evaluator.SetCachedCapture(capture);
 
         await RunPreActionSequenceAsync(_strategy.Info.PreActions, async preAction =>
         {

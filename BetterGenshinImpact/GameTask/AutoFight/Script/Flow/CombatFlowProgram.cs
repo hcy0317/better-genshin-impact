@@ -53,6 +53,7 @@ public sealed partial class CombatFlowProgram
     public IReadOnlyList<string> Diagnostics => _diagnostics;
     public IReadOnlyCollection<string> Actors { get; private set; } = Array.Empty<string>();
     public bool Loop { get; private set; }
+    internal bool LegacyOutcomePolicy { get; private set; }
     internal void AllowHostLoop(bool loop) => Loop |= loop;
 
     public static CombatFlowProgram Compile(string text, SkillCatalogSnapshot? database = null) => Compile(CombatScriptParser.ParseContext(text), database);
@@ -62,7 +63,8 @@ public sealed partial class CombatFlowProgram
         script = new(new HashSet<string>(script.AvatarNames), script.CombatCommands.Select(command => new CombatCommand(command)).ToList());
         CombatFlowCompatibility.Compile(script.CombatCommands);
         foreach (var command in script.CombatCommands) CombatParameterRegistry.Validate(command);
-        var program = new CombatFlowProgram { Actors = script.AvatarNames.ToArray() };
+        var program = new CombatFlowProgram { Actors = script.AvatarNames.ToArray(),
+            LegacyOutcomePolicy = script.CombatCommands.Any(command => command.LegacyOutcomePolicy) };
         var stack = new Stack<CombatFlowBlock>();
         stack.Push(program.Root);
         var executableSeen = false;
@@ -190,6 +192,9 @@ public sealed partial class CombatFlowProgram
                     FieldSource(durationFact, durationKey) ?? (fallback?.Duration != null ? "strategy:" + timingName : null));
             program._recordSources[command] = new(command.Name, command.Method.Alias[0], effect?.Id,
                 fact?.Revision, fact?.Id, effect?.Capability, effect?.EndsOnSwitch ?? false, effect?.Scope);
+            if (command.GuardianDurationLimit is > 0 && program._resolvedTimings.TryGetValue(command, out var guardianTiming))
+                program._resolvedTimings[command] = guardianTiming with
+                { Duration = Math.Min(guardianTiming.Duration ?? command.GuardianDurationLimit.Value, command.GuardianDurationLimit.Value) };
             if (form != null)
                 program._refreshes[command] = form.Refreshes
                     .Where(relation => relation.Verified && relation.Revision == fact!.Revision &&

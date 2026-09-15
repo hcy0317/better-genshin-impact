@@ -66,7 +66,7 @@ public class AutoComboBuildTask : ISoloTask
             throw new InvalidOperationException("未能返回主界面，无法识别队伍角色");
         }
 
-        var combatScenes = CombatScenes.GetCombatScenesWithRetry();
+        using var combatScenes = CombatScenes.GetCombatScenesWithRetry();
         var avatarNames = combatScenes.GetAvatars().Select(a => a.Name).ToList();
         logger.LogInformation("识别队伍：{Avatars}", string.Join("、", avatarNames));
         return avatarNames;
@@ -82,7 +82,7 @@ public class AutoComboBuildTask : ISoloTask
         AutoComboBuildBuilder? builder = null;
         try
         {
-            var chatClient = CreateChatClient(config, logger);
+            using var chatClient = CreateChatClient(config, logger);
 
             var blackboard = new Blackboard();
             builder = new AutoComboBuildBuilder().WithBlackboard(blackboard);

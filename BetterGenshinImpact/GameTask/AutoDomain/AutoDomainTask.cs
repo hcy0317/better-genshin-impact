@@ -892,39 +892,17 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
         combatScenes.BeforeTask(cts.Token);
         using var flow = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
-        // 战斗操作
-        Task CombatAsync()
+        using var host = NativeCombatBattleHostIo.CreateForExternalScene(flow, combatScenes);
+        async Task CombatAsync()
         {
             try
             {
                 AutoFightTask.FightStatusFlag = true;
                 while (!cts.Token.IsCancellationRequested)
                 {
-                    if (flow != null)
-                    {
-                        flow.Step(cts.Token);
-                        continue;
-                    }
-                    // 通用化战斗策略
-                    var strategyBlockSucceeded = true;
-                    CombatCommand? lastCommand = null;
-                    foreach (var command in combatCommands)
-                    {
-                        if (command.Execute(combatScenes, lastCommand))
-                        {
-                            lastCommand = command;
-                            continue;
-                        }
-                        Logger.LogWarning(
-                            "自动秘境角色 {Avatar} 未确认切换成功，后推当前策略块",
-                            command.Name);
-                        strategyBlockSucceeded = false;
-                        break;
-                    }
-                    if (!strategyBlockSucceeded)
-                    {
-                        Sleep(250, cts.Token);
-                    }
+                    var result = await host.AdvanceAsync(flow, cts.Token);
+                    if (result == CombatBattleHostResult.Unconfirmed)
+                        TaskExecutionScope.StopUnconfirmedCombat("场景战斗宿主未取得可靠进展：" + host.Reason);
                 }
             }
             catch (NormalEndException e)
@@ -944,69 +922,11 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 Simulation.ReleaseAllKey();
                 AutoFightTask.FightStatusFlag = false;
             }
-            return Task.CompletedTask;
         }
 
-        // 秘境战斗不用自动战斗的结束检测，但可以复用其寻敌/靠近辅助。
-        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync,
-            () => DomainEndDetectionTask(cts),
-            flow == null ? () => StartFightSeekAssistTask(cts) : null);
-    }
-
-    private Task StartFightSeekAssistTask(CancellationTokenSource cts)
-    {
-        var options = AutoDomainFightSeekOptions.FromAutoFightConfig(TaskContext.Instance().Config.AutoFightConfig);
-        if (!options.Enabled)
-        {
-            return Task.CompletedTask;
-        }
-
-        Logger.LogInformation("自动秘境：启用战斗寻敌辅助，间隔 {Interval:0.##} 秒，旋转因子 {RotaryFactor}",
-            options.Interval.TotalSeconds,
-            options.RotaryFactor);
-
-        AutoFightSeek.ResetSeekState();
-        return Task.Run(async () =>
-        {
-            try
-            {
-                if (options.InitialDelay > TimeSpan.Zero)
-                {
-                    await Delay((int)options.InitialDelay.TotalMilliseconds, cts.Token);
-                }
-
-                while (!cts.Token.IsCancellationRequested)
-                {
-                    try
-                    {
-                        // isEndCheck=true keeps this as seek-only assist and avoids party-screen finish checks.
-                        var result = await AutoFightSeek.SeekAndFightAsync(
-                            Logger,
-                            0,
-                            0,
-                            cts.Token,
-                            true,
-                            options.RotaryFactor);
-                        AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
-                            AutoFightSeek.RotationCount,
-                            result);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogDebug(ex, "自动秘境战斗寻敌辅助异常");
-                    }
-
-                    await Delay((int)options.Interval.TotalMilliseconds, cts.Token);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        });
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts),
+            () => AvatarRecognition.ContinuousTargetingLoopAsync(cts.Token, () => cts.IsCancellationRequested,
+                flow.Context.BattleId.ToString()));
     }
 
     /// <summary>
@@ -1063,6 +983,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         var jsonParam = new AutoFightParam
         {
             CombatStrategyPath = _jsonCombatStrategyPath!,
+            ExternalCompletionAuthority = true,
             FightFinishDetectEnabled = false,
             ExpBasedPickupEnabled = false,
             KazuhaPickupEnabled = false,

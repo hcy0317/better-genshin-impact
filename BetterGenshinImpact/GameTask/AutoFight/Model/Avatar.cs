@@ -126,7 +126,7 @@ public partial class Avatar
     {
         ct.ThrowIfCancellationRequested();
         await QBurstClassifierLazy.Value.WarmUpAsync(Logger, ct);
-        _ = OcrFactory.Paddle;
+        await OcrFactory.PreparePaddleAsync(ct);
         ct.ThrowIfCancellationRequested();
     }
 
@@ -292,7 +292,7 @@ public partial class Avatar
     /// tp 到七天神像恢复
     /// </summary>
     /// <param name="ct"></param>
-    /// <param name="retryException"></param>
+    /// <param name="ex"></param>
     /// <exception cref="RetryException"></exception>
     public static void TpForRecover(CancellationToken ct, Exception ex) => TpForRecover(ct, ex, null);
 

@@ -18,6 +18,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     private static readonly CombatInputCoordinator Coordinator = new();
     public TimeProvider Clock => TimeProvider.System;
     public ILogger Logger => TaskControl.Logger;
+    public ICombatHostInputDevice ControlDevice { get; } = new NativeCombatHostInputDevice();
     public CombatInputCoordinator InputCoordinator => Coordinator;
     public IReadOnlyList<NativeCombatActor> Actors => scenes.GetAvatars().Select(avatar => new NativeCombatActor(avatar.Name, avatar.Index)).ToArray();
     public double LastFinishCheckAge => Math.Max(0, (DateTime.Now - AutoFightTask.LastFightFinishCheckTime).TotalSeconds);
@@ -34,6 +35,8 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         return new CaptureContent(frame, 0, 0).CaptureRectArea;
     }
     public bool IsCombatHud(ImageRegion frame) => Bv.IsCombatHud(frame);
+    public CombatControlObservation ReadControl(ImageRegion frame) =>
+        CombatMotionReader.ReadControl(frame, combatHud: true, Core.Recognition.OCR.OcrFactory.Paddle);
     public bool IsMainUi(ImageRegion frame) => Bv.IsInMainUi(frame);
     public int ReadActive(ImageRegion frame, AvatarActiveCheckContext context) => scenes.GetActiveAvatarIndex(frame, context);
     public bool? IsActorActive(NativeCombatActor actor, ImageRegion frame)

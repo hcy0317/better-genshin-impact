@@ -463,4 +463,5 @@ public enum MotionStatus
     Normal, // 正常
     Fly, // 飞行
     Climb, // 攀爬
+    Unknown, // 没有足够的姿态证据，不能授权战斗移动
 }

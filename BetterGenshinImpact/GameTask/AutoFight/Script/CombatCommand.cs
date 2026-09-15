@@ -30,6 +30,9 @@ public class CombatCommand
     public int SourceLine { get; set; } = 1;
     public int SourceColumn { get; set; } = 1;
     internal bool IsCompilerGenerated { get; init; }
+    // 内部兼容政策，不增加外部语法；普通片段的真实失败不能按可选增强节点忽略。
+    internal bool LegacyOutcomePolicy { get; set; }
+    internal double? GuardianDurationLimit { get; init; }
     internal FormatException Error(string message, Exception? inner = null) =>
         SyntaxError(message, SourceLine, SourceColumn, inner, SourceFile);
 
@@ -57,6 +60,8 @@ public class CombatCommand
         SourceLine = source.SourceLine;
         SourceColumn = source.SourceColumn;
         IsCompilerGenerated = source.IsCompilerGenerated;
+        LegacyOutcomePolicy = source.LegacyOutcomePolicy;
+        GuardianDurationLimit = source.GuardianDurationLimit;
         foreach (var (key, value) in source.Options) Options.Add(key, value);
         Flags.UnionWith(source.Flags);
     }

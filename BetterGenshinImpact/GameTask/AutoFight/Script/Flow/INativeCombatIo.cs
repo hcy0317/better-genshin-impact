@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.Model.Area;
 using Microsoft.Extensions.Logging;
+using BetterGenshinImpact.GameTask.Common.BgiVision;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
@@ -22,6 +23,8 @@ internal interface INativeCombatIo
     IDisposable BeginExclusive(bool allowPassiveObservation);
     ImageRegion? Capture();
     bool IsCombatHud(ImageRegion frame);
+    CombatControlObservation ReadControl(ImageRegion frame) => default;
+    ICombatHostInputDevice? ControlDevice => null;
     bool IsMainUi(ImageRegion frame);
     int ReadActive(ImageRegion frame, AvatarActiveCheckContext context);
     bool? IsActorActive(NativeCombatActor actor, ImageRegion frame);

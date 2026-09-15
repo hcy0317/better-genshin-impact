@@ -84,6 +84,7 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
     public string CombatStrategyPath { get; set; }
 
     public bool FightFinishDetectEnabled { get; set; } = false;
+    internal bool ExternalCompletionAuthority { get; set; }
     public bool PickDropsAfterFightEnabled { get; set; } = true;
     public int PickDropsAfterFightSeconds { get; set; } = 15;
     public const int KazuhaGatheredDropsScanSeconds = 3;

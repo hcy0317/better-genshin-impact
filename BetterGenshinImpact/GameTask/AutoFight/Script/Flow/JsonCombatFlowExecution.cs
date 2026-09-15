@@ -19,6 +19,7 @@ public sealed class JsonCombatFlowExecution : IDisposable
     private readonly Root[] _roots;
     private readonly Entry[] _entries;
     private Root? _active;
+    private Entry? _preparing;
     private readonly HashSet<Root> _unproductiveRoots = [];
     private bool _closed;
     public CombatFlowContext Context => _battle.Context;
@@ -29,8 +30,10 @@ public sealed class JsonCombatFlowExecution : IDisposable
     public IReadOnlyCollection<string> Actors { get; }
     public IReadOnlyList<string> Diagnostics { get; }
     public bool IsAtomic => _active?.Execution.IsAtomic == true;
+    internal void InterruptAtomicForControl() => _active?.Execution.InterruptAtomicForControl();
     public bool HasPendingConfirmation => _active?.Execution.HasPendingConfirmation == true;
-    public bool IsAtRootBoundary => _active?.Execution.IsAtRootBoundary != false;
+    public bool HasAwaitingObservation => _preparing != null || _active?.Execution.HasAwaitingObservation == true;
+    public bool IsAtRootBoundary => _preparing == null && _active?.Execution.IsAtRootBoundary != false;
     public bool TakeFinishCheckRequest() => _battle.TakeFinishCheckRequest();
 
     public static bool RequiresFlow(JsonCombatStrategy strategy) => strategy.Info.Declarations.Count != 0 ||
@@ -39,13 +42,29 @@ public sealed class JsonCombatFlowExecution : IDisposable
             .Any(command => command.RequiresFlow));
 
     public JsonCombatFlowExecution(JsonCombatStrategy strategy, ICombatFlowGame game,
-        SkillCatalogSnapshot? database = null, TimeProvider? clock = null)
+        SkillCatalogSnapshot? database = null, TimeProvider? clock = null, IEnumerable<string>? availableActors = null)
+        : this(strategy, game, database, clock, availableActors, null) { }
+
+    internal JsonCombatFlowExecution(JsonCombatStrategy strategy, ICombatFlowGame game,
+        SkillCatalogSnapshot? database, TimeProvider? clock, IEnumerable<string>? availableActors, LegacyGuardianOptions? guardian)
     {
         _game = game;
+        var legacy = !RequiresFlow(strategy);
+        var party = availableActors?.ToHashSet(StringComparer.Ordinal);
+        bool Available(JsonAction action) => !legacy || party == null || string.IsNullOrWhiteSpace(action.Character) ||
+            action.Character == CombatScriptParser.CurrentAvatarName || party.Contains(DefaultAutoFightConfig.AvatarAliasToStandardName(action.Character));
+        if (legacy && strategy.Actions.Count == 0) throw new InvalidOperationException("EMPTY_FRAGMENT");
         var declarations = CombatScriptParser.ParseContext(string.Join("\n", strategy.Info.Declarations));
         var commands = declarations.CombatCommands.ToList();
         foreach (var command in commands) command.SourceFile = "JSON.info.declarations";
         var actors = declarations.AvatarNames.ToHashSet(StringComparer.Ordinal);
+        if (legacy && guardian != null)
+        {
+            actors.Add(guardian.Actor);
+            if (guardian.Duration is > 0)
+                commands.Add(new("", $"timing($legacy-guardian,duration={guardian.Duration.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)})")
+                { IsCompilerGenerated = true });
+        }
         var roots = new List<(JsonAction Action, string Name, bool Loop)>();
         for (var i = 0; i < strategy.Actions.Count; i++)
         {
@@ -63,9 +82,16 @@ public sealed class JsonCombatFlowExecution : IDisposable
                 throw new FormatException("JSON timing 应放入 info.declarations；strategy(loop=battle) 仅放在根 action 开头");
             foreach (var command in body)
             {
+                command.LegacyOutcomePolicy = legacy;
                 command.SourceFile = $"JSON.actions[{i}].action";
                 if (!command.Method.IsFlowControl && command.Name != CombatScriptParser.CurrentAvatarName) actors.Add(command.Name);
                 if (action.EnsureCast && command.Method == Method.Skill) command.Flags.Add("required");
+            }
+            if (legacy)
+            {
+                if (body.Count == 0) throw new InvalidOperationException("EMPTY_FRAGMENT");
+                body = LegacyCombatFlowAdapter.ProtectHeldInputSpans(body, "$legacy-json:" + i);
+                if (guardian != null) body = LegacyCombatFlowAdapter.ApplyGuardian(body, guardian, includeDeclaration: false);
             }
             var rootName = "$json-root:" + i;
             commands.Add(new("", $"segment(start,name={rootName},define)") { SourceFile = $"JSON.actions[{i}].action", IsCompilerGenerated = true });
@@ -111,14 +137,16 @@ public sealed class JsonCombatFlowExecution : IDisposable
             }
         }
         ValidateOpenings(program, roots, prepared);
-        Actors = program.Actors;
+        Actors = legacy && party != null ? program.Actors.Where(actor => actor == CombatScriptParser.CurrentAvatarName || party.Contains(actor)).ToArray() : program.Actors;
         Diagnostics = program.Diagnostics;
         _battle = new(clock);
         _roots = roots.Select(root => new Root(root.Action, new(program, game, _battle, program.Blocks[root.Name],
             root.Loop, root.Loop, yieldAtRootBoundaries: true, jsonAction: root.Action))).ToArray();
         _battle.History.KnownNames.UnionWith(names);
-        _entries = prepared.Select(entry => new Entry(_roots[entry.RootIndex], entry.Condition, entry.Priority))
+        _entries = prepared.Where(entry => Available(roots[entry.RootIndex].Action))
+            .Select(entry => new Entry(_roots[entry.RootIndex], entry.Condition, entry.Priority))
             .OrderBy(entry => entry.Priority).ToArray();
+        if (legacy && _entries.Length == 0) throw new InvalidOperationException("NO_APPLICABLE_ACTOR");
     }
 
     public async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct = default)
@@ -126,10 +154,18 @@ public sealed class JsonCombatFlowExecution : IDisposable
         ObjectDisposedException.ThrowIf(_closed, this);
         ct.ThrowIfCancellationRequested();
         _game.BeginStep();
-        if (_active == null || _active.Execution.IsAtRootBoundary && !_active.Execution.NeedsCompletion)
+        var resumedPreparation = _preparing != null;
+        if (_preparing is { } preparing)
         {
-            Root? Select() => _entries.FirstOrDefault(entry => !_unproductiveRoots.Contains(entry.Root) &&
-                entry.Root.Execution.EvaluateCondition(entry.Condition, entry.Root.Action.Character) == true)?.Root;
+            var eligible = await preparing.Root.Execution.EvaluateConditionAsync(preparing.Condition, preparing.Root.Action.Character, ct);
+            if (preparing.Root.Execution.HasAwaitingObservation) return new(CombatFlowResult.AwaitingObservation, false);
+            _preparing = null;
+            // 等待期间不换根；准备完成后沿用既有“同帧从最高优先级重算”的策略。
+            _active = SelectObservedRoot();
+            if (_active == null) return new(CombatFlowResult.Skipped, false);
+        }
+        if (!resumedPreparation && (_active == null || _active.Execution.IsAtRootBoundary && !_active.Execution.NeedsCompletion))
+        {
             var preparationVersion = _battle.ConditionPreparationVersion;
             async ValueTask<Root?> SelectWithPreparationAsync()
             {
@@ -137,18 +173,21 @@ public sealed class JsonCombatFlowExecution : IDisposable
                 {
                     if (_unproductiveRoots.Contains(entry.Root)) continue;
                     var eligible = await entry.Root.Execution.EvaluateConditionAsync(entry.Condition, entry.Root.Action.Character, ct);
+                    if (entry.Root.Execution.HasAwaitingObservation) { _preparing = entry; return null; }
                     // 准备已换人并清掉旧帧：从最高优先级纯重算，不连续准备多个目标。
-                    if (_battle.ConditionPreparationVersion != preparationVersion) return Select();
+                    if (_battle.ConditionPreparationVersion != preparationVersion) return SelectObservedRoot();
                     if (eligible == true) return entry.Root;
                 }
                 return null;
             }
             _active = await SelectWithPreparationAsync();
+            if (_preparing != null) return new(CombatFlowResult.AwaitingObservation, false);
             if (_active == null && _unproductiveRoots.Count != 0)
             {
                 // 其他可执行根均已获得机会；前次核心的空闲让出已完成，不再叠加固定 sleep。
                 _unproductiveRoots.Clear();
-                _active = _battle.ConditionPreparationVersion != preparationVersion ? Select() : await SelectWithPreparationAsync();
+                _active = _battle.ConditionPreparationVersion != preparationVersion ? SelectObservedRoot() : await SelectWithPreparationAsync();
+                if (_preparing != null) return new(CombatFlowResult.AwaitingObservation, false);
             }
         }
         if (_active == null)
@@ -169,6 +208,9 @@ public sealed class JsonCombatFlowExecution : IDisposable
         return step;
     }
 
+    private Root? SelectObservedRoot() => _entries.FirstOrDefault(entry => !_unproductiveRoots.Contains(entry.Root) &&
+        entry.Root.Execution.EvaluateCondition(entry.Condition, entry.Root.Action.Character) == true)?.Root;
+
     public void Dispose()
     {
         if (_closed) return;
@@ -176,6 +218,7 @@ public sealed class JsonCombatFlowExecution : IDisposable
         _battle.Dispose();
         foreach (var root in _roots) root.Execution.Dispose();
         _active = null;
+        _preparing = null;
         _unproductiveRoots.Clear();
     }
 

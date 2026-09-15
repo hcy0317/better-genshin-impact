@@ -136,9 +136,14 @@ public class AutoFightTask : ISoloTask
         internal bool EndConfirmed;
         internal CombatDecisionDiagnostics? Diagnostics;
 
-        public TaskFightFinishDetectConfig(AutoFightParam taskParam)
+        public TaskFightFinishDetectConfig(AutoFightParam taskParam) : this(taskParam.FinishDetectConfig)
         {
-            var finishDetectConfig = taskParam.FinishDetectConfig;
+            CombatTargetingMode = taskParam.CombatTargetingMode;
+            RotaryFactor = taskParam.RotaryFactor;
+        }
+
+        public TaskFightFinishDetectConfig(AutoFightParam.FightFinishDetectConfig finishDetectConfig)
+        {
             FastCheckEnabled = finishDetectConfig.FastCheckEnabled;
             CheckAfterSwitchAvatar = finishDetectConfig.CheckAfterSwitchAvatar;
             ParseCheckTimeString(finishDetectConfig.FastCheckParams, out CheckTime, CheckNames);
@@ -152,8 +157,6 @@ public class AutoFightTask : ISoloTask
             PaimonEndCheckEnabled = finishDetectConfig.PaimonEndCheckEnabled;
             // 派蒙检测延时（秒）限制在 0.05-0.4 之间，超出范围时修饰到对应上下限
             PaimonEndCheckDelayMs = (int)(Math.Clamp(finishDetectConfig.PaimonEndCheckDelay, 0.05, 0.4) * 1000);
-            CombatTargetingMode = taskParam.CombatTargetingMode;
-            RotaryFactor = taskParam.RotaryFactor;
         }
 
         internal TimeSpan GetSeekBudget()
@@ -301,70 +304,15 @@ public class AutoFightTask : ISoloTask
         using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         combatScenes.BeforeTask(cts2.Token);
-        using var flow = Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
-        using var battleHost = flow == null ? null : NativeCombatBattleHostIo.Create(flow, combatScenes, _taskParam);
-        if (flow != null) _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
+        using var flow = Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true, param: _taskParam);
+        using var battleHost = NativeCombatBattleHostIo.Create(flow, combatScenes, _taskParam);
+        _finishDetectConfig.FinishEvidenceId = flow.Context.BattleId.ToString();
         _finishDetectConfig.Diagnostics = new(Logger);
-        var fightTimeoutEnabled = AutoFightParam.IsTimeTimeoutEnabled(_taskParam.Timeout);
-        TimeSpan fightTimeout = fightTimeoutEnabled ? TimeSpan.FromSeconds(_taskParam.Timeout) : TimeSpan.Zero; // 战斗超时时间
-        Stopwatch timeoutStopwatch = Stopwatch.StartNew();
-
-        // 记录开战时间，供"开战前一段时间阻断战斗结束检查"使用
         FightStartTime = DateTime.Now;
-
-        Stopwatch checkFightFinishStopwatch = Stopwatch.StartNew();
-        TimeSpan checkFightFinishTime = AutoFightParam.NormalizeFinishCheckInterval(
-            TimeSpan.FromSeconds(_finishDetectConfig.CheckTime),
-            _finishDetectConfig.RotateFindEnemyEnabled); //检查战斗超时时间的超时时间
-
-
-        //战斗前检查，可做成配置
-        // if (await CheckFightFinish()) {
-        //     return;
-        // }
-        var fightEndFlag = false;
         var skipPostFightPickupFlag = false;
         string lastFightName = "";
-        var finishCheckRequested = false;
-        var periodicFinishCheckRequested = false;
-
-        //统计切换人打架次数
-        var countFight = 0;
-        
-        // 可以跳过的角色名,配置中有的和命令中有的取交
-        var canBeSkippedAvatarNames = combatScenes.UpdateActionSchedulerByCd(_taskParam.ActionSchedulerByCd)
-            .Where(s => commandAvatarNames.Contains(s)).WhereNotNull().ToList();
-        
-        //所有角色是否都可被跳过
-        var allCanBeSkipped = commandAvatarNames.All(a => canBeSkippedAvatarNames.Contains(a));
-        
-        var delayTime = _finishDetectConfig.DelayTime;
-        var detectDelayTime = _finishDetectConfig.DetectDelayTime;
-
-        async Task<bool> RunPendingFinishCheckAsync(bool allowSeek)
-        {
-            var shouldRunPeriodicCheck = periodicFinishCheckRequested && checkFightFinishStopwatch.Elapsed >= checkFightFinishTime;
-            if (!finishCheckRequested && !shouldRunPeriodicCheck)
-            {
-                return false;
-            }
-
-            finishCheckRequested = false;
-            periodicFinishCheckRequested = false;
-            checkFightFinishStopwatch.Restart();
-            return await CheckFightFinish(
-                _finishDetectConfig,
-                ct,
-                delayTime,
-                detectDelayTime,
-                allowSeek);
-        }
-        
-        //盾奶优先功能角色预处理
-        var guardianAvatar = string.IsNullOrWhiteSpace(_taskParam.GuardianAvatar) ? null : combatScenes.SelectAvatar(int.Parse(_taskParam.GuardianAvatar));
-        _finishDetectConfig.SeekBudgetProvider = () => AutoFightSkill.GetSafeSeekBudget(
-            guardianAvatar,
-            _taskParam.GuardianShieldDurationSeconds);
+        // 原CD配置仍更新角色数据；调度由统一内核的显式fast/wait负责。
+        combatScenes.UpdateActionSchedulerByCd(_taskParam.ActionSchedulerByCd);
         
         AutoFightSeek.ResetSeekState(); // 重置旋转次数与目标路线锁定
         
@@ -388,314 +336,10 @@ public class AutoFightTask : ISoloTask
                 
                 while (!cts2.Token.IsCancellationRequested)
                 {
-                    if (flow != null)
-                    {
-                        var hostResult = await battleHost!.AdvanceAsync(flow, cts2.Token);
-                        TraceFlowHost(_finishDetectConfig, flow, false, false, battleHost);
-                        if (NativeCombatBattleHostIo.ApplyResult(battleHost, hostResult, _finishDetectConfig)) break;
-                        continue;
-                    }
-                    // 所有战斗角色都可以被取消
-
-                    #region 本次战斗的跳过战斗判定
-
-                    // CD 只用于脚本显式 fast/wait 指令。不能因全队 E 冷却挂起
-                    // 整轮策略，否则普攻、Q 和移动也会一同被阻塞。
-
-                    var skipFightName = "";
-                    var guardianSkillHandledForCurrentBlock = false;
-                    var guardianBoundaryResolvedForCurrentBlock = false;
-
-                    #endregion
-                    
-                    for (var i = 0; i < combatCommands.Count; i++)
-                    {
-                        var command = combatCommands[i];
-                        var lastCommand = i == 0 ? null : combatCommands[i - 1];
-                        
-                        #region 盾奶位技能优先功能
-                        
-                        var skipModel = guardianAvatar != null && lastFightName != command.Name;
-                        var guardianSkillRequired = GuardianSkillSwitchPolicy.ShouldEnsureGuardianSkill(
-                            guardianBoundaryResolvedForCurrentBlock,
-                            skipModel);
-                        if (guardianSkillRequired)
-                        {
-                            var guardianAction = await AutoFightSkill.EnsureGuardianBoundaryAsync(
-                                guardianAvatar,
-                                _taskParam.GuardianAvatar,
-                                _taskParam.GuardianAvatarHold,
-                                _taskParam.GuardianCoverageMode,
-                                _taskParam.GuardianShieldDurationSeconds,
-                                ct,
-                                _taskParam.GuardianCombatSkip,
-                                _taskParam.BurstEnabled);
-                            if (guardianAction == GuardianBoundaryAction.Cancel)
-                            {
-                                ct.ThrowIfCancellationRequested();
-                            }
-                            if (guardianAction == GuardianBoundaryAction.FailCombat)
-                            {
-                                throw new InvalidOperationException(
-                                    $"盾奶位 {guardianAvatar.Name} 未能建立严格护盾覆盖");
-                            }
-                            guardianBoundaryResolvedForCurrentBlock =
-                                guardianAction is GuardianBoundaryAction.ProceedProtected or
-                                    GuardianBoundaryAction.ProceedUnprotected;
-                            guardianSkillHandledForCurrentBlock =
-                                guardianAction == GuardianBoundaryAction.ProceedProtected;
-                        }
-                        if (GuardianSkillSwitchPolicy.ShouldRetryBlock(
-                                guardianSkillRequired,
-                                guardianBoundaryResolvedForCurrentBlock))
-                        {
-                            Logger.LogWarning(
-                                "盾奶位 {GuardianAvatar} 未确认切换并释放战技，后推本轮全部策略后重试",
-                                guardianAvatar!.Name);
-                            lastFightName = "";
-                            await Delay(250, ct);
-                            break;
-                        }
-                        var avatar = combatScenes.SelectAvatar(command.Name);
-
-                        if (guardianSkillHandledForCurrentBlock &&
-                            guardianAvatar != null &&
-                            avatar?.Name != guardianAvatar.Name &&
-                            !GuardianSkillSwitchPolicy.IsKnownCoverageValid(
-                                guardianAvatar.LastConfirmedSkillCastAtUtc,
-                                _taskParam.GuardianShieldDurationSeconds,
-                                DateTime.UtcNow))
-                        {
-                            var nextGuardianSkillIndex = FindNextGuardianSkillCommandIndex(
-                                combatCommands,
-                                i,
-                                guardianAvatar.Name);
-                            if (nextGuardianSkillIndex > i)
-                            {
-                                Logger.LogInformation(
-                                    "盾奶位 {GuardianAvatar} 护盾即将到期，快进到策略中下一次 E 时机",
-                                    guardianAvatar.Name);
-                                // 从下一次策略 E 重新走边界确认，避免把已过期的本轮状态带过去。
-                                guardianBoundaryResolvedForCurrentBlock = false;
-                                guardianSkillHandledForCurrentBlock = false;
-                                lastFightName = "";
-                                Simulation.ReleaseAllKey();
-                                i = nextGuardianSkillIndex - 1;
-                                continue;
-                            }
-                            // 本轮已无补盾点时从下一轮重新建盾，不带着即将到期的覆盖继续输出。
-                            Simulation.ReleaseAllKey();
-                            lastFightName = "";
-                            break;
-                        }
-
-                        if (GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill(
-                                guardianSkillHandledForCurrentBlock,
-                                avatar?.Name == guardianAvatar?.Name,
-                                command.Method == Method.Skill,
-                                guardianAvatar?.LastConfirmedSkillCastAtUtc ?? default,
-                                _taskParam.GuardianShieldDurationSeconds,
-                                DateTime.UtcNow,
-                                refreshRequested: command.Args?.Contains("refresh") == true))
-                        {
-                            Logger.LogInformation(
-                                "盾奶位 {GuardianAvatar} 当前护盾仍在持续，跳过策略中重复 E 命令并继续后续动作",
-                                guardianAvatar!.Name);
-                            lastFightName = command.Name;
-                            continue;
-                        }
-                        
-                        #endregion
-                        
-                        #region 初始寻敌处理
-                        
-                        if (_finishDetectConfig.RotateFindEnemyEnabled && i == 0 && _taskParam.IsFirstCheck)
-                        {
-                            bool? result = null;
-                            using (AvatarRecognition.BeginExclusiveOperation())
-                            {
-                                try
-                                {
-                                    result = RunPassiveSeek(
-                                        _finishDetectConfig,
-                                        ct);
-                                }
-                                catch (Exception ex)
-                                {
-                                    Logger.LogError(ex, "SeekAndFightAsync 方法发生异常");
-                                    result = false;
-                                }
-                            }
-
-                            AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
-                                AutoFightSeek.RotationCount,
-                                result);
-                            fightEndFlag = result == true;
-                            if (fightEndFlag)
-                            {
-                                break;
-                            }
-                        }
-                        
-                        #endregion
-
-                        fightEndFlag = await RunPendingFinishCheckAsync(
-                            BoundedSeekPolicy.CanSeekAtTxtRoundBoundary(
-                                i,
-                                combatCommands.Count,
-                                beforeCommand: true));
-                        if (fightEndFlag)
-                        {
-                            break;
-                        }
-                        
-                        if (avatar is null || (avatar.Name == guardianAvatar?.Name && (_taskParam.GuardianCombatSkip || _taskParam.BurstEnabled)))
-                        {
-                            continue;
-                        }
-
-                        #region 每个命令的跳过战斗判定
-
-                        // 判断是否满足跳过条件:
-                        // 1.上一次成功执行命令的最后执行角色不是这次的执行角色
-                        // 2.这次执行的角色包含在可跳过的角色列表中
-                        if (!
-                                //上次命令的执行角色和这次相同
-                                (lastFightName == command.Name &&
-                                 // 且未跳过(成功执行)了,则不进行跳过判定
-                                 skipFightName == "")
-                            &&
-                            // 且这次执行的角色包含在可跳过的角色列表中
-                            (!allCanBeSkipped && canBeSkippedAvatarNames.Contains(command.Name))
-                           )
-                        {
-                            var cd = avatar.GetSkillCdSeconds();
-                            if (cd > 0)
-                            {
-                                // 如果上一次该角色已经被跳过，则不进行log输出，以免刷屏
-                                if (skipFightName != command.Name)
-                                {
-                                    var manualSkillCd = avatar.ManualSkillCd;
-                                    if (manualSkillCd > 0)
-                                    {
-                                        Logger.LogInformation("{commandName}cd冷却为{skillCd}秒,剩余{Cd}秒,跳过此次行动",
-                                            command.Name,
-                                            manualSkillCd, Math.Round(cd, 2));
-                                    }
-                                    else
-                                    {
-                                        Logger.LogInformation("{CommandName}cd冷却剩余{Cd}秒,跳过此次行动", command.Name,
-                                            Math.Round(cd, 2));
-                                    }
-                                }
-
-                                // 避免重复log提示
-                                skipFightName = command.Name;
-                                continue;
-                            }
-
-                            // 表示这次执行命令没有跳过
-                            skipFightName = "";
-                        }
-
-                        #endregion
-
-                        if (AutoFightParam.ShouldStopForCombatTimeout(fightTimeoutEnabled, timeoutStopwatch.Elapsed, fightTimeout, AutoFightSeek.RotationCount))
-                        {
-                            Logger.LogInformation(AutoFightParam.IsSeekRotationLimitReached(AutoFightSeek.RotationCount) ? "旋转次数达到上限，战斗结束" : "战斗超时结束");
-                            fightEndFlag = true;
-                            skipPostFightPickupFlag = AutoFightParam.ShouldSkipPostFightPickupAfterForcedStop(fightTimeoutEnabled, timeoutStopwatch.Elapsed, fightTimeout, AutoFightSeek.RotationCount);
-                            break;
-                        }
-
-                        #region Q前寻敌处理
-                        if (_finishDetectConfig.RotateFindEnemyEnabled && _taskParam.CheckBeforeBurst && (command.Method == Method.Burst || command.Args.Contains("q") || command.Args.Contains("Q")))
-                        {
-                            finishCheckRequested = true;
-                        }
-                        fightEndFlag = await RunPendingFinishCheckAsync(
-                            BoundedSeekPolicy.CanSeekAtTxtRoundBoundary(
-                                i,
-                                combatCommands.Count,
-                                beforeCommand: true));
-                        if (fightEndFlag)
-                        {
-                            break;
-                        }
-                        #endregion
-
-                        if (!command.Execute(combatScenes, lastCommand))
-                        {
-                            Logger.LogWarning(
-                                "角色 {Avatar} 未确认切换成功，后推本轮剩余策略并从盾位重新开始",
-                                command.Name);
-                            lastFightName = "";
-                            break;
-                        }
-                        //统计战斗人次
-                        if (i == combatCommands.Count - 1 || command.Name != combatCommands[i + 1].Name)
-                        {
-                            countFight++;
-                        }
-
-                        #region check动作触发战斗结束检测
-                        if (command.Method == Method.Check && _taskParam.FightFinishDetectEnabled)
-                        {
-                            finishCheckRequested = true;
-                        }
-                        #endregion
-
-                        lastFightName = command.Name;
-                        if (!fightEndFlag && _taskParam is { FightFinishDetectEnabled: true })
-                        {
-                            //处于最后一个位置，或者当前执行人和下一个人名字不一样的情况，满足一定条件(开启快速检查，并且检查时间大于0或人名存在配置)检查战斗
-                            if (i == combatCommands.Count - 1
-                                || (
-                                    _finishDetectConfig.FastCheckEnabled &&
-                                    command.Name != combatCommands[i + 1].Name &&
-                                    ((_finishDetectConfig.CheckTime > 0 &&
-                                      checkFightFinishStopwatch.Elapsed > checkFightFinishTime)
-                                     || _finishDetectConfig.CheckNames.Contains(command.Name))
-                                ))
-                            {
-                                if (_finishDetectConfig.DelayTimes.TryGetValue(command.Name, out var time))
-                                {
-                                    delayTime = time;
-                                    // Logger.LogInformation($"{command.Name}结束后，延时检查为{delayTime}毫秒");
-                                }
-                                else
-                                {
-                                    // Logger.LogInformation($"延时检查为{delayTime}毫秒");
-                                }
-                                
-                                if (_finishDetectConfig.CheckNames.Contains(command.Name))
-                                {
-                                    finishCheckRequested = true;
-                                }
-                                else
-                                {
-                                    periodicFinishCheckRequested = true;
-                                }
-                            }
-                        }
-
-                        fightEndFlag = await RunPendingFinishCheckAsync(
-                            BoundedSeekPolicy.CanSeekAtTxtRoundBoundary(
-                                i,
-                                combatCommands.Count,
-                                beforeCommand: false));
-
-                        if (fightEndFlag)
-                        {
-                            break;
-                        }
-                    }
-
-
-                    if (fightEndFlag)
-                    {
-                        break;
-                    }
+                    var hostResult = await battleHost.AdvanceAsync(flow, cts2.Token);
+                    lastFightName = flow.Context.LastObservedActor ?? lastFightName;
+                    TraceFlowHost(_finishDetectConfig, flow, false, false, battleHost);
+                    if (NativeCombatBattleHostIo.ApplyResult(battleHost, hostResult, _finishDetectConfig)) break;
                 }
             }
             catch (Exception e)
@@ -805,6 +449,7 @@ public class AutoFightTask : ISoloTask
             }
         }
 
+        var countFight = flow.Context.ActorTurns;
         if (_taskParam.BattleThresholdForLoot>=2 && countFight < _taskParam.BattleThresholdForLoot)
         {
             Logger.LogInformation($"战斗人次（{countFight}）低于配置人次（{_taskParam.BattleThresholdForLoot}），跳过此次拾取！");
@@ -1279,7 +924,7 @@ public class AutoFightTask : ISoloTask
             return $"root={flow.IsAtRootBoundary} atomic=False pendingConfirmation={flow.HasPendingConfirmation} atomicSteps={diagnostics.AtomicSteps} requested={requested} periodicDue={periodicDue} " +
                 $"freshTarget={fresh} ageMs={age:F0} healthBar={observation.HasNormalHealthBar} skipVisible={config.SkipFightEndCheckWhenEnemyVisible} rotate={config.RotateFindEnemyEnabled} mode={config.CombatTargetingMode} " +
                 (host != null
-                    ? $"hostState={host.State} hostReason={host.Reason} cameraRequests={host.CameraRequests} approachRequests={host.ApproachRequests} actualMotion=unknown"
+                    ? $"hostState={host.State} hostReason={host.Reason} cameraRequests={host.CameraRequests} approachRequests={host.ApproachRequests} actualMotion={host.LastMotion}"
                     : $"seekCalls={diagnostics.SeekCalls} lastSeek={diagnostics.LastSeek} cameraPulse={diagnostics.LastCameraPulse} approachInput=False");
         });
     }

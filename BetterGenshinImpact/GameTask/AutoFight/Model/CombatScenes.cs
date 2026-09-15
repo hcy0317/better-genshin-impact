@@ -25,7 +25,6 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
-using BetterGenshinImpact.Core.Recognition;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Model;
@@ -438,10 +437,17 @@ public class CombatScenes : IDisposable
         for (var attempt = 1; attempt <= maxRetries; attempt++)
         {
             using var imageRegion = CaptureToRectArea();
-            var combatScenes = new CombatScenes().InitializeTeam(imageRegion);
-            if (combatScenes.CheckTeamInitialized())
+            var combatScenes = new CombatScenes();
+            try
             {
-                return combatScenes;
+                combatScenes.InitializeTeam(imageRegion);
+                if (combatScenes.CheckTeamInitialized())
+                    return combatScenes;
+            }
+            catch
+            {
+                combatScenes.Dispose();
+                throw;
             }
             combatScenes.Dispose();
             if (attempt < maxRetries)
