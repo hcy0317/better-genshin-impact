@@ -431,14 +431,23 @@ public partial class CommonSettingsPageViewModel : ViewModel
     [RelayCommand]
     private async Task OnGameLangSelectionChanged(KeyValuePair<string, string> type)
     {
-        await App.ServiceProvider.GetRequiredService<OcrFactory>().Unload();
+        await RetireOcrAsync();
     }
 
     [RelayCommand]
     private async Task OnPaddleOcrModelConfigChanged(PaddleOcrModelConfig value)
     {
         Config.OtherConfig.OcrConfig.PaddleOcrModelConfig = value;
-        await App.ServiceProvider.GetRequiredService<OcrFactory>().Unload();
+        await RetireOcrAsync();
+    }
+
+    private static async Task RetireOcrAsync()
+    {
+        try { await App.ServiceProvider.GetRequiredService<OcrFactory>().Unload(); }
+        catch (Exception error)
+        {
+            await ThemedMessageBox.ErrorAsync("OCR尚未完成卸载，新识别已暂停。请重试切换或正常关闭后重试。\n" + error.Message);
+        }
     }
 
     [RelayCommand]

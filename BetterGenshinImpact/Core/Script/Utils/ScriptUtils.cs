@@ -27,10 +27,13 @@ public class ScriptUtils
         path = path.Replace('\\', '/');
 
         // 组合并获取绝对路径
-        var fullPath = Path.GetFullPath(Path.Combine(root, path));
+        var rootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        var fullPath = Path.GetFullPath(Path.Combine(rootPath, path));
+        var prefix = Path.EndsInDirectorySeparator(rootPath) ? rootPath : rootPath + Path.DirectorySeparatorChar;
 
         // 防止越界访问
-        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        if (!fullPath.Equals(rootPath, StringComparison.OrdinalIgnoreCase) &&
+            !fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException($"文件路径 '{path}' 越界访问!");
         }

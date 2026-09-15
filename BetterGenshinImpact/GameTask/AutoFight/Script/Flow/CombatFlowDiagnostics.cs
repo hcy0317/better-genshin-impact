@@ -117,9 +117,16 @@ internal sealed class CombatFlowDiagnostics
 /// <summary>仅测量已有游戏边界调用，不额外截图/识别/输入，也不把缓存查询计为实际 OCR。</summary>
 internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagnostics diagnostics) : ICombatFlowGame
 {
+    public async ValueTask<CombatSkillRecovery> RecoverExpiredSkillStepAsync(CombatFlowAction action, CancellationToken ct)
+    {
+        var start = Stopwatch.GetTimestamp();
+        try { return await game.RecoverExpiredSkillStepAsync(action, ct).ConfigureAwait(false); }
+        finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds); }
+    }
     public void BeginStep() => game.BeginStep();
     public void CheckDefeated(CancellationToken ct) => game.CheckDefeated(ct);
     public bool HasPendingSkill(CombatFlowAction action) => game.HasPendingSkill(action);
+    public void CancelObservation(CombatFlowAction action) => game.CancelObservation(action);
     public ValueTask WaitAfterFailedPassAsync(CancellationToken ct) => game.WaitAfterFailedPassAsync(ct);
     public async ValueTask<CombatSkillAttempt?> TryRecoverExpiredSkillAsync(CombatFlowAction action, CancellationToken ct)
     {
@@ -144,6 +151,12 @@ internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagn
     {
         var start = Stopwatch.GetTimestamp();
         try { await game.PrepareObservationAsync(action, function, ct).ConfigureAwait(false); }
+        finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds, action); }
+    }
+    public async ValueTask<CombatObservationPreparation> PrepareObservationStepAsync(CombatFlowAction action, string function, CancellationToken ct)
+    {
+        var start = Stopwatch.GetTimestamp();
+        try { return await game.PrepareObservationStepAsync(action, function, ct).ConfigureAwait(false); }
         finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds, action); }
     }
     public async ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)

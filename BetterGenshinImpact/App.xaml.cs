@@ -51,16 +51,25 @@ namespace BetterGenshinImpact;
 
 public partial class App : Application
 {
+    private static ApplicationLogPipeline? _logPipeline;
     private ApplicationShutdownSequence? _shutdownSequence;
     public static bool ShutdownPrepared => (Current as App)?._shutdownSequence?.Prepared == true;
 
     public static Task RequestShutdownAsync(int exitCode = 0)
     {
         if (Current is not App app) return Task.CompletedTask;
+        Core.Script.CancellationContext.Instance.CheckLifecycleAccess();
+        // 在投递到UI队列前就停止准入，避免旧run完成动作与新run启动竞争。
+        GameTask.Common.TaskControl.SetShuttingDown(true);
         if (!app.Dispatcher.CheckAccess())
-            return app.Dispatcher.InvokeAsync(() => RequestShutdownAsync(exitCode)).Task.Unwrap();
-        app._shutdownSequence ??= new ApplicationShutdownSequence(app.DrainBeforeExitAsync, () => app.Shutdown(exitCode));
-        return app._shutdownSequence.RequestAsync();
+            return app.Dispatcher.InvokeAsync(() => app.RequestShutdownOnDispatcher(exitCode)).Task.Unwrap();
+        return app.RequestShutdownOnDispatcher(exitCode);
+    }
+
+    private Task RequestShutdownOnDispatcher(int exitCode)
+    {
+        _shutdownSequence ??= new ApplicationShutdownSequence(DrainBeforeExitAsync, () => Shutdown(exitCode));
+        return _shutdownSequence.RequestAsync();
     }
 
     public static void RequestShutdown(int exitCode = 0)
@@ -75,7 +84,7 @@ public partial class App : Application
     {
         GameTask.Common.TaskControl.SetShuttingDown(true);
         TaskTriggerDispatcher.Existing?.StopTimer();
-        Core.Script.CancellationContext.Instance.Cancel();
+        await Core.Script.CancellationContext.Instance.CancelAsync();
         try { await GameTask.Common.TaskControl.WaitForTaskDrainAsync(TimeSpan.FromSeconds(20)); }
         catch
         {
@@ -85,9 +94,13 @@ public partial class App : Application
         try
         {
             if (TaskTriggerDispatcher.Existing is { } dispatcher) await dispatcher.DisposeAsync();
+            // OCR冷启动也可能来自后台预热；保持DI/日志和UI仍可用，先异步等构造与借用退役。
+            await _host.Services.GetRequiredService<OcrFactory>().DisposeAsync();
             // WPF仍能调度时完成Host停止；不能把异步排空留给Shutdown后的async-void OnExit。
             await _host.StopAsync();
             TempManager.CleanUp();
+            if (_logPipeline != null)
+                await _logPipeline.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
             _host.Dispose();
         }
         finally { GameTask.Common.TaskControl.TaskSemaphore.Release(); }
@@ -124,7 +137,7 @@ public partial class App : Application
                         .Enrich.WithProperty("BgiInstance", instanceIdentity)
                         .WriteTo.File(logFile,
                             outputTemplate:
-                            "[{Timestamp:HH:mm:ss.fff}] [{Level:u3}] [{BgiInstance}] {SourceContext}{NewLine}{Message}{NewLine}{Exception}{NewLine}",
+                            "[{Timestamp:HH:mm:ss.fff}] [{Level:u3}] [{BgiInstance}] {SourceContext} logQueueMs={LogQueueMs:0.0}{NewLine}{Message}{NewLine}{Exception}{NewLine}",
                             rollingInterval: RollingInterval.Day,
                             shared: true,
                             retainedFileCountLimit: 31,
@@ -145,7 +158,8 @@ public partial class App : Application
                         () => all.MaskWindowConfig is { MaskEnabled: true, ShowLogBox: true }),
                     LogEventLevel.Information);
 
-                Log.Logger = loggerConfiguration.CreateLogger();
+                _logPipeline = new ApplicationLogPipeline(loggerConfiguration);
+                Log.Logger = _logPipeline.Logger;
                 services.AddLogging(c => c.AddSerilog());
 
                 services.AddLocalization();

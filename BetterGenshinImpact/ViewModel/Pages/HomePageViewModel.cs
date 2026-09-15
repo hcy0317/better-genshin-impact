@@ -388,6 +388,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
     private Task? _stopTask;
     private Task StopAsync()
     {
+        CancellationContext.Instance.CheckLifecycleAccess();
         lock (this)
         {
             if (_stopTask?.IsFaulted == true) _stopTask = null;
@@ -402,7 +403,7 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             using var admission = TaskControl.PauseTaskAdmission();
             _mouseKeyMonitor.Unsubscribe();
             _taskDispatcher.StopTimer();
-            CancellationContext.Instance.Cancel();
+            await CancellationContext.Instance.CancelAsync();
             // 停止按钮和真正退出一样，先等任务释放输入，再释放它使用的截图器。
             await TaskControl.WaitForTaskDrainAsync(TimeSpan.FromSeconds(20));
             try { await _taskDispatcher.StopAsync(); }

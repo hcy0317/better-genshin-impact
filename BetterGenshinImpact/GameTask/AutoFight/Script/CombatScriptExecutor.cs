@@ -52,18 +52,11 @@ public static class CombatScriptExecutor
 
             try
             {
-                using var flow = Flow.NativeCombatFlowRunner.Create(combatScript.CombatCommands, combatScenes, loop: false);
-                if (flow != null)
-                {
-                    var result = await flow.RunRoundAsync(ct);
-                    var outcome = FromFlowResult(result);
-                    outcome.EnsureCanContinue();
-                    return outcome;
-                }
-                var legacy = await ExecuteLegacyAsync(combatScript, combatScenes.GetAvatars().Select(a => a.Name),
-                    (command, previous, _) => command.ExecuteWithResult(combatScenes, previous), mode, logger, ct);
-                legacy.EnsureCanContinue();
-                return legacy;
+                using var flow = Flow.NativeCombatFlowRunner.Create(combatScript.CombatCommands, combatScenes, loop: false, mode);
+                var result = await flow.RunRoundAsync(ct);
+                var outcome = FromFlowResult(result);
+                outcome.EnsureCanContinue();
+                return outcome;
             }
             catch (OperationCanceledException)
             {

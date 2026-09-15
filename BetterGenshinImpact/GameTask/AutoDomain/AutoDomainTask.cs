@@ -44,6 +44,9 @@ using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Reward;
 using Compunet.YoloSharp;
 using Microsoft.Extensions.DependencyInjection;
+using BetterGenshinImpact.GameTask.AutoCombo;
+using BetterGenshinImpact.GameTask.AutoCombo.ComboBuild;
+using BetterGenshinImpact.GameTask.AutoCombo.ComboRun;
 using BetterGenshinImpact.GameTask.AutoFight;
 
 namespace BetterGenshinImpact.GameTask.AutoDomain;
@@ -60,6 +63,15 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
     private readonly CombatScriptBag? _combatScriptBag;
     private readonly string? _jsonCombatStrategyPath;
+
+    /// <summary>策略为自动连招（LLM 行为树）时为 true：进本前调用 LLM 建树，循环战斗中 Tick 该树</summary>
+    private readonly bool _useComboStrategy;
+
+    /// <summary>后台建树任务：队伍识别后启动，与传送进本并行，战斗启动前等待其完成</summary>
+    private Task<ComboTreeSession>? _comboBuildTask;
+
+    /// <summary>后台建树的取消源：链接主令牌，秘境流程结束时取消，避免宿主异常退出后建树白跑</summary>
+    private CancellationTokenSource? _comboBuildCts;
     private readonly Dictionary<string, int> _rewardSummary = new();
 
     private CancellationToken _ct;
@@ -95,7 +107,12 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
         _config = TaskContext.Instance().Config.AutoDomainConfig;
 
-        if (_taskParam.CombatStrategyPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        if (AutoFightParam.ComboStrategyName.Equals(_taskParam.CombatStrategyPath))
+        {
+            _useComboStrategy = true;
+            Logger.LogInformation("自动秘境：检测到自动连招策略，将使用LLM行为树");
+        }
+        else if (_taskParam.CombatStrategyPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
         {
             _jsonCombatStrategyPath = _taskParam.CombatStrategyPath;
             Logger.LogInformation("自动秘境：检测到JSON策略文件，将使用JSON战斗引擎");
@@ -176,56 +193,102 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         Init();
         Notify.Event(NotificationEvent.DomainStart).Success("自动秘境启动");
 
-        // 复活重试
-        var maximumAttempts = Math.Max(1, _config.ReviveRetryCount);
-        for (var i = 0; i < maximumAttempts; i++)
+        try
         {
-            try
+            // 只在显式选择自动连招时建树，与进本并行；退出前必须排空后台任务。
+            if (_useComboStrategy)
             {
-                await DoDomain();
-                // 其他场景不重试
-                break;
+                var avatarNames = await AutoComboBuildTask.EnsureMainUiAndRecognizeTeamAsync(Logger, ct);
+                Logger.LogInformation("自动秘境：后台启动 LLM 建树");
+                var config = TaskContext.Instance().Config.AutoComboBuildConfig;
+                _comboBuildCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                _comboBuildTask = AutoComboBuildTask.BuildComboTreeAsync(avatarNames, config, Logger, _comboBuildCts.Token);
             }
-            catch (RetryException e)
+
+            // 复活重试
+            var maximumAttempts = Math.Max(1, _config.ReviveRetryCount);
+            for (var i = 0; i < maximumAttempts; i++)
             {
-                if (i == maximumAttempts - 1) throw;
-                // 只有选择了秘境的时候才会重试
-                if (!string.IsNullOrEmpty(_taskParam.DomainName))
+                try
                 {
-                    var msg = e.Message;
-                    if (IsDomainReviveRetry(e))
-                    {
-                        await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(e, async () =>
-                        {
-                            await TryRecoverAfterDomainReviveRetry(_ct, TryExitDomainForRetry, Avatar.RecoverAtStatueOfTheSeven);
-                        }, _ct, Logger, TimeSpan.FromSeconds(80), // 退出最多20秒，后续传送仍受60秒及父剩余预算约束。
-                            (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
-                        msg = "存在角色死亡，已确认退出秘境并完成神像恢复，允许重试";
-                    }
-                    else if (msg.Contains("复活") || msg.Contains("复苏"))
-                    {
-                        msg = "存在角色死亡，复活后重试秘境...";
-                    }
-
-                    Logger.LogWarning("自动秘境：{Text}", msg);
-                    await Delay(2000, ct);
-                    Notify.Event(NotificationEvent.DomainRetry).Error(msg);
-                    continue;
+                    await DoDomain();
+                    // 其他场景不重试
+                    break;
                 }
+                catch (RetryException e)
+                {
+                    if (i == maximumAttempts - 1) throw;
+                    // 只有选择了秘境的时候才会重试
+                    if (!string.IsNullOrEmpty(_taskParam.DomainName))
+                    {
+                        var msg = e.Message;
+                        if (IsDomainReviveRetry(e))
+                        {
+                            await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(e, async () =>
+                            {
+                                await TryRecoverAfterDomainReviveRetry(_ct, TryExitDomainForRetry, Avatar.RecoverAtStatueOfTheSeven);
+                            }, _ct, Logger, TimeSpan.FromSeconds(80), // 退出最多20秒，后续传送仍受60秒及父剩余预算约束。
+                                (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
+                            msg = "存在角色死亡，已确认退出秘境并完成神像恢复，允许重试";
+                        }
+                        else if (msg.Contains("复活") || msg.Contains("复苏"))
+                        {
+                            msg = "存在角色死亡，复活后重试秘境...";
+                        }
 
-                throw;
+                        Logger.LogWarning("自动秘境：{Text}", msg);
+                        await Delay(2000, ct);
+                        Notify.Event(NotificationEvent.DomainRetry).Error(msg);
+                        continue;
+                    }
+
+                    throw;
+                }
+            }
+
+
+            await Delay(2000, ct);
+            if (!await Bv.WaitForMainUi(_ct, 30))
+                throw new InvalidOperationException("秘境任务结束后未确认主界面，停止后续背包处理");
+            await Delay(2000, ct);
+
+            await ArtifactSalvage();
+            Notify.Event(NotificationEvent.DomainEnd).Success("自动秘境结束");
+            return new Dictionary<string, int>(_rewardSummary);
+        }
+        finally
+        {
+            if (_comboBuildCts != null)
+            {
+                try
+                {
+                    try
+                    {
+                        await _comboBuildCts.CancelAsync();
+                    }
+                    finally
+                    {
+                        // 取消请求不等于任务已结束，不能先释放令牌源或遗弃失败的建树任务。
+                        if (_comboBuildTask != null)
+                            await _comboBuildTask;
+                    }
+                }
+                catch (OperationCanceledException) when (_comboBuildCts.IsCancellationRequested)
+                {
+                }
+                catch (Exception e)
+                {
+                    // 战斗入口已传播的错误或秘境原始错误不能被清理阶段覆盖。
+                    Logger.LogWarning(e, "自动秘境：后台建树清理结束，保留秘境原始结果");
+                }
+                finally
+                {
+                    _comboBuildCts.Dispose();
+                    _comboBuildCts = null;
+                    _comboBuildTask = null;
+                }
             }
         }
-
-
-        await Delay(2000, ct);
-        if (!await Bv.WaitForMainUi(_ct, 30))
-            throw new InvalidOperationException("秘境任务结束后未确认主界面，停止后续背包处理");
-        await Delay(2000, ct);
-
-        await ArtifactSalvage();
-        Notify.Event(NotificationEvent.DomainEnd).Success("自动秘境结束");
-        return new Dictionary<string, int>(_rewardSummary);
     }
 
     private async Task DoDomain()
@@ -261,7 +324,26 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             Logger.LogDebug("0. 关闭秘境提示");
             await CloseDomainTip();
 
-            if (_jsonCombatStrategyPath != null)
+            if (_useComboStrategy)
+            {
+                ESkillCdTracker.Clear();
+                // 自动连招策略：战斗引擎内部初始化队伍，无需TXTSpecific步骤
+
+                if (!_comboBuildTask!.IsCompleted)
+                {
+                    Logger.LogInformation("自动秘境：{Text}", "0. 等待后台 LLM 建树完成");
+                }
+                await _comboBuildTask!; // 建树失败在此抛出快速结束任务，结果由 StartComboFight 内再次 await 获取
+
+                // 1. 走到钥匙处启动
+                Logger.LogInformation("自动秘境：{Text}", "1. 走到钥匙处启动");
+                await WalkToPressF();
+
+                // 2. 执行战斗（LLM行为树）
+                Logger.LogInformation("自动秘境：{Text}", "2. 执行战斗策略(自动连招)");
+                await StartComboFight();
+            }
+            else if (_jsonCombatStrategyPath != null)
             {
                 ESkillCdTracker.Clear();
                 // JSON策略：战斗引擎内部初始化队伍，无需TXTSpecific步骤
@@ -810,39 +892,17 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
         combatScenes.BeforeTask(cts.Token);
         using var flow = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.NativeCombatFlowRunner.Create(combatCommands, combatScenes, loop: true);
-        // 战斗操作
-        Task CombatAsync()
+        using var host = NativeCombatBattleHostIo.CreateForExternalScene(flow, combatScenes);
+        async Task CombatAsync()
         {
             try
             {
                 AutoFightTask.FightStatusFlag = true;
                 while (!cts.Token.IsCancellationRequested)
                 {
-                    if (flow != null)
-                    {
-                        flow.Step(cts.Token);
-                        continue;
-                    }
-                    // 通用化战斗策略
-                    var strategyBlockSucceeded = true;
-                    CombatCommand? lastCommand = null;
-                    foreach (var command in combatCommands)
-                    {
-                        if (command.Execute(combatScenes, lastCommand))
-                        {
-                            lastCommand = command;
-                            continue;
-                        }
-                        Logger.LogWarning(
-                            "自动秘境角色 {Avatar} 未确认切换成功，后推当前策略块",
-                            command.Name);
-                        strategyBlockSucceeded = false;
-                        break;
-                    }
-                    if (!strategyBlockSucceeded)
-                    {
-                        Sleep(250, cts.Token);
-                    }
+                    var result = await host.AdvanceAsync(flow, cts.Token);
+                    if (result == CombatBattleHostResult.Unconfirmed)
+                        TaskExecutionScope.StopUnconfirmedCombat("场景战斗宿主未取得可靠进展：" + host.Reason);
                 }
             }
             catch (NormalEndException e)
@@ -862,69 +922,54 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 Simulation.ReleaseAllKey();
                 AutoFightTask.FightStatusFlag = false;
             }
-            return Task.CompletedTask;
         }
 
-        // 秘境战斗不用自动战斗的结束检测，但可以复用其寻敌/靠近辅助。
-        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync,
-            () => DomainEndDetectionTask(cts),
-            flow == null ? () => StartFightSeekAssistTask(cts) : null);
+        await NativeCombatTaskGroup.RunAsync(cts, _ct, CombatAsync, () => DomainEndDetectionTask(cts),
+            () => AvatarRecognition.ContinuousTargetingLoopAsync(cts.Token, () => cts.IsCancellationRequested,
+                flow.Context.BattleId.ToString()));
     }
 
-    private Task StartFightSeekAssistTask(CancellationTokenSource cts)
+    /// <summary>
+    /// 自动连招战斗入口：Tick 后台构建的连招行为树（注入建树会话，不读静态暂存），
+    /// 秘境的DomainEndDetectionTask通过CancellationToken控制战斗结束。
+    /// </summary>
+    private async Task StartComboFight()
     {
-        var options = AutoDomainFightSeekOptions.FromAutoFightConfig(TaskContext.Instance().Config.AutoFightConfig);
-        if (!options.Enabled)
-        {
-            return Task.CompletedTask;
-        }
+        CancellationTokenSource cts = new();
+        _ct.Register(cts.Cancel);
 
-        Logger.LogInformation("自动秘境：启用战斗寻敌辅助，间隔 {Interval:0.##} 秒，旋转因子 {RotaryFactor}",
-            options.Interval.TotalSeconds,
-            options.RotaryFactor);
+        // 建树已在 WalkToPressF 前汇合完成，此处 await 已完成的任务同步返回结果
+        var comboTreeSession = await _comboBuildTask!;
 
-        AutoFightSeek.ResetSeekState();
-        return Task.Run(async () =>
+        // 抑制其自带的结束检测（FightFinishDetectEnabled=false），由秘境的DomainEndDetectionTask控制战斗结束
+        var comboTask = new AutoComboRunTask(new AutoFightParam { FightFinishDetectEnabled = false }, comboTreeSession);
+
+        var domainEndTask = DomainEndDetectionTask(cts);
+
+        var combatTask = Task.Run(async () =>
         {
             try
             {
-                if (options.InitialDelay > TimeSpan.Zero)
-                {
-                    await Delay((int)options.InitialDelay.TotalMilliseconds, cts.Token);
-                }
-
-                while (!cts.Token.IsCancellationRequested)
-                {
-                    try
-                    {
-                        // isEndCheck=true keeps this as seek-only assist and avoids party-screen finish checks.
-                        var result = await AutoFightSeek.SeekAndFightAsync(
-                            Logger,
-                            0,
-                            0,
-                            cts.Token,
-                            true,
-                            options.RotaryFactor);
-                        AutoFightSeek.RotationCount = AutoFightSeek.GetNextRotationCount(
-                            AutoFightSeek.RotationCount,
-                            result);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.LogDebug(ex, "自动秘境战斗寻敌辅助异常");
-                    }
-
-                    await Delay((int)options.Interval.TotalMilliseconds, cts.Token);
-                }
+                await comboTask.Start(cts.Token);
+            }
+            catch (RetryException)
+            {
+                // 复活/恢复信号必须传回 Start 的重试循环，复活后重试秘境
+                await cts.CancelAsync();
+                throw;
             }
             catch (OperationCanceledException)
             {
+                // 对局结束取消战斗，正常流程
             }
-        });
+            catch (Exception e)
+            {
+                Logger.LogWarning("自动连招战斗任务异常：{Msg}", e.Message);
+            }
+        }, cts.Token);
+
+        domainEndTask.Start();
+        await Task.WhenAll(combatTask, domainEndTask);
     }
 
     /// <summary>
@@ -938,6 +983,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         var jsonParam = new AutoFightParam
         {
             CombatStrategyPath = _jsonCombatStrategyPath!,
+            ExternalCompletionAuthority = true,
             FightFinishDetectEnabled = false,
             ExpBasedPickupEnabled = false,
             KazuhaPickupEnabled = false,
@@ -952,6 +998,16 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             try
             {
                 await jsonTask.Start(cts.Token);
+            }
+            catch (RetryException)
+            {
+                // 复活/恢复信号必须传回 Start 的重试循环，复活后重试秘境
+                await cts.CancelAsync();
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                // 对局结束取消战斗，正常流程
             }
             catch (Exception e)
             {

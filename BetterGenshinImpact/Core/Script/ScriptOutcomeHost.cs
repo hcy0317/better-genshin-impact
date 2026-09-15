@@ -10,8 +10,19 @@ namespace BetterGenshinImpact.Core.Script;
 
 public enum ScriptOutcomeKind { Completed, Skipped, Deferred, NeedsReconcile, Failed, Cancelled }
 
+internal static class ScriptOutcomeContract
+{
+    internal const string ExplicitV1 = "explicit-v1";
+    internal static void Validate(string? contract)
+    {
+        if (!string.IsNullOrEmpty(contract) && contract != ExplicitV1)
+            throw new InvalidOperationException("当前宿主不支持脚本结果合同：" + contract);
+    }
+}
+
 public sealed record ScriptExecutionResult(ScriptOutcomeKind Kind, string Reason)
 {
+    public string? OutcomeContract { get; init; }
     public string? TaskName { get; init; }
     public IReadOnlyList<ScriptExecutionResult> Children { get; init; } = Array.Empty<ScriptExecutionResult>();
 
@@ -19,6 +30,7 @@ public sealed record ScriptExecutionResult(ScriptOutcomeKind Kind, string Reason
     {
         record.Outcome = Kind.ToString();
         record.OutcomeReason = Reason;
+        record.OutcomeContract = OutcomeContract;
         record.IsSuccessful = Kind == ScriptOutcomeKind.Completed && TaskExecutionScope.Failure == null;
     }
     internal void ThrowIfFailure()
@@ -109,9 +121,10 @@ public sealed class ScriptOutcomeReporter
         lock (_gate)
         {
             _closed = true;
-            return _result ?? (_required
+            var result = _result ?? (_required
                 ? new(ScriptOutcomeKind.NeedsReconcile, "SCRIPT_OUTCOME_MISSING")
                 : new(ScriptOutcomeKind.Completed, "LEGACY_NORMAL_RETURN"));
+            return result with { OutcomeContract = _required ? ScriptOutcomeContract.ExplicitV1 : null };
         }
     }
     internal void Close() { lock (_gate) _closed = true; }
@@ -119,12 +132,17 @@ public sealed class ScriptOutcomeReporter
 
 internal static class ScriptOutcomeHost
 {
-    internal static async Task<ScriptExecutionResult> RunAsync(IScriptEngine engine, Func<object?> evaluate, CancellationToken ct)
+    internal static async Task<ScriptExecutionResult> RunAsync(IScriptEngine engine, Func<object?> evaluate, CancellationToken ct,
+        string? outcomeContract = null)
     {
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
+        ScriptOutcomeContract.Validate(outcomeContract);
         var reporter = new ScriptOutcomeReporter(ct);
         try
         {
             reporter.Check();
+            if (outcomeContract == ScriptOutcomeContract.ExplicitV1) reporter.RequireExplicitOutcome();
             engine.AddHostObject("taskResult", reporter);
             var result = evaluate();
             if (result is Task task) await task;

@@ -33,6 +33,10 @@ public sealed class CombatFlowContext(TimeProvider? timeProvider = null) : IDisp
     private readonly Dictionary<(string Actor, string Effect), Guid> _currentEffects = new();
     private bool _closed;
     private long _generation;
+    private string? _lastObservedActor;
+    private int _actorTurns;
+    public string? LastObservedActor { get { lock (_gate) return _lastObservedActor; } }
+    public int ActorTurns { get { lock (_gate) return _actorTurns; } }
     private CombatScopeObservation? _targetScope;
     private CombatScopeObservation? _rangeScope;
     private long _lastScopeFrame = -1;
@@ -179,6 +183,7 @@ public sealed class CombatFlowContext(TimeProvider? timeProvider = null) : IDisp
         lock (_gate)
         {
             if (_closed) return;
+            if (_lastObservedActor != actor) { _lastObservedActor = actor; _actorTurns++; }
             foreach (var (id, effect) in _effects)
                 if (effect.Valid && effect.Source.EndsOnSwitch && effect.Source.Actor != actor)
                     InvalidateEffect(id, effect.Version, "切换角色导致效果失效");

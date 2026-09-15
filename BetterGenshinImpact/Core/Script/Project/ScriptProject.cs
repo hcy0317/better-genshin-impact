@@ -154,7 +154,7 @@ public class ScriptProject
                 {
                     return engine.Evaluate(code);
                 }
-            }, CancellationContext.Instance.Cts.Token);
+            }, CancellationContext.Instance.Cts.Token, Manifest.OutcomeContract);
             TaskExecutionScope.ThrowIfFailed();
             return result;
         }

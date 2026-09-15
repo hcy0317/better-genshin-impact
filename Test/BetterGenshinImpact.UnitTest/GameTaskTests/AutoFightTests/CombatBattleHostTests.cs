@@ -3,11 +3,153 @@ using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using Fischless.GameCapture;
 using Microsoft.Extensions.Time.Testing;
+using BetterGenshinImpact.GameTask.Common.BgiVision;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatBattleHostTests
 {
+    [Fact]
+    public async Task AControlHintDuringSearchReturnsToTheKernelInsteadOfSendingAnotherCameraPulse()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishDetectionEnabled = false, FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 20 && host.State != "Searching"; i++) await host.AdvanceAsync(flow, default);
+        Assert.Equal("Searching", host.State);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080)
+        { Control = new(MotionStatus.Unknown, true) };
+        var requests = io.Requests.Count;
+        var kernelSteps = flow.RuntimeStatistics.CoreSteps;
+        await host.AdvanceAsync(flow, default);
+        Assert.Equal(requests, io.Requests.Count);
+        Assert.True(flow.RuntimeStatistics.CoreSteps > kernelSteps);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ContinuouslyUnsentRequestsKeepOneDeadlineEvenWithUnlimitedBattleTimeout(bool party)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { UnsentAttempts = int.MaxValue };
+        using var host = new CombatBattleHost(io, new()
+        { TimeoutSeconds = 0, FinishDetectionEnabled = party, FinishCheckIntervalSeconds = .1 });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Empty(io.Inputs);
+        Assert.NotEmpty(io.Requests);
+        Assert.Single(io.Requests.Select(x => x.RequestId).Distinct());
+        Assert.Single(io.Requests.Select(x => x.DeadlineTimestamp).Distinct());
+        Assert.Equal(0, host.CameraRequests);
+        Assert.Equal(0, host.ApproachRequests);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 1, party ? 3 : 20);
+    }
+
+    [Fact]
+    public async Task UnknownInputIsNotRetriedOrCountedAsSent()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId)
+        { ForcedResult = new(CombatBattleHostInputStatus.Unknown, Reason: "partial-native-send") };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 50 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Single(io.Requests);
+        Assert.Empty(io.Inputs);
+        Assert.Equal(result, await host.AdvanceAsync(flow, default));
+        Assert.Single(io.Requests);
+    }
+
+    [Fact]
+    public async Task UnsentPartyRequestDoesNotEnterConfirmationAndCanContinueOnANewFrame()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { UnsentAttempts = 1 };
+        io.PartyFactory = stamp => new(stamp.Sequence, stamp.CapturedAt, 1920, 1080, io.PartyOpen, (ulong)stamp.Sequence)
+        { Source = stamp };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 50 && io.Requests.Count == 0; i++) await host.AdvanceAsync(flow, default);
+        Assert.Single(io.Requests);
+        Assert.Empty(io.Inputs);
+        Assert.Equal("BeforeParty", host.State);
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 100 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Completed, result);
+        Assert.Single(io.Inputs, input => input.Kind == CombatBattleHostInputKind.OpenParty);
+        Assert.NotEqual(Guid.Empty, io.Requests[0].RequestId);
+        Assert.Equal(io.Requests[0].RequestId, io.Requests[1].RequestId);
+        Assert.Equal(io.Requests[0].DeadlineTimestamp, io.Requests[1].DeadlineTimestamp);
+        Assert.True(io.Requests[1].Source.IsAfter(io.Requests[0].Source));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RecoveryIsDisabledByDefaultAndOnlyExplicitReplayAllowsBoundedDetach(bool enableReplayRecovery)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080) { Motion = MotionStatus.Climb };
+        using var host = new CombatBattleHost(io, new() { ControlRecoveryEnabled = enableReplayRecovery });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++) result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Equal(enableReplayRecovery ? 2 : 0, io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.Detach));
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+    }
+    [Fact]
+    public async Task UnknownPostureDoesNotAuthorizeWalkingIntoAnUnreachableTarget()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080) { Motion = MotionStatus.Unknown };
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++) result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExternalSceneOwnsCompletionDuringABoundedSearchAndAnInvulnerablePhase(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(json, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { ExternalCompletionAuthority = true, TimeoutSeconds = 120 });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 10000 && clock.GetElapsedTime(started).TotalSeconds < 65 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Continue, result);
+        Assert.True(game.Inputs > 0);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind is CombatBattleHostInputKind.OpenParty or CombatBattleHostInputKind.CloseParty);
+        Assert.InRange(host.CameraRequests, 1, 24);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await host.AdvanceAsync(flow, cancelled.Token));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -101,7 +243,7 @@ public class CombatBattleHostTests
         var io = new ReplayIo(clock, flow.Context.BattleId);
         io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
             new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
-                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080);
+                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080) { Motion = MotionStatus.Normal };
         using var host = new CombatBattleHost(io, new());
         var result = CombatBattleHostResult.Continue;
         for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
@@ -252,6 +394,9 @@ public class CombatBattleHostTests
         public TimeProvider Clock => clock;
         public Guid BattleId => battleId;
         public List<CombatBattleHostInput> Inputs { get; } = [];
+        public List<CombatBattleHostInput> Requests { get; } = [];
+        public int UnsentAttempts { get; set; }
+        public CombatBattleHostInputResult? ForcedResult { get; init; }
         public bool PartyOpen { get; private set; }
         public bool RepeatSource { get; init; }
         public int SourcePeriodMilliseconds { get; init; }
@@ -277,14 +422,22 @@ public class CombatBattleHostTests
             return new(stamp.Sequence, stamp.CapturedAt, 1920, 1080, false, (ulong)stamp.Sequence)
             { Source = stamp };
         }
-        public ValueTask SendAsync(CombatBattleHostInput input, CancellationToken ct)
+        public ValueTask<CombatBattleHostInputResult> SendAsync(CombatBattleHostInput input, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            Requests.Add(input);
+            if (ForcedResult is { } forced) return ValueTask.FromResult(forced);
+            if (UnsentAttempts > 0)
+            {
+                UnsentAttempts--;
+                clock.Advance(TimeSpan.FromMilliseconds(292));
+                return ValueTask.FromResult(new CombatBattleHostInputResult(CombatBattleHostInputStatus.NotSent));
+            }
             Inputs.Add(input);
             if (input.Kind == CombatBattleHostInputKind.OpenParty) PartyOpen = true;
             if (input.Kind == CombatBattleHostInputKind.CloseParty) PartyOpen = false;
             clock.Advance(TimeSpan.FromMilliseconds(10));
-            return ValueTask.CompletedTask;
+            return ValueTask.FromResult(new CombatBattleHostInputResult(CombatBattleHostInputStatus.Sent, clock.GetTimestamp()));
         }
         public ValueTask DelayAsync(int milliseconds, CancellationToken ct)
         {

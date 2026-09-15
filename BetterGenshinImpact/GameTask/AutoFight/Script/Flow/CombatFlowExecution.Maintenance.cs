@@ -11,6 +11,31 @@ public sealed partial class CombatFlowExecution
     private readonly Dictionary<string, int> _maintenanceAttemptsSinceProgress = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (long Generation, long EffectVersion)> _deferredMaintenance = new(StringComparer.Ordinal);
     public string? LastMaintenanceDecision { get; private set; }
+    private sealed record MaintenanceRecovery(string Goal, Frame Owner, int Index, bool Watch, CombatFlowAction Action);
+    private MaintenanceRecovery? _maintenanceRecovery;
+
+    private void CancelMaintenanceRecovery()
+    {
+        if (_maintenanceRecovery is { } recovery) _game.CancelObservation(recovery.Action);
+        _maintenanceRecovery = null;
+    }
+
+    private async ValueTask<(CombatFlowAction Probe, CombatSkillRecovery Result)> RecoverMaintenanceAsync(
+        string goal, CombatCommand command, double ancestorDeadline, CancellationToken ct, bool watch = false)
+    {
+        var owner = _frames.Peek();
+        if (_maintenanceRecovery is { } old && (old.Goal != goal || old.Owner != owner || old.Index != owner.Index))
+            CancelMaintenanceRecovery();
+        var probe = _maintenanceRecovery?.Action ?? new CombatFlowAction(command, Context,
+            () => !_closed && _frames.Contains(owner) && owner.Result == CombatFlowResult.Succeeded && RequirementsHold(owner),
+            Math.Min(ancestorDeadline, Context.Now + 3));
+        var result = await _game.RecoverExpiredSkillStepAsync(probe, ct);
+        ct.ThrowIfCancellationRequested();
+        if (result.State == CombatObservationPreparation.AwaitingObservation && probe.CanStart)
+            _maintenanceRecovery ??= new(goal, owner, owner.Index, watch, probe);
+        else CancelMaintenanceRecovery();
+        return (probe, result);
+    }
 
     private async ValueTask<bool> TryRecoverRequiredOpeningAsync(CombatCommand caller,
         CombatFlowBlock block, double ancestorDeadline, CancellationToken ct)
@@ -26,9 +51,8 @@ public sealed partial class CombatFlowExecution
             Context.Now >= ancestorDeadline || !_episodes.CanTrySkillReset(goal, Context.Now)) return false;
 
         LastMaintenanceDecision = $"必需开场 {block.Name} 预算已耗尽，核实原技能请求是否已过期并重新就绪";
-        var probe = new CombatFlowAction(command, Context, () => !_closed,
-            Math.Min(ancestorDeadline, Context.Now + 3));
-        var reset = await _game.TryRecoverExpiredSkillAsync(probe, ct);
+        var (probe, recovery) = await RecoverMaintenanceAsync(goal, command, ancestorDeadline, ct);
+        var reset = recovery.RetiredAttempt;
         ct.ThrowIfCancellationRequested();
         if (probe.DiagnosticReason is { } reason) LastMaintenanceDecision = $"必需开场 {block.Name}：{reason}";
         if (reset == null || !probe.CanStart || _closed || Context.Now >= ancestorDeadline ||
@@ -40,7 +64,7 @@ public sealed partial class CombatFlowExecution
     }
 
     private async ValueTask<double?> TrySpendCoverageAsync(string name, CombatCommand command,
-        double ancestorDeadline, double demand, CancellationToken ct)
+        double ancestorDeadline, double demand, CancellationToken ct, bool watch = false)
     {
         var goal = "coverage:" + name;
         if (_program.Timing(command)?.Duration is { } full && full <= demand) return null;
@@ -50,9 +74,8 @@ public sealed partial class CombatFlowExecution
         if (IsAtomic || Context.Now >= ancestorDeadline || !_episodes.CanTrySkillReset(goal, Context.Now) ||
             command.Method != Method.Skill && command.Method != Method.Burst) return null;
 
-        var probe = new CombatFlowAction(command, Context, () => !_closed,
-            Math.Min(ancestorDeadline, Context.Now + 3));
-        var reset = await _game.TryRecoverExpiredSkillAsync(probe, ct);
+        var (probe, recovery) = await RecoverMaintenanceAsync(goal, command, ancestorDeadline, ct, watch);
+        var reset = recovery.RetiredAttempt;
         ct.ThrowIfCancellationRequested();
         if (probe.DiagnosticReason is { } reason) LastMaintenanceDecision = $"维护目标 {name}：{reason}";
         if (reset == null || !probe.CanStart || _closed || Context.Now >= ancestorDeadline || reset.BattleId != Context.BattleId ||

@@ -138,7 +138,7 @@ internal sealed class OnnxInitializationTask<T> : IDisposable
     {
         var stopwatch = Stopwatch.StartNew();
         var progress = new OnnxInitializationProgress(_heartbeatInterval);
-        _logger.LogInformation("[ONNX]开始初始化模型 {Model} 预测器。", _modelName);
+        TryLog(() => _logger.LogInformation("[ONNX]开始初始化模型 {Model} 预测器。", _modelName));
         var initialization = Task.Run(_factory);
 
         try
@@ -156,28 +156,34 @@ internal sealed class OnnxInitializationTask<T> : IDisposable
                 var observation = progress.Observe(stopwatch.Elapsed);
                 if (observation.ShouldLog)
                 {
-                    _logger.LogInformation(
+                    TryLog(() => _logger.LogInformation(
                         "[ONNX]模型 {Model} 仍在初始化，已等待 {ElapsedSeconds} 秒。首次 TensorRT 引擎构建可能较慢。",
                         _modelName,
-                        observation.ElapsedSeconds);
+                        observation.ElapsedSeconds));
                 }
             }
 
             var value = await initialization.ConfigureAwait(false);
-            _logger.LogInformation(
+            TryLog(() => _logger.LogInformation(
                 "[ONNX]模型 {Model} 预测器初始化完成，耗时 {ElapsedMilliseconds} ms。",
                 _modelName,
-                stopwatch.ElapsedMilliseconds);
+                stopwatch.ElapsedMilliseconds));
             return value;
         }
         catch (Exception exception)
         {
-            _logger.LogError(
+            TryLog(() => _logger.LogError(
                 exception,
                 "[ONNX]模型 {Model} 预测器初始化失败，耗时 {ElapsedMilliseconds} ms。",
                 _modelName,
-                stopwatch.ElapsedMilliseconds);
+                stopwatch.ElapsedMilliseconds));
             throw;
         }
+    }
+
+    private static void TryLog(Action write)
+    {
+        try { write(); }
+        catch { /* 诊断不能替换构造结果，否则已创建的 native 资源失去回收所有权。 */ }
     }
 }

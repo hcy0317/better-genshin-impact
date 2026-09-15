@@ -1,13 +1,13 @@
 // 岩：钟离 / 班尼特 / 娜维娅 / 香菱。一枪后按本次附魔实际剩余时间选择短打，不预设两枪满层。
 // 未知被动条件只走普通短打；静态两次充能不当作当前还有两次可用。E 确认不等于结晶层数/命中。
-// 班尼特给香菱的接球关系显式声明，只有明确缺能且非 CD 时执行供能。
+// 供能分阶段：先在香菱前台确认缺能且Q非CD，再独立确认班尼特E就绪并接球。
+// recharge保留本次需求、原期限和反证检查，不把两个角色的旧帧拼成同时条件。
 strategy(loop=battle)
 timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
 班尼特 q(if=q-ready(班尼特))
-call(供能,if=q-energy-low(香菱) && !q-cd(香菱) && e-ready(班尼特))
-香菱 e(fast), q(if=q-ready(香菱))
+香菱 e(fast), q(recharge,from=segment:供能)
 娜维娅 q(if=q-ready(娜维娅))
 call(一枪短打,if=e-ready(娜维娅))
 娜维娅 attack(0.4,keep=护盾), check

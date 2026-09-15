@@ -9,12 +9,39 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 public sealed partial class CombatFlowExecution
 {
-    internal ValueTask<bool?> EvaluateConditionAsync(ConditionEvaluator.CompiledCondition condition,
-        string actor, CancellationToken ct) => EvaluateWithPreparationAsync(condition, actor,
-            _frames.TryPeek(out var frame) ? frame : CreateFrame(_root), ct);
+    private Frame? _selectionFrame;
+
+    internal async ValueTask<bool?> EvaluateConditionAsync(ConditionEvaluator.CompiledCondition condition,
+        string actor, CancellationToken ct)
+    {
+        var frame = _frames.TryPeek(out var active) ? active : _selectionFrame ??= CreateFrame(_root);
+        var result = await EvaluateWithPreparationAsync(condition, actor, frame, ct);
+        if (frame.PreparingCondition == null && ReferenceEquals(frame, _selectionFrame)) _selectionFrame = null;
+        return result;
+    }
+
+    private void CancelConditionPreparation(Frame frame)
+    {
+        if (frame.PreparingCondition is { } pending) _game.CancelObservation(pending.Action);
+        frame.PreparingCondition = null;
+    }
+
+    private void CancelBurstPreparation(Frame frame)
+    {
+        if (frame.PreparingBurst is { } pending) _game.CancelObservation(pending);
+        frame.PreparingBurst = null;
+    }
+
+    private void CancelFeedPreparation(Frame frame)
+    {
+        if (frame.PendingFeed is { } pending) _game.CancelObservation(pending);
+        frame.PendingFeed = null;
+        frame.FeedParentCommand = null;
+    }
 
     private async ValueTask<bool?> EvaluateWithPreparationAsync(ConditionEvaluator.CompiledCondition condition,
-        string actor, Frame frame, CancellationToken ct, CombatFlowBlock? child = null, bool allowPreparation = true)
+        string actor, Frame frame, CancellationToken ct, CombatFlowBlock? child = null, bool allowPreparation = true,
+        double? commandStartedAt = null, double? commandDeadline = null)
     {
         string? unknownActor = null;
         string? unknownFunction = null;
@@ -30,7 +57,6 @@ public sealed partial class CombatFlowExecution
             }
             return value;
         }
-        var result = condition.EvaluateBoolean(Resolve);
         bool CanPrepare()
         {
             if (_closed || IsAtomic || Context.Now >= frame.Deadline || !LiveRequirementsHold(frame)) return false;
@@ -41,6 +67,31 @@ public sealed partial class CombatFlowExecution
                     remaining > guarded.Block.EstimatedSeconds + CombatFlowPolicy.RecoverySeconds) &&
                 RequirementsFit(guarded, guarded.Block.EstimatedSeconds + CombatFlowPolicy.RecoverySeconds);
         }
+        async ValueTask<bool?> Advance(ConditionPreparation preparation)
+        {
+            if (!CanPrepare() || !preparation.Action.CanStart)
+            {
+                CancelConditionPreparation(frame);
+                return null;
+            }
+            var prepared = await _game.PrepareObservationStepAsync(preparation.Action, preparation.Function, ct);
+            ct.ThrowIfCancellationRequested();
+            if (prepared == CombatObservationPreparation.AwaitingObservation) return null;
+            frame.PreparingCondition = null;
+            _game.BeginStep();
+            if (!preparation.Action.CanStart) return null;
+            if (Observe(preparation.Function, [preparation.Actor], frame, preparation.Actor) is bool)
+                _episodes.Resolve(preparation.Goal);
+            // 只完成原来的这一次准备，再重验原条件；不能跨Step隐式切第二个角色拼接旧帧。
+            return condition.EvaluateBoolean((function, args) => Observe(function, args, frame, actor,
+                !_roundStarted && _hasRootRounds ? Round + 1 : Round));
+        }
+        if (frame.PreparingCondition is { } pending)
+        {
+            if (!ReferenceEquals(pending.Condition, condition)) CancelConditionPreparation(frame);
+            else return await Advance(pending);
+        }
+        var result = condition.EvaluateBoolean(Resolve);
         if (result != null || !allowPreparation || unknownActor == null || !CanPrepare()) return result;
         var targetActor = unknownActor;
         var goal = "condition:" + unknownFunction + ":" + targetActor;
@@ -50,15 +101,10 @@ public sealed partial class CombatFlowExecution
         ct.ThrowIfCancellationRequested();
         _battle.NextConditionProbe[goal] = Context.Now + 1;
         var probe = new CombatFlowAction(new CombatCommand(targetActor, "e"), Context, CanPrepare,
-            Math.Min(frame.Deadline, Math.Min(deadline, Context.Now + 3)), continuation: CanPrepare);
+            Math.Min(commandDeadline ?? double.PositiveInfinity, Math.Min(frame.Deadline, Math.Min(deadline, Context.Now + 3))),
+            continuation: CanPrepare);
         _battle.ConditionPreparationVersion++;
-        await _game.PrepareObservationAsync(probe, unknownFunction!, ct);
-        ct.ThrowIfCancellationRequested();
-        _game.BeginStep(); // 不复用切人之前的条件缓存。
-        if (!probe.CanStart) return null;
-        if (Observe(unknownFunction!, [targetActor], frame, targetActor) is bool) _episodes.Resolve(goal);
-        // 同一次求值不连环切换多个角色，也不拼接不同角色的旧帧证据。
-        return condition.EvaluateBoolean((function, args) => Observe(function, args, frame, actor,
-            !_roundStarted && _hasRootRounds ? Round + 1 : Round));
+        frame.PreparingCondition = new(condition, goal, targetActor, unknownFunction!, probe, commandStartedAt ?? Context.Now);
+        return await Advance(frame.PreparingCondition);
     }
 }

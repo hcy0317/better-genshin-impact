@@ -47,6 +47,8 @@ public class ExecutionRecord
     public string? Outcome { get; set; }
     [JsonProperty("outcome_reason", NullValueHandling = NullValueHandling.Ignore)]
     public string? OutcomeReason { get; set; }
+    [JsonProperty("outcome_contract", NullValueHandling = NullValueHandling.Ignore)]
+    public string? OutcomeContract { get; set; }
 }
 
 internal static class ExecutionRecordFinalizer

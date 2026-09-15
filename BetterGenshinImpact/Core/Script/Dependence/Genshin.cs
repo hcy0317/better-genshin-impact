@@ -473,6 +473,19 @@ public class Genshin
         await new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token);
     }
 
+    /// <summary>脚本子任务交接：确认大世界主界面；失败保留终止类型，禁止被父层再次当普通失败恢复。</summary>
+    public async Task RecoverMainUi(string? failureContext = null)
+    {
+        _taskGuard.Check();
+        var ct = CancellationContext.Instance.Cts.Token;
+        if (failureContext?.Length > 128) failureContext = failureContext[..128];
+        await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(
+            new InvalidOperationException(failureContext ?? "脚本继续前需要确认大世界主界面"),
+            () => new ReturnMainUiTask().Start(ct, requireOverworld: true), ct, _logger,
+            captureFailure: failureContext == null ? null : (error, context) =>
+                TaskFailureDiagnostics.CaptureScreenshotOnce(error, $"{context} 脚本子任务 {failureContext}"));
+    }
+
     /// <summary>退出秘境并用连续新帧确认已回到秘境外主界面。</summary>
     public async Task ExitDomain()
     {

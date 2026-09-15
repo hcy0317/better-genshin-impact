@@ -459,9 +459,10 @@ public static class AvatarRecognition
         var diagnostics = new CombatDecisionDiagnostics(Logger);
         var battleId = Guid.TryParse(diagnosticBattleId, out var boundBattle) ? boundBattle : Guid.Empty;
         CaptureFrameStamp lastSource = default;
+        CombatControlObservation lastControl = default;
         long suppressedFrames = 0, capturedFrames = 0, publishedFrames = 0, rejectedFrames = 0, nonMainFrames = 0;
         void Trace(bool force = false) => diagnostics.Write("FIGHT_PERCEPTION", diagnosticBattleId ?? "unbound", () =>
-            $"captured={capturedFrames} skippedExclusive={suppressedFrames} published={publishedFrames} rejectedEpochOrExclusive={rejectedFrames} nonMain={nonMainFrames}", force);
+            $"captured={capturedFrames} skippedExclusive={suppressedFrames} published={publishedFrames} rejectedEpochOrExclusive={rejectedFrames} nonMain={nonMainFrames} controlObserved={lastControl.IsObserved} motion={lastControl.Motion} keyboardBreakout={lastControl.KeyboardBreakoutRequested} controlSourceSequence={lastSource.Sequence}", force);
         void RecordPublication(bool published)
         {
             if (published) publishedFrames++;
@@ -500,6 +501,7 @@ public static class AvatarRecognition
                     // 不在主界面时跳过本轮（避免菜单/地图/对话等界面下误操作）
                     if (!Bv.IsCombatHud(capture))
                     {
+                        lastControl = default;
                         PublishPassiveObservation(false, false, null, capture.Width, capture.Height,
                             capturedAtUtc, observationEpoch, source: capture.FrameStamp, battleId: battleId,
                             quality: CombatObservationQuality.Unavailable);
@@ -512,6 +514,9 @@ public static class AvatarRecognition
                         continue;
                     }
 
+                    var control = CombatMotionReader.ReadControl(capture, combatHud: true, OcrFactory.Paddle);
+                    lastControl = control;
+                    var motion = control.Motion;
                     // 1. 血条识别：检测红色血条并过滤左侧 UI 区域 (x > 200)
                     var bars = FindBloodBars(capture);
                     var valid = bars.Where(b => b.x > (int)(200 * AssetScale)).ToList();
@@ -529,7 +534,7 @@ public static class AvatarRecognition
                         RecordPublication(PublishPassiveObservation(false, false, visual, capture.Width, capture.Height,
                             capturedAtUtc, observationEpoch, new EnemySeekDecision(
                                 AutoFightSeekAction.ApproachFixedTopHealthTarget, EnemyIndicatorDirection.None,
-                                visual, 1, SeekCueKind.FixedTopHealth), capture.FrameStamp, battleId));
+                                visual, 1, SeekCueKind.FixedTopHealth), capture.FrameStamp, battleId, motion: motion, control: control));
                     }
                     else if (valid.Count > 0)
                     {
@@ -549,7 +554,7 @@ public static class AvatarRecognition
                             capture.Width,
                             capture.Height,
                             capturedAtUtc,
-                            observationEpoch, source: capture.FrameStamp, battleId: battleId));
+                            observationEpoch, source: capture.FrameStamp, battleId: battleId, motion: motion, control: control));
 
                         // 叠加层：最近血条绿色粗框，其余红色细框
                         if (drawResults)
@@ -584,7 +589,7 @@ public static class AvatarRecognition
                                 capture.Height,
                                 capturedAtUtc,
                                 observationEpoch, source: capture.FrameStamp, battleId: battleId,
-                                cueFingerprint: FingerprintDamageCue(capture, damageVisual)));
+                                cueFingerprint: FingerprintDamageCue(capture, damageVisual), motion: motion, control: control));
 
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
@@ -626,7 +631,7 @@ public static class AvatarRecognition
                                 capture.Height,
                                 capturedAtUtc,
                                 observationEpoch,
-                                confirmedIndicator, capture.FrameStamp, battleId));
+                                confirmedIndicator, capture.FrameStamp, battleId, motion: motion, control: control));
                         }
                     }
 
@@ -668,7 +673,8 @@ public static class AvatarRecognition
         long captureEpoch,
         EnemySeekDecision? indicatorDecision = null,
         CaptureFrameStamp source = default, Guid battleId = default,
-        CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0)
+        CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0, MotionStatus motion = MotionStatus.Unknown,
+        CombatControlObservation control = default)
     {
         lock (_seekLock)
         {
@@ -690,7 +696,7 @@ public static class AvatarRecognition
                     imageHeight,
                     indicatorDecision)
                 { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
-                    CueFingerprint = cueFingerprint };
+                    CueFingerprint = cueFingerprint, Motion = motion, Control = control };
             }
             return true;
         }
@@ -748,4 +754,6 @@ internal readonly record struct PassiveTargetObservation(
     public long CaptureEpoch { get; init; }
     public CombatObservationQuality Quality { get; init; }
     public ulong CueFingerprint { get; init; }
+    public MotionStatus Motion { get; init; } = MotionStatus.Unknown;
+    public CombatControlObservation Control { get; init; }
 }

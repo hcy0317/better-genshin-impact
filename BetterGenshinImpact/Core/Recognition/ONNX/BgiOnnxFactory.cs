@@ -27,6 +27,7 @@ public class BgiOnnxFactory : IDisposable
     private readonly ConcurrentDictionary<BgiOnnxModel, string?> _cachedModelPaths = new();
     private readonly ConcurrentDictionary<BgiOnnxModel, Lazy<BgiYoloPredictor>> _sharedYoloPredictors = new();
     private readonly bool _excludeTensorRtForOcr;
+    private readonly Func<string, SessionOptions, InferenceSession> _createSession;
 
 
     /// <summary>
@@ -40,10 +41,12 @@ public class BgiOnnxFactory : IDisposable
     internal BgiOnnxFactory(
         ILogger<BgiOnnxFactory> logger,
         bool? forceCpuOcr,
-        bool excludeTensorRtForOcr = false)
+        bool excludeTensorRtForOcr = false,
+        Func<string, SessionOptions, InferenceSession>? createSession = null)
     {
-        _logger = logger;
+        _logger = new NonThrowingLogger(logger);
         _excludeTensorRtForOcr = excludeTensorRtForOcr;
+        _createSession = createSession ?? ((path, options) => new InferenceSession(path, options));
 
         var config = GetConfig();
         if (config.AutoAppendCudaPath) AppendCudaPath();
@@ -302,7 +305,7 @@ public class BgiOnnxFactory : IDisposable
         }
 
         var updatedPath = string.Join(Path.PathSeparator, pathVariables.Distinct());
-        _logger.LogDebug("[GpuAuto]修改进程PATH为:{UpdatedPath}", updatedPath);
+        _logger.LogDebug("[GpuAuto]已补充进程依赖路径，路径项数={PathCount}", pathVariables.Distinct().Count());
         Environment.SetEnvironmentVariable("PATH", updatedPath, EnvironmentVariableTarget.Process);
     }
 
@@ -413,26 +416,26 @@ public class BgiOnnxFactory : IDisposable
     /// <returns>InferenceSession</returns>
     public InferenceSession CreateInferenceSession(BgiOnnxModel model, bool ocr = false)
     {
-        _logger.LogDebug("[ONNX]创建推理会话，模型: {ModelName}", model.Name);
-        ProviderType[]? providerTypes = null;
-        if (ocr)
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var providers = ocr ? ResolveOcrProviderTypes(CpuOcr, _excludeTensorRtForOcr, ProviderTypes) : ProviderTypes;
+        var cached = EnableCache ? GetCached(model, providers) : null;
+        var applied = new List<ProviderType>();
+        using var options = CreateSessionOptions(model, EnableCache && cached == null, providers, applied);
+        _logger.LogInformation("ONNX_SESSION phase=creating model={Model} ocr={Ocr} providers={Providers} cacheHit={CacheHit} managedBytes={ManagedBytes}",
+            model.Name, ocr, applied.Count == 0 ? "implicit-cpu" : string.Join(",", applied), cached != null, GC.GetTotalMemory(false));
+        try
         {
-            providerTypes = ResolveOcrProviderTypes(
-                CpuOcr,
-                _excludeTensorRtForOcr,
-                ProviderTypes);
-            _logger.LogDebug(
-                "[ONNX] OCR provider策略: {Providers}",
-                string.Join(",", providerTypes.Select<ProviderType, string>(Enum.GetName!)));
+            var session = _createSession(cached ?? model.ModalPath, options);
+            _logger.LogInformation("ONNX_SESSION phase=ready model={Model} ms={Milliseconds:F1} managedBytes={ManagedBytes}",
+                model.Name, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds, GC.GetTotalMemory(false));
+            return session;
         }
-
-        if (!EnableCache)
-            return new InferenceSession(model.ModalPath, CreateSessionOptions(model, false, providerTypes));
-
-        var cached = GetCached(model, providerTypes);
-        return cached == null
-            ? new InferenceSession(model.ModalPath, CreateSessionOptions(model, true, providerTypes))
-            : new InferenceSession(cached, CreateSessionOptions(model, false, providerTypes));
+        catch (Exception error)
+        {
+            _logger.LogError(error, "ONNX_SESSION phase=failed model={Model} ms={Milliseconds:F1}",
+                model.Name, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            throw;
+        }
     }
 
     internal static ProviderType[] ResolveOcrProviderTypes(
@@ -512,9 +515,11 @@ public class BgiOnnxFactory : IDisposable
     /// <returns></returns>
     /// <exception cref="InvalidEnumArgumentException"></exception>
     private SessionOptions CreateSessionOptions(BgiOnnxModel model, bool genCache,
-        ProviderType[]? forcedProvider = null)
+        ProviderType[]? forcedProvider = null, ICollection<ProviderType>? appliedProviders = null)
     {
         var sessionOptions = new SessionOptions();
+        try
+        {
         var providerTypes = forcedProvider is null || forcedProvider.Length == 0 ? ProviderTypes : forcedProvider;
         foreach (var type in providerTypes)
             try
@@ -562,6 +567,7 @@ public class BgiOnnxFactory : IDisposable
                     default:
                         throw new InvalidEnumArgumentException("无效的推理设备");
                 }
+                appliedProviders?.Add(type);
             }
             catch (Exception e)
             {
@@ -577,6 +583,22 @@ public class BgiOnnxFactory : IDisposable
         if (!Directory.Exists(optPath)) Directory.CreateDirectory(optPath);
         sessionOptions.OptimizedModelFilePath = Path.Combine(optPath, Path.GetFileName(model.ModalPath));
         return sessionOptions;
+        }
+        catch
+        {
+            sessionOptions.Dispose();
+            throw;
+        }
+    }
+
+    private sealed class NonThrowingLogger(ILogger inner) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull
+        { try { return inner.BeginScope(state); } catch { return null; } }
+        public bool IsEnabled(LogLevel logLevel)
+        { try { return inner.IsEnabled(logLevel); } catch { return false; } }
+        public void Log<TState>(LogLevel level, EventId eventId, TState state, Exception? error, Func<TState, Exception?, string> formatter)
+        { try { inner.Log(level, eventId, state, error, formatter); } catch { } }
     }
 
 

@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
@@ -10,17 +11,18 @@ using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.Core.Recognition.OCR;
 
-public class OcrFactory : IDisposable
+public class OcrFactory : IDisposable, IAsyncDisposable
 {
     // public static IOcrService Media = Create(OcrEngineTypes.Media);
 
 
     public static IOcrService Paddle => App.ServiceProvider.GetRequiredService<OcrFactory>().PaddleOcr;
-    private IOcrService PaddleOcr => _paddleOcrService ??= Create(OcrEngineTypes.Paddle);
+    internal IOcrService PaddleOcr => _lifetime.Service;
 
-    private IOcrService? _paddleOcrService;
+    private readonly OcrServiceLifetime _lifetime;
     private readonly ILogger<BgiOnnxFactory> _logger;
     private readonly OtherConfig.Ocr _config;
+    private readonly Func<IOcrService>? _nativeFactory;
 
     /// <summary>
     ///  OCR 工厂,不可以直接实例化,请使用 App.ServiceProvider获取实例
@@ -30,7 +32,24 @@ public class OcrFactory : IDisposable
     {
         _logger = logger;
         _config = GetConfig();
+        _lifetime = CreateLifetime();
     }
+
+    internal OcrFactory(ILogger<BgiOnnxFactory> logger, Func<IOcrService> nativeFactory)
+    {
+        _logger = logger;
+        _config = new OtherConfig.Ocr();
+        _nativeFactory = nativeFactory;
+        _lifetime = CreateLifetime();
+    }
+
+    private OcrServiceLifetime CreateLifetime() => new(() => Create(OcrEngineTypes.Paddle), observation =>
+        _logger.LogDebug("OCR_LIFECYCLE generation={Generation} state={State} ms={Milliseconds:F1} borrowers={Borrowers} suppressed={Suppressed}",
+            observation.Generation, observation.State, observation.Milliseconds, observation.Borrowers, observation.Suppressed));
+
+    public Task PrepareAsync(CancellationToken ct = default) => _lifetime.PrepareAsync(ct);
+    public static Task PreparePaddleAsync(CancellationToken ct = default) =>
+        App.ServiceProvider.GetRequiredService<OcrFactory>().PrepareAsync(ct);
 
     /// <summary>
     /// 创建
@@ -39,10 +58,11 @@ public class OcrFactory : IDisposable
     {
         var result = type switch
         {
-            OcrEngineTypes.Paddle => CreatePaddleOcrInstance(),
+            OcrEngineTypes.Paddle => _nativeFactory == null ? CreatePaddleOcrInstance() : _nativeFactory(),
             _ => throw new ArgumentOutOfRangeException(Enum.GetName(type), type, "不支持的 OCR 引擎类型")
         };
-        _logger.LogDebug("创建了类型为 {Type} 的 OCR服务", Enum.GetName(type));
+        try { _logger.LogDebug("创建了类型为 {Type} 的 OCR服务", Enum.GetName(type)); }
+        catch { /* 已创建的native实例不能因日志失败而遗失。 */ }
         return result;
     }
 
@@ -61,7 +81,7 @@ public class OcrFactory : IDisposable
         catch (Exception e)
         {
             // 如果配置获取失败，使用默认配置
-            _logger.LogWarning(e, "获取 OCR 配置失败，使用默认配置");
+            try { _logger.LogWarning(e, "获取 OCR 配置失败，使用默认配置"); } catch { }
             return new OtherConfig.Ocr();
         }
     }
@@ -80,7 +100,7 @@ public class OcrFactory : IDisposable
         catch (Exception e)
         {
             var result = new CultureInfo(new OtherConfig().GameCultureInfoName);
-            _logger.LogInformation("获取游戏文化信息失败，使用默认文化信息: {CultureInfo}", result.Name);
+            try { _logger.LogInformation("获取游戏文化信息失败，使用默认文化信息: {CultureInfo}", result.Name); } catch { }
             return result;
         }
     }
@@ -123,34 +143,13 @@ public class OcrFactory : IDisposable
         };
     }
 
-    public Task Unload()
-    {
-        if (_paddleOcrService is not IDisposable disposable)
-        {
-            _paddleOcrService = null;
-            return Task.CompletedTask;
-        }
-        try
-        {
-            disposable.Dispose();
-            _paddleOcrService = null;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "卸载 OCR 服务时发生错误");
-        }
-
-        return Task.CompletedTask;
-    }
+    public Task Unload() => _lifetime.UnloadAsync();
 
     public void Dispose()
     {
-        Unload().GetAwaiter().GetResult();
+        _lifetime.Dispose();
         GC.SuppressFinalize(this);
     }
 
-    ~OcrFactory()
-    {
-        Dispose();
-    }
+    public ValueTask DisposeAsync() => _lifetime.DisposeAsync();
 }

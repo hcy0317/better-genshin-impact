@@ -556,7 +556,9 @@ public partial class MainWindowViewModel : ObservableObject, IViewModel
                     // 现在OCR创建的时候会自己读设置了
                     // string gameCultureInfoName = TaskContext.Instance().Config.OtherConfig.GameCultureInfoName;
                     // await OcrFactory.ChangeCulture(gameCultureInfoName);
-                    var s = OcrFactory.Paddle.Ocr(new Mat(Global.Absolute(@"Assets\Model\PaddleOCR\test_pp_ocr.png")));
+                    await OcrFactory.PreparePaddleAsync();
+                    using var warmupMat = new Mat(Global.Absolute(@"Assets\Model\PaddleOCR\test_pp_ocr.png"));
+                    var s = OcrFactory.Paddle.Ocr(warmupMat);
                     Debug.WriteLine("PaddleOcr预热结果:" + s);
                     if (TaskContext.Instance().Config.AutoPickConfig.OcrEngine == nameof(PickOcrEngineEnum.Yap))
                     {

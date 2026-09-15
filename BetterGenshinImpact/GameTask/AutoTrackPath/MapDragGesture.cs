@@ -80,7 +80,8 @@ internal static class MapDragGesture
                 await Move(next);
                 previous = next;
             }
-            await delay(50, ct);
+            // 上游的松键前稳定窗口与本地finally释放/绝对落点校验同时保留。
+            await delay(60, ct);
             Check();
             Verify(end);
             var final = pointer.Position;

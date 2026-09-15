@@ -8,6 +8,84 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.LogParseTests;
 
 public class ExecutionRecordStorageTests
 {
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{damaged-json")]
+    public void InvalidExistingHistoryIsNotReplacedWithAnEmptyLedger(string content)
+    {
+        var directory = Directory.CreateTempSubdirectory("bgi-invalid-receipts-");
+        try
+        {
+            var record = CreateRecord(null);
+            var path = Path.Combine(directory.FullName, record.StartTime.ToString("yyyyMMdd") + ".json");
+            File.WriteAllText(path, content);
+            Assert.NotNull(Record.Exception(() => ExecutionRecordStorage.SaveExecutionRecord(record, directory.FullName)));
+            Assert.Equal(content, File.ReadAllText(path));
+            Assert.Single(directory.GetFiles());
+        }
+        finally { directory.Delete(true); }
+    }
+
+    [Fact]
+    public async Task ConcurrentExecutionReceiptsDoNotOverwriteEachOther()
+    {
+        var directory = Directory.CreateTempSubdirectory("bgi-execution-receipts-");
+        try
+        {
+            using var ready = new CountdownEvent(12);
+            using var start = new ManualResetEventSlim();
+            var errors = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+            var records = Enumerable.Range(0, 12).Select(_ => CreateRecord(null)).ToArray();
+            var writers = records.Select(record => Task.Factory.StartNew(() =>
+            {
+                ready.Signal();
+                start.Wait();
+                try { ExecutionRecordStorage.SaveExecutionRecord(record, directory.FullName); }
+                catch (Exception error) { errors.Add(error); }
+            }, default, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+            var allReady = ready.Wait(TimeSpan.FromSeconds(5));
+            start.Set();
+            await Task.WhenAll(writers).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.True(allReady);
+            Assert.Empty(errors);
+            var stored = JsonConvert.DeserializeObject<DailyExecutionRecord>(File.ReadAllText(
+                Path.Combine(directory.FullName, records[0].StartTime.ToString("yyyyMMdd") + ".json")))!;
+            Assert.Equal(records.Select(x => x.Id).Order(), stored.ExecutionRecords.Select(x => x.Id).Order());
+        }
+        finally { directory.Delete(true); }
+    }
+
+    [Fact]
+    public void CompatibleExplicitCompletionStillHonorsTheConfiguredCooldown()
+    {
+        var project = CreateProject("采集选中的材料");
+        var record = CreateRecord(null);
+        record.Outcome = "Completed";
+        record.OutcomeReason = "VERIFIED_COMPLETION";
+        record.OutcomeContract = "explicit-v1";
+        var manifest = Manifest.FromJson("""{"outcome_contract":"explicit-v1"}""");
+        Assert.True(ExecutionRecordStorage.IsSkipTask(project, out _,
+            [new DailyExecutionRecord { ExecutionRecords = [record] }], _ => manifest));
+        record.Outcome = "NeedsReconcile";
+        Assert.False(ExecutionRecordStorage.IsSkipTask(project, out _,
+            [new DailyExecutionRecord { ExecutionRecords = [record] }], _ => manifest));
+    }
+
+    [Fact]
+    public void ManagedOutcomeContractCannotReuseLegacyNormalReturnAsCompletion()
+    {
+        var project = CreateProject("采集选中的材料");
+        var record = CreateRecord(null);
+        record.Outcome = "Completed";
+        record.OutcomeReason = "LEGACY_NORMAL_RETURN";
+        var manifest = Manifest.FromJson("""{"outcome_contract":"explicit-v1"}""");
+        var before = JsonConvert.SerializeObject(record);
+        Assert.False(ExecutionRecordStorage.IsSkipTask(project, out var message,
+            [new DailyExecutionRecord { ExecutionRecords = [record] }], _ => manifest));
+        Assert.Contains("结果合同", message);
+        Assert.Equal(before, JsonConvert.SerializeObject(record));
+    }
+
     [Fact]
     public void SelfManagedJavascriptReevaluatesMaterialCooldownDespiteSameDaySuccess()
     {

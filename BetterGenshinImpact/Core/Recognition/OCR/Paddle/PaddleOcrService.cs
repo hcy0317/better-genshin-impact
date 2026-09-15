@@ -27,6 +27,9 @@ public class PaddleOcrService : IOcrService, IDisposable
     private readonly Det _localDetModel;
 
     private readonly Rec _localRecModel;
+    private readonly object _disposeGate = new();
+    private volatile bool _retiring;
+    private bool _detDisposed, _recDisposed;
 
     /// <summary>Gets or sets the official recognition score threshold used to discard low-confidence results.</summary>
     public float DropScore { get; set; } = 0.5f;
@@ -116,9 +119,10 @@ public class PaddleOcrService : IOcrService, IDisposable
                     detector,
                     new Rec(RecognitionModel, RecLabel(), RecognitionVersion, onnxFactory));
             }
-            catch
+            catch (Exception constructionFailure)
             {
-                detector.Dispose();
+                try { detector.Dispose(); }
+                catch (Exception cleanupFailure) { throw new AggregateException(constructionFailure, cleanupFailure); }
                 throw;
             }
         }
@@ -274,10 +278,10 @@ public class PaddleOcrService : IOcrService, IDisposable
             Debug.WriteLine(
                 $"PaddleOcrService 预热完成，使用模型: {modelType.DetectionModel.Name} 和 {modelType.RecognitionModel.Name}，结果: {preHeatResult.Text}");
         }
-        catch
+        catch (Exception initializationFailure)
         {
-            _localRecModel.Dispose();
-            _localDetModel.Dispose();
+            try { Dispose(); }
+            catch (Exception cleanupFailure) { throw new AggregateException(initializationFailure, cleanupFailure); }
             throw;
         }
     }
@@ -295,6 +299,7 @@ public class PaddleOcrService : IOcrService, IDisposable
     /// </summary>
     public OcrResult OcrResult(Mat mat)
     {
+        ObjectDisposedException.ThrowIf(_retiring, this);
         if (mat.Channels() == 4)
         {
             using var mat3 = mat.CvtColor(ColorConversionCodes.BGRA2BGR);
@@ -309,6 +314,7 @@ public class PaddleOcrService : IOcrService, IDisposable
     /// </summary>
     public string OcrWithoutDetector(Mat mat)
     {
+        ObjectDisposedException.ThrowIf(_retiring, this);
         var startTime = Stopwatch.GetTimestamp();
         var str = _localRecModel.Run(mat).Text;
         var time = Stopwatch.GetElapsedTime(startTime);
@@ -433,8 +439,18 @@ public class PaddleOcrService : IOcrService, IDisposable
 
     public void Dispose()
     {
-        _localDetModel.Dispose();
-        _localRecModel.Dispose();
+        lock (_disposeGate)
+        {
+            _retiring = true;
+            List<Exception> failures = [];
+            if (!_detDisposed)
+                try { _localDetModel.Dispose(); _detDisposed = true; }
+                catch (Exception error) { failures.Add(error); }
+            if (!_recDisposed)
+                try { _localRecModel.Dispose(); _recDisposed = true; }
+                catch (Exception error) { failures.Add(error); }
+            if (failures.Count != 0) throw new AggregateException("OCR模型未能完全释放", failures);
+        }
     }
 
     /// <summary>

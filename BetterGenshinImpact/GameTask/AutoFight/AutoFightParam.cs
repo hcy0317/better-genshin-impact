@@ -11,6 +11,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight;
 
 public class AutoFightParam : BaseTaskParam<AutoFightTask>
 {
+    /// <summary>
+    /// 自动连招（LLM 行为树）策略的固定名称；该名称不对应任何策略文件，
+    /// 命中时由 ComboCombatTaskFactory 路由到 AutoComboRunTask，并复用此名称作为 CombatStrategyPath
+    /// </summary>
+    public const string ComboStrategyName = "自动连招（实验）";
+
     public class FightFinishDetectConfig
     {
         public bool FastCheckEnabled = false;
@@ -78,6 +84,7 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
     public string CombatStrategyPath { get; set; }
 
     public bool FightFinishDetectEnabled { get; set; } = false;
+    internal bool ExternalCompletionAuthority { get; set; }
     public bool PickDropsAfterFightEnabled { get; set; } = true;
     public int PickDropsAfterFightSeconds { get; set; } = 15;
     public const int KazuhaGatheredDropsScanSeconds = 3;
@@ -176,6 +183,10 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
         {
             CombatStrategyPath =  Global.Absolute(@"User\AutoFight\");
         }
+        else if (ComboStrategyName.Equals(strategyName))
+        {
+            CombatStrategyPath = strategyName;
+        }
         else
         {
             CombatStrategyPath =  Global.Absolute(@"User\AutoFight\" + strategyName + ".txt");
@@ -194,6 +205,11 @@ public class AutoFightParam : BaseTaskParam<AutoFightTask>
         {
             var dir = Global.Absolute(@"User\AutoFight\");
             return (dir, "txt");
+        }
+
+        if (ComboStrategyName.Equals(strategyName))
+        {
+            return (strategyName, "combo");
         }
 
         var baseDir = Global.Absolute(@"User\AutoFight\");

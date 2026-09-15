@@ -126,7 +126,7 @@ public partial class Avatar
     {
         ct.ThrowIfCancellationRequested();
         await QBurstClassifierLazy.Value.WarmUpAsync(Logger, ct);
-        _ = OcrFactory.Paddle;
+        await OcrFactory.PreparePaddleAsync(ct);
         ct.ThrowIfCancellationRequested();
     }
 
@@ -801,7 +801,7 @@ public partial class Avatar
         return observation;
     }
 
-    private static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
+    internal static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
     {
         using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
         var topClass = QBurstClassifierLazy.Value.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());
