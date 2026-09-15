@@ -8,6 +8,7 @@ using OpenCvSharp;
 using System.Linq;
 using BetterGenshinImpact.GameTask.Common;
 using Microsoft.Extensions.Logging;
+using BetterGenshinImpact.Helpers;
 
 namespace BetterGenshinImpact.Core.Script.Dependence;
 
@@ -172,6 +173,10 @@ public class LimitedFile(string rootPath)
         path = NormalizePath(path);
         return File.ReadAllText(path);
     }
+
+    /// <summary>仅当磁盘内容仍与读到的原文相同才写入；null表示文件不存在，不等于空文件。</summary>
+    public bool CompareExchangeTextSync(string path, string? expectedContent, string content) =>
+        FileMutationGate.CompareExchange(NormalizePath(path), expectedContent, content);
 
     /// <summary>
     /// Read all text from a file.

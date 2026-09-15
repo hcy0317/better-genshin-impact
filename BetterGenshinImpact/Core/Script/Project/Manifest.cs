@@ -29,6 +29,8 @@ public class Manifest
     public string[] HttpAllowedUrls { get; set; } = [];
     /// <summary>脚本自己按材料目标和刷新时间判断是否完成；一次成功不代表整日完成。</summary>
     public bool SelfManagedCompletion { get; set; }
+    /// <summary>受管脚本的结果合同；在跳过判断和执行前生效，而不是等JS入口再声明。</summary>
+    public string? OutcomeContract { get; set; }
 
     public static Manifest FromJson(string json)
     {
@@ -38,6 +40,7 @@ public class Manifest
 
     public void Validate(string path)
     {
+        ScriptOutcomeContract.Validate(OutcomeContract);
         if (string.IsNullOrWhiteSpace(Name))
         {
             throw new Exception("manifest.json: name is required.");

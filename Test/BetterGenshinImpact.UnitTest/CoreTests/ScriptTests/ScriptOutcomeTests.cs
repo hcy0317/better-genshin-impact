@@ -10,6 +10,61 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.ScriptTests;
 public class ScriptOutcomeTests
 {
     [Fact]
+    public async Task ManifestOutcomeContractAppliesBeforeTheFirstJavaScriptStatement()
+    {
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding);
+        var result = await ScriptOutcomeHost.RunAsync(engine, () => engine.Evaluate("42"), default,
+            outcomeContract: "explicit-v1");
+        Assert.Equal(ScriptOutcomeKind.NeedsReconcile, result.Kind);
+        Assert.Equal("SCRIPT_OUTCOME_MISSING", result.Reason);
+        var record = new ExecutionRecord();
+        result.ApplyTo(record);
+        Assert.False(record.IsSuccessful);
+        Assert.Equal("explicit-v1", record.OutcomeContract);
+        var completed = await ScriptOutcomeHost.RunAsync(engine,
+            () => engine.Evaluate("taskResult.report('Completed', 'VERIFIED')"), default, "explicit-v1");
+        completed.ApplyTo(record);
+        Assert.True(record.IsSuccessful);
+        Assert.Equal("explicit-v1", record.OutcomeContract);
+    }
+
+    [Fact]
+    public async Task UnknownManifestContractNeverEvaluatesAndCannotOverrideCancellation()
+    {
+        using var engine = new V8ScriptEngine();
+        var evaluated = false;
+        object? Evaluate() { evaluated = true; return null; }
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            ScriptOutcomeHost.RunAsync(engine, Evaluate, default, "explicit-future"));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            ScriptOutcomeHost.RunAsync(engine, Evaluate, cancellation.Token, "explicit-future"));
+        Assert.False(evaluated);
+    }
+
+    [Fact]
+    public void ClearScriptCanReadTheNativeFrameIdentityAndTimestampWithoutKeepingItsImageAlive()
+    {
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new Fischless.GameCapture.CaptureFrameSource(clock);
+        using var first = new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(
+            new OpenCvSharp.Mat(1, 1, OpenCvSharp.MatType.CV_8UC3), 0, 0) { FrameStamp = source.Next() };
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        using var second = new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(
+            new OpenCvSharp.Mat(1, 1, OpenCvSharp.MatType.CV_8UC3), 0, 0) { FrameStamp = source.Next() };
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding);
+        engine.AddHostObject("first", first);
+        engine.AddHostObject("second", second);
+        engine.Execute("var oldSource = first.FrameStamp;");
+        first.Dispose();
+        Assert.True((bool)engine.Evaluate("oldSource.IsKnown && second.FrameStamp.IsAfter(oldSource)"));
+        Assert.Equal(clock.GetUtcNow().ToUnixTimeMilliseconds(),
+            Convert.ToInt64(engine.Evaluate("Number(second.FrameStamp.CapturedAt.ToUnixTimeMilliseconds())")));
+        Assert.False((bool)engine.Evaluate("oldSource.IsAfter(second.FrameStamp)"));
+    }
+
+    [Fact]
     public async Task JavaScriptRethrowPreservesNativeTerminalRecoveryFailure()
     {
         using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);

@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Script.Group;
+using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.Core.Script.Project;
 using BetterGenshinImpact.Helpers;
 using Newtonsoft.Json;
@@ -46,22 +47,26 @@ public class ExecutionRecordStorage
     /// <summary>
     /// 保存执行记录到对应日期的文件中
     /// </summary>
-    public static void SaveExecutionRecord(ExecutionRecord record)
+    public static void SaveExecutionRecord(ExecutionRecord record) => SaveExecutionRecord(record, StorageDirectory);
+
+    internal static void SaveExecutionRecord(ExecutionRecord record, string storageDirectory)
     {
         // 创建存储目录
-        Directory.CreateDirectory(StorageDirectory);
+        Directory.CreateDirectory(storageDirectory);
 
         // 获取基于StartTime的日期文件名
         string dateKey = record.StartTime.ToString("yyyyMMdd");
         string fileName = $"{dateKey}.json";
-        string filePath = Path.Combine(StorageDirectory, fileName);
+        string filePath = Path.Combine(storageDirectory, fileName);
+        using var transaction = FileMutationGate.Enter(filePath);
 
         // 读取或创建当天的记录
         DailyExecutionRecord dailyRecord;
         if (File.Exists(filePath))
         {
             string json = File.ReadAllText(filePath);
-            dailyRecord = JsonConvert.DeserializeObject<DailyExecutionRecord>(json);
+            dailyRecord = JsonConvert.DeserializeObject<DailyExecutionRecord>(json)
+                ?? throw new InvalidDataException("执行记录为空，保留原文件并拒绝覆盖");
         }
         else
         {
@@ -84,7 +89,7 @@ public class ExecutionRecordStorage
 
         // 保存更新后的文件
         string updatedJson = JsonConvert.SerializeObject(dailyRecord, Formatting.Indented);
-        File.WriteAllText(filePath, updatedJson);
+        FileMutationGate.WriteAtomic(filePath, updatedJson);
     }
 
     public static List<DailyExecutionRecord> GetRecentExecutionRecordsByConfig(TaskCompletionSkipRuleConfig config)
@@ -137,8 +142,10 @@ public class ExecutionRecordStorage
 
             if (File.Exists(filePath))
             {
+                using var transaction = FileMutationGate.Enter(filePath);
                 string json = File.ReadAllText(filePath);
-                var record = JsonConvert.DeserializeObject<DailyExecutionRecord>(json);
+                var record = JsonConvert.DeserializeObject<DailyExecutionRecord>(json)
+                    ?? throw new InvalidDataException("执行记录为空，不能作为完成证据");
                 results.Add(record);
             }
         }
@@ -223,8 +230,10 @@ public class ExecutionRecordStorage
             return false; // 配置无效，不执行跳过检查
         }
 
-        if (project.Type == "Javascript"
-            && (project.Project?.Manifest ?? (loadManifest ?? ReadManifest)(project.FolderName))?.SelfManagedCompletion == true)
+        var manifest = project.Type == "Javascript"
+            ? project.Project?.Manifest ?? (loadManifest ?? ReadManifest)(project.FolderName)
+            : null;
+        if (manifest?.SelfManagedCompletion == true)
         {
             message = "脚本声明自主管理完成状态，交由脚本按材料库存目标和刷新时间重新评估";
             return false;
@@ -326,6 +335,15 @@ public class ExecutionRecordStorage
 
                 if (isMatchFound)
                 {
+                    if (!string.IsNullOrEmpty(manifest?.OutcomeContract) &&
+                        (manifest.OutcomeContract != ScriptOutcomeContract.ExplicitV1 ||
+                         record.OutcomeContract != manifest.OutcomeContract ||
+                         record.Outcome != nameof(ScriptOutcomeKind.Completed) ||
+                         record.OutcomeReason == "LEGACY_NORMAL_RETURN"))
+                    {
+                        message = "旧记录不满足当前脚本结果合同，保留历史并交由脚本重新复核";
+                        continue;
+                    }
                     // 构建匹配消息
                     message = $"检查出满足跳过条件: {matchReason}";
 

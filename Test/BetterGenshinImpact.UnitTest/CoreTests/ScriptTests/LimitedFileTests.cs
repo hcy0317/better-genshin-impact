@@ -14,6 +14,57 @@ public sealed class LimitedFileTests : IDisposable
     }
 
     [Fact]
+    public async Task AtomicIntentClaimHasOnlyOneWinnerAndPreservesCompetingData()
+    {
+        var file = new LimitedFile(_rootPath);
+        var winners = await Task.WhenAll(Enumerable.Range(0, 12).Select(index => Task.Run(() =>
+            file.CompareExchangeTextSync("record/claim.json", null, index.ToString()))));
+        Assert.Single(winners.Where(value => value));
+        var current = file.ReadTextSyncOrThrow("record/claim.json");
+        Assert.False(file.CompareExchangeTextSync("record/claim.json", "stale", "overwritten"));
+        Assert.Equal(current, file.ReadTextSyncOrThrow("record/claim.json"));
+        Assert.True(file.CompareExchangeTextSync("record/claim.json", current, "confirmed"));
+        Assert.Equal("confirmed", file.ReadTextSyncOrThrow("record/claim.json"));
+    }
+
+    [Fact]
+    public void JavaScriptCanDistinguishAnAbsentFileFromAnEmptyFileWhenClaiming()
+    {
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding);
+        engine.AddHostObject("file", new LimitedFile(_rootPath));
+        Assert.True((bool)engine.Evaluate("file.compareExchangeTextSync('claim.txt', null, '')"));
+        Assert.False((bool)engine.Evaluate("file.compareExchangeTextSync('claim.txt', null, 'wrong')"));
+        Assert.True((bool)engine.Evaluate("file.compareExchangeTextSync('claim.txt', '', 'claimed')"));
+    }
+
+    [Fact]
+    public void SimilarDirectoryPrefixIsNotInsideTheScriptRoot()
+    {
+        var sibling = _rootPath + "-outside";
+        Directory.CreateDirectory(sibling);
+        try
+        {
+            File.WriteAllText(Path.Combine(sibling, "private.txt"), "outside");
+            Assert.Throws<ArgumentException>(() => new LimitedFile(_rootPath)
+                .ReadTextSyncOrThrow(Path.Combine("..", Path.GetFileName(sibling), "private.txt")));
+        }
+        finally { Directory.Delete(sibling, true); }
+    }
+
+    [Theory]
+    [InlineData("missing.json", -2147024894)]
+    [InlineData("missing/record.txt", -2147024893)]
+    [InlineData(".", -2147024891)]
+    public void TypedReadErrorsAreVisibleToJavaScriptWithoutParsingLocalizedLogMessages(string path, int expected)
+    {
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding);
+        engine.AddHostObject("file", new LimitedFile(_rootPath));
+        engine.Script.fixturePath = path;
+        var code = engine.Evaluate("(() => { try { file.readTextSyncOrThrow(fixturePath); return 0; } catch (error) { let detail = error.hostException; for (let i = 0; i < 4 && detail && detail.InnerException; i++) detail = detail.InnerException; return detail ? detail.HResult : null; } })()");
+        Assert.Equal(expected, code);
+    }
+
+    [Fact]
     public async Task ConfirmedRouteCompletionIsVisibleToJavascript()
     {
         var script = new AutoPathingScript(_rootPath, null, new LimitedFile(_rootPath), (_, _) => { },
