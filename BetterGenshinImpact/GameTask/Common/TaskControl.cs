@@ -25,9 +25,19 @@ public class TaskControl
     private static readonly TaskAdmissionGate Admission = new();
     internal static bool IsShuttingDown => Admission.IsClosing;
     internal static void SetShuttingDown(bool requested) => Admission.SetClosing(requested);
-    internal static void CheckTaskAdmission() => Admission.Check();
+    internal static void CheckTaskAdmission()
+    {
+        Admission.Check();
+        Core.Script.CancellationContext.Instance.CheckRunAccess(checkCancellation: true);
+    }
     internal static IDisposable PauseTaskAdmission() => Admission.Pause();
-    internal static IDisposable EnterTaskActivity() => Admission.EnterActivity();
+    internal static IDisposable EnterTaskActivity()
+    {
+        CheckTaskAdmission();
+        return Admission.EnterActivity();
+    }
+    internal static Task RunAutomationAsync(Func<Task> work, Func<Exception?, bool, Task>? finalize = null) =>
+        AutomationRunCoordinator.RunAsync(Core.Script.CancellationContext.Instance, Admission, TaskSemaphore, work, finalize);
     internal static async Task WaitForTaskDrainAsync(TimeSpan timeout)
     {
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -69,8 +79,8 @@ public class TaskControl
         ct.ThrowIfCancellationRequested();
         CombatActionScope.Current?.Check();
         operation.Check();
-        TrySuspend();
-        CheckAndActivateGameWindow();
+        using (operation.Measure(UiOperationPhase.Pause)) TrySuspend();
+        using (operation.Measure(UiOperationPhase.Focus)) CheckAndActivateGameWindow();
         operation.DelayAsync(Math.Max(0, milliseconds), ct).GetAwaiter().GetResult();
         return true;
     }

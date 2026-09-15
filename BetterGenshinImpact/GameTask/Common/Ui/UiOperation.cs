@@ -8,6 +8,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
+internal enum UiOperationPhase { Check, Pause, Focus, Admission, NativeInput, ExplicitWait }
+
 /// <summary>仅在当前UI调用链生效的预算与关联诊断，不建立后台观察/输入线程。</summary>
 internal sealed class UiOperation : IDisposable
 {
@@ -26,9 +28,12 @@ internal sealed class UiOperation : IDisposable
     private int _debugEvents, _suppressed;
     private bool _ended, _disposed;
     private string? _latestDescription;
+    private readonly double?[] _phaseMilliseconds = new double?[6];
+    private double _constructionMilliseconds, _logProducerMilliseconds;
+    private double? _firstCheckAtMilliseconds, _dispatchMilliseconds;
 
     public static UiOperation? Current => Active.Value;
-    public string Id { get; } = Guid.NewGuid().ToString("N");
+    public string Id { get; }
     public string RootId { get; }
     public string Name { get; }
     public CancellationToken Token => _linked.Token;
@@ -40,11 +45,12 @@ internal sealed class UiOperation : IDisposable
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(budget, TimeSpan.Zero);
         _parent = Current;
+        _clock = _parent?._clock ?? clock ?? TimeProvider.System;
+        _started = _clock.GetTimestamp();
+        Id = Guid.NewGuid().ToString("N");
         _parent?.Check();
         _callerToken = ct;
         _userToken = _parent?._userToken ?? ct;
-        _clock = _parent?._clock ?? clock ?? TimeProvider.System;
-        _started = _clock.GetTimestamp();
         _budget = _parent == null || budget <= _parent.Remaining ? budget : _parent.Remaining;
         _deadline = new CancellationTokenSource(_budget, _clock);
         _linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _deadline.Token, _parent?.Token ?? default);
@@ -54,6 +60,7 @@ internal sealed class UiOperation : IDisposable
         Active.Value = this;
         SafeLog(() => _logger.LogDebug("UI_BEGIN root={RootId} op={OpId} parent={ParentId} operation={Operation} budgetMs={BudgetMs:F0}",
             RootId, Id, _parent?.Id ?? "-", Name, _budget.TotalMilliseconds));
+        _constructionMilliseconds = Elapsed.TotalMilliseconds;
     }
 
     internal static UiOperation Begin(string name, TimeSpan budget, CancellationToken ct = default,
@@ -88,6 +95,8 @@ internal sealed class UiOperation : IDisposable
 
     public void Check()
     {
+        _firstCheckAtMilliseconds ??= Elapsed.TotalMilliseconds;
+        using var measured = Measure(UiOperationPhase.Check);
         ObjectDisposedException.ThrowIf(_disposed, this);
         _userToken.ThrowIfCancellationRequested();
         TaskExecutionScope.ThrowIfFailed();
@@ -131,7 +140,8 @@ internal sealed class UiOperation : IDisposable
         Check();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(Token, extraToken);
         // 同步Sleep也会桥接到此处，不能依赖被GetResult阻塞的UI线程恢复continuation。
-        await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(0, milliseconds)), _clock, linked.Token).ConfigureAwait(false);
+        using (Measure(UiOperationPhase.ExplicitWait))
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(0, milliseconds)), _clock, linked.Token).ConfigureAwait(false);
         extraToken.ThrowIfCancellationRequested();
         Check();
     }
@@ -177,11 +187,40 @@ internal sealed class UiOperation : IDisposable
         if (_ended) return;
         _ended = true;
         SafeLog(() => _logger.Log(error == null || outcome == "cancelled" ? LogLevel.Debug : LogLevel.Warning,
-            error, "UI_END root={RootId} op={OpId} operation={Operation} outcome={Outcome} expected={Expected} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0} suppressed={Suppressed}",
-            RootId, Id, Name, outcome, Expected, _latestDescription ?? "未取得观察", Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds, _suppressed));
+            error, "UI_END root={RootId} op={OpId} operation={Operation} outcome={Outcome} expected={Expected} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0} suppressed={Suppressed} constructionMs={ConstructionMs:F3} dispatchMs={DispatchMs:F3} firstCheckAtMs={FirstCheckAtMs:F3} checksMs={ChecksMs:F3} pauseMs={PauseMs:F3} focusMs={FocusMs:F3} admissionMs={AdmissionMs:F3} nativeInputMs={NativeInputMs:F3} explicitWaitMs={ExplicitWaitMs:F3} logProducerBeforeEndMs={LogProducerBeforeEndMs:F3}",
+            RootId, Id, Name, outcome, Expected, _latestDescription ?? "未取得观察", Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds, _suppressed,
+            _constructionMilliseconds, _dispatchMilliseconds, _firstCheckAtMilliseconds,
+            _phaseMilliseconds[(int)UiOperationPhase.Check], _phaseMilliseconds[(int)UiOperationPhase.Pause],
+            _phaseMilliseconds[(int)UiOperationPhase.Focus], _phaseMilliseconds[(int)UiOperationPhase.Admission],
+            _phaseMilliseconds[(int)UiOperationPhase.NativeInput], _phaseMilliseconds[(int)UiOperationPhase.ExplicitWait],
+            _logProducerMilliseconds));
     }
 
-    private static void SafeLog(Action emit) { try { emit(); } catch { } }
+    public void RecordDispatch(TimeSpan elapsed) => _dispatchMilliseconds = elapsed.TotalMilliseconds;
+
+    // 未进入的阶段保持null；零只表示实际测量到了零，不能伪造未执行的输入/等待。
+    public PhaseMeasurement Measure(UiOperationPhase phase) => new(this, phase);
+    internal readonly struct PhaseMeasurement : IDisposable
+    {
+        private readonly UiOperation _owner;
+        private readonly UiOperationPhase _phase;
+        private readonly long _started;
+        internal PhaseMeasurement(UiOperation owner, UiOperationPhase phase)
+        { _owner = owner; _phase = phase; _started = owner._clock.GetTimestamp(); }
+        public void Dispose()
+        {
+            var index = (int)_phase;
+            _owner._phaseMilliseconds[index] = (_owner._phaseMilliseconds[index] ?? 0) +
+                _owner._clock.GetElapsedTime(_started).TotalMilliseconds;
+        }
+    }
+
+    private void SafeLog(Action emit)
+    {
+        var started = _clock.GetTimestamp();
+        try { emit(); } catch { }
+        finally { _logProducerMilliseconds += _clock.GetElapsedTime(started).TotalMilliseconds; }
+    }
 
     public void Dispose()
     {

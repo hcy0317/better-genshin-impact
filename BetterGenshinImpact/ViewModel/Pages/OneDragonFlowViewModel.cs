@@ -43,7 +43,6 @@ public partial class OneDragonFlowViewModel : ViewModel
 
     private readonly ScriptService _scriptService;
     private bool _isLoadingTaskListFromConfig;
-    private readonly SemaphoreSlim _managedAutomationSemaphore = new(1, 1);
     private bool _managedAutomationActive;
     private bool _managedShutdownRequested;
 
@@ -522,7 +521,10 @@ public partial class OneDragonFlowViewModel : ViewModel
         }
     }
 
-    internal async Task RunCommandLineAsync(string? configName)
+    internal Task RunCommandLineAsync(string? configName) =>
+        TaskControl.RunAutomationAsync(() => RunCommandLineOwnedAsync(configName));
+
+    private async Task RunCommandLineOwnedAsync(string? configName)
     {
         if (SelectedConfig is null)
         {
@@ -551,7 +553,7 @@ public partial class OneDragonFlowViewModel : ViewModel
         }
 
         Toast.Information($"命令行一条龙「{SelectedConfig.Name}」。");
-        await RunOneDragonAsync(propagateExceptions: true);
+        await RunOwnedOneDragonAsync(propagateExceptions: true);
     }
 
     [RelayCommand]
@@ -560,16 +562,21 @@ public partial class OneDragonFlowViewModel : ViewModel
         await RunOneDragonAsync(propagateExceptions: false);
     }
 
-    internal async Task RunOneDragonAsync(bool propagateExceptions)
+    internal Task RunOneDragonAsync(bool propagateExceptions) =>
+        TaskControl.RunAutomationAsync(() => RunOwnedOneDragonAsync(propagateExceptions));
+
+    private async Task RunOwnedOneDragonAsync(bool propagateExceptions)
     {
+        var sourceConfig = SelectedConfig ?? throw new InvalidOperationException("没有可用的一条龙配置");
+        var snapshot = OneDragonRunSnapshot.Capture(sourceConfig, TaskList);
         var completionActionAttempted = false;
         try
         {
             await RunOneDragonCoreAsync(propagateExceptions, () =>
             {
                 completionActionAttempted = true;
-                ExecuteCompletionAction();
-            });
+                ExecuteCompletionAction(snapshot.Config);
+            }, snapshot, sourceConfig);
         }
         catch (Exception exception) when (
             !completionActionAttempted &&
@@ -577,24 +584,26 @@ public partial class OneDragonFlowViewModel : ViewModel
         {
             await OneDragonFinalizer.RunWithFailureCompletionAsync(
                 () => Task.FromException(exception),
-                ExecuteCompletionAction);
+                () => ExecuteCompletionAction(snapshot.Config));
         }
     }
 
-    private async Task RunOneDragonCoreAsync(bool propagateExceptions, Action completionAction)
+    private async Task RunOneDragonCoreAsync(bool propagateExceptions, Action completionAction,
+        OneDragonRunSnapshot snapshot, OneDragonFlowConfig sourceConfig)
     {
         using var activity = TaskControl.EnterTaskActivity();
-        _logger.LogInformation($"启用一条龙配置：{SelectedConfig.Name}");
+        var runConfig = snapshot.Config;
+        _logger.LogInformation($"启用一条龙配置：{runConfig.Name}");
 
         // 启动等待之前先进行取消操作的初始化，便于在任务开始前终止任务.
         TaskControl.InitializeTaskCancellation();
 
-        var taskListCopy = new List<OneDragonTaskItem>(TaskList);//避免执行过程中修改TaskList
+        var taskListCopy = snapshot.Tasks;
 
         // 如果设置了 NextTaskId，从指定任务开始执行
-        if (!string.IsNullOrEmpty(SelectedConfig.NextTaskId))
+        if (!string.IsNullOrEmpty(runConfig.NextTaskId))
         {
-            var taskIndex = taskListCopy.FindIndex(t => t.Id == SelectedConfig.NextTaskId);
+            var taskIndex = taskListCopy.FindIndex(t => t.Id == runConfig.NextTaskId);
             if (taskIndex >= 0)
             {
                 _logger.LogInformation("一条龙：任务将从 {Name} 开始执行", taskListCopy[taskIndex].Name);
@@ -604,13 +613,13 @@ public partial class OneDragonFlowViewModel : ViewModel
             {
                 _logger.LogWarning("一条龙：未找到标记的任务，将从头开始执行");
             }
-            SelectedConfig.NextTaskId = string.Empty;
+            sourceConfig.NextTaskId = string.Empty;
             LoadDisplayTaskListFromConfig();
         }
 
         foreach (var task in taskListCopy)
         {
-            task.InitAction(SelectedConfig);
+            task.InitAction(runConfig);
         }
 
         int finishOneTaskcount = 1;
@@ -624,7 +633,7 @@ public partial class OneDragonFlowViewModel : ViewModel
             ScriptGroups.Remove(task);
         }
 
-        if (SelectedConfig == null || taskListCopy.Count(t => t.IsEnabled) == 0)
+        if (taskListCopy.Count(t => t.IsEnabled) == 0)
         {
             Toast.Warning("请先选择任务");
             _logger.LogInformation("没有配置,退出执行!");
@@ -635,6 +644,14 @@ public partial class OneDragonFlowViewModel : ViewModel
             t.IsEnabled && ScriptGroupsdefault.Any(defaultTask => defaultTask.Name == t.Name));
         _logger.LogInformation($"启用一条龙任务的数量: {enabledoneTaskCount}");
 
+        // 固定配置组内容也必须在游戏准备前完成，执行中切换/编辑UI配置不串入本run。
+        var groupSnapshots = new Dictionary<string, ScriptGroup>();
+        foreach (var task in taskListCopy.Where(t => t.IsEnabled && !ScriptGroupsdefault.Any(d => d.Name == t.Name)))
+        {
+            var path = Path.Combine(_basePath, _scriptGroupPath, $"{task.Name}.json");
+            groupSnapshots[task.Id] = ScriptGroup.FromJson(File.ReadAllText(path));
+        }
+        SaveConfig();
         await ScriptService.StartGameTask();
         if (CancellationContext.Instance.IsCancellationRequested)
         {
@@ -645,7 +662,6 @@ public partial class OneDragonFlowViewModel : ViewModel
             return;
         }
 
-        SaveConfig();
         int enabledTaskCount = taskListCopy.Count(t =>
             t.IsEnabled && !ScriptGroupsdefault.Any(d => d.Name == t.Name));
         _logger.LogInformation($"启用配置组任务的数量: {enabledTaskCount}");
@@ -709,8 +725,7 @@ public partial class OneDragonFlowViewModel : ViewModel
 
                         _logger.LogInformation($"配置组任务执行: {finishTaskcount++}/{enabledTaskCount}");
                         await Task.Delay(500);
-                        string filePath = Path.Combine(_basePath, _scriptGroupPath, $"{task.Name}.json");
-                        var group = ScriptGroup.FromJson(await File.ReadAllTextAsync(filePath));
+                        var group = groupSnapshots[task.Id];
                         IScriptService? scriptService = App.GetService<IScriptService>();
                         var groupOutcome = await scriptService!.RunMulti(
                             ScriptControlViewModel.GetNextProjects(group),
@@ -805,14 +820,14 @@ public partial class OneDragonFlowViewModel : ViewModel
             taskName, stopwatch.Elapsed.TotalSeconds);
     }
 
-    private void ExecuteCompletionAction()
+    private void ExecuteCompletionAction(OneDragonFlowConfig runConfig)
     {
-        if (SelectedConfig == null || string.IsNullOrEmpty(SelectedConfig.CompletionAction))
+        if (string.IsNullOrEmpty(runConfig.CompletionAction))
         {
             return;
         }
 
-        switch (SelectedConfig.CompletionAction)
+        switch (runConfig.CompletionAction)
         {
             case "关闭游戏":
                 SystemControl.CloseGame();
@@ -842,17 +857,17 @@ public partial class OneDragonFlowViewModel : ViewModel
         App.RequestShutdown();
     }
 
-    public async Task RunManagedAutomationAsync(
+    public Task RunManagedAutomationAsync(
         string configName,
         string runId,
         string resultPath)
     {
-        using var activity = TaskControl.EnterTaskActivity();
-        await _managedAutomationSemaphore.WaitAsync();
+        var owned = false;
         var status = "failed";
         string? message = null;
-        try
+        return TaskControl.RunAutomationAsync(async () =>
         {
+            owned = true;
             _managedAutomationActive = true;
             _managedShutdownRequested = false;
             InitConfigList();
@@ -873,7 +888,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                 return;
             }
 
-            await RunOneDragonAsync(propagateExceptions: true);
+            await RunOwnedOneDragonAsync(propagateExceptions: true);
             if (CancellationContext.Instance.IsCancellationRequested)
             {
                 status = "cancelled";
@@ -883,24 +898,20 @@ public partial class OneDragonFlowViewModel : ViewModel
             {
                 status = "succeeded";
             }
-        }
-        catch (Exception exception) when (
-            exception is OperationCanceledException or NormalEndException)
+        }, async (failure, cancelled) =>
         {
-            status = "cancelled";
-            message = "一条龙任务被取消。";
-            _logger.LogInformation(
-                exception,
-                "Child Session 一条龙已取消：{RunId}",
-                runId);
-        }
-        catch (Exception exception)
-        {
-            _logger.LogError(exception, "Child Session 一条龙执行失败：{RunId}", runId);
-            message = exception.GetBaseException().Message;
-        }
-        finally
-        {
+            if (failure is OperationCanceledException or NormalEndException || cancelled)
+            {
+                status = "cancelled";
+                message = "一条龙任务被取消。";
+                _logger.LogInformation(failure, "Child Session 一条龙已取消：{RunId}", runId);
+            }
+            else if (failure != null)
+            {
+                status = "failed";
+                message = failure.GetBaseException().Message;
+                _logger.LogError(failure, "Child Session 一条龙执行失败：{RunId}", runId);
+            }
             try
             {
                 await WriteAutomationResultAsync(
@@ -912,16 +923,15 @@ public partial class OneDragonFlowViewModel : ViewModel
             }
             finally
             {
-                var shutdownRequested = _managedShutdownRequested;
-                _managedShutdownRequested = false;
-                _managedAutomationActive = false;
-                _managedAutomationSemaphore.Release();
-                if (shutdownRequested)
+                if (owned)
                 {
-                    App.RequestShutdown();
+                    var shutdownRequested = _managedShutdownRequested;
+                    _managedShutdownRequested = false;
+                    _managedAutomationActive = false;
+                    if (shutdownRequested) App.RequestShutdown();
                 }
             }
-        }
+        });
     }
 
     private static async Task WriteAutomationResultAsync(

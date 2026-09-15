@@ -81,14 +81,18 @@ public class TaskRunner
         }
         Exception? executionException = null;
         TaskExecutionScope? executionScope = null;
+        CancellationContext.RunLease? runLease = null;
+        var initializationStarted = false;
         try
         {
             CheckTaskAdmission();
+            runLease = CancellationContext.Instance.EnterTaskRun(resetCancellationContext);
             if (resetCancellationContext) InitializeTaskCancellation();
             executionScope = TaskExecutionScope.BeginOwned();
             _logger.LogInformation("→ {Text}", _name + "任务启动！");
 
             // 初始化
+            initializationStarted = true;
             Init();
             RunnerContext.Instance.Clear();
 
@@ -134,12 +138,21 @@ public class TaskRunner
             {
                 cleanupFailures = TaskRunnerCleanup.RunAll(
                 [
-                    ("任务资源", End),
+                    ("任务资源", () => { if (initializationStarted) End(); }),
                     ("结束日志", () => _logger.LogInformation("→ {Text}", _name + "任务结束")),
                     ("取消上下文", CancellationContext.Instance.Clear),
-                    ("运行上下文", RunnerContext.Instance.Clear)
+                    ("运行上下文", () => { if (initializationStarted) RunnerContext.Instance.Clear(); })
                 ],
                 LogCleanupFailure);
+                if (runLease != null)
+                {
+                    try { await runLease.DisposeAsync(); }
+                    catch (Exception error)
+                    {
+                        cleanupFailures = [..cleanupFailures, error];
+                        try { LogCleanupFailure("运行取消代际", error); } catch { }
+                    }
+                }
             }
             finally
             {
@@ -181,8 +194,11 @@ public class TaskRunner
         }
 
         var ownershipTransferred = false;
+        CancellationContext.RunLease? startupRun = null;
+        Exception? startupFailure = null;
         try
         {
+            startupRun = CancellationContext.Instance.EnterTaskRun(reset: false);
             var taskCancellationToken = CancellationContext.Instance.GetTokenOrNone();
 
             // 没启动的时候先启动
@@ -212,12 +228,26 @@ public class TaskRunner
                 propagateExceptions: propagateExceptions,
                 taskSemaphoreAlreadyOwned: true));
         }
+        catch (Exception error)
+        {
+            startupFailure = error;
+            throw;
+        }
         finally
         {
-            if (!ownershipTransferred)
+            try
             {
-                CancellationContext.Instance.Clear();
-                TaskSemaphore.Release();
+                if (!ownershipTransferred)
+                {
+                    CancellationContext.Instance.Clear();
+                    TaskSemaphore.Release();
+                }
+            }
+            finally
+            {
+                try { if (startupRun != null) await startupRun.DisposeAsync(); }
+                catch (Exception cleanup) when (startupFailure != null)
+                { startupFailure.Data["StartupRunCleanup"] = cleanup; }
             }
         }
     }
