@@ -292,7 +292,7 @@ public partial class Avatar
     /// tp 到七天神像恢复
     /// </summary>
     /// <param name="ct"></param>
-    /// <param name="ex"></param>
+    /// <param name="retryException"></param>
     /// <exception cref="RetryException"></exception>
     public static void TpForRecover(CancellationToken ct, Exception ex) => TpForRecover(ct, ex, null);
 
@@ -801,7 +801,7 @@ public partial class Avatar
         return observation;
     }
 
-    private static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
+    internal static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
     {
         using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
         var topClass = QBurstClassifierLazy.Value.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());

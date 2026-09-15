@@ -82,32 +82,9 @@ public class AutoFightJsonTask : ISoloTask
     }
 
     /// <summary>
-    /// 获取战斗场景，带重试机制
-    /// 最多重试 5 次，每次间隔 1 秒
+    /// 获取战斗场景；复用统一初始化与截图/场景生命周期。
     /// </summary>
-    /// <returns>初始化完成的战斗场景</returns>
-    public CombatScenes GetCombatScenesWithRetry()
-    {
-        const int maxRetries = 5;
-        var retryDelayMs = 1000;
-
-        for (int attempt = 1; attempt <= maxRetries; attempt++)
-        {
-            using var capture = CaptureToRectArea();
-            var combatScenes = new CombatScenes().InitializeTeam(capture);
-            if (combatScenes.CheckTeamInitialized())
-            {
-                return combatScenes;
-            }
-            combatScenes.Dispose();
-
-            if (attempt < maxRetries)
-            {
-                Thread.Sleep(retryDelayMs);
-            }
-        }
-        throw new Exception("识别队伍角色失败（已重试 5 次）");
-    }
+    public CombatScenes GetCombatScenesWithRetry() => CombatScenes.GetCombatScenesWithRetry();
 
     /// <summary>
     /// 启动自动战斗（JSON策略模式）
@@ -147,8 +124,7 @@ public class AutoFightJsonTask : ISoloTask
         {
             AutoFightTask.ValidateAndLogCombatSafetyConfiguration(Logger, _taskParam);
             LogScreenResolution();
-            var combatScenes = GetCombatScenesWithRetry();
-
+            var combatScenes = CombatScenes.GetCombatScenesWithRetry();
             // 收集当前队伍角色名
             foreach (var avatar in combatScenes.GetAvatars())
             {
