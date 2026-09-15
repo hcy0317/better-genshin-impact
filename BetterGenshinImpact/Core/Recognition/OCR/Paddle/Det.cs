@@ -40,14 +40,6 @@ public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgi
     /// <summary>Gets or sets the ratio for enlarging text boxes during post-processing.</summary>
     public float UnclipRatio { get; set; } = 1.5f;
 
-    ~Det()
-    {
-        lock (_session)
-        {
-            _session.Dispose();
-        }
-    }
-
     public void Dispose()
     {
         lock (_session)

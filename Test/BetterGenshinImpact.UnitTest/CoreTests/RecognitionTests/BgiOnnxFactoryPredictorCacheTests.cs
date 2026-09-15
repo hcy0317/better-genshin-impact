@@ -7,6 +7,34 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.RecognitionTests;
 public class BgiOnnxFactoryPredictorCacheTests
 {
     [Fact]
+    public void FailedNativeSessionConstructionDisposesItsSessionOptionsImmediately()
+    {
+        Microsoft.ML.OnnxRuntime.SessionOptions? captured = null;
+        using var factory = new BgiOnnxFactory(new FakeLogger<BgiOnnxFactory>(), forceCpuOcr: true,
+            createSession: (_, options) => { captured = options; throw new InvalidOperationException("native session failed"); });
+        Assert.Throws<InvalidOperationException>(() => factory.CreateInferenceSession(BgiOnnxModel.PaddleOcrDetV4, ocr: true));
+        Assert.NotNull(captured);
+        try { Assert.True(captured.IsClosed); }
+        finally { captured.Dispose(); }
+    }
+
+    [Theory]
+    [InlineData("开始初始化")]
+    [InlineData("初始化完成")]
+    public async Task DiagnosticFailureCannotLoseTheInitializedNativeResource(string failingMessage)
+    {
+        var resource = new TrackingDisposable();
+        using var initialization = new OnnxInitializationTask<TrackingDisposable>(
+            "DiagnosticModel", () => resource,
+            new CollectingLogger { FailingMessage = failingMessage },
+            disposeValue: value => value.Dispose());
+
+        Assert.Same(resource, await initialization.GetValueAsync(CancellationToken.None));
+        initialization.Dispose();
+        Assert.True(SpinWait.SpinUntil(() => resource.IsDisposed, TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
     public void AnUnusedModelNeverStartsInitializationOrBuildsAnEngine()
     {
         var built = false;
@@ -215,6 +243,7 @@ public class BgiOnnxFactoryPredictorCacheTests
     private sealed class CollectingLogger : ILogger
     {
         public ConcurrentQueue<string> Messages { get; } = new();
+        public string? FailingMessage { get; init; }
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
@@ -227,7 +256,10 @@ public class BgiOnnxFactoryPredictorCacheTests
             Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            Messages.Enqueue(formatter(state, exception));
+            var message = formatter(state, exception);
+            Messages.Enqueue(message);
+            if (FailingMessage != null && message.Contains(FailingMessage))
+                throw new InvalidOperationException("diagnostic sink unavailable");
         }
     }
 

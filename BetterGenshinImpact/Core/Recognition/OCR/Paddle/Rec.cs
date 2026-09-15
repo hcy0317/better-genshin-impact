@@ -33,14 +33,6 @@ public class Rec(
     }
 
 
-    ~Rec()
-    {
-        lock (_session)
-        {
-            _session.Dispose();
-        }
-    }
-
     /// <summary>
     ///     Run OCR recognition on multiple images in batches.
     /// </summary>
