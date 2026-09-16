@@ -50,12 +50,14 @@ public sealed class CombatActionScope : IDisposable
     {
         ArgumentOutOfRangeException.ThrowIfNegative(milliseconds);
         delay ??= Task.Delay;
+        var end = _action.Now + milliseconds / 1000d;
         Check();
-        while (milliseconds > 0)
+        while (_action.Now < end)
         {
-            var slice = Math.Min(50, milliseconds);
+            // 调度迟到已经是实际等待的一部分，不能在下一片再次补等。
+            var remaining = Math.Min(end - _action.Now, _action.RemainingBudget);
+            var slice = Math.Max(1, (int)Math.Ceiling(Math.Min(.05, remaining) * 1000));
             await delay(slice, _ct).ConfigureAwait(false);
-            milliseconds -= slice;
             Check();
         }
     }
