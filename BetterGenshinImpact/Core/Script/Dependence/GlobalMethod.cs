@@ -22,7 +22,7 @@ public class GlobalMethod
 {
     public static async Task Sleep(int millisecondsTimeout)
     {
-        await Task.Delay(millisecondsTimeout, CancellationContext.Instance.Cts.Token);
+        await Task.Delay(millisecondsTimeout, ScriptAsyncLifetime.Current?.Token ?? CancellationContext.Instance.Cts.Token);
     }
     
     public static string GetVersion()

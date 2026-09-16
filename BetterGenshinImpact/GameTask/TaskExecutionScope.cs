@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
+using BetterGenshinImpact.Core.Script;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 
 namespace BetterGenshinImpact.GameTask;
@@ -92,6 +93,7 @@ internal sealed class TaskExecutionScope : IDisposable
 
     internal sealed class Guard(State? state)
     {
+        private readonly ScriptAsyncLifetime? _script = ScriptAsyncLifetime.Current;
         internal void Check()
         {
             var owner = state ?? Active.Value;
@@ -115,6 +117,7 @@ internal sealed class TaskExecutionScope : IDisposable
 
         internal IDisposable Enter()
         {
+            _script?.Check();
             Check();
             var previous = Active.Value;
             Active.Value = state ?? previous;

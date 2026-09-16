@@ -120,6 +120,7 @@ public class ScriptProject
         GlobalMethod.SetGameMetrics(1920, 1080);
         // 加载代码
         var code = await LoadCode();
+        using var lifetime = new ScriptAsyncLifetime(CancellationContext.Instance.GetTokenOrNone(), TaskControl.Logger);
         using var engine = BuildScriptEngine(partyConfig);
 
         // 使用自定义加载器解析脚本文件
@@ -154,7 +155,7 @@ public class ScriptProject
                 {
                     return engine.Evaluate(code);
                 }
-            }, CancellationContext.Instance.Cts.Token, Manifest.OutcomeContract);
+            }, CancellationContext.Instance.Cts.Token, Manifest.OutcomeContract, lifetime);
             TaskExecutionScope.ThrowIfFailed();
             return result;
         }
