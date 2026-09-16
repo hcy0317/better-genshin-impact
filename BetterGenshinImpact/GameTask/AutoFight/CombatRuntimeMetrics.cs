@@ -8,7 +8,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight;
 internal readonly record struct CombatMetricSnapshot(
     int Count,
     double P50Milliseconds,
-    double P95Milliseconds);
+    double P95Milliseconds)
+{
+    public CombatMetricPopulation AllSamples { get; init; }
+}
+
+internal readonly record struct CombatMetricPopulation(long Count, double TotalMilliseconds,
+    double MaximumMilliseconds, double P50UpperMilliseconds, double P95UpperMilliseconds,
+    double P99UpperMilliseconds, long Over150Milliseconds, int MaximumConsecutiveOverruns);
 
 internal sealed class CombatMetricSeries
 {
@@ -16,6 +23,12 @@ internal sealed class CombatMetricSeries
     private readonly object _sync = new();
     private readonly int _capacity;
     private readonly Queue<double> _milliseconds;
+    // 0..1024ms按0.25ms上界聚合，超过范围单列溢出。空间固定，不丢总量/超限/最大值。
+    private const int OverflowBin = 4097;
+    private readonly long[] _histogram = new long[OverflowBin + 1];
+    private long _totalCount, _overruns;
+    private double _totalMilliseconds, _maximumMilliseconds;
+    private int _consecutiveOverruns, _maximumConsecutiveOverruns;
 
     internal CombatMetricSeries(int capacity = DefaultCapacity)
     {
@@ -31,7 +44,19 @@ internal sealed class CombatMetricSeries
     {
         lock (_sync)
         {
-            _milliseconds.Enqueue(Math.Max(0, elapsed.TotalMilliseconds));
+            var milliseconds = Math.Max(0, elapsed.TotalMilliseconds);
+            _totalCount++;
+            _totalMilliseconds += milliseconds;
+            _maximumMilliseconds = Math.Max(_maximumMilliseconds, milliseconds);
+            _histogram[milliseconds > 1024 ? OverflowBin : (int)Math.Ceiling(milliseconds * 4)]++;
+            if (milliseconds > 150)
+            {
+                _overruns++;
+                _consecutiveOverruns++;
+                _maximumConsecutiveOverruns = Math.Max(_maximumConsecutiveOverruns, _consecutiveOverruns);
+            }
+            else _consecutiveOverruns = 0;
+            _milliseconds.Enqueue(milliseconds);
             while (_milliseconds.Count > _capacity)
             {
                 _milliseconds.Dequeue();
@@ -52,7 +77,12 @@ internal sealed class CombatMetricSeries
             return new CombatMetricSnapshot(
                 ordered.Length,
                 Percentile(ordered, 0.50),
-                Percentile(ordered, 0.95));
+                Percentile(ordered, 0.95))
+            {
+                AllSamples = new(_totalCount, _totalMilliseconds, _maximumMilliseconds,
+                    PopulationPercentile(.5), PopulationPercentile(.95), PopulationPercentile(.99),
+                    _overruns, _maximumConsecutiveOverruns)
+            };
         }
     }
 
@@ -61,7 +91,23 @@ internal sealed class CombatMetricSeries
         lock (_sync)
         {
             _milliseconds.Clear();
+            Array.Clear(_histogram);
+            _totalCount = _overruns = 0;
+            _totalMilliseconds = _maximumMilliseconds = 0;
+            _consecutiveOverruns = _maximumConsecutiveOverruns = 0;
         }
+    }
+
+    private double PopulationPercentile(double percentile)
+    {
+        var rank = (long)Math.Ceiling(_totalCount * percentile);
+        long seen = 0;
+        for (var index = 0; index < _histogram.Length; index++)
+        {
+            seen += _histogram[index];
+            if (seen >= rank) return index == OverflowBin ? double.PositiveInfinity : index / 4d;
+        }
+        return double.PositiveInfinity;
     }
 
     private static double Percentile(IReadOnlyList<double> ordered, double percentile)
@@ -100,6 +146,9 @@ internal sealed class CombatRuntimeMetrics
             series.Reset();
         }
     }
+
+    internal IReadOnlyDictionary<string, CombatMetricPopulation> SnapshotPopulation() =>
+        _series.ToDictionary(pair => pair.Key, pair => pair.Value.Snapshot().AllSamples, StringComparer.Ordinal);
 }
 
 internal readonly record struct CombatFailureTraceEntry<T>(

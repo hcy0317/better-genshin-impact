@@ -5,6 +5,7 @@ using BetterGenshinImpact.View;
 using BetterGenshinImpact.View.Drawable;
 using Microsoft.Extensions.Logging;
 using System;
+using BetterGenshinImpact.GameTask.Common;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.ExceptionServices;
@@ -81,6 +82,7 @@ public class TaskRunner
         }
         Exception? executionException = null;
         TaskExecutionScope? executionScope = null;
+        DiagnosticEvidenceScope? evidenceScope = null;
         CancellationContext.RunLease? runLease = null;
         var initializationStarted = false;
         try
@@ -89,6 +91,7 @@ public class TaskRunner
             runLease = CancellationContext.Instance.EnterTaskRun(resetCancellationContext);
             if (resetCancellationContext) InitializeTaskCancellation();
             executionScope = TaskExecutionScope.BeginOwned();
+            evidenceScope = DiagnosticEvidenceScope.CreateOwned();
             _logger.LogInformation("→ {Text}", _name + "任务启动！");
 
             // 初始化
@@ -133,35 +136,15 @@ public class TaskRunner
         {
             // 先关闭所属任务，拒绝迟到回调；常驻触发器随后在无旧任务状态的上下文重建。
             executionScope?.Dispose();
-            IReadOnlyList<Exception> cleanupFailures;
-            try
-            {
-                cleanupFailures = TaskRunnerCleanup.RunAll(
+            var cleanupFailures = await TaskRunnerCleanup.RetireAsync(evidenceScope,
                 [
                     ("任务资源", () => { if (initializationStarted) End(); }),
                     ("结束日志", () => _logger.LogInformation("→ {Text}", _name + "任务结束")),
                     ("取消上下文", CancellationContext.Instance.Clear),
                     ("运行上下文", () => { if (initializationStarted) RunnerContext.Instance.Clear(); })
                 ],
-                LogCleanupFailure);
-                if (runLease != null)
-                {
-                    try { await runLease.DisposeAsync(); }
-                    catch (Exception error)
-                    {
-                        cleanupFailures = [..cleanupFailures, error];
-                        try { LogCleanupFailure("运行取消代际", error); } catch { }
-                    }
-                }
-            }
-            finally
-            {
-                // 信号量必须由最外层 finally 释放，不能被任何清理异常阻断。
-                if (hasLock)
-                {
-                    TaskSemaphore.Release();
-                }
-            }
+                () => runLease?.DisposeAsync() ?? ValueTask.CompletedTask,
+                () => { if (hasLock) TaskSemaphore.Release(); }, LogCleanupFailure);
 
             TaskRunnerFailurePolicy.ThrowAfterCleanup(
                 executionException,
@@ -338,6 +321,35 @@ internal static class TaskRunnerStartupGate
 
 internal static class TaskRunnerCleanup
 {
+    internal static async Task<IReadOnlyList<Exception>> RetireAsync(DiagnosticEvidenceScope? evidence,
+        IEnumerable<(string Name, Action Action)> steps, Func<ValueTask> retireRun, Action releaseLock,
+        Action<string, Exception> onFailure)
+    {
+        ValueTask evidenceDrain = default;
+        try { evidenceDrain = evidence?.DisposeAsync() ?? ValueTask.CompletedTask; } catch { /* 保留业务清理。 */ }
+        IReadOnlyList<Exception> failures;
+        try
+        {
+            failures = RunAll(steps, onFailure);
+            try { await retireRun(); }
+            catch (Exception error)
+            {
+                failures = [..failures, error];
+                try { onFailure("运行取消代际", error); } catch { }
+            }
+        }
+        finally
+        {
+            try { releaseLock(); }
+            finally
+            {
+                // writer只有独立像素副本；慢磁盘不能扣留游戏输入、run或任务锁。
+                try { await evidenceDrain; } catch { /* 诊断不能替换原业务或清理失败。 */ }
+            }
+        }
+        return failures;
+    }
+
     internal static IReadOnlyList<Exception> RunAll(
         IEnumerable<(string Name, Action Action)> steps,
         Action<string, Exception> onFailure)

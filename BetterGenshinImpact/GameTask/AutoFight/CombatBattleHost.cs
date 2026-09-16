@@ -9,7 +9,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
 
-internal enum CombatObservationQuality { Available, Unavailable, Faulted }
+internal enum CombatObservationQuality { Available, Unavailable, Faulted, Late }
 internal readonly record struct CombatBattleObservation(CaptureFrameStamp Source, Guid BattleId,
     CombatObservationQuality Quality, EnemySeekDecision? Target, int Width, int Height, ulong CueFingerprint = 0)
 {
@@ -27,7 +27,13 @@ internal readonly record struct CombatBattleHostInput(CombatBattleHostInputKind 
 }
 internal enum CombatBattleHostInputStatus { NotSent, Sent, Unknown, Failed }
 internal readonly record struct CombatBattleHostInputResult(CombatBattleHostInputStatus Status,
-    long? CompletedTimestamp = null, string? Reason = null, Exception? Error = null);
+    long? CompletedTimestamp = null, string? Reason = null, Exception? Error = null)
+{
+    public int? NativeRequested { get; init; }
+    public int? NativeSubmitted { get; init; }
+    public long? StartedTimestamp { get; init; }
+    public long? ObservableAfterTimestamp { get; init; }
+}
 
 /// <summary>游戏/时钟边界；生产与回放共同驱动宿主，不在回放重写退出循环。</summary>
 internal interface ICombatBattleHostIo
@@ -128,12 +134,32 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 return _result;
             }
             if (_phase is Phase.BeforeParty or Phase.OpenParty or Phase.AwaitParty or Phase.CloseParty)
+            {
+                if (_phase is Phase.BeforeParty or Phase.OpenParty && observation.Target != null &&
+                    Accept(observation, out var newCombatEvidence))
+                {
+                    // 未发探测可以撤回；已发探测必须经过原回执/打开UI证据收束。
+                    _phase = Phase.Fighting;
+                    _partyDeadline = 0;
+                    _inputRequestId = Guid.Empty;
+                    _inputRequestDeadline = 0;
+                    _finishRequested = false;
+                    _nextFinishCheck = now + Math.Max(.1, options.FinishCheckIntervalSeconds);
+                    _lastValidAt = now;
+                    if (newCombatEvidence) ObserveProgress(observation, now);
+                    if (_finalProbe && now - _lastProgressAt >= NoProgressDeadline)
+                        return Stop("bounded-search-without-game-progress");
+                    await flow.StepAsync(ct);
+                    return _result;
+                }
                 return await AdvancePartyAsync(ct);
+            }
 
             var fresh = Accept(observation, out var newEvidence);
             if (!fresh)
             {
-                Reason = observation.Quality == CombatObservationQuality.Faulted ? "observation-faulted" : "awaiting-source-frame";
+                Reason = observation.Quality switch { CombatObservationQuality.Faulted => "observation-faulted",
+                    CombatObservationQuality.Late => "late-observation", _ => "awaiting-source-frame" };
                 if (observation.Quality == CombatObservationQuality.Unavailable && observation.BattleId == io.BattleId &&
                     observation.Source.IsKnown && now >= _nextNonCombatCheck)
                 {
@@ -171,7 +197,12 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 (_finishRequested && UsesPartyFinish || noProgress || observation.Target == null && now >= _nextFinishCheck))
             {
                 _finishRequested = false;
-                if (UsesPartyFinish) _phase = Phase.BeforeParty;
+                if (noProgress && observation.Target != null)
+                {
+                    if (!options.SeekEnabled) return Stop("visible-target-without-progress");
+                    _phase = Phase.Searching;
+                }
+                else if (UsesPartyFinish) _phase = Phase.BeforeParty;
                 else if (options.SeekEnabled) _phase = Phase.Searching;
                 else if (noProgress && !options.ExternalCompletionAuthority) return Stop("no-progress-without-finish-detector");
                 _nextFinishCheck = now + Math.Max(.1, options.FinishCheckIntervalSeconds);
@@ -195,7 +226,14 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         CombatRuntimeMetrics.Shared.Record("host.observation", elapsed);
         // 返回后才能安全丢弃迟到证据，不让超预算观察继续产生输入。
         if (elapsed > TimeSpan.FromMilliseconds(150))
-            throw new TimeoutException("战斗宿主观察超过150ms，禁止用迟到证据准入输入");
+        {
+            // 单次迟到只否决本次证据，不能在这里升级为全场异常。原deadline继续计时。
+            if (value is CombatBattleObservation battle)
+                return (T)(object)(battle with { Quality = CombatObservationQuality.Late });
+            if (value is PartySetupFinishObservation party)
+                return (T)(object)(party with { Source = default, BarVisible = false });
+            throw new InvalidOperationException("未定义的战斗观察类型");
+        }
         return value;
     }
 
@@ -451,6 +489,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     return new(CombatBattleHostInputStatus.Unknown, Reason: Reason);
                 }
                 _inputRequestId = Guid.Empty;
+                if (result.Error != null) Stop("host-input-submitted-but-operation-interrupted: " + result.Error.GetType().Name);
                 if (completed > _inputRequestDeadline) Stop("host-input-deadline-after-send");
                 _inputRequestDeadline = 0;
                 break;

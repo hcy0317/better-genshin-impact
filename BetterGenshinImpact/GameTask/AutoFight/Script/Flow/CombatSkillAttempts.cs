@@ -49,6 +49,16 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         }
     }
 
+    internal bool DiscardUnsubmitted(Guid attemptId)
+    {
+        lock (_gate)
+        {
+            var entry = _slots.FirstOrDefault(pair => pair.Value.Attempt.AttemptId == attemptId);
+            if (_closed || entry.Value == null || entry.Value.InputFence != null || entry.Value.Confirmed) return false;
+            return _slots.Remove(entry.Key);
+        }
+    }
+
     private static bool AcceptsSource(Slot slot, CombatSkillObservation sample) =>
         (!sample.SourceBound || sample.SourceAcceptedFresh &&
             (!slot.LastSource.IsKnown || sample.SourceStamp.IsAfter(slot.LastSource))) &&

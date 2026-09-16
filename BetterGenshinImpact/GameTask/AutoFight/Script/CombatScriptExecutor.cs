@@ -27,7 +27,8 @@ public static class CombatScriptExecutor
         CancellationToken ct,
         ILogger logger,
         CombatScenes? combatScenes = null,
-        CombatScriptExecutionMode mode = CombatScriptExecutionMode.RequiredSequence)
+        CombatScriptExecutionMode mode = CombatScriptExecutionMode.RequiredSequence,
+        CombatScriptExecutionPurpose purpose = CombatScriptExecutionPurpose.Combat)
     {
         var ownsScenes = false;
         try
@@ -52,7 +53,7 @@ public static class CombatScriptExecutor
 
             try
             {
-                using var flow = Flow.NativeCombatFlowRunner.Create(combatScript.CombatCommands, combatScenes, loop: false, mode);
+                using var flow = Flow.NativeCombatFlowRunner.Create(combatScript.CombatCommands, combatScenes, loop: false, mode, purpose: purpose);
                 var result = await flow.RunRoundAsync(ct);
                 var outcome = FromFlowResult(result);
                 outcome.EnsureCanContinue();

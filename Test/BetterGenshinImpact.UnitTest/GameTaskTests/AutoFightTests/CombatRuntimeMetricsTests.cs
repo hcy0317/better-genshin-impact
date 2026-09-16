@@ -8,6 +8,25 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatRuntimeMetricsTests
 {
     [Fact]
+    public void FullPopulationPreservesOldOverrunsWhenTheRecentWindowAndTraceAreEvicted()
+    {
+        var series = new CombatMetricSeries(capacity: 3);
+        foreach (var value in new[] { 300, 500, 800, 1800, 300, 800 }) series.Record(TimeSpan.FromMilliseconds(value));
+        for (var i = 0; i < 20; i++) series.Record(TimeSpan.FromMilliseconds(40));
+        var snapshot = series.Snapshot();
+        Assert.Equal(3, snapshot.Count); // 原近期成本估计保持兼容，但不能当总体验收。
+        Assert.Equal(40, snapshot.P95Milliseconds);
+        Assert.Equal(26, snapshot.AllSamples.Count);
+        Assert.Equal(6, snapshot.AllSamples.Over150Milliseconds);
+        Assert.Equal(6, snapshot.AllSamples.MaximumConsecutiveOverruns);
+        Assert.Equal(1800, snapshot.AllSamples.MaximumMilliseconds);
+        Assert.InRange(snapshot.AllSamples.P95UpperMilliseconds, 800, 800.25);
+        Assert.True(double.IsPositiveInfinity(snapshot.AllSamples.P99UpperMilliseconds));
+        series.Reset();
+        Assert.Equal(0, series.Snapshot().AllSamples.Count);
+    }
+
+    [Fact]
     public void MetricSeries_ReportsDeterministicCountP50AndP95()
     {
         var series = new CombatMetricSeries();

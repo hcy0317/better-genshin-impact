@@ -280,14 +280,18 @@ public class NativeAdapterLatencyTests(ITestOutputHelper output)
         public bool TryGetKnownSkillCooldown(string actor, out double cooldown) { cooldown = 0; return false; }
         public void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc) => throw new NotSupportedException();
         public Task WaitSkillCooldown(NativeCombatActor actor, CancellationToken ct) => throw new NotSupportedException();
-        public void SelectActor(int index, CancellationToken ct) => throw new InvalidOperationException("录制前台应已匹配；不允许实际切人");
+        public CombatBattleHostInputResult SelectActor(int index, CombatNativeInputRequest request, CancellationToken ct) => throw new InvalidOperationException("录制前台应已匹配；不允许实际切人");
         public void WaitForSelection(int milliseconds, CancellationToken ct) => Task.Delay(milliseconds, ct).GetAwaiter().GetResult();
         public bool OnSelectionMismatch(NativeCombatActor actor, int attempt, int attempts, int observed, CancellationToken ct) => false;
         public void ResolveSelectionRecovery(NativeCombatActor actor, AvatarSelectionProtocol.Result<ImageRegion> selection, CancellationToken ct) => throw new InvalidOperationException("录制HUD不能进入恢复");
         public void CheckDefeated(ImageRegion frame, CancellationToken ct) => throw new NotSupportedException();
-        public void SendSkill(NativeCombatActor actor, bool hold) => throw new NotSupportedException();
-        public void SendBurst(NativeCombatActor actor) => throw new NotSupportedException();
-        public void ExecutePrimitive(NativeCombatActor actor, CombatCommand command) => Assert.Equal(Method.MoveBy, command.Method);
+        public CombatBattleHostInputResult SubmitInput(NativeCombatActor actor, CombatCommand command,
+            CombatNativeInputRequest request, Action begin, CancellationToken ct)
+        {
+            Assert.Equal(Method.MoveBy, command.Method);
+            begin();
+            return new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp());
+        }
         public void ReleaseInput() { }
         public Task DelayAsync(int milliseconds, CancellationToken ct) => Task.Delay(milliseconds, ct);
         public Task PrepareVisionAsync(CancellationToken ct) => Task.CompletedTask;

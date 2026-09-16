@@ -75,6 +75,7 @@ public partial class PathExecutor
     public Func<ImageRegion, bool>? EndAction { get; set; }
 
     private CombatScenes? _combatScenes;
+    private PathMovementDiagnostics? _movementDiagnostics;
     // private readonly Dictionary<string, string> _actionAvatarIndexMap = new();
 
     private DateTime _elementalSkillLastUseTime = DateTime.MinValue;
@@ -487,6 +488,7 @@ public partial class PathExecutor
         {
             return false;
         }
+        CombatScriptHandler.ValidateRouteRequirements(task.Positions, task.Info.Name, _combatScenes.GetAvatars().Select(avatar => avatar.Name));
 
         // 没有强制配置的情况下，使用地图追踪内的条件配置
         // 必须放在这里，因为要通过队伍识别来得到最终结果
@@ -1366,7 +1368,23 @@ public partial class PathExecutor
     public bool GetPositionAndTimeSuspendFlag = false;
     private async Task<(Point2f point,int additionalTimeInMs)> GetPositionAndTime(ImageRegion imageRegion, WaypointForTrack waypoint)
     {
-        
+        // 复用此次导航帧；诊断不取新截图、不更新角色共享状态、不把提示当作运动许可。
+        (_movementDiagnostics ??= new(Logger)).Observe($"{CurWaypoints.Item1 + 1}/{CurWaypoint.Item1 + 1}", () =>
+        {
+            if (!imageRegion.FrameStamp.IsFresh(TimeProvider.System, TimeSpan.FromSeconds(2)))
+                return new(imageRegion.FrameStamp, waypoint.MoveMode, waypoint.Action, null, null, null, null);
+            var hud = Bv.IsCombatHud(imageRegion);
+            int? active = null;
+            if (hud && _combatScenes != null)
+            {
+                var index = PartyAvatarSideIndexHelper.GetAvatarIndexIsActiveWithContext(imageRegion,
+                    _combatScenes.GetAvatarIndexRectSnapshot(), new AvatarActiveCheckContext());
+                if (index > 0) active = index;
+            }
+            return new(imageRegion.FrameStamp, waypoint.MoveMode, waypoint.Action, hud, active,
+                hud ? Bv.CurrentAvatarIsLowHp(imageRegion, imageRegion.Height / 1080d) : null,
+                Bv.GetMotionStatus(imageRegion).ToString());
+        }, imageRegion, waypoint.PathingTaskFileName);
         var position = Navigation.GetPosition(imageRegion, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector);
         int time = 0;
         if (position == new Point2f())

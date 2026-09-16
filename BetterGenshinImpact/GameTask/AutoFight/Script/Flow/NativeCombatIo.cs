@@ -26,6 +26,9 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         ?? throw new InvalidOperationException("当前队伍缺少角色：" + actor.Name);
 
     public Task PrepareVisionAsync(CancellationToken ct) => Avatar.PrepareCombatVisionAsync(ct);
+    public Task PrepareVisionAsync(bool needsBurst, CancellationToken ct) => Avatar.PrepareCombatVisionAsync(ct, needsBurst);
+    public Task PrepareVisionAsync(bool needsBurst, ImageRegion frame, CancellationToken ct) =>
+        Avatar.PrepareCombatVisionAsync(ct, needsBurst, frame);
     public IDisposable BeginExclusive(bool allowPassiveObservation) => AvatarRecognition.BeginExclusiveOperation(allowPassiveObservation: allowPassiveObservation);
     public ImageRegion? Capture()
     {
@@ -37,8 +40,16 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     public bool IsCombatHud(ImageRegion frame) => Bv.IsCombatHud(frame);
     public CombatControlObservation ReadControl(ImageRegion frame) =>
         CombatMotionReader.ReadControl(frame, combatHud: true, Core.Recognition.OCR.OcrFactory.Paddle);
+    public CannonUiObservation ReadCannonScene(ImageRegion frame) =>
+        CannonUiReader.Read(frame, Core.Recognition.OCR.OcrFactory.Paddle);
     public bool IsMainUi(ImageRegion frame) => Bv.IsInMainUi(frame);
     public int ReadActive(ImageRegion frame, AvatarActiveCheckContext context) => scenes.GetActiveAvatarIndex(frame, context);
+    public AvatarLayoutPreparation PrepareActorObservation(ImageRegion frame, AvatarActiveCheckContext context, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        CombatActionScope.Current?.Check();
+        return scenes.PrepareAvatarObservation(frame, context, TimeSpan.FromMilliseconds(150));
+    }
     public bool? IsActorActive(NativeCombatActor actor, ImageRegion frame)
     {
         var avatar = AvatarFor(actor);
@@ -46,17 +57,29 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     }
     public double ReadSkillCooldown(NativeCombatActor actor, ImageRegion frame) => AvatarFor(actor).ReadSkillCurrentCd(frame);
     public bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown) => AvatarFor(actor).IsSkillReadyFromCurrentFrame(frame, cooldown);
-    public BurstObservation ReadBurst(ImageRegion frame, bool active) => Avatar.ObserveBurst(frame, active);
+    public BurstObservation ReadBurst(ImageRegion frame, bool active)
+    {
+        var started = Clock.GetTimestamp();
+        try { return Avatar.ObserveBurst(frame, active); }
+        finally
+        {
+            var elapsed = Clock.GetElapsedTime(started).TotalMilliseconds;
+            if (elapsed > 75)
+                try { Logger.LogDebug("NATIVE_OBSERVATION_COST phase=q-classification ms={Elapsed:F2} source={Session}/{Sequence} sourceAgeMs={Age:F2}",
+                    elapsed, frame.FrameStamp.SessionId, frame.FrameStamp.Sequence,
+                    Clock.GetElapsedTime(frame.FrameStamp.CapturedTimestamp).TotalMilliseconds); } catch { }
+        }
+    }
     public bool ReadLowHp(ImageRegion frame) => Bv.CurrentAvatarIsLowHp(frame);
     public HashSet<int> ReadSideBurstReady(ImageRegion frame) => CombatHudReader.ReadSideBurstReady(frame);
     public bool TryGetKnownSkillCooldown(string actor, out double cooldown) => ESkillCdTracker.TryGetKnownRemainingCd(actor, out cooldown);
     public void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc) => AvatarFor(actor).ConfirmSkillUsed(cooldown, inputAtUtc);
     public Task WaitSkillCooldown(NativeCombatActor actor, CancellationToken ct) => AvatarFor(actor).WaitSkillCd(ct);
-    public void SelectActor(int index, CancellationToken ct)
+    public CombatBattleHostInputResult SelectActor(int index, CombatNativeInputRequest request, CancellationToken ct)
     {
         CombatActionScope.Current?.Check();
         ct.ThrowIfCancellationRequested();
-        scenes.SelectAvatar(index).SimulateSwitchAction(index);
+        return scenes.SelectAvatar(index).SubmitSwitchAction(index, request, ct);
     }
     public void WaitForSelection(int milliseconds, CancellationToken ct) => TaskControl.Sleep(milliseconds, ct);
     public bool OnSelectionMismatch(NativeCombatActor actor, int attempt, int attempts, int observed, CancellationToken ct)
@@ -77,9 +100,31 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         Avatar.ResolveSelectionRecovery(request, ct);
     }
     public void CheckDefeated(ImageRegion frame, CancellationToken ct) => Avatar.ThrowWhenDefeated(frame, ct);
-    public void SendSkill(NativeCombatActor actor, bool hold) => AvatarFor(actor).SendSkillInput(hold);
-    public void SendBurst(NativeCombatActor actor) => AvatarFor(actor).SendBurstInput();
-    public void ExecutePrimitive(NativeCombatActor actor, CombatCommand command) => command.Execute(AvatarFor(actor));
+    public CombatBattleHostInputResult SubmitInput(NativeCombatActor actor, CombatCommand command,
+        CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken ct)
+        => SubmitCore(command, request, beforeFirstNative, ct, () =>
+        {
+            if (command.Method == Method.Skill) AvatarFor(actor).SendSkillInput(command.HasFlag("hold"));
+            else if (command.Method == Method.Burst) AvatarFor(actor).SendBurstInput();
+            else command.Execute(AvatarFor(actor));
+        });
+
+    public CombatBattleHostInputResult SubmitPathingInput(CombatCommand command, CombatNativeInputRequest request,
+        Action beforeFirstNative, CancellationToken ct, CannonUiObservation scene = default) =>
+        SubmitCore(command, request, beforeFirstNative, ct, () => PathingPrimitiveInput.Send(command, ct, scene, request.Source));
+
+    private CombatBattleHostInputResult SubmitCore(CombatCommand command, CombatNativeInputRequest request,
+        Action beforeFirstNative, CancellationToken ct, Action send)
+    {
+        var receipt = new CombatNativeInput(Clock, Logger, () => TaskControl.CheckAndSleep(0)).Submit(request,
+            command.Method.Alias[0], send, ct, beforeFirstNative);
+        if (receipt.Status == CombatBattleHostInputStatus.Unknown)
+        {
+            ReleaseInput();
+            receipt = receipt with { ObservableAfterTimestamp = Clock.GetTimestamp() };
+        }
+        return receipt;
+    }
     public void ReleaseInput() => Simulation.ReleaseAllKey();
     public Task DelayAsync(int milliseconds, CancellationToken ct) => Task.Delay(milliseconds, ct);
 }

@@ -175,33 +175,26 @@ public class GuardianSkillSwitchPolicyTests
             StringComparison.Ordinal);
         var selectionSource = File.ReadAllText(Path.Combine(root, "BetterGenshinImpact", "GameTask",
             "AutoFight", "Model", "AvatarSelectionProtocol.cs"));
-        Assert.Contains("AvatarSwitchConfirmationPolicy.TryConfirm", selectionSource, StringComparison.Ordinal);
+        Assert.Contains("AvatarSwitchConfirmationPolicy.Observe", selectionSource, StringComparison.Ordinal);
         Assert.Contains("public bool Execute(CombatScenes", commandSource,
             StringComparison.Ordinal);
         Assert.Contains("ExecuteWithResult(combatScenes, lastCommand).CanContinue", commandSource,
             StringComparison.Ordinal);
         Assert.Contains("if (!avatar.TrySwitch(10)) return new(CombatExecutionKind.Failed", commandSource,
             StringComparison.Ordinal);
-        Assert.Contains("GuardianSkillSwitchPolicy.ShouldRetryBlock", taskSource,
-            StringComparison.Ordinal);
-        Assert.Contains("后推本轮全部策略后重试", taskSource,
-            StringComparison.Ordinal);
+        Assert.Contains("NativeCombatFlowRunner.Create", taskSource, StringComparison.Ordinal);
+        Assert.Contains("NativeCombatBattleHostIo.ApplyResult", taskSource, StringComparison.Ordinal);
         Assert.Contains("TryUseGuardianSkillOnceAsync", seekSource,
             StringComparison.Ordinal);
         Assert.DoesNotContain("guardianAvatar.UseSkill", seekSource,
             StringComparison.Ordinal);
-        Assert.Contains("private async Task<bool> ExecuteAction", jsonTaskSource,
-            StringComparison.Ordinal);
-        Assert.Contains("if (!cmd.Execute(combatScenes, lastSubCmd))", jsonTaskSource,
-            StringComparison.Ordinal);
-        Assert.Contains("后推时间线并等待下一轮重试", jsonTaskSource,
-            StringComparison.Ordinal);
-        Assert.Contains("catch (OperationCanceledException)", jsonTaskSource,
-            StringComparison.Ordinal);
-        Assert.Contains("if (command.Execute(combatScenes, lastCommand))", domainSource,
-            StringComparison.Ordinal);
-        Assert.Contains("if (command.Execute(combatScenes, lastCommand)) continue;", stygianSource,
-            StringComparison.Ordinal);
+        Assert.Contains("NativeCombatFlowRunner.Create", jsonTaskSource, StringComparison.Ordinal);
+        Assert.Contains("NativeCombatBattleHostIo.ApplyResult", jsonTaskSource, StringComparison.Ordinal);
+        foreach (var externalScene in new[] { domainSource, stygianSource })
+        {
+            Assert.Contains("NativeCombatBattleHostIo.CreateForExternalScene", externalScene, StringComparison.Ordinal);
+            Assert.Contains("TaskExecutionScope.StopUnconfirmedCombat", externalScene, StringComparison.Ordinal);
+        }
     }
 
     private static string FindRepoRoot()

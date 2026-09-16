@@ -122,10 +122,18 @@ public partial class Avatar
     private static readonly Lazy<BgiYoloPredictor> QBurstClassifierLazy = new(() =>
         App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiQClassify));
 
-    internal static async Task PrepareCombatVisionAsync(CancellationToken ct)
+    internal static async Task PrepareCombatVisionAsync(CancellationToken ct, bool needsBurst = true, ImageRegion? preparationFrame = null)
     {
         ct.ThrowIfCancellationRequested();
-        await QBurstClassifierLazy.Value.WarmUpAsync(Logger, ct);
+        if (needsBurst)
+        {
+            if (preparationFrame == null) await QBurstClassifierLazy.Value.WarmUpAsync(Logger, ct);
+            else
+            {
+                using var area = preparationFrame.DeriveCrop(AutoFightAssets.Get(preparationFrame).QRectForClassify);
+                await QBurstClassifierLazy.Value.PrepareClassificationAsync(area.CacheImage, Logger, ct);
+            }
+        }
         await OcrFactory.PreparePaddleAsync(ct);
         ct.ThrowIfCancellationRequested();
     }
@@ -385,29 +393,30 @@ public partial class Avatar
     {
         var context = new AvatarActiveCheckContext();
         var requested = new ReviveTarget(Name, Index);
-        using var result = AvatarSelectionProtocol.Select(requested.Index, tryTimes, CaptureFreshUiFrame,
+        var maximumAge = CombatActionScope.Current != null ? UiSnapshot.CombatMaximumAge : UiSnapshot.RecoveryMaximumAge;
+        ImageRegion? CaptureSelectionFrame()
+        {
+            var frame = CaptureFreshUiFrame();
+            try
+            {
+                if (frame != null && context.NeedsLayoutPreparation)
+                    CombatScenes.PrepareAvatarObservation(frame, context, maximumAge);
+                return frame;
+            }
+            catch { frame?.Dispose(); throw; }
+        }
+        using var result = AvatarSelectionProtocol.Select(requested.Index, tryTimes, CaptureSelectionFrame,
             region => region.FrameStamp, Bv.IsCombatHud,
             region => region.ReadOnce((CombatScenes, typeof(AvatarActiveCheckContext)),
                 () => CombatScenes.GetActiveAvatarIndex(region, context)),
             region => new ImageRegion(region.SrcMat.Clone(), 0, 0) { FrameStamp = region.FrameStamp },
-            index =>
+            (index, request) =>
             {
                 CombatActionScope.Current?.Check();
                 Ct.ThrowIfCancellationRequested();
-                SimulateSwitchAction(index);
+                return SubmitSwitchAction(index, request, Ct);
             }, milliseconds => Sleep(milliseconds, Ct), Ct,
-            maximumAge: CombatActionScope.Current != null ? UiSnapshot.CombatMaximumAge : UiSnapshot.RecoveryMaximumAge,
-            onMismatch: (attempt, observed) =>
-            {
-                if (attempt == tryTimes - 1 && tryTimes == 4)
-                    Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", observed, requested.Index);
-                else if (attempt == 9 && AutoFightTask.FightStatusFlag)
-                {
-                    PerformUnstuckAction(Ct);
-                    return true;
-                }
-                return false;
-            },
+            maximumAge: maximumAge,
             trace: observed => CombatActionScope.Current?.Trace("switch-frame", $"expected={requested.Index} observed={observed}"));
         var frame = result.TakeFrame();
         if (result.NeedsRecovery && frame != null)
@@ -420,7 +429,7 @@ public partial class Avatar
     {
         // 只把不可变的编号框快照交给后台。观察结果不更改当前角色或护盾时间戳，
         // 且切到其他角色后丢弃结果，防止把别人的 E 冷却记在本角色上。
-        var rects = CombatScenes.GetAvatars().Select(a => a.IndexRect).ToArray();
+        var rects = CombatScenes.GetAvatarIndexRectSnapshot();
         var index = Index;
         var cancellationToken = Ct;
         ESkillCdTracker.TriggerECheck(() =>
@@ -457,8 +466,20 @@ public partial class Avatar
 
     internal void SimulateSwitchAction(int index)
     {
-        Simulation.SendInput.SimulateAction(GIActions.Drop); //反正会重试就不等落地了
         SimulateSwitchKey(index);
+    }
+
+    internal CombatBattleHostInputResult SubmitSwitchAction(int index, CombatNativeInputRequest request, CancellationToken ct)
+    {
+        var receipt = new CombatNativeInput(TimeProvider.System, Logger, () => CheckAndSleep(0))
+            .Submit(request, "switch", () => SimulateSwitchAction(index), ct);
+        if (receipt.Status == CombatBattleHostInputStatus.Unknown ||
+            receipt.Status == CombatBattleHostInputStatus.Failed && receipt.NativeSubmitted > 0)
+        {
+            Simulation.ReleaseAllKey();
+            receipt = receipt with { ObservableAfterTimestamp = TimeProvider.System.GetTimestamp() };
+        }
+        return receipt;
     }
 
     private static void SimulateSwitchKey(int index)
@@ -508,21 +529,7 @@ public partial class Avatar
     /// </summary>
     public void SwitchWithoutCts()
     {
-        var context = new AvatarActiveCheckContext();
-        for (var i = 0; i < 10; i++)
-        {
-            using var region = CaptureToRectArea();
-            ThrowWhenDefeated(region, Ct);
-
-            if (CombatScenes.GetActiveAvatarIndex(region, context) == Index)
-            {
-                return;
-            }
-
-            SimulateSwitchAction(Index);
-
-            Sleep(250);
-        }
+        _ = TrySwitch(10);
     }
 
     /// <summary>

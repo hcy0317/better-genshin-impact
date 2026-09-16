@@ -11,6 +11,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 /// <summary>原 JSON 优先级政策的薄宿主；动作、片段和本场状态都由同一流程核心执行。</summary>
 public sealed class JsonCombatFlowExecution : IDisposable
 {
+    internal bool NeedsBurstVision { get; }
     private sealed record Root(JsonAction Action, CombatFlowExecution Execution);
     private sealed record Entry(Root Root, ConditionEvaluator.CompiledCondition Condition, int Priority);
     private sealed record PreparedEntry(int RootIndex, ConditionEvaluator.CompiledCondition Condition, int Priority, string Source);
@@ -137,6 +138,8 @@ public sealed class JsonCombatFlowExecution : IDisposable
             }
         }
         ValidateOpenings(program, roots, prepared);
+        NeedsBurstVision = program.NeedsBurstVision(roots.Select(root => program.Blocks[root.Name])) ||
+            prepared.Any(entry => CombatFlowProgram.NeedsBurstVision(entry.Condition));
         Actors = legacy && party != null ? program.Actors.Where(actor => actor == CombatScriptParser.CurrentAvatarName || party.Contains(actor)).ToArray() : program.Actors;
         Diagnostics = program.Diagnostics;
         _battle = new(clock);

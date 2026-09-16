@@ -1,6 +1,7 @@
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
+using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.Model.Area;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -66,14 +67,13 @@ public class CombatHostInputOwnershipTests
         public bool TryGetKnownSkillCooldown(string actor, out double cooldown) => throw new NotSupportedException();
         public void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc) => throw new NotSupportedException();
         public Task WaitSkillCooldown(NativeCombatActor actor, CancellationToken ct) => throw new NotSupportedException();
-        public void SelectActor(int index, CancellationToken ct) => throw new NotSupportedException();
+        public CombatBattleHostInputResult SelectActor(int index, CombatNativeInputRequest request, CancellationToken ct) => throw new NotSupportedException();
         public void WaitForSelection(int milliseconds, CancellationToken ct) => throw new NotSupportedException();
         public bool OnSelectionMismatch(NativeCombatActor actor, int attempt, int attempts, int observed, CancellationToken ct) => throw new NotSupportedException();
         public void ResolveSelectionRecovery(NativeCombatActor actor, AvatarSelectionProtocol.Result<ImageRegion> selection, CancellationToken ct) => throw new NotSupportedException();
         public void CheckDefeated(ImageRegion frame, CancellationToken ct) => throw new NotSupportedException();
-        public void SendSkill(NativeCombatActor actor, bool hold) => throw new NotSupportedException();
-        public void SendBurst(NativeCombatActor actor) => throw new NotSupportedException();
-        public void ExecutePrimitive(NativeCombatActor actor, CombatCommand command) => throw new NotSupportedException();
+        public CombatBattleHostInputResult SubmitInput(NativeCombatActor actor, CombatCommand command,
+            CombatNativeInputRequest request, Action begin, CancellationToken ct) => throw new NotSupportedException();
         public Task DelayAsync(int milliseconds, CancellationToken ct) => throw new NotSupportedException();
         private sealed class Cleanup(Action close) : IDisposable { public void Dispose() => close(); }
     }

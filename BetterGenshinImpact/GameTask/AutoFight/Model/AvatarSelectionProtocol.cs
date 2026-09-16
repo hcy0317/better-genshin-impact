@@ -7,7 +7,6 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Model;
 /// <summary>生产/回放共用的选角协议。替身只提供帧、识别、物理输入和时钟。</summary>
 internal static class AvatarSelectionProtocol
 {
-    private sealed class StopSelection : Exception;
 
     internal sealed class Result<TFrame>(bool confirmed, bool needsRecovery, CaptureFrameStamp source,
         TFrame? frame, TFrame? before, CaptureFrameFence? inputFence, bool awaitingObservation = false) : IDisposable where TFrame : class, IDisposable
@@ -37,11 +36,13 @@ internal static class AvatarSelectionProtocol
         private readonly Func<TFrame, bool> _isHud;
         private readonly Func<TFrame, int> _active;
         private readonly Func<TFrame, TFrame> _clone;
-        private readonly Action<int> _select;
+        private readonly Func<int, CombatNativeInputRequest, CombatBattleHostInputResult> _select;
         private readonly TimeProvider _clock;
         private readonly TimeSpan _maximumAge;
         private readonly TimeSpan _duration;
         private readonly long _started;
+        private readonly Guid _requestId = Guid.NewGuid();
+        private readonly long _deadline;
         private long _unknownSince;
         private long? _lastInput;
         private CaptureFrameStamp _last;
@@ -51,10 +52,12 @@ internal static class AvatarSelectionProtocol
         private bool _submitted, _closed;
         internal bool HasSubmittedInput => _lastInput != null;
         internal bool IsClosed => _closed;
+        internal bool IsExpired => _clock.GetElapsedTime(_started) >= _duration;
 
         internal Continuation(int expectedIndex, int maximumRequests, TimeSpan duration,
             Func<TFrame?> capture, Func<TFrame, CaptureFrameStamp> source, Func<TFrame, bool> isHud,
-            Func<TFrame, int> active, Func<TFrame, TFrame> clone, Action<int> select,
+            Func<TFrame, int> active, Func<TFrame, TFrame> clone,
+            Func<int, CombatNativeInputRequest, CombatBattleHostInputResult> select,
             TimeProvider clock, TimeSpan? maximumAge = null)
         {
             _expectedIndex = expectedIndex;
@@ -69,6 +72,7 @@ internal static class AvatarSelectionProtocol
             _clock = clock;
             _maximumAge = maximumAge ?? TimeSpan.FromMilliseconds(150);
             _started = _unknownSince = clock.GetTimestamp();
+            _deadline = checked(_started + (long)Math.Ceiling(duration.TotalSeconds * clock.TimestampFrequency));
         }
 
         internal Result<TFrame> Advance(CancellationToken ct, bool allowInput = true)
@@ -96,8 +100,6 @@ internal static class AvatarSelectionProtocol
                 ct.ThrowIfCancellationRequested();
                 if (!stamp.IsFresh(_clock, _maximumAge)) return Unknown();
                 if (observed > 0) _unknownSince = _clock.GetTimestamp();
-                else if (_clock.GetElapsedTime(_unknownSince) >= TimeSpan.FromSeconds(1)) return Finish(false, false, null);
-                _submitted = false;
                 _consecutive = AvatarSwitchConfirmationPolicy.Observe(_consecutive, observed, _expectedIndex);
                 if (AvatarSwitchConfirmationPolicy.IsConfirmed(_consecutive))
                 {
@@ -105,17 +107,25 @@ internal static class AvatarSelectionProtocol
                     frame = null;
                     return result;
                 }
-                if (allowInput && observed != _expectedIndex && _requests < _maximumRequests &&
-                    (_lastInput == null || _clock.GetElapsedTime(_lastInput.Value) >= TimeSpan.FromMilliseconds(250)))
+                if (allowInput && observed > 0 && observed != _expectedIndex && _requests < _maximumRequests && _lastInput == null)
                 {
                     _before?.Dispose();
                     _before = _clone(frame);
                     ct.ThrowIfCancellationRequested();
-                    _select(_expectedIndex);
-                    _lastInput = _clock.GetTimestamp();
-                    _fence = new(stamp, _lastInput.Value);
-                    _submitted = true;
-                    _requests++;
+                    var receipt = _select(_expectedIndex, new(_requestId, stamp, _deadline));
+                    if (receipt.Status is CombatBattleHostInputStatus.Sent or CombatBattleHostInputStatus.Unknown || receipt.NativeSubmitted > 0)
+                    {
+                        var completed = receipt.CompletedTimestamp ?? receipt.ObservableAfterTimestamp ?? _clock.GetTimestamp();
+                        if (completed < stamp.CapturedTimestamp || completed > _clock.GetTimestamp())
+                            throw new InvalidOperationException("切人输入回执的时间边界无效");
+                        _lastInput = completed;
+                        _fence = new(stamp, completed);
+                        _submitted = true;
+                        _requests++;
+                    }
+                    ct.ThrowIfCancellationRequested();
+                    if (receipt.Status == CombatBattleHostInputStatus.Failed)
+                        throw receipt.Error ?? new InvalidOperationException(receipt.Reason);
                 }
                 return new(false, false, _last, null, null, _fence, awaitingObservation: true);
             }
@@ -125,8 +135,7 @@ internal static class AvatarSelectionProtocol
         private Result<TFrame> Unknown()
         {
             _consecutive = 0;
-            return _clock.GetElapsedTime(_unknownSince) >= TimeSpan.FromSeconds(1)
-                ? Finish(false, false, null)
+            return IsExpired ? Finish(false, false, null)
                 : new(false, false, _last, null, null, _fence, awaitingObservation: true);
         }
 
@@ -148,81 +157,26 @@ internal static class AvatarSelectionProtocol
 
     internal static Result<TFrame> Select<TFrame>(int expectedIndex, int attempts,
         Func<TFrame?> capture, Func<TFrame, CaptureFrameStamp> source, Func<TFrame, bool> isHud,
-        Func<TFrame, int> active, Func<TFrame, TFrame> clone, Action<int> select,
+        Func<TFrame, int> active, Func<TFrame, TFrame> clone,
+        Func<int, CombatNativeInputRequest, CombatBattleHostInputResult> select,
         Action<int> wait, CancellationToken ct, TimeProvider? clock = null,
-        TimeSpan? maximumAge = null, Func<int, int, bool>? onMismatch = null,
-        Action<int>? trace = null) where TFrame : class, IDisposable
+        TimeSpan? maximumAge = null, Action<int>? trace = null) where TFrame : class, IDisposable
     {
         clock ??= TimeProvider.System;
-        var age = maximumAge ?? TimeSpan.FromMilliseconds(150);
-        TFrame? before = null, frame = null;
-        CaptureFrameStamp last = default;
-        CaptureFrameFence? fence = null;
-        var submitted = false;
-        var canSelect = false;
-        var needsRecovery = false;
-        var unknownSince = clock.GetTimestamp();
-        int Unknown()
-        {
-            if (clock.GetElapsedTime(unknownSince) >= TimeSpan.FromSeconds(1)) throw new StopSelection();
-            return -1;
-        }
-        Result<TFrame> Finish(bool confirmed)
-        {
-            var causalBefore = needsRecovery && submitted ? before : null;
-            if (causalBefore != null) before = null;
-            var result = new Result<TFrame>(confirmed, needsRecovery, last, frame, causalBefore, fence);
-            frame = null;
-            return result;
-        }
-        try
-        {
-            var confirmed = AvatarSwitchConfirmationPolicy.TryConfirm(expectedIndex, attempts, () =>
+        using var continuation = new Continuation<TFrame>(expectedIndex, attempts,
+            TimeSpan.FromMilliseconds(Math.Max(1, attempts) * 250d), capture, source, isHud,
+            frame =>
             {
-                canSelect = false;
-                frame?.Dispose();
-                frame = capture();
-                if (frame == null) return Unknown();
-                var stamp = source(frame);
-                if (!stamp.IsFresh(clock, age) || last.IsKnown && !stamp.IsAfter(last) ||
-                    fence is { } input && !input.Accepts(stamp)) return Unknown();
-                last = stamp;
-                if (!isHud(frame))
-                {
-                    needsRecovery = true;
-                    throw new StopSelection();
-                }
                 var observed = active(frame);
-                canSelect = stamp.IsFresh(clock, age);
-                if (!canSelect) return Unknown();
-                if (observed > 0) unknownSince = clock.GetTimestamp();
-                else Unknown();
-                submitted = false;
-                if (observed != expectedIndex)
-                {
-                    before?.Dispose();
-                    before = clone(frame);
-                }
                 trace?.Invoke(observed);
                 return observed;
-            }, index =>
-            {
-                ct.ThrowIfCancellationRequested();
-                if (!canSelect || before == null) return;
-                select(index);
-                fence = new(source(before), clock.GetTimestamp());
-                submitted = true;
-            }, wait, ct, (attempt, observed) =>
-            {
-                if (!canSelect || onMismatch?.Invoke(attempt, observed) != true) return;
-                submitted = false;
-                canSelect = false;
-                before?.Dispose();
-                before = null;
-            });
-            return Finish(confirmed);
+            }, clone, select, clock, maximumAge);
+        while (true)
+        {
+            var result = continuation.Advance(ct);
+            if (!result.AwaitingObservation) return result;
+            result.Dispose();
+            wait(50);
         }
-        catch (StopSelection) { return Finish(false); }
-        finally { before?.Dispose(); frame?.Dispose(); }
     }
 }

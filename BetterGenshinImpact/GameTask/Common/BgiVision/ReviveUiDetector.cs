@@ -85,14 +85,25 @@ internal sealed class ReviveUiDetector(
                 var pixel = mat.At<Vec4b>(y, x + offset);
                 (blue, green, red) = (pixel.Item0, pixel.Item1, pixel.Item2);
             }
-            // 只接受未被弹窗遮暗的原生绿/红血条；空血条、背景及暗化图像不能证明角色存活。
-            var healthy = Math.Abs(red - 150) <= 3 && Math.Abs(green - 215) <= 3 && Math.Abs(blue - 34) <= 3;
-            var low = red == 255 && green == 90 && blue == 90;
+            // 血条会随HUD动画改变亮度。这里只判断是否仍有绿/红血条，
+            // 是否被弹窗遮暗由独立HUD锚点判断，不能把正常淡出误作复苏。
+            var healthy = green >= 100 && green > red * 1.2 && green > blue * 3;
+            var low = red >= 150 && red > green * 1.6 && Math.Abs(green - blue) <= 15;
             if (!healthy && !low) return false;
         }
         using var paimon = image.Find(ElementRecognition.Get("PaimonMenu", image));
-        if (paimon.IsExist()) return true;
+        if (HasBrightAnchor(image, paimon)) return true;
         using var chat = image.Find(ElementRecognition.Get("FriendChat", image));
-        return chat.IsExist();
+        return HasBrightAnchor(image, chat);
+    }
+
+    private static bool HasBrightAnchor(ImageRegion image, Region anchor)
+    {
+        if (!anchor.IsExist()) return false;
+        using var area = image.DeriveCrop(new Rect(anchor.X, anchor.Y, anchor.Width, anchor.Height));
+        using var white = new Mat();
+        Cv2.InRange(area.SrcMat, new Scalar(235, 235, 235, 0), Scalar.All(255), white);
+        // 归一化模板匹配可能命中弹窗后的暗化图标；只有实际白色前景仍可见才授予HUD证据。
+        return Cv2.CountNonZero(white) >= Math.Max(4, anchor.Width * anchor.Height / 20);
     }
 }

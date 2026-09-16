@@ -18,6 +18,35 @@ public sealed class CombatFlowAction
     private readonly double _deadline;
     private readonly Func<bool>? _shouldYield;
     private readonly Func<bool>? _continuation;
+    private readonly Guid _legacySubmissionId = Guid.NewGuid();
+    private HashSet<Guid>? _reportedSubmissions;
+    internal Guid InputRequestId => _legacySubmissionId;
+    internal int SubmissionCount => _reportedSubmissions?.Count ?? 0;
+
+    internal void ClearUnsubmittedInput(CombatSkillAttempt? attempt = null)
+    {
+        if (_reportedSubmissions?.Contains(InputRequestId) == true)
+            throw new InvalidOperationException("已提交输入不能回退为未发送");
+        if (attempt != null)
+        {
+            if (PendingAttempt?.AttemptId != attempt.AttemptId) throw new InvalidOperationException("未发送请求身份不一致");
+            PendingAttempt = null;
+        }
+        InputAt = null;
+        DiagnosticAttemptId = null;
+    }
+
+    internal void RecordInputSubmission(Guid requestId)
+    {
+        if (requestId == Guid.Empty) throw new ArgumentException("输入回执缺少请求身份", nameof(requestId));
+        _reportedSubmissions ??= new();
+        if (_reportedSubmissions.Add(requestId)) _context.RecordInputAttempt();
+    }
+
+    internal void RecordLegacyInput()
+    {
+        if (InputAt != null && Command.Method != Method.Wait) RecordInputSubmission(_legacySubmissionId);
+    }
 
     internal CombatFlowAction(CombatCommand command, CombatFlowContext context, Func<bool> validate, double deadline,
         Func<bool>? shouldYield = null, Func<bool>? continuation = null, bool canReuseConfirmedActor = false,

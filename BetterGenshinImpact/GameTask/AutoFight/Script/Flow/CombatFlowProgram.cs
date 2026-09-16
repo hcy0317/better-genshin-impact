@@ -55,6 +55,13 @@ public sealed partial class CombatFlowProgram
     public bool Loop { get; private set; }
     internal bool LegacyOutcomePolicy { get; private set; }
     internal void AllowHostLoop(bool loop) => Loop |= loop;
+    internal bool NeedsBurstVision(IEnumerable<CombatFlowBlock>? roots = null) =>
+        (roots ?? [Root]).SelectMany(ReachableBlocks).Distinct().Any(block =>
+            NeedsBurstVision(block.Requires) || block.Nodes.Any(node => node.Command.Method == Method.Burst ||
+                NeedsBurstVision(node.Condition)));
+
+    internal static bool NeedsBurstVision(ConditionEvaluator.CompiledCondition? condition) =>
+        condition != null && new[] { "q-ready", "q-cd", "q-energy-low" }.Any(condition.UsesFunction);
 
     public static CombatFlowProgram Compile(string text, SkillCatalogSnapshot? database = null) => Compile(CombatScriptParser.ParseContext(text), database);
 
