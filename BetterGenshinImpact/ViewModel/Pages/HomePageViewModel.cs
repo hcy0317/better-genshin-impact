@@ -344,11 +344,12 @@ public partial class HomePageViewModel : ViewModel, IDisposable
             if (!TaskDispatcherEnabled)
             {
                 _hWnd = hWnd;
-                _taskDispatcher.Start(hWnd, GetCaptureMode(), Config.TriggerInterval);
                 _taskDispatcher.UiTaskStopTickEvent -= OnUiTaskStopTick;
                 _taskDispatcher.UiTaskStartTickEvent -= OnUiTaskStartTick;
                 _taskDispatcher.UiTaskStopTickEvent += OnUiTaskStopTick;
                 _taskDispatcher.UiTaskStartTickEvent += OnUiTaskStartTick;
+                // 首个tick也可能发现窗口退出；先绑定单次停止通知，再启动计时器。
+                _taskDispatcher.Start(hWnd, GetCaptureMode(), Config.TriggerInterval);
                 _maskWindow ??= new MaskWindow();
                 _maskWindow.Show();
                 MaskWindow.Instance().RefreshPosition();
@@ -420,16 +421,18 @@ public partial class HomePageViewModel : ViewModel, IDisposable
         }
     }
 
-    private async void ObserveStopOnUi()
+    private async void ObserveStopOnUi(long generation)
     {
+        if (!_taskDispatcher.IsCurrentStopRequest(generation)) return;
         try { await StopAsync(); }
         catch (Exception error) { _logger.LogError(error, "停止实时任务失败"); }
     }
 
     private void OnUiTaskStopTick(object? sender, EventArgs e)
     {
+        if (!ReferenceEquals(sender, _taskDispatcher) || e is not CaptureStopRequestedEventArgs request) return;
         // 不从tick同步等待UI，再让UI同步等待同一tick。
-        Application.Current.Dispatcher.BeginInvoke(new Action(ObserveStopOnUi));
+        Application.Current.Dispatcher.BeginInvoke(new Action(() => ObserveStopOnUi(request.Generation)));
     }
 
     private void OnUiTaskStartTick(object? sender, EventArgs e)

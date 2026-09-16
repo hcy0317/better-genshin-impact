@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Fischless.GameCapture.Graphics;
 
@@ -14,6 +15,8 @@ internal sealed class DispatcherDrainController
     private readonly Func<Task> _release;
     private Task? _stop;
     private bool _started;
+    private bool _stopRequested;
+    private long _generation;
     internal DispatcherDrainController(Action quiesce, Action release)
         : this(quiesce, () => { release(); return Task.CompletedTask; }) { }
     internal DispatcherDrainController(Action quiesce, Func<Task> release)
@@ -31,20 +34,52 @@ internal sealed class DispatcherDrainController
     {
         lock (_gate)
         {
-            if (_started && !_callbacks.IsStopping) throw new InvalidOperationException("调度器已经启动");
+            if (_started && (!_callbacks.IsStopping || _stop == null)) throw new InvalidOperationException("上一次截图会话尚未排空");
             if (_stop != null && !_stop.IsCompletedSuccessfully) throw new InvalidOperationException("上一次停止尚未成功排空");
             _stop = null;
             _started = true;
+            _stopRequested = false;
+            _generation++;
         }
     }
     internal void Activate()
+        => Activate(static () => { });
+
+    internal void Activate(Action startTimer)
     {
         lock (_gate)
         {
             if (!_started || _stop != null) throw new InvalidOperationException("启动已取消或尚未准备");
             _callbacks.Reset();
+            ScheduleTimer(startTimer);
         }
     }
+
+    internal void ScheduleTimer(Action startTimer)
+    {
+        lock (_gate)
+        {
+            if (_callbacks.IsStopping) return;
+            // 捕获器是宿主资源，会跨任务存活；Timer不能继承创建它的一条龙AsyncLocal运行权。
+            if (ExecutionContext.IsFlowSuppressed()) startTimer();
+            else { using (ExecutionContext.SuppressFlow()) startTimer(); }
+        }
+    }
+
+    internal bool RequestStop(out long generation)
+    {
+        lock (_gate)
+        {
+            generation = _generation;
+            if (!_started || _stopRequested || _stop != null) return false;
+            _stopRequested = true;
+            _callbacks.BeginStop();
+            _quiesce();
+            return true;
+        }
+    }
+    internal bool IsCurrentStopRequest(long generation)
+    { lock (_gate) return _stopRequested && generation == _generation; }
     internal Task StopAsync()
     {
         TaskCompletionSource completion;
@@ -75,4 +110,9 @@ internal sealed class DispatcherDrainController
         try { await _release().ConfigureAwait(false); } catch (Exception error) { failures.Add(error); }
         if (failures.Count != 0) throw new AggregateException("调度器停止清理失败", failures);
     }
+}
+
+internal sealed class CaptureStopRequestedEventArgs(long generation) : EventArgs
+{
+    internal long Generation { get; } = generation;
 }
