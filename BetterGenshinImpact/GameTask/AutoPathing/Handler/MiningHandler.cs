@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Threading;
+using System.Linq;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.Common.Job;
 using Microsoft.Extensions.Logging;
@@ -42,7 +44,13 @@ public class MiningHandler : IActionHandler
     ];
     
 
-    private readonly ScanPickTask _scanPickTask = new();
+    private ScanPickTask? _scanPickTask;
+    private readonly INativeCombatIo? _nativeIo;
+
+    public MiningHandler() { }
+
+    // 与生产相同的入口；替换的只有游戏I/O，不替换选角、预算或执行器。
+    internal MiningHandler(INativeCombatIo nativeIo) => _nativeIo = nativeIo;
 
     internal static string? SelectMiningAction(Func<string, bool> hasAvatar)
     {
@@ -54,14 +62,18 @@ public class MiningHandler : IActionHandler
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {
         ct.ThrowIfCancellationRequested();
-        var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
-        if (combatScenes == null)
+        var io = _nativeIo;
+        if (io == null)
         {
-            throw new InvalidOperationException("队伍识别未初始化成功，挖矿未执行，不能标记路线完成");
+            var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
+            if (combatScenes == null)
+                throw new InvalidOperationException("队伍识别未初始化成功，挖矿未执行，不能标记路线完成");
+            io = new NativeCombatIo(combatScenes);
         }
 
         // 挖矿
-        Mining(combatScenes, ct);
+        await MiningAsync(io, ct);
+        ct.ThrowIfCancellationRequested();
 
 
         if (waypointForTrack is { ActionParams: not null }
@@ -71,32 +83,26 @@ public class MiningHandler : IActionHandler
             await Delay(1000, ct);
 
             // 拾取
-            await _scanPickTask.Start(ct);
+            await (_scanPickTask ??= new ScanPickTask()).Start(ct);
         }
     }
 
-    private void Mining(CombatScenes combatScenes, CancellationToken ct) => RunMiningAction(
-        () => SelectMiningAction(name => combatScenes.SelectAvatar(name) != null),
-        command => command.Execute(combatScenes), ct,
-        name => Logger.LogWarning("挖矿角色 {Name} 未确认执行，停止当前挖矿动作，不回退其他角色普攻", name));
-
-    internal static void RunMiningAction(Func<string?> selectAction,
-        Func<CombatCommand, bool> execute, CancellationToken ct = default, Action<string>? warn = null)
+    private static async Task MiningAsync(INativeCombatIo io, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var selected = selectAction();
+        var selected = SelectMiningAction(name => io.Actors.Any(actor => actor.Name == name));
         if (selected == null) throw new InvalidOperationException("当前队伍没有可执行的挖矿动作，不能标记路线完成");
         var miningAction = CombatScriptParser.ParseContext(selected);
-        foreach (var command in miningAction.CombatCommands)
+        using var runner = NativeCombatFlowRunner.Create(miningAction.CombatCommands, io, loop: false,
+            purpose: CombatScriptExecutionPurpose.Pathing);
+        var outcome = CombatScriptExecutor.FromFlowResult(await runner.RunRoundAsync(ct));
+        ct.ThrowIfCancellationRequested();
+        if (outcome.Kind != CombatExecutionKind.Completed)
         {
-            ct.ThrowIfCancellationRequested();
-            if (!execute(command))
-            {
-                ct.ThrowIfCancellationRequested();
-                warn?.Invoke(command.Name);
-                throw new InvalidOperationException($"挖矿角色 {command.Name} 未确认执行，停止当前挖矿动作；本路线未完成");
-            }
-            ct.ThrowIfCancellationRequested();
+            var name = selected[..selected.IndexOf(' ')];
+            io.Logger.LogWarning("挖矿角色 {Name} 未确认执行，停止当前挖矿动作，不回退其他角色普攻：{Outcome}/{Reason}",
+                name, outcome.Kind, outcome.Reason);
+            throw new InvalidOperationException($"挖矿角色 {name} 未确认执行，停止当前挖矿动作；本路线未完成：{outcome.Kind}/{outcome.Reason}");
         }
     }
 }

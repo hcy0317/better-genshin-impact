@@ -20,15 +20,8 @@ internal static class LegacyCombatFlowAdapter
     internal static CombatScript Prepare(IReadOnlyList<CombatCommand> commands, IEnumerable<string> party,
         bool loop, CombatScriptExecutionMode mode, LegacyGuardianOptions? guardian = null)
     {
-        if (commands.Count == 0) throw Failure("EMPTY_FRAGMENT");
-        var available = party.ToHashSet(StringComparer.Ordinal);
-        if (available.Count == 0) throw Failure("PARTY_NOT_INITIALIZED");
-        var named = commands.Where(command => !command.Method.IsFlowControl && command.Name != CombatScriptParser.CurrentAvatarName)
-            .Select(command => command.Name).ToHashSet(StringComparer.Ordinal);
+        var available = ValidateParty(commands, party, mode);
         var enhanced = commands.Any(command => command.RequiresFlow);
-        if ((enhanced || mode == CombatScriptExecutionMode.RequiredSequence) && !named.IsSubsetOf(available))
-            throw Failure("REQUIRED_ACTOR_MISSING:" + string.Join(",", named.Except(available)));
-        if (!enhanced && named.Count > 0 && !named.Overlaps(available)) throw Failure("NO_APPLICABLE_ACTOR");
         var selected = commands.Where(command => enhanced || command.Method.IsFlowControl ||
                 command.Name == CombatScriptParser.CurrentAvatarName || available.Contains(command.Name))
             .Select(command => new CombatCommand(command) { LegacyOutcomePolicy = !enhanced }).ToList();
@@ -38,6 +31,22 @@ internal static class LegacyCombatFlowAdapter
         if (!enhanced && loop)
             selected.Insert(0, new CombatCommand("", "strategy(loop=battle)") { IsCompilerGenerated = true });
         return new(selected.Where(command => !command.Method.IsFlowControl).Select(command => command.Name).ToHashSet(StringComparer.Ordinal), selected);
+    }
+
+    internal static HashSet<string> ValidateParty(IReadOnlyList<CombatCommand> commands, IEnumerable<string> party,
+        CombatScriptExecutionMode mode)
+    {
+        if (commands.Count == 0) throw Failure("EMPTY_FRAGMENT");
+        var available = party.ToHashSet(StringComparer.Ordinal);
+        if (available.Count == 0) throw Failure("PARTY_NOT_INITIALIZED");
+        var named = commands.Where(command => !command.Method.IsFlowControl && command.Name != CombatScriptParser.CurrentAvatarName)
+            .Select(command => command.Name).ToHashSet(StringComparer.Ordinal);
+        var enhanced = commands.Any(command => command.RequiresFlow);
+        if ((enhanced || mode == CombatScriptExecutionMode.RequiredSequence) && !named.IsSubsetOf(available))
+            throw Failure("REQUIRED_ACTOR_MISSING:" + string.Join(",", named.Except(available)));
+        if (!enhanced && named.Count > 0 && !named.Overlaps(available))
+            throw Failure($"NO_APPLICABLE_ACTOR: 路线所需角色=[{string.Join(",", named)}]，当前队伍=[{string.Join(",", available)}]");
+        return available;
     }
 
     internal static List<CombatCommand> ApplyGuardian(IReadOnlyList<CombatCommand> commands, LegacyGuardianOptions guardian,

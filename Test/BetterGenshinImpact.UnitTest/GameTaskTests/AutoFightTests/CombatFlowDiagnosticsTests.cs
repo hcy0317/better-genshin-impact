@@ -11,6 +11,66 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatFlowDiagnosticsTests(ITestOutputHelper output)
 {
     [Fact]
+    public async Task ASubmittedPendingActionDoesNotTurnEveryLaterPollIntoAnotherInputEvent()
+    {
+        var clock = new FakeTimeProvider();
+        var diagnostics = new CombatFlowDiagnostics();
+        var game = new DiagnosticCombatGame(new SubmissionThenWaitingGame(), diagnostics);
+        using var context = new CombatFlowContext(clock);
+        var action = new CombatFlowAction(new("琴", "e(required)"), context, () => true, 30);
+        for (var index = 0; index < 301; index++) await game.ExecuteAsync(action, default);
+        var events = diagnostics.Snapshot().RecentEvents;
+        Assert.Contains(events, entry => entry.ReportedResult == "Pending");
+        Assert.Equal(300, Assert.Single(events.Where(entry => entry.ReportedResult == "AwaitingObservation")).SampleCount);
+    }
+
+    private sealed class SubmissionThenWaitingGame : ICombatFlowGame
+    {
+        private bool _submitted;
+        public bool ReportsInputReceipts => true;
+        public object? Observe(string function, IReadOnlyList<object?> args, string actor) => null;
+        public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
+        {
+            if (_submitted) return ValueTask.FromResult(CombatFlowResult.AwaitingObservation);
+            _submitted = true;
+            action.TryBeginInput();
+            action.RecordInputSubmission(action.InputRequestId);
+            return ValueTask.FromResult(CombatFlowResult.Pending);
+        }
+        public ValueTask YieldAsync(CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    [Fact]
+    public async Task WaitingForOneRequestRetainsThePrecedingInputEvidence()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new WaitingObservationGame(clock);
+        using var execution = new CombatFlowExecution(
+            CombatFlowProgram.Compile("琴 attack(0.1)\n琴 e(required)"), game, clock);
+        for (var step = 0; step < 1000 && game.Observations < 300; step++)
+            await execution.StepAsync(default);
+
+        Assert.Equal(1, game.Inputs);
+        Assert.Equal(300, game.Observations);
+        var statistics = execution.RuntimeStatistics;
+        Assert.Contains(statistics.RecentEvents, item => item.Action == "attack" && item.InputStarted);
+        Assert.Contains(statistics.RecentEvents, item => item.ReportedResult == "AwaitingObservation");
+        var waiting = Assert.Single(statistics.RecentEvents.Where(item => item.ReportedResult == "AwaitingObservation"));
+        Assert.Equal(300, waiting.SampleCount);
+        Assert.Equal(301, statistics.GameActionCalls);
+        Assert.InRange(statistics.RecentEvents.Count, 2, 64);
+        var logger = new RecordingLogger();
+        new CombatFlowDiagnosticWriter(logger, clock).Write(execution.Context.BattleId, statistics, "failed-pass");
+        Assert.Contains(logger.Messages, item => item.Contains("action=attack") && item.Contains("inputAdmitted=True"));
+        Assert.DoesNotContain(logger.Messages, item => item.StartsWith("FIGHT_TRACE_GAP "));
+        var periodic = new RecordingLogger();
+        var writer = new CombatFlowDiagnosticWriter(periodic, clock);
+        clock.Advance(TimeSpan.FromSeconds(30));
+        writer.WritePeriodic(execution.Context.BattleId, () => statistics);
+        Assert.Contains("sampled=2 dropped=0 coalesced=299", Assert.Single(periodic.Messages.Where(item => item.StartsWith("FIGHT_PROGRESS "))));
+    }
+
+    [Fact]
     public async Task PeriodicLoggingMeasuresInMemorySinkCostSeparatelyFromGameWork()
     {
         var clock = new FakeTimeProvider();
@@ -352,6 +412,27 @@ public class CombatFlowDiagnosticsTests(ITestOutputHelper output)
         Assert.Equal(0, next.RuntimeStatistics.GameActionCalls);
         Assert.Empty(next.RuntimeStatistics.RecentEvents);
         Assert.Null(next.Context.Find("动作"));
+    }
+
+    private sealed class WaitingObservationGame(FakeTimeProvider clock) : ICombatFlowGame
+    {
+        public int Inputs { get; private set; }
+        public int Observations { get; private set; }
+        public object? Observe(string function, IReadOnlyList<object?> args, string actor) => true;
+        public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(5));
+            if (action.Command.Method == Method.Attack)
+            {
+                Assert.True(action.TryBeginInput());
+                Inputs++;
+                return ValueTask.FromResult(CombatFlowResult.Succeeded);
+            }
+            action.DiagnosticReason = "等待同一切人请求的新帧";
+            Observations++;
+            return ValueTask.FromResult(CombatFlowResult.AwaitingObservation);
+        }
+        public ValueTask YieldAsync(CancellationToken ct) => ValueTask.CompletedTask;
     }
 
     private sealed class RecordingLogger : ILogger

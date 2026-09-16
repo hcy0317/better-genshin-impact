@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text.Json;
 using BetterGenshinImpact.View.Drawable;
 using Compunet.YoloSharp;
+using Compunet.YoloSharp.Data;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -23,6 +24,7 @@ public class BgiYoloPredictor : IDisposable
     private readonly OnnxInitializationTask<YoloPredictor> _predictorInitialization;
     private readonly Action<BgiYoloPredictor>? _initializationFailed;
     private readonly object _predictionLock = new();
+    private readonly HashSet<(int Width, int Height)> _preparedClassificationSizes = [];
     private int _failureReported;
     private int _disposed;
 
@@ -112,6 +114,27 @@ public class BgiYoloPredictor : IDisposable
             ReportInitializationFailure();
             throw;
         }
+    }
+
+    /// <summary>当前调用方所需分类尺寸的真实首推理；结果只用于准备，不能当作实时画面证据。</summary>
+    internal async Task<bool> PrepareClassificationAsync(
+        SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24> sample, ILogger logger, CancellationToken ct)
+    {
+        await WarmUpAsync(logger, ct);
+        ct.ThrowIfCancellationRequested();
+        var started = Stopwatch.GetTimestamp();
+        lock (_predictionLock)
+        {
+            ThrowIfDisposed();
+            if (_preparedClassificationSizes.Contains((sample.Width, sample.Height))) return false;
+            ct.ThrowIfCancellationRequested();
+            _ = Predictor.Classify(sample).GetTopClass();
+            ct.ThrowIfCancellationRequested();
+            _preparedClassificationSizes.Add((sample.Width, sample.Height));
+        }
+        try { logger.LogDebug("ONNX_CLASSIFICATION_PREPARED model={Model} width={Width} height={Height} ms={Milliseconds:F2}; result-not-gameplay-evidence",
+            _model.Name, sample.Width, sample.Height, Stopwatch.GetElapsedTime(started).TotalMilliseconds); } catch { }
+        return true;
     }
 
     private void ReportInitializationFailure()

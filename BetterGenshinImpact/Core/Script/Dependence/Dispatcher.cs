@@ -33,6 +33,11 @@ namespace BetterGenshinImpact.Core.Script.Dependence;
 public class Dispatcher
 {
     private readonly TaskExecutionScope.Guard _taskGuard = TaskExecutionScope.Capture();
+    private readonly ScriptAsyncLifetime? _scriptLifetime = ScriptAsyncLifetime.Current;
+    private CancellationToken ParentToken => _scriptLifetime?.Token ?? CancellationContext.Instance.Cts.Token;
+
+    private CancellationTokenSource LinkCancellation(CancellationToken? customCt) =>
+        CancellationTokenSource.CreateLinkedTokenSource(ParentToken, customCt ?? CancellationToken.None);
     private readonly ILogger<Dispatcher> _logger;
     private readonly CombatSkillCatalog? _skillCatalog;
     private CombatSkillCatalog SkillCatalog => _skillCatalog ?? CombatSkillCatalog.Default;
@@ -43,7 +48,8 @@ public class Dispatcher
         using var ownedTask = _taskGuard.Enter();
         var keys = string.IsNullOrWhiteSpace(characterKeys) ? null
             : characterKeys.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        await SkillCatalog.SyncAsync(keys, ct: customCt ?? CancellationContext.Instance.Cts.Token);
+        using var cancellation = LinkCancellation(customCt);
+        await SkillCatalog.SyncAsync(keys, ct: cancellation.Token);
         return ReadCombatSkillStatus();
     }
 
@@ -173,7 +179,7 @@ public class Dispatcher
         // 创建链接的取消令牌源，任何一个取消都会触发
         using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             customCts.Token,
-            CancellationContext.Instance.Cts.Token);
+            ParentToken);
         await RunTask(soloTask, linkedCts.Token);
     }
 
@@ -206,17 +212,8 @@ public class Dispatcher
         }
 
 
-        CancellationToken cancellationToken;
-
-        if (customCt != null)
-        {
-            cancellationToken = customCt.Value;
-        }
-        else
-        {
-            // 如果没有自定义令牌，就使用全局令牌
-            cancellationToken = CancellationContext.Instance.Cts.Token;
-        }
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
 
         // 根据名称执行任务
         switch (soloTask.Name)
@@ -370,8 +367,35 @@ public class Dispatcher
 
     public CancellationTokenSource GetLinkedCancellationTokenSource()
     {
-        // 创建一个新的链接令牌源，链接到全局令牌
-        return CancellationTokenSource.CreateLinkedTokenSource(CancellationContext.Instance.Cts.Token);
+        return CancellationTokenSource.CreateLinkedTokenSource(ParentToken);
+    }
+
+    /// <summary>有界等待当前脚本的宿主任务；超时不是取消完成，也不替代所属脚本的退休。</summary>
+    public async Task<bool> WaitForTask(Task task, int timeoutMilliseconds)
+    {
+        using var ownedTask = _taskGuard.Enter();
+        ArgumentNullException.ThrowIfNull(task);
+        ArgumentOutOfRangeException.ThrowIfNegative(timeoutMilliseconds);
+        var token = ParentToken;
+        token.ThrowIfCancellationRequested();
+        if (task.IsCompleted) { await task; return true; }
+        using var timerCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var timer = Task.Delay(timeoutMilliseconds, timerCancellation.Token);
+        try
+        {
+            var completed = await Task.WhenAny(task, timer).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(completed, task)) return false;
+            await task.ConfigureAwait(false);
+            _taskGuard.Check();
+            return true;
+        }
+        finally
+        {
+            await timerCancellation.CancelAsync().ConfigureAwait(false);
+            try { await timer.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (timerCancellation.IsCancellationRequested) { }
+        }
     }
 
 
@@ -394,7 +418,8 @@ public class Dispatcher
             throw new ArgumentNullException(nameof(param), "秘境任务参数不能为空");  
         }  
   
-        CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;  
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
         Dictionary<string, int> rewards = await new AutoDomainTask(param).Start(cancellationToken);
         return ToScriptDictionary(rewards);
     }  
@@ -413,7 +438,8 @@ public class Dispatcher
             throw new ArgumentNullException(nameof(param), "自动首领讨伐任务参数不能为空");
         }
 
-        CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
         Dictionary<string, int> rewards = await new AutoBossTask(param).Start(cancellationToken);
         return ToScriptDictionary(rewards);
     }
@@ -432,7 +458,8 @@ public class Dispatcher
             throw new ArgumentNullException(nameof(param), "战斗任务参数不能为空");  
         }  
   
-        CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;  
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
         var factory = GameTask.AutoFight.Factory.CombatTaskFactoryProvider.GetFactory(param.CombatStrategyPath);
         var fightTask = factory.CreateTask(param);
         await fightTask.Start(cancellationToken);  
@@ -453,7 +480,8 @@ public class Dispatcher
             throw new ArgumentException("策略字符串不能为空", nameof(script));
         }
 
-        CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
 
         // 1. 解析策略字符串（ParseContext 已处理全角符号、注释、分号/逗号分隔）
         var combatScript = CombatScriptParser.ParseContext(script, validate: false, defaultAvatarName: avatarName);
@@ -478,7 +506,8 @@ public class Dispatcher
             throw new ArgumentNullException(nameof(param), "自动地脉花任务参数不能为空");  
         }  
   
-        CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;  
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
         await new AutoLeyLineOutcropTask(param).Start(cancellationToken);  
     }
 
@@ -497,7 +526,8 @@ public class Dispatcher
             throw new ArgumentNullException(nameof(param), "自动幽境危战任务参数不能为空");
         }
 
-        CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
         await new AutoStygianOnslaughtTask(param).Start(cancellationToken);
     }
     
@@ -515,7 +545,8 @@ public class Dispatcher
             throw new ArgumentNullException(nameof(param), "背包物品计数参数不能为空");
         }
 
-        CancellationToken cancellationToken = customCt ?? CancellationContext.Instance.Cts.Token;
+        using var cancellation = LinkCancellation(customCt);
+        var cancellationToken = cancellation.Token;
         object result = await new CountInventoryItem(param).Start(cancellationToken);
 
         if (param.ItemName != null)

@@ -61,7 +61,7 @@ public class SwitchPartyTask
         bool stayInPartyViewOnFailure, CancellationToken ct, bool deferApplyToCaller)
     {
         bool isInPartyViewUi = false;
-        using var driver = new NativeUiDriver();
+        using var driver = new NativeUiDriver(inspectWorld: true);
 
         Logger.LogInformation("尝试切换至队伍: {Name}", partyName);
         var initial = driver.Capture();
@@ -73,36 +73,8 @@ public class SwitchPartyTask
             isInPartyViewUi = true;
             await _returnMainUiTask.Start(ct);
 
-            // 尝试打开队伍配置页面
-            const int maxAttempts = 2;
-            bool isOpened = false;
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
-            {
-                Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
-
-                // 考虑加载时间 2s，共检查 4.2s，如果失败则抛出异常
-
-                for (int i = 0; i < 7; i++) // 检查 7 次
-                {
-                    await Delay(600, ct);
-                    using var raCheck = CaptureToRectArea();
-                    if (Bv.IsInPartyViewUi(raCheck))
-                    {
-                        isOpened = true;
-                        break;
-                    }
-                }
-
-                if (isOpened)
-                {
-                    break; // 页面已打开，跳出循环
-                }
-            }
-
-            if (!isOpened)
-            {
-                throw new PartySetupFailedException("未能打开队伍配置界面");
-            }
+            // 原8.4秒预算内只提交一次探测；危险世界由外层现有恢复owner处理。
+            await UiTransition.EnterPartyAsync(driver, ct, Logger);
         }
 
         await UiTransition.WaitAsync("party-ready", UiTarget.Party, driver, ct, TimeSpan.FromSeconds(10), logger: Logger);

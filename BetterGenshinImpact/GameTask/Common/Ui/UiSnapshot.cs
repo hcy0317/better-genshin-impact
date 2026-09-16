@@ -4,7 +4,11 @@ using Fischless.GameCapture;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal enum UiTarget { Main, Overworld, DomainMain, Party, PartyList, PartyOrMain, Menu, Crafting }
-internal enum UiAction { Escape, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty }
+internal enum UiAction { Escape, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty }
+
+internal enum UiReadinessKind { Ready, TemporarilyUnavailable, Unknown, Terminal }
+internal readonly record struct UiReadiness(UiReadinessKind Kind, string Reason, bool CanProbe = false);
+internal readonly record struct UiWorldObservation(bool Controlled, bool LowHp, bool PartyRejected);
 
 /// <summary>同一次截图的特征证据；主HUD与秘境上下文是不同维度。</summary>
 internal sealed record UiSnapshot(long FrameId)
@@ -50,12 +54,28 @@ internal sealed record UiSnapshot(long FrameId)
     public bool MenuBack { get; init; }
     public bool Crafting { get; init; }
     public bool Handbook { get; init; }
+    public bool Cannon { get; init; }
+    public UiWorldObservation? World { get; init; }
+
+    public UiReadiness PartyEntryReadiness()
+    {
+        if (!HasUsableEvidence) return new(UiReadinessKind.Unknown, "source-unavailable");
+        if (FullPartyDefeat || Revive) return new(UiReadinessKind.TemporarilyUnavailable, "revive-required");
+        if (Matches(UiTarget.Party)) return new(UiReadinessKind.Ready, "party-visible");
+        if (!MainReady || World is not { } world) return new(UiReadinessKind.Unknown, "world-not-observed");
+        if (InDomain) return new(UiReadinessKind.TemporarilyUnavailable, "domain-context");
+        if (world.Controlled) return new(UiReadinessKind.TemporarilyUnavailable, "control-interrupted");
+        if (world.LowHp) return new(UiReadinessKind.TemporarilyUnavailable, "low-hp");
+        if (world.PartyRejected) return new(UiReadinessKind.TemporarilyUnavailable, "party-rejected");
+        // 只有进入菜单后的新帧才能证明就绪；当前只允许一次无消费探测。
+        return new(UiReadinessKind.Unknown, "awaiting-party-page", CanProbe: true);
+    }
 
     public bool MainReady => HasUsableEvidence && MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
-        && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook;
+        && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook && !Cannon;
     public bool MapReady => HasUsableEvidence && BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
         && !FullPartyDefeat && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook;
-    public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook);
+    public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || Cannon);
     public bool Matches(UiTarget target) => HasUsableEvidence && !FullPartyDefeat && target switch
     {
         UiTarget.Main => MainReady,
@@ -72,6 +92,6 @@ internal sealed record UiSnapshot(long FrameId)
 
     public int Signature => (MainHud ? 1 : 0) | (BigMap ? 2 : 0) | (Party ? 4 : 0)
         | (PartyList ? 8 : 0) | (Talk ? 16 : 0) | (Prompt ? 32 : 0) | (Revive ? 64 : 0)
-        | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0);
-    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},fullPartyDefeat={FullPartyDefeat}";
+        | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0) | (Cannon ? 32768 : 0);
+    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},cannon={Cannon},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason}";
 }

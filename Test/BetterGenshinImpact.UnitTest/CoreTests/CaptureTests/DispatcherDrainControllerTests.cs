@@ -1,9 +1,57 @@
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.Core.Script;
 
 namespace BetterGenshinImpact.UnitTest.CoreTests.CaptureTests;
 
 public class DispatcherDrainControllerTests
 {
+    [Fact]
+    public async Task GameExitStopsAdmissionBeforeUiDrainAndPublishesOnlyOneGenerationBoundRequest()
+    {
+        var quiesced = false;
+        var released = false;
+        var controller = new DispatcherDrainController(() => quiesced = true, () => released = true);
+        controller.Start();
+        Assert.True(controller.TryEnter());
+        Assert.True(controller.RequestStop(out var generation));
+        Assert.True(quiesced);
+        Assert.False(controller.TryEnter());
+        Assert.False(controller.RequestStop(out _));
+        Assert.True(controller.IsCurrentStopRequest(generation));
+        Assert.False(released);
+        Assert.Throws<InvalidOperationException>(controller.Start);
+        controller.Exit();
+        await controller.StopAsync();
+        Assert.True(released);
+        controller.Start();
+        Assert.False(controller.IsCurrentStopRequest(generation));
+        await controller.StopAsync();
+    }
+
+    [Fact]
+    public async Task CaptureTimerDoesNotInheritTheAutomationRunThatStartedIt()
+    {
+        var cancellation = new CancellationContext();
+        var controller = new DispatcherDrainController(() => { }, () => { });
+        var observed = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        System.Threading.Timer? timer = null;
+        var run = cancellation.EnterRun();
+        try
+        {
+            controller.PrepareStart();
+            controller.Activate(() => timer = new System.Threading.Timer(_ =>
+                observed.TrySetResult(Record.Exception(cancellation.CheckLifecycleAccess)), null,
+                Timeout.Infinite, Timeout.Infinite));
+        }
+        finally { await run.DisposeAsync(); }
+        try
+        {
+            timer!.Change(0, Timeout.Infinite);
+            Assert.Null(await observed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally { timer?.Dispose(); await controller.StopAsync(); }
+    }
+
     [Fact]
     public async Task ReentrantStopSharesThePublishedDrainInsteadOfReleasingTwice()
     {

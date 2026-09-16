@@ -180,11 +180,7 @@ namespace BetterGenshinImpact.GameTask
                     // 启动定时器
                     _frameIndex = 0;
                     _timer.Interval = interval;
-                    _lifetime.Activate();
-                    if (!_timer.Enabled)
-                    {
-                        _timer.Start();
-                    }
+                    _lifetime.Activate(() => { if (!_timer.Enabled) _timer.Start(); });
                 }
                 catch
                 {
@@ -205,6 +201,21 @@ namespace BetterGenshinImpact.GameTask
         public Task StopAsync()
         {
             lock (_lifecycleGate) return _lifetime.StopAsync();
+        }
+
+        internal bool IsCurrentStopRequest(long generation) => _lifetime.IsCurrentStopRequest(generation);
+
+        private void RequestUiStop(bool gameExited)
+        {
+            // 先停止接收新tick，再交UI取消任务并排空；不能等待UI接单期间继续反复投递。
+            if (!_lifetime.RequestStop(out var generation)) return;
+            try
+            {
+                if (gameExited) _logger.LogInformation("游戏已退出，BetterGI 请求停止截图器，captureGeneration={Generation}", generation);
+                else _logger.LogError("截图器未初始化，请求停止，captureGeneration={Generation}", generation);
+            }
+            catch { /* 记录故障不能阻止已经取得所有权的停止通知。 */ }
+            UiTaskStopTickEvent?.Invoke(this, new CaptureStopRequestedEventArgs(generation));
         }
 
         private void ObserveStop(Task task)
@@ -247,7 +258,7 @@ namespace BetterGenshinImpact.GameTask
             lock (_lifecycleGate)
             {
                 if (_disposed || _lifetime.IsStopping) return;
-                if (!_timer.Enabled) _timer.Start();
+                _lifetime.ScheduleTimer(() => { if (!_timer.Enabled) _timer.Start(); });
             }
         }
 
@@ -313,19 +324,7 @@ namespace BetterGenshinImpact.GameTask
                 if (GameCapture == null || !GameCapture.IsCapturing)
                 {
                     ChatUiHotkeyGuard.Reset();
-                    if (!TaskContext.Instance().SystemInfo.GameProcess.HasExited)
-                    {
-                        _logger.LogError("截图器未初始化!");
-                    }
-                    else
-                    {
-                        _logger.LogInformation("游戏已退出，BetterGI 自动停止截图器");
-                    }
-
-                    PictureInPictureService.Hide(resetManual: true);
-                    UiTaskStopTickEvent?.Invoke(sender, e);
-                    maskWindow.Invoke(maskWindow.HideSelf);
-                    HtmlMaskWindow.HideAll();
+                    RequestUiStop(TaskContext.Instance().SystemInfo.GameProcess.HasExited);
                     return;
                 }
 
@@ -351,8 +350,7 @@ namespace BetterGenshinImpact.GameTask
                     // 检查游戏是否已结束
                     if (TaskContext.Instance().SystemInfo.GameProcess.HasExited)
                     {
-                        _logger.LogInformation("游戏已退出，BetterGI 自动停止截图器");
-                        UiTaskStopTickEvent?.Invoke(sender, e);
+                        RequestUiStop(gameExited: true);
                         return;
                     }
 

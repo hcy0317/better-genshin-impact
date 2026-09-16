@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.Common.Ui;
+using BetterGenshinImpact.GameTask.Common.Exceptions;
 using Microsoft.Extensions.Time.Testing;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
@@ -8,6 +9,55 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class UiTransitionTests
 {
+    [Fact]
+    public async Task CannonExitWaitsForNewStableHudInsteadOfClaimingTheCannonIsTheMainScreen()
+    {
+        var clock = new FakeTimeProvider();
+        var cannon = new UiSnapshot(1) { Cannon = true };
+        var driver = new ReplayDriver(clock, cannon, cannon, new(2) { MainHud = true }, new(3) { MainHud = true });
+        Assert.False(cannon.MainReady);
+        var result = await UiRecovery.ToMainAsync(driver, default, requireOverworld: true, clock: clock);
+        Assert.Equal(3, result.FrameId);
+        Assert.Equal(new[] { UiAction.Escape }, driver.Actions);
+    }
+
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public async Task DangerousWorldDoesNotDispatchPartyProbe(bool controlled, bool lowHp, bool rejected)
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { MainHud = true,
+            World = new(controlled, lowHp, rejected) });
+        await Assert.ThrowsAsync<PartySetupFailedException>(() => UiTransition.EnterPartyAsync(driver, default, clock: clock));
+        Assert.Empty(driver.Actions);
+    }
+
+    [Fact]
+    public async Task PartyProbeWaitsForTwoNewPageFramesWithoutResending()
+    {
+        var clock = new FakeTimeProvider();
+        var world = new UiSnapshot(1) { MainHud = true, World = new(false, false, false) };
+        var driver = new ReplayDriver(clock, world, world with { FrameId = 2 },
+            new(3) { Party = true }, new(3) { Party = true }, new(4) { Party = true });
+        Assert.Equal(4, (await UiTransition.EnterPartyAsync(driver, default, clock: clock)).FrameId);
+        Assert.Equal(new[] { UiAction.OpenParty }, driver.Actions);
+    }
+
+    [Fact]
+    public async Task UnappliedInputDoesNotConsumeTheSingleProbe()
+    {
+        var clock = new FakeTimeProvider();
+        var calls = 0;
+        var driver = new ReplayDriver(clock, new(1) { MainHud = true }, new(2) { MainHud = true },
+            new(3) { Party = true }, new(4) { Party = true })
+        { ApplyAction = _ => ++calls > 1 };
+        await UiTransition.WaitAsync("single-probe", UiTarget.Party, driver, default,
+            TimeSpan.FromSeconds(3), _ => UiAction.OpenParty, maxActions: 1, clock: clock);
+        Assert.Equal(2, calls);
+    }
+
     [Theory]
     [InlineData(7, 1)]
     [InlineData(2, 2)]

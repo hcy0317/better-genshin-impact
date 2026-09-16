@@ -14,6 +14,7 @@ internal static class AutomationRunCoordinator
     {
         CancellationContext.RunLease? run = null;
         IDisposable? activity = null;
+        DiagnosticEvidenceScope? evidence = null;
         Exception? failure = null, finalizationFailure = null;
         var cancelled = false;
         try
@@ -23,6 +24,7 @@ internal static class AutomationRunCoordinator
             try { admission.Initialize(() => run = cancellation.EnterRun()); }
             finally { input.Release(); }
             activity = admission.EnterActivity();
+            evidence = DiagnosticEvidenceScope.CreateOwned();
             await work();
         }
         catch (Exception error) { failure = error; }
@@ -43,6 +45,8 @@ internal static class AutomationRunCoordinator
         catch (Exception error) { finalizationFailure = error; }
         finally
         {
+            ValueTask evidenceDrain = default;
+            try { evidenceDrain = evidence?.DisposeAsync() ?? ValueTask.CompletedTask; } catch { }
             try
             {
                 if (run != null) await run.DisposeAsync();
@@ -52,7 +56,11 @@ internal static class AutomationRunCoordinator
                 if (failure == null) failure = error;
                 else if (!ReferenceEquals(failure, error)) failure.Data["RunRetirementCleanup"] = error;
             }
-            finally { activity?.Dispose(); }
+            finally
+            {
+                try { activity?.Dispose(); }
+                finally { try { await evidenceDrain; } catch { /* 诊断不可阻断run资源退役。 */ } }
+            }
         }
         if (finalizationFailure != null)
         {

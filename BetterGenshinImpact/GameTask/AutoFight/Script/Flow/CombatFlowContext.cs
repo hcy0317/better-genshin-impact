@@ -33,6 +33,12 @@ public sealed class CombatFlowContext(TimeProvider? timeProvider = null) : IDisp
     private readonly Dictionary<(string Actor, string Effect), Guid> _currentEffects = new();
     private bool _closed;
     private long _generation;
+    private long _inputAttemptRevision;
+    internal long InputAttemptRevision { get { lock (_gate) return _inputAttemptRevision; } }
+    internal void RecordInputAttempt()
+    {
+        lock (_gate) { if (!_closed) _inputAttemptRevision++; }
+    }
     private string? _lastObservedActor;
     private int _actorTurns;
     public string? LastObservedActor { get { lock (_gate) return _lastObservedActor; } }

@@ -8,6 +8,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -37,7 +38,24 @@ public class CombatScenes : IDisposable
     /// <summary>
     /// 当前配队
     /// </summary>
-    private Avatar[] Avatars { set; get; } = [];
+    private readonly object _layoutGate = new();
+    private Avatar[] _avatars = [];
+    private long _layoutGeneration;
+    private Avatar[] Avatars
+    {
+        get => _avatars;
+        set
+        {
+            lock (_layoutGate) { _avatars = value; _layoutGeneration++; }
+        }
+    }
+
+    internal long LayoutGeneration { get { lock (_layoutGate) return _layoutGeneration; } }
+
+    internal Rect[] GetAvatarIndexRectSnapshot()
+    {
+        lock (_layoutGate) return Avatars.Select(avatar => avatar.IndexRect).ToArray();
+    }
 
     public int AvatarCount => Avatars.Length;
 
@@ -250,21 +268,32 @@ public class CombatScenes : IDisposable
     /// </summary>
     /// <param name="imageRegion"></param>
     /// <returns>false:存在 IndexRectList 的情况下使用此方法，返回false的时候很有可能处于地图边缘环境下</returns>
-    public bool RefreshTeamAvatarIndexRectList(ImageRegion imageRegion)
+    public bool RefreshTeamAvatarIndexRectList(ImageRegion imageRegion, TimeSpan? maximumAge = null)
     {
+        var age = maximumAge ?? UiSnapshot.RecoveryMaximumAge;
+        if (!imageRegion.FrameStamp.IsFresh(TimeProvider.System, age)) return false;
         // 只用新方法判断
         try
         {
-            var (avatarIndexRectList, _) = PartyAvatarSideIndexHelper.GetAllIndexRectsNew(imageRegion, CurrentMultiGameStatus!, _logger, _systemInfo);
+            // 手工配置队伍名没有联机状态；显式准备必须从这一帧读取，不能依赖测试补默认单人状态。
+            var multiGameStatus = PartyAvatarSideIndexHelper.DetectedMultiGameStatus(imageRegion, _autoFightAssets, _logger);
+            var (avatarIndexRectList, _) = PartyAvatarSideIndexHelper.GetAllIndexRectsNew(imageRegion, multiGameStatus, _logger, _systemInfo);
             if (avatarIndexRectList.Count != ExpectedTeamAvatarNum)
             {
                 _logger.LogWarning("重新识别到的队伍角色数量与之前不一致，之前{Old}个，现在{New}个", ExpectedTeamAvatarNum, avatarIndexRectList.Count);
                 return false;
             }
 
-            for (var i = 0; i < ExpectedTeamAvatarNum; i++)
+            if (!imageRegion.FrameStamp.IsFresh(TimeProvider.System, age)) return false;
+            lock (_layoutGate)
             {
-                Avatars[i].IndexRect = avatarIndexRectList[i];
+                CurrentMultiGameStatus = multiGameStatus;
+                if (!Avatars.Select(avatar => avatar.IndexRect).SequenceEqual(avatarIndexRectList))
+                {
+                    for (var i = 0; i < ExpectedTeamAvatarNum; i++)
+                        Avatars[i].IndexRect = avatarIndexRectList[i];
+                    _layoutGeneration++;
+                }
             }
 
             return true;
@@ -275,6 +304,25 @@ public class CombatScenes : IDisposable
             _logger.LogWarning("[重新识别角色编号位置]使用新方法获取角色编号位置失败，原因：" + ex.Message);
             return false;
         }
+    }
+
+    internal AvatarLayoutPreparation PrepareAvatarObservation(ImageRegion image,
+        AvatarActiveCheckContext context, TimeSpan maximumAge)
+    {
+        if (!context.NeedsLayoutPreparation) return AvatarLayoutPreparation.NotRequested;
+        if (!image.FrameStamp.IsFresh(TimeProvider.System, maximumAge)) return AvatarLayoutPreparation.Unavailable;
+        if (!context.TryBeginLayoutPreparation()) return AvatarLayoutPreparation.NotRequested;
+        var before = LayoutGeneration;
+        var found = RefreshTeamAvatarIndexRectList(image, maximumAge);
+        var result = !found ? AvatarLayoutPreparation.Unavailable : LayoutGeneration == before
+            ? AvatarLayoutPreparation.Unchanged : AvatarLayoutPreparation.Changed;
+        try
+        {
+            _logger.LogDebug("ACTOR_LAYOUT_PREPARE sourceSequence={Source} result={Result} generation={Generation} activeConfirmed=false",
+                image.FrameStamp.Sequence, result, LayoutGeneration);
+        }
+        catch { /* 诊断不能改变布局准备结果。 */ }
+        return result;
     }
 
     // public static List<Rect> FindAvatarIndexRectList(ImageRegion imageRegion)
@@ -540,42 +588,29 @@ public class CombatScenes : IDisposable
 
     /// <summary>
     /// 推荐使用
-    /// 失败后自动刷新编号框位置
+    /// 只读取当前布局；有界布局准备由调用者在独立阶段显式执行。
     /// </summary>
     /// <param name="imageRegion"></param>l
     /// <param name="context"></param>
     /// <returns></returns>
     public int GetActiveAvatarIndex(ImageRegion imageRegion, AvatarActiveCheckContext context)
     {
-        var rectArray = Avatars.Select(t => t.IndexRect).ToArray();
+        Rect[] rectArray;
+        long generation;
+        lock (_layoutGate)
+        {
+            rectArray = Avatars.Select(avatar => avatar.IndexRect).ToArray();
+            generation = _layoutGeneration;
+        }
+        // 不把不同布局的观察拼接成连续确认。
+        var layoutChanged = context.ObserveLayout(generation);
         int index = PartyAvatarSideIndexHelper.GetAvatarIndexIsActiveWithContext(imageRegion, rectArray, context);
-
+        if (layoutChanged) return -2;
         if (index > 0)
         {
             LastActiveAvatarIndex = index;
             return index;
         }
-        else
-        {
-            // 多次识别失败则尝试刷新角色编号位置
-            // 应对草露问题
-            if (context.TotalCheckFailedCount % 3 == 0 && context.TotalCheckFailedCount > 0 && context.TotalCheckFailedCount < 10)
-            {
-                // 失败多次，识别是否存在满足预期的编号框
-                if (PartyAvatarSideIndexHelper.CountIndexRect(imageRegion) == Avatars.Length)
-                {
-                    bool res = RefreshTeamAvatarIndexRectList(imageRegion);
-                    _logger.LogWarning("多次识别出战角色失败，尝试刷新角色编号位置，刷新结果:{Result}", res ? "成功" : "失败");
-                    imageRegion.SrcMat.SaveImage(Global.Absolute("log\\refresh_avatar_index_rect.png"));
-                    if (res)
-                    {
-                        context.TotalCheckFailedCount = 0;
-                    }
-                }
-            }
-        }
-
-
         return -1;
     }
 

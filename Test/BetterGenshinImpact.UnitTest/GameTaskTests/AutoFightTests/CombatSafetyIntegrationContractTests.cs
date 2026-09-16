@@ -39,12 +39,20 @@ public class CombatSafetyIntegrationContractTests
             "AutoFight",
             "AutoFightJsonTask.cs");
 
-        Assert.Contains("AutoFightSkill.EnsureGuardianBoundaryAsync", txt);
-        Assert.Contains("AutoFightSkill.EnsureGuardianBoundaryAsync", json);
-        Assert.Contains("GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill", txt);
-        Assert.Contains("GuardianSkillSwitchPolicy.ShouldSkipCoveredGuardianSkill", json);
-        Assert.Contains("FindNextGuardianSkillCommandIndex", txt);
-        Assert.Contains("护盾即将到期，快进到策略中下一次 E 时机", txt);
+        foreach (var source in new[] { txt, json })
+        {
+            Assert.Contains("NativeCombatFlowRunner.Create", source);
+            Assert.Contains("NativeCombatBattleHostIo.Create", source);
+            Assert.Contains("battleHost.AdvanceAsync(flow", source);
+        }
+        // TXT/JSON均把旧护盾配置交给同一编译层；不再要求已经退役的两套内联循环。
+        var runner = ReadSource("BetterGenshinImpact", "GameTask", "AutoFight", "Script", "Flow", "NativeCombatFlowRunner.cs");
+        var adapter = ReadSource("BetterGenshinImpact", "GameTask", "AutoFight", "Script", "Flow", "LegacyCombatFlowAdapter.cs");
+        var jsonCore = ReadSource("BetterGenshinImpact", "GameTask", "AutoFight", "Script", "Flow", "JsonCombatFlowExecution.cs");
+        Assert.Contains("LegacyGuardianOptions.From", runner);
+        Assert.Contains("LegacyCombatFlowAdapter.ApplyGuardian", jsonCore);
+        Assert.Contains("maintain={record}", adapter);
+        Assert.Contains("GuardianDurationLimit = guardian.Duration", adapter);
     }
 
     [Fact]

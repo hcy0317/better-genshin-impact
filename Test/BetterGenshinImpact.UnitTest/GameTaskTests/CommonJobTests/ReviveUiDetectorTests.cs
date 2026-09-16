@@ -8,6 +8,19 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class ReviveUiDetectorTests
 {
+    [Theory]
+    [InlineData("s32-mining-hud-20260916.png", true)]
+    [InlineData("s32-food-revive-20260916.png", false)]
+    public void RecordedMiningHudAndReviveOverlayRemainDistinctWithoutPopupOcr(string file, bool living)
+    {
+        using var image = new ImageRegion(Cv2.ImRead(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Ui", file)), 0, 0);
+        Assert.False(image.SrcMat.Empty());
+        var detector = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", image),
+            new UnavailableOcr(), "复苏", "使用道具复苏角色");
+        Assert.Equal(living, detector.IsCombatHud(image));
+        if (living) Assert.Equal(ReviveUiState.None, detector.Read(image));
+    }
+
     [Fact]
     public void CombatHandoffIdentifiesAnAbnormalHudWithoutRunningPopupOcr()
     {

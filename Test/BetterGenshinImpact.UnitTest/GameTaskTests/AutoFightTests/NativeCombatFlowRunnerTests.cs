@@ -9,6 +9,37 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class NativeCombatFlowRunnerTests
 {
+    [Fact]
+    public async Task FailedPassesWithoutSubmittedInputShareOneBoundedRecoveryWindow()
+    {
+        using var owner = TaskExecutionScope.BeginOwned();
+        var clock = new FakeTimeProvider();
+        var game = new NoInputFailureGame(clock);
+        using var runner = NativeCombatFlowRunner.Create(new JsonCombatStrategy
+        { Actions = [new() { Character = "琴", Action = "e(required)" }] }, game, clock: clock)!;
+        var passes = 0;
+        for (var step = 0; step < 100 && passes < 4; step++)
+            if ((await runner.StepAsync(default)).RoundCompleted) passes++;
+        Assert.Equal(4, passes);
+        Assert.True(game.Calls >= 3);
+        Assert.Null(TaskExecutionScope.Failure);
+        clock.Advance(TimeSpan.FromSeconds(16));
+        await Assert.ThrowsAsync<CombatNotFinishedException>(async () => await runner.StepAsync(default));
+    }
+
+    private sealed class NoInputFailureGame(FakeTimeProvider clock) : ICombatFlowGame
+    {
+        public int Calls { get; private set; }
+        public object? Observe(string function, IReadOnlyList<object?> args, string actor) => true;
+        public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
+        {
+            Calls++;
+            clock.Advance(TimeSpan.FromMilliseconds(100));
+            return ValueTask.FromResult(CombatFlowResult.Failed);
+        }
+        public ValueTask YieldAsync(CancellationToken ct) => ValueTask.CompletedTask;
+        public ValueTask WaitAfterFailedPassAsync(CancellationToken ct) => ValueTask.CompletedTask;
+    }
 
     [Theory]
     [InlineData(0)]

@@ -473,6 +473,23 @@ public class Genshin
         await new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token);
     }
 
+    /// <summary>只读世界操作证据；Unknown/CanProbe仅允许非消费探测，不代表已脱离战斗。</summary>
+    public string InspectWorldUi()
+    {
+        using var ownedTask = _taskGuard.Enter();
+        using var driver = new NativeUiDriver(inspectWorld: true);
+        var snapshot = driver.Capture();
+        _taskGuard.Check();
+        var readiness = snapshot.PartyEntryReadiness();
+        return Newtonsoft.Json.JsonConvert.SerializeObject(new
+        {
+            kind = readiness.Kind.ToString(), reason = readiness.Reason, canProbe = readiness.CanProbe,
+            source = new { known = snapshot.SourceBound && snapshot.HasUsableEvidence,
+                sequence = snapshot.SourceStamp.Sequence, session = snapshot.SourceStamp.SessionId,
+                capturedAtUnixMs = snapshot.SourceStamp.CapturedAt.ToUnixTimeMilliseconds() }
+        });
+    }
+
     /// <summary>脚本子任务交接：确认大世界主界面；失败保留终止类型，禁止被父层再次当普通失败恢复。</summary>
     public async Task RecoverMainUi(string? failureContext = null)
     {

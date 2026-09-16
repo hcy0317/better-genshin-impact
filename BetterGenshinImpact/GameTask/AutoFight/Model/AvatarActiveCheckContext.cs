@@ -5,6 +5,29 @@
 /// </summary>
 public class AvatarActiveCheckContext
 {
+    private bool _layoutPreparationAttempted;
+    private long? _layoutGeneration;
+    internal bool NeedsLayoutPreparation => TotalCheckFailedCount >= 3 && !_layoutPreparationAttempted;
+
+    internal bool TryBeginLayoutPreparation()
+    {
+        if (!NeedsLayoutPreparation) return false;
+        _layoutPreparationAttempted = true;
+        return true;
+    }
+
+    internal bool ObserveLayout(long generation)
+    {
+        var changed = _layoutGeneration is { } previous && previous != generation;
+        _layoutGeneration = generation;
+        if (changed)
+        {
+            System.Array.Clear(ActiveIndexByArrowCount);
+            TotalCheckFailedCount = 0;
+        }
+        return changed;
+    }
+
     /// <summary>
     /// 出战标识识别结果的次数统计
     /// </summary>
@@ -15,6 +38,8 @@ public class AvatarActiveCheckContext
     /// </summary>
     public int TotalCheckFailedCount { get; set; } = 0;
 }
+
+internal enum AvatarLayoutPreparation { NotRequested, Unchanged, Changed, Unavailable }
 
 internal static class AvatarSwitchConfirmationPolicy
 {

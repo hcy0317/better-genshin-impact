@@ -8,6 +8,8 @@ namespace Fischless.WindowsInput;
 internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
 {
     private readonly Action? _beforeInputDispatch;
+    private readonly Func<User32.INPUT[], uint> _dispatch = DispatchNative;
+    private readonly Func<int> _readError = Marshal.GetLastWin32Error;
 
     [DllImport("kernel32.dll")]
     private static extern void SetLastError(uint errorCode);
@@ -19,6 +21,20 @@ internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
     internal WindowsInputMessageDispatcher(Action beforeInputDispatch)
     {
         _beforeInputDispatch = beforeInputDispatch ?? throw new ArgumentNullException(nameof(beforeInputDispatch));
+    }
+
+    internal WindowsInputMessageDispatcher(Action? beforeInputDispatch,
+        Func<User32.INPUT[], uint> dispatch, Func<int> readError)
+    {
+        _beforeInputDispatch = beforeInputDispatch;
+        _dispatch = dispatch;
+        _readError = readError;
+    }
+
+    private static uint DispatchNative(User32.INPUT[] inputs)
+    {
+        SetLastError(0);
+        return User32.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(User32.INPUT)));
     }
 
     public void DispatchInput(User32.INPUT[] inputs)
@@ -35,12 +51,16 @@ internal class WindowsInputMessageDispatcher : IInputMessageDispatcher
 
         InvokeBeforeInputDispatch();
 
-        SetLastError(0);
-        uint num = User32.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(User32.INPUT)));
+        var capture = InputDispatchCapture.BeforeNative();
+        capture?.Begin(inputs.Length);
+        uint num;
+        try { num = _dispatch(inputs); }
+        catch { capture?.MarkUncertain(); throw; }
+        var errorCode = num == inputs.Length ? 0 : _readError();
+        capture?.Complete(num);
 
         if (num != inputs.Length)
         {
-            var errorCode = Marshal.GetLastWin32Error();
             using var process = Process.GetCurrentProcess();
             throw new InputDispatchException(CreateFailureMessage(
                 inputs.Length,

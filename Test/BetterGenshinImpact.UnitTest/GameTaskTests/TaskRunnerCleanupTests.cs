@@ -2,11 +2,49 @@ using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.Service.Interface;
 using BetterGenshinImpact.ViewModel.Pages;
 using System.Reflection;
+using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.Model.Area;
+using Fischless.GameCapture;
+using OpenCvSharp;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests;
 
 public class TaskRunnerCleanupTests
 {
+    [Fact]
+    public async Task SlowEvidenceWriterCannotDelayInputReleaseRunRetirementOrTaskLockRelease()
+    {
+        var sinkEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSink = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Mat? owned = null;
+        await using var evidence = new DiagnosticEvidenceScope(async (_, image) =>
+        {
+            owned = image;
+            sinkEntered.TrySetResult();
+            await releaseSink.Task;
+        });
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        Assert.True(evidence.TryCapture(frame, "cancelled-run", "last", ""));
+        await sinkEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var calls = new List<string>();
+        var retirement = TaskRunnerCleanup.RetireAsync(evidence,
+            [("release-input", () => { calls.Add("input"); throw new IOException("release failure"); }),
+             ("clear-context", () => calls.Add("context"))],
+            () => { calls.Add("run"); return ValueTask.CompletedTask; },
+            () => calls.Add("lock"), (_, _) => { });
+        try
+        {
+            Assert.Equal(new[] { "input", "context", "run", "lock" }, calls);
+            Assert.False(retirement.IsCompleted);
+            Assert.False(owned!.IsDisposed);
+            Assert.False(evidence.TryCapture(frame, "late", "last", ""));
+        }
+        finally { releaseSink.TrySetResult(); await retirement; }
+        Assert.Single(await retirement);
+        Assert.True(owned!.IsDisposed);
+    }
+
     [Fact]
     public void RunAllContinuesAfterCleanupStepFailures()
     {

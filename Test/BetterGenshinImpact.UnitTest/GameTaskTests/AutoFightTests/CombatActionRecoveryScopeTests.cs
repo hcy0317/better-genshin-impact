@@ -9,6 +9,60 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatActionRecoveryScopeTests
 {
     [Fact]
+    public async Task DelayedWakeupsDoNotAccumulateIntoAFalseActionTimeout()
+    {
+        var clock = new FakeTimeProvider();
+        using var context = new CombatFlowContext(clock);
+        using var scope = new CombatActionScope(new CombatFlowAction(
+            new CombatCommand(CombatScriptParser.CurrentAvatarName, "wait(6.5)"), context, () => true, 8), default);
+
+        await scope.WaitAsync(6500, (milliseconds, _) =>
+        {
+            // 外部调度每次迟到12.5ms；不是用被测实现推导期望时间。
+            clock.Advance(TimeSpan.FromMilliseconds(milliseconds + 12.5));
+            return Task.CompletedTask;
+        });
+
+        Assert.InRange(context.Now, 6.5, 6.563);
+        scope.Check();
+    }
+
+    [Fact]
+    public async Task EarlyWakeupsStillWaitForTheRequestedElapsedDuration()
+    {
+        var clock = new FakeTimeProvider();
+        using var context = new CombatFlowContext(clock);
+        using var scope = new CombatActionScope(new CombatFlowAction(
+            new CombatCommand("琴", "wait(1)"), context, () => true, 8), default);
+        await scope.WaitAsync(1000, (milliseconds, _) =>
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(Math.Max(.5, milliseconds / 2d)));
+            return Task.CompletedTask;
+        });
+        Assert.InRange(context.Now, 1, 1.001);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ARealDeadlineOrCancellationStillInterruptsTheOriginalWait(bool cancelled)
+    {
+        var clock = new FakeTimeProvider();
+        using var cancellation = new CancellationTokenSource();
+        using var context = new CombatFlowContext(clock);
+        using var scope = new CombatActionScope(new CombatFlowAction(
+            new CombatCommand("琴", "wait(1)"), context, () => true, .2), cancellation.Token);
+        var failure = await Record.ExceptionAsync(() => scope.WaitAsync(1000, (_, _) =>
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(1800));
+            if (cancelled) cancellation.Cancel();
+            return Task.CompletedTask;
+        }));
+        if (cancelled) Assert.IsType<OperationCanceledException>(failure);
+        else Assert.IsType<CombatActionInterruptedException>(failure);
+    }
+
+    [Fact]
     public void RecoveryCanOutliveActionBudgetButRestoresItEvenWhenRecoveryFails()
     {
         var clock = new FakeTimeProvider();

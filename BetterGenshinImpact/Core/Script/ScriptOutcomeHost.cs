@@ -133,11 +133,14 @@ public sealed class ScriptOutcomeReporter
 internal static class ScriptOutcomeHost
 {
     internal static async Task<ScriptExecutionResult> RunAsync(IScriptEngine engine, Func<object?> evaluate, CancellationToken ct,
-        string? outcomeContract = null)
+        string? outcomeContract = null, ScriptAsyncLifetime? lifetime = null)
     {
         ct.ThrowIfCancellationRequested();
         TaskExecutionScope.ThrowIfFailed();
         ScriptOutcomeContract.Validate(outcomeContract);
+        using var ownedLifetime = lifetime == null ? new ScriptAsyncLifetime(ct) : null;
+        lifetime ??= ownedLifetime!;
+        lifetime.Attach(engine);
         var reporter = new ScriptOutcomeReporter(ct);
         try
         {
@@ -146,8 +149,14 @@ internal static class ScriptOutcomeHost
             engine.AddHostObject("taskResult", reporter);
             var result = evaluate();
             if (result is Task task) await task;
+            await lifetime.CloseAsync();
             return reporter.Finish();
         }
-        finally { reporter.Close(); }
+        finally
+        {
+            reporter.Close();
+            try { await lifetime.CloseAsync(); }
+            catch { /* 首个执行/退休异常已经由try块传播，不以重复清理覆盖它。 */ }
+        }
     }
 }

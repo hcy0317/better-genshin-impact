@@ -353,9 +353,10 @@ public static partial class Bv
     /// <param name="captureRa"></param>
     /// <returns></returns>
     public static bool CurrentAvatarIsLowHp(ImageRegion captureRa)
-    {
-        var assetScale = TaskContext.Instance().SystemInfo.AssetScale;
+        => CurrentAvatarIsLowHp(captureRa, TaskContext.Instance().SystemInfo.AssetScale);
 
+    internal static bool CurrentAvatarIsLowHp(ImageRegion captureRa, double assetScale)
+    {
         // 获取 (808, 1010) 位置的像素颜色
         var pixelColor = captureRa.SrcMat.At<Vec3b>((int)(1010 * assetScale), (int)(808 * assetScale));
 

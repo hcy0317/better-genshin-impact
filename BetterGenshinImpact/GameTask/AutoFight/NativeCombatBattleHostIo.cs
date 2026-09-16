@@ -9,6 +9,7 @@ using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model;
 using Microsoft.Extensions.Logging;
 using Fischless.GameCapture;
+using Fischless.WindowsInput;
 using BetterGenshinImpact.GameTask.Common.Ui;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
@@ -19,6 +20,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     private readonly NativeCombatFlowRunner _flow;
     private readonly NativeCombatIo? _vision;
     private readonly ICombatHostInputDevice _device;
+    private readonly Func<PartySetupFinishObservation>? _partyObservation;
     private bool _partyRequested, _partyEvidence;
     private CaptureFrameFence? _partyFence;
     private CaptureFrameStamp _partyEvidenceSource;
@@ -28,8 +30,9 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     public NativeCombatBattleHostIo(NativeCombatFlowRunner flow, CombatScenes scenes)
         : this(flow, new NativeCombatHostInputDevice()) => _vision = new(scenes);
 
-    internal NativeCombatBattleHostIo(NativeCombatFlowRunner flow, ICombatHostInputDevice device)
-    { _flow = flow; _device = device; }
+    internal NativeCombatBattleHostIo(NativeCombatFlowRunner flow, ICombatHostInputDevice device,
+        Func<PartySetupFinishObservation>? partyObservation = null)
+    { _flow = flow; _device = device; _partyObservation = partyObservation; }
 
     public CombatBattleObservation ObserveTarget()
     {
@@ -47,9 +50,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     public PartySetupFinishObservation ObservePartyBar()
     {
-        using var capture = _vision?.Capture();
-        if (capture == null) return default;
-        var observed = AutoFightTask.ObservePartySetupBar(capture, capture.FrameStamp.Sequence);
+        PartySetupFinishObservation ReadNative()
+        {
+            using var capture = _vision?.Capture();
+            return capture == null ? default : AutoFightTask.ObservePartySetupBar(capture, capture.FrameStamp.Sequence);
+        }
+        var observed = _partyObservation?.Invoke() ?? ReadNative();
         if (_partyRequested && observed.BarVisible && observed.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) &&
                  _partyFence?.Accepts(observed.Source) == true)
         {
@@ -73,6 +79,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         var requestedAt = Clock.GetTimestamp();
         var inputAttempted = false;
         long? completedAt = null;
+        InputDispatchCapture? nativeCapture = null;
         var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.NotSent);
         try
         {
@@ -90,6 +97,14 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             using var operation = UiOperation.Begin("combat-host-input", TimeSpan.FromMilliseconds(Math.Min(150, remaining)), token, _device.Logger, Clock);
             operation.RecordDispatch(dispatch);
             operation.Check();
+            using var nativeScope = _device.BeginNativeCapture(() =>
+            {
+                operation.Check();
+                if (input.Kind != CombatBattleHostInputKind.CloseParty &&
+                    !input.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)))
+                    throw new TimeoutException("窗口准备后源帧已过期，不能进入原生输入");
+            });
+            nativeCapture = nativeScope;
             _device.PrepareInput(); // 生产仍走TaskControl的暂停/焦点入口，回放仅替换操作系统边界。
             operation.Check();
             if (input.Kind != CombatBattleHostInputKind.CloseParty)
@@ -130,10 +145,6 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                     inputAttempted = true;
                     using (operation.Measure(UiOperationPhase.NativeInput))
                         _device.PressParty();
-                    _partyRequested = true;
-                    _partyEvidence = false;
-                    AutoFightTask.LastFightFinishCheckTime = DateTime.Now;
-                    _partyFence = new(input.Source, Clock.GetTimestamp());
                     break;
                 case CombatBattleHostInputKind.Breakout:
                     if (!controlRecovery) throw new InvalidOperationException("普通宿主不能借用控制恢复输入");
@@ -176,6 +187,32 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 result = new(CombatBattleHostInputStatus.NotSent, Reason: "input-check-late-before-send", Error: error);
             else result = new(CombatBattleHostInputStatus.Failed, Reason: "input-preparation-failed", Error: error);
         }
+        if (nativeCapture != null)
+        {
+            var actual = CombatNativeInput.Classify(nativeCapture, result.Error, completedAt ?? Clock.GetTimestamp());
+            result = actual with
+            {
+                NativeRequested = nativeCapture.Requested, NativeSubmitted = nativeCapture.Submitted,
+                ObservableAfterTimestamp = Clock.GetTimestamp(),
+                Reason = actual.Reason ?? result.Reason
+            };
+        }
+        if (result.Status == CombatBattleHostInputStatus.Sent)
+        {
+            if (input.Kind == CombatBattleHostInputKind.OpenParty)
+            {
+                _partyRequested = true;
+                _partyEvidence = false;
+                AutoFightTask.LastFightFinishCheckTime = DateTime.Now;
+                _partyFence = new(input.Source, result.CompletedTimestamp!.Value);
+            }
+            else if (input.Kind == CombatBattleHostInputKind.CloseParty)
+            {
+                _partyRequested = _partyEvidence = false;
+                _partyFence = null;
+                _partyEvidenceSource = default;
+            }
+        }
         try
         {
             _device.Logger.LogDebug("HOST_INPUT_RESULT request={Request} kind={Kind} status={Status} reason={Reason} sourceSequence={SourceSequence} completedAt={CompletedAt} elapsedMs={ElapsedMs:F3} errorType={ErrorType}",
@@ -190,31 +227,16 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     {
         _device.PressDrop();
         if (evidence) _device.PressParty();
-        _partyRequested = false;
-        _partyEvidence = false;
-        _partyFence = null;
-        _partyEvidenceSource = default;
     }
 
     public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => _device.DelayAsync(milliseconds, ct);
     public void ReleaseInput()
     {
-        try
-        {
-            if (_partyRequested && _partyEvidence && _partyEvidenceSource.IsFresh(Clock, TimeSpan.FromMilliseconds(150)))
-                _flow.RunHostOperationAsync(_ =>
-                {
-                    CloseParty(_partyEvidence);
-                    return ValueTask.CompletedTask;
-                }, CancellationToken.None).GetAwaiter().GetResult();
-        }
-        finally
-        {
-            _partyRequested = _partyEvidence = false;
-            _partyFence = null;
-            _partyEvidenceSource = default;
-            _flow.ReleaseHostInput();
-        }
+        // 这里只释放本owner持有的物理键；UI转换属于业务输入，未知结果不得在cleanup重放。
+        _partyRequested = _partyEvidence = false;
+        _partyFence = null;
+        _partyEvidenceSource = default;
+        _flow.ReleaseHostInput();
     }
 
     internal static CombatBattleHost Create(NativeCombatFlowRunner flow, CombatScenes scenes, AutoFightParam param)
@@ -265,6 +287,7 @@ internal interface ICombatHostInputDevice
     TimeProvider Clock { get; }
     ILogger Logger { get; }
     void PrepareInput();
+    InputDispatchCapture? BeginNativeCapture(Action beforeFirstNative) => null;
     void MoveCamera(int x, int y);
     void MoveForward(bool down);
     void PressDrop();
@@ -278,6 +301,7 @@ internal sealed class NativeCombatHostInputDevice : ICombatHostInputDevice
     public TimeProvider Clock => TimeProvider.System;
     public ILogger Logger => TaskControl.Logger;
     public void PrepareInput() => TaskControl.CheckAndSleep(0);
+    public InputDispatchCapture BeginNativeCapture(Action beforeFirstNative) => new(beforeFirstNative);
     public void MoveCamera(int x, int y) => Simulation.SendInput.Mouse.MoveMouseBy(x, y);
     public void MoveForward(bool down) => Simulation.SendInput.SimulateAction(GIActions.MoveForward,
         down ? KeyType.KeyDown : KeyType.KeyUp);

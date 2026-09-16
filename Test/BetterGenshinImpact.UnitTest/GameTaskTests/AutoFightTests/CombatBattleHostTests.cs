@@ -9,6 +9,43 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatBattleHostTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NewEnemyEvidenceWithdrawsOnlyAnUnsentFinishProbe(bool alreadyPrepared)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 50 && host.State != "BeforeParty"; i++) await host.AdvanceAsync(flow, default);
+        Assert.Equal("BeforeParty", host.State);
+        if (alreadyPrepared) { await host.AdvanceAsync(flow, default); Assert.Equal("OpenParty", host.State); }
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                new(700, 400, 80, 30, 2400), 1, SeekCueKind.DamageNumber), 1920, 1080, 1);
+        for (var i = 0; i < 10; i++) await host.AdvanceAsync(flow, default);
+        Assert.DoesNotContain(io.Requests, request => request.Kind == CombatBattleHostInputKind.OpenParty);
+        Assert.Equal("Fighting", host.State);
+    }
+
+    [Fact]
+    public async Task LateNativeObservationRejectsThisDecisionWithoutDestroyingTheBattle()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId)
+        { AfterTargetCapture = () => { Thread.Sleep(180); clock.Advance(TimeSpan.FromMilliseconds(180)); } };
+        using var host = new CombatBattleHost(io, new());
+        Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal(0, game.Inputs);
+        Assert.Empty(io.Requests);
+        io.AfterTargetCapture = null;
+        for (var i = 0; i < 20 && game.Inputs == 0; i++) await host.AdvanceAsync(flow, default);
+        Assert.True(game.Inputs > 0);
+    }
+
     [Fact]
     public async Task AControlHintDuringSearchReturnsToTheKernelInsteadOfSendingAnotherCameraPulse()
     {
@@ -402,6 +439,7 @@ public class CombatBattleHostTests
         public int SourcePeriodMilliseconds { get; init; }
         public int DelayCalls { get; private set; }
         public Func<CaptureFrameStamp, CombatBattleObservation>? TargetFactory { get; set; }
+        public Action? AfterTargetCapture { get; set; }
         public Func<CaptureFrameStamp, PartySetupFinishObservation>? PartyFactory { get; set; }
         private CaptureFrameStamp _first;
         private CaptureFrameStamp _produced;
@@ -412,6 +450,7 @@ public class CombatBattleHostTests
             var stamp = _produced;
             if (!_first.IsKnown) _first = stamp;
             if (RepeatSource) stamp = _first;
+            AfterTargetCapture?.Invoke();
             return TargetFactory?.Invoke(stamp) ?? new(stamp, battleId,
                 CombatObservationQuality.Available, null, 1920, 1080);
         }

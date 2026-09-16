@@ -15,6 +15,7 @@ public readonly record struct CombatSkillRecovery(CombatObservationPreparation S
 /// <summary>游戏观测/输入及等待边界，不在模拟测试中替换解析器或流程状态。</summary>
 public interface ICombatFlowGame
 {
+    bool ReportsInputReceipts => false;
     void BeginStep() { }
     void CheckDefeated(CancellationToken ct) { ct.ThrowIfCancellationRequested(); }
     void ReleaseHeldInput() { }
@@ -528,7 +529,9 @@ public sealed partial class CombatFlowExecution : IDisposable
                 atomicObservationId: frame.Block.RawAtomicPlan != null ? frame.Id : null);
             if (!action.CanStart)
             {
-                CompleteNode(frame, command, CombatFlowResult.Skipped);
+                // 普通片段等待的原动作到期仍未执行，不是用户允许的可选跳过。
+                CompleteNode(frame, command, command.LegacyOutcomePolicy && resumingObservation && action.RemainingBudget <= 0
+                    ? CombatFlowResult.Failed : CombatFlowResult.Skipped);
                 continue;
             }
             var hasPendingSkill = _game.HasPendingSkill(action);
@@ -583,6 +586,12 @@ public sealed partial class CombatFlowExecution : IDisposable
                 continue;
             }
             var actionResult = await _game.ExecuteAsync(action, ct);
+            // 执行端也可能跨过原期限；先收束原等待，再清游标，不能把迟到未执行当成可选跳过。
+            if (resumingObservation && command.LegacyOutcomePolicy && action.RemainingBudget <= 0 &&
+                actionResult == CombatFlowResult.Skipped)
+                actionResult = CombatFlowResult.Failed;
+            // 旧的高层游戏端口以自身声明的输入事实兼容；Native改由真实提交回执记录。
+            if (!_game.ReportsInputReceipts) action.RecordLegacyInput();
             ct.ThrowIfCancellationRequested();
             if (action.InputAt != null && command.Method != Method.Wait)
                 foreach (var atomic in _frames.Where(active => active.Block.Atomic && active.AtomicAdmitted))

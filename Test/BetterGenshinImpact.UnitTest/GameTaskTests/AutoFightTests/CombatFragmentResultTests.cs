@@ -7,6 +7,32 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatFragmentResultTests
 {
     [Fact]
+    public void RoutePreflightUsesTheSameTemplateRulesAndReportsTheFailingWaypoint()
+    {
+        BetterGenshinImpact.GameTask.AutoPathing.Model.Waypoint[] points =
+            [new() { Id = 5, Action = "combat_script", ActionParams = ";迪希雅 attack(0.25),e;attack(0.4),s(1)" }];
+        var failure = Assert.Throws<InvalidOperationException>(() => CombatScriptHandler.ValidateRouteRequirements(points, "recorded-route", ["钟离", "琴"]));
+        Assert.Contains("第5点", failure.Message);
+        Assert.Contains("迪希雅", failure.Message);
+        points[0].ActionParams = "迪希雅 e;钟离 e(hold)";
+        CombatScriptHandler.ValidateRouteRequirements(points, "recorded-route", ["钟离", "琴"]);
+        points[0].ActionParams = "keypress(f),wait(0.5)";
+        CombatScriptHandler.ValidateRouteRequirements(points, "recorded-route", ["钟离", "琴"]);
+    }
+
+    [Fact]
+    public void MissingRouteActorNamesTheRequirementAndActualPartyBeforeExecution()
+    {
+        var script = CombatScriptParser.ParseContext(";迪希雅 attack(0.25),e;attack(0.4),s(1)", false);
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            BetterGenshinImpact.GameTask.AutoFight.Script.Flow.LegacyCombatFlowAdapter.Prepare(
+                script.CombatCommands, new[] { "钟离", "娜维娅", "枫原万叶", "琴" }, false,
+                CombatScriptExecutionMode.LegacyPartyTemplate));
+        Assert.Contains("迪希雅", failure.Message);
+        Assert.Contains("钟离", failure.Message);
+    }
+
+    [Fact]
     public async Task RequiredMissingActorFailsBeforeGenericInputAndPreventsPathCompletion()
     {
         var script = CombatScriptParser.ParseContext("keypress(f);钟离 e(hold)", validate: false);

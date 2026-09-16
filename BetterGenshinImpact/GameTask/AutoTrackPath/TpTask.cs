@@ -983,7 +983,7 @@ public class TpTask
             return;
         }
 
-        throw new TeleportPanelNotOpenedException("点击传送点后未出现交互面板，可能是传送点未激活");
+        throw new TeleportPanelNotOpenedException("点击目标后仍未确认传送面板，原因尚不明确；本次未发送传送确认");
     }
 
     private async Task<bool> WaitForTeleportPanelAndConfirm(GiTpPosition? targetTp)
