@@ -369,6 +369,14 @@ public class BgiOnnxFactory : IDisposable
         }
     }
 
+    internal bool TryGetCachedYoloPredictor(BgiOnnxModel model, out BgiYoloPredictor? predictor)
+    {
+        predictor = null;
+        if (!_sharedYoloPredictors.TryGetValue(model, out var cached) || !cached.IsValueCreated) return false;
+        predictor = cached.Value;
+        return true;
+    }
+
     internal void EvictFailedSharedPredictor(
         BgiOnnxModel model,
         BgiYoloPredictor failed)

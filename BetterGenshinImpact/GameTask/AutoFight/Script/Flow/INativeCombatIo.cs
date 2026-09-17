@@ -18,8 +18,11 @@ internal interface INativeCombatIo
     ILogger Logger { get; }
     CombatInputCoordinator InputCoordinator { get; }
     IReadOnlyList<NativeCombatActor> Actors { get; }
+    double DpiScale => 1;
     double LastFinishCheckAge { get; }
     Task PrepareVisionAsync(CancellationToken ct);
+    Task PrepareCommonVisionAsync(CancellationToken ct) => Task.CompletedTask;
+    bool IsVisionPrepared => true;
     Task PrepareVisionAsync(bool needsBurst, CancellationToken ct) => PrepareVisionAsync(ct);
     Task PrepareVisionAsync(bool needsBurst, ImageRegion frame, CancellationToken ct) => PrepareVisionAsync(needsBurst, ct);
     IDisposable BeginExclusive(bool allowPassiveObservation);

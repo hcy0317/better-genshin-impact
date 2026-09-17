@@ -9,6 +9,49 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatBattleHostTests
 {
+    [Fact]
+    public void UnknownPostureMayPermitOnlyObservedAlignedBoundedMovement()
+    {
+        var clock = new FakeTimeProvider();
+        var battle = Guid.NewGuid();
+        var frame = new CombatBattleObservation(new CaptureFrameSource(clock).Next(), battle,
+            CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None, new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar),
+            1920, 1080) { Control = new(MotionStatus.Unknown, false) };
+        Assert.True(CombatBattleHost.CanApproach(frame, battle, clock));
+        Assert.Equal(MotionStatus.Unknown, frame.Motion);
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = default }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = new(MotionStatus.Unknown, true) }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = new(MotionStatus.Climb, false) }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = new(MotionStatus.Fly, false) }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = null }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = frame.Target!.Value with { Cue = SeekCueKind.FixedTopHealth } }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = frame.Target!.Value with { Cue = SeekCueKind.DamageNumber } }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = frame.Target!.Value with { Visual = new(100, 400, 100, 4, 400) } }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame, Guid.NewGuid(), clock));
+        clock.Advance(TimeSpan.FromMilliseconds(151));
+        Assert.False(CombatBattleHost.CanApproach(frame, battle, clock));
+    }
+
+    [Fact]
+    public async Task ExhaustingCameraAttemptsCannotAuthorizeWalkingInAnUnconfirmedDirection()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                new(350, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080)
+            { Motion = MotionStatus.Normal, Control = new(MotionStatus.Normal, false) };
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.InRange(host.CameraRequests, 1, 24);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -280,7 +323,7 @@ public class CombatBattleHostTests
         var io = new ReplayIo(clock, flow.Context.BattleId);
         io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
             new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
-                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080) { Motion = MotionStatus.Normal };
+                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080) { Control = new(MotionStatus.Unknown, false) };
         using var host = new CombatBattleHost(io, new());
         var result = CombatBattleHostResult.Continue;
         for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)

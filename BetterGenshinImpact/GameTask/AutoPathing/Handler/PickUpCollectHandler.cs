@@ -40,192 +40,72 @@ public class PickUpCollectHandler : IActionHandler
             .Distinct()
     );
     
+    private readonly BetterGenshinImpact.GameTask.AutoFight.Script.Flow.INativeCombatIo? _nativeIo;
+    public PickUpCollectHandler() { }
+    internal PickUpCollectHandler(BetterGenshinImpact.GameTask.AutoFight.Script.Flow.INativeCombatIo nativeIo) => _nativeIo = nativeIo;
+
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {
-        Logger.LogInformation("简易策略：执行 {Nhd} 动作","聚集材料");
-
-        var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
-        if (combatScenes == null)
+        var io = await NativeActionHandler.ResolveAsync(_nativeIo, ct);
+        var requested = waypointForTrack?.ActionParams;
+        var names = string.IsNullOrWhiteSpace(requested)
+            ? new[] { PickUpActions.Select(action => action.Split(' ')[0]).FirstOrDefault(header =>
+                io.Actors.Any(actor => actor.Name == GetBaseCharacterName(header)))
+                ?? throw new InvalidOperationException("队伍没有可执行聚物动作的角色，路线未完成") }
+            : requested.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (names.Length == 0) throw new InvalidOperationException("聚物动作参数为空，路线未完成");
+        foreach (var raw in names)
         {
-            Logger.LogError("队伍识别未初始化成功！");
-            return;
-        }
-
-        Avatar? picker = null;
-        var commandsList = new List<string>();
-        
-        if (waypointForTrack != null)
-        {
-            if (!string.IsNullOrEmpty(waypointForTrack.ActionParams))
-            {
-                var commands = waypointForTrack.ActionParams.Split(',');
-                
-                foreach (var command in commands)
-                {
-   
-                    try
-                    {
-                        var alias = DefaultAutoFightConfig.AvatarAliasToStandardName(command);
-                        commandsList.Add(!string.IsNullOrEmpty(alias) ? alias : command);
-                    }
-                    catch (Exception e)
-                    {
-                        commandsList.Add(command);
-                        Console.WriteLine(e);
-                    }
-                }
-            }
-            else
-            {
-                // 1、ActionParams没填参数，尝试选择，如果找到，后续会执行第一个找到该角色的相关命令
-                foreach (var characterName in CharacterNames)
-                {
-                    var pickerNull = combatScenes.SelectAvatar(characterName);
-                    if (pickerNull is null)
-                    {
-                        continue;
-                    }
-                    commandsList.Add(characterName);
-                    break;
-                }
-            }
-        }
-
-        foreach (var commands in commandsList)
-        {
-            if (CharacterNames.Contains(commands))
-            {
-                picker = combatScenes.SelectAvatar(commands);
-            }
-            else
-            {
-                var characterName = GetCharacterName(commands);
-                picker = combatScenes.SelectAvatar(characterName);
-            }
-
-            if (picker is not null)
-            {
-                picker.TrySwitch();
-                await picker.WaitSkillCd(ct);
-            }
-            else
-            {
-                continue;
-            }
-            
-            PickUpMaterial(combatScenes,commands); // 开始执行动作
+            ct.ThrowIfCancellationRequested();
+            var dash = raw.IndexOf('-');
+            var baseName = dash < 0 ? raw : raw[..dash];
+            var actor = DefaultAutoFightConfig.AvatarAliasToStandardName(baseName);
+            var header = actor + (dash < 0 ? "" : raw[dash..]);
+            var selected = PickUpActions.FirstOrDefault(action => dash < 0
+                ? GetBaseCharacterName(action.Split(' ')[0]) == actor
+                : action.StartsWith(header + " ", StringComparison.Ordinal));
+            if (selected == null || !io.Actors.Any(item => item.Name == actor))
+                throw new InvalidOperationException("没有可执行的聚物角色/动作：" + raw);
+            var commands = CombatScriptParser.ParseContext(actor + selected[selected.IndexOf(' ')..]).CombatCommands;
+            await NativeActionHandler.ExecuteAsync(io,
+                NativeActionHandler.WithConfirmedSkill(actor, commands, selected.Split(' ')[0].EndsWith("长E", StringComparison.Ordinal)), ct);
         }
     }
-    
-    /// <summary>
-    /// 执行聚集材料动作
-    /// <param name="combatScenes"></param>
-    /// <param name="pickerName"></param>
-    /// </summary>
-   private void PickUpMaterial(CombatScenes combatScenes, string? pickerName = null)
-    {
-        try
-        {
-            var foundAvatar = false;
-            string[] actionsToUse;
-            var characterName = string.Empty;
-            
-            if (pickerName != null)
-            {
-                actionsToUse = PickUpActions.Where(action => 
-                    action.StartsWith(pickerName + " ", StringComparison.OrdinalIgnoreCase)).ToArray();
-                
-                if (actionsToUse.Length == 0)
-                {
-                    if (CharacterNames.Contains(pickerName)) //2.只填了角色名，则用基础角色名筛选，执行pickerName相关的第一个命令
-                    {
-                        var actions = PickUpActions.FirstOrDefault(action => action.StartsWith(pickerName, StringComparison.OrdinalIgnoreCase));
-                        actionsToUse = actions == null ? new string[0] : new string[] {actions};
-                        
-                        // 替换第一个空格前的字符为 pickerName
-                        if (actionsToUse.Length > 0 && actionsToUse[0].Contains(' '))
-                        {
-                            string action = actionsToUse[0];
-                            int firstSpaceIndex = action.IndexOf(' ');
-                            actionsToUse[0] = pickerName + action.Substring(firstSpaceIndex);
-                        }
-                    }
-                    else
-                    {
-                        Logger.LogError($"未找到角色 {pickerName} 对应的动作");
-                        return; 
-                    }
-                }
-                else
-                {
-                    // 提取角色名称
-                    characterName = GetCharacterName(pickerName);
 
-                    // 3.填了具体命令，则用具体命令筛选，并将命令中的角色替换为角色名称
-                    actionsToUse = actionsToUse
-                        .Select(action => action.Replace(pickerName + " ", characterName + " ", StringComparison.OrdinalIgnoreCase))
-                        .ToArray(); 
-                }
-            }
-            else
-            {
-                Logger.LogError("未找到ActionParams");
-                return;
-            }
-
-            foreach (var pickUpActionStr in actionsToUse)
-            {
-                var pickUpAction = CombatScriptParser.ParseContext(pickUpActionStr);
-                foreach (var command in pickUpAction.CombatCommands)
-                {
-                    var avatar = combatScenes.SelectAvatar(command.Name);
-                    if (avatar != null)
-                    {
-                        command.Execute(combatScenes);
-                        foundAvatar = true;
-                    }
-                }
-                if (foundAvatar)
-                {
-                    var selectedAvatar = combatScenes.SelectAvatar(characterName);
-                    if (selectedAvatar is not null)
-                    { 
-                        Sleep(200);//等待CD显示
-                        selectedAvatar.AfterUseSkill();
-                    }
-                    break;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            // 处理异常
-            Console.WriteLine($"PickUpCollectHandler 异常: {ex.Message}");
-        }
-    }
-    
-    // 直接匹配预解析的角色名
-    private static string GetCharacterName(string pickerName)
-    {
-        foreach (var name in CharacterNames)
-        {
-            if (pickerName.StartsWith(name))
-                return name;
-        }
-        
-        return pickerName;
-    }
-    
-    /// <summary>
-    /// 从完整动作名提取基础角色名
-    /// </summary>
     private static string GetBaseCharacterName(string fullActionName)
     {
-        // 找到第一个"-"号的位置
-        var dashIndex = fullActionName.IndexOf('-');
-
-        // 如果存在"-"号，则返回"-"号前的部分
-        return dashIndex > 0 ? fullActionName.Substring(0, dashIndex) : string.Empty;
+        var dash = fullActionName.IndexOf('-');
+        return dash > 0 ? fullActionName[..dash] : fullActionName;
     }
 
+    internal static async Task RunAfterBattleAsync(Avatar picker, bool doublePickup, CancellationToken ct)
+    {
+        var io = new BetterGenshinImpact.GameTask.AutoFight.Script.Flow.NativeCombatIo(picker.CombatScenes);
+        if (picker.Name == "枫原万叶")
+        {
+            var body = "keyup(VK_LBUTTON),wait(0.01),keydown(E),wait(0.8),keyup(E),wait(0.05)," +
+                string.Join(",", Enumerable.Repeat("keyup(VK_LBUTTON),wait(0.01),keydown(VK_LBUTTON),wait(0.035),keyup(VK_LBUTTON),wait(0.05)", 6)) + ",wait(1.5)";
+            var commands = CombatScriptParser.ParseContext(picker.Name + " " + body).CombatCommands;
+            await NativeActionHandler.ExecuteAsync(io, NativeActionHandler.WithConfirmedSkill(picker.Name, commands, hold: true), ct);
+            return;
+        }
+        if (picker.Name != "琴") throw new InvalidOperationException("不支持的战后聚物角色：" + picker.Name);
+        var found = !doublePickup;
+        void ObservePickup()
+        {
+            if (found) return;
+            using var image = CaptureToRectArea();
+            using var icon = image.Find(BetterGenshinImpact.GameTask.AutoPick.Assets.AutoPickAssets.Get(image,
+                BetterGenshinImpact.GameTask.TaskContext.Instance().Config.AutoPickConfig.PickKey).PickRo);
+            found = icon.IsExist();
+        }
+        var selected = PickUpActions.First(action => action.StartsWith("琴-长E ", StringComparison.Ordinal));
+        for (var attempt = 0; attempt < (doublePickup ? 2 : 1); attempt++)
+        {
+            var commands = CombatScriptParser.ParseContext("琴" + selected[selected.IndexOf(' ')..]).CombatCommands;
+            await NativeActionHandler.ExecuteAsync(io,
+                NativeActionHandler.WithConfirmedSkill("琴", commands, hold: true, ObservePickup), ct, ObservePickup);
+            if (found) break;
+        }
+    }
 }

@@ -100,7 +100,7 @@ internal sealed class CombatFlowDiagnosticWriter(ILogger logger, TimeProvider? c
                     battleId, boundary, name, population.Count, population.TotalMilliseconds,
                     population.P50UpperMilliseconds, population.P95UpperMilliseconds, population.P99UpperMilliseconds,
                     population.MaximumMilliseconds, population.Over150Milliseconds, population.MaximumConsecutiveOverruns,
-                    name is "step-total" or "action-including-physical-wait" or "explicit-yield");
+                    name is "step-total" or "action-including-physical-wait" or "explicit-yield" || name.EndsWith("-including-wait", StringComparison.Ordinal));
             }
             catch { /* 全量计数仍保存在内存，日志异常不干预执行。 */ }
         }

@@ -86,11 +86,31 @@ public class BgiYoloPredictor : IDisposable
 
     public TResult UsePredictor<TResult>(Func<YoloPredictor, TResult> action)
     {
+        if (RecognitionReadinessScope.IsNonBlocking)
+        {
+            if (!System.Threading.Monitor.TryEnter(_predictionLock))
+                throw new RecognitionNotReadyException("预测器正在准备/被借用，当前实时观察不等待");
+            try
+            {
+                ThrowIfDisposed();
+                if (!_predictorInitialization.TryGetValue(out var ready))
+                    throw new RecognitionNotReadyException("预测器未完成初始化");
+                return action(ready);
+            }
+            finally { System.Threading.Monitor.Exit(_predictionLock); }
+        }
         lock (_predictionLock)
         {
             ThrowIfDisposed();
             return action(Predictor);
         }
+    }
+
+    internal bool IsClassificationPrepared(int width, int height)
+    {
+        if (!System.Threading.Monitor.TryEnter(_predictionLock)) return false;
+        try { return Volatile.Read(ref _disposed) == 0 && _preparedClassificationSizes.Contains((width, height)); }
+        finally { System.Threading.Monitor.Exit(_predictionLock); }
     }
 
     public async Task WarmUpAsync(ILogger logger, CancellationToken ct)

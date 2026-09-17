@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.SkillData;
@@ -28,6 +29,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     private readonly ILogger _diagnosticLogger;
     private readonly CombatFlowDiagnosticWriter _diagnosticWriter;
     private readonly Func<CombatFlowStatistics> _readDiagnosticStatistics;
+    private readonly CombatRuntimeMetrics _outerMetrics = new();
     private string? _pendingDiagnosticBoundary;
     private IDisposable? _exclusive;
     private bool _disposed;
@@ -40,12 +42,34 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     private string? _lastReportedMaintenanceDecision;
     private string? MaintenanceDecision => _execution?.LastMaintenanceDecision ?? _jsonExecution?.LastMaintenanceDecision;
     public CombatFlowContext Context => _execution?.Context ?? _jsonExecution!.Context;
-    public CombatFlowStatistics RuntimeStatistics => _execution?.RuntimeStatistics ?? _jsonExecution!.RuntimeStatistics;
+    public CombatFlowStatistics RuntimeStatistics
+    {
+        get
+        {
+            var statistics = _execution?.RuntimeStatistics ?? _jsonExecution!.RuntimeStatistics;
+            return statistics with { Populations = statistics.Populations.Concat(_outerMetrics.SnapshotPopulation())
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal) };
+        }
+    }
+    internal void RecordHostStep(TimeSpan elapsed) => _outerMetrics.Record("host-step-total-including-wait", elapsed);
     public bool IsAtomic => _execution?.IsAtomic ?? _jsonExecution!.IsAtomic;
     public bool HasPendingConfirmation => _execution?.HasPendingConfirmation ?? _jsonExecution!.HasPendingConfirmation;
-    public bool HasAwaitingObservation => (_game is NativeGame { HasDefeatProbe: true } or NativeGame { HasDeferredSelection: true } or NativeGame { PendingControl: not null }) ||
+    public bool HasAwaitingObservation => (_game is NativeGame { HasDefeatProbe: true } or NativeGame { HasSelection: true } or NativeGame { PendingControl: not null } or NativeGame { IsPreparingVision: true }) ||
         (_execution?.HasAwaitingObservation ?? _jsonExecution!.HasAwaitingObservation);
     public bool IsAtRootBoundary => _execution?.IsAtRootBoundary ?? _jsonExecution!.IsAtRootBoundary;
+    internal (Guid Goal, long Deadline)? SelectionAssistance => !_disposed && Volatile.Read(ref _advancing) == 0 &&
+        !IsAtomic && !HasPendingConfirmation && _game is NativeGame native ? native.SelectionAssistance : null;
+    internal ValueTask RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
+    {
+        if (request.Kind != CombatBattleHostInputKind.Approach || SelectionAssistance?.Goal != request.SelectionGoal ||
+            _game is not NativeGame native)
+            throw new InvalidOperationException("选角辅助未取得当前目标和同一输入owner的许可");
+        return native.RunSelectionOperationAsync(request, operation, ct);
+    }
+    internal void ObserveSelectionAssistance(CombatBattleHostInput request, CombatBattleHostInputResult receipt)
+    {
+        if (_game is NativeGame native) native.ObserveSelectionAssistance(request, receipt);
+    }
     internal ValueTask RunHostOperationAsync(Func<CancellationToken, ValueTask> operation, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -102,6 +126,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     }
 
     internal static ICombatFlowGame CreateAdapter(INativeCombatIo io) => new NativeGame(io);
+
+    internal Task PrepareVisionBeforeEntryAsync(CancellationToken ct) => _game is NativeGame native
+        ? native.PrepareVisionBeforeEntryAsync(ct) : Task.CompletedTask;
 
     internal static NativeCombatFlowRunner Create(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock = null, ILogger? logger = null) =>
         new(program, game, clock, logger);
@@ -184,31 +211,40 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (Interlocked.CompareExchange(ref _advancing, 1, 0) != 0)
             throw new InvalidOperationException("同一战斗内核不能并发推进两步");
+        var outerStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        var phaseStarted = outerStarted;
+        var phase = "preparation";
+        void ChangePhase(string next)
+        {
+            _outerMetrics.Record("native-" + phase + "-including-wait", System.Diagnostics.Stopwatch.GetElapsedTime(phaseStarted));
+            phaseStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            phase = next;
+        }
+        using var realtime = new RecognitionReadinessScope();
         try
         {
             ct.ThrowIfCancellationRequested();
             if (_game is NativeGame { PendingControl: not null } controlled)
+            {
+                phase = "control"; // 未进入模型准备，不能记一份虚构的零耗时准备。
                 return await AdvanceControlRecoveryAsync(controlled, ct);
-            if (_game is NativeGame nativeGame && !await nativeGame.PrepareAsync(ct))
+            }
+            if (_game is NativeGame nativeGame && !await nativeGame.PrepareAsync(ct,
+                    (_execution?.ObservationDeadline ?? _jsonExecution!.ObservationDeadline) - Context.Now))
             {
                 await nativeGame.YieldAsync(ct);
                 return new(CombatFlowResult.AwaitingObservation, false);
             }
+            ChangePhase("execution");
             // 整步（包含产球后的接球）独占；进入 atomic 后跨 Step 保留，退出再交还普通观察。
             if (_game is NativeGame nativeOwner) _exclusive ??= nativeOwner.BeginExclusive();
             TaskExecutionScope.ThrowIfFailed();
             if (_game is NativeGame { HasDefeatProbe: true } probing)
             {
+                ChangePhase("defeat-observation");
                 probing.BeginStep();
                 probing.AdvanceDefeatProbe(ct);
                 await probing.YieldAsync(ct);
-                return new(CombatFlowResult.AwaitingObservation, false);
-            }
-            if (_game is NativeGame { HasDeferredSelection: true } settling)
-            {
-                settling.BeginStep();
-                settling.AdvanceDeferredSelection(ct);
-                await settling.YieldAsync(ct);
                 return new(CombatFlowResult.AwaitingObservation, false);
             }
             var stalled = _hasFailedPass &&
@@ -284,6 +320,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         catch { _pendingDiagnosticBoundary = "exception"; EndExclusive(); throw; }
         finally
         {
+            _outerMetrics.Record("native-" + phase + "-including-wait", System.Diagnostics.Stopwatch.GetElapsedTime(phaseStarted));
+            _outerMetrics.Record("native-step-total-including-wait", System.Diagnostics.Stopwatch.GetElapsedTime(outerStarted));
             try { if (!IsAtomic) EndExclusive(); }
             finally { Volatile.Write(ref _advancing, 0); }
         }
@@ -391,9 +429,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         internal CombatScriptExecutionPurpose Purpose { get; init; }
         private CaptureFrameFence? _pathingInputFence;
         public bool ReportsInputReceipts => true;
-        private bool _controlAffectedSelection;
         private Guid? _lastAtomicInputId;
-        internal bool HasDeferredSelection => _controlAffectedSelection && _selection is { IsClosed: false };
+        internal bool HasSelection => _selection != null;
+        public bool HasObservationRequest => _selection != null && _selectionResult == null;
         internal CombatControlRequest? PendingControl { get; private set; }
         internal ICombatHostInputDevice? ControlDevice => io.ControlDevice;
         internal TimeProvider ControlClock => io.Clock;
@@ -421,8 +459,12 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         {
             if (frame == null || !frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) || !io.IsCombatHud(frame)) return false;
             var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
+            if (!control.IsObserved)
+            {
+                _captureFailureReason = "control-not-ready: 本帧控制检查尚未完成，保持原意图但不准入输入";
+                return true;
+            }
             if (!control.KeyboardBreakoutRequested) return false;
-            if (_selection is { HasSubmittedInput: true, IsClosed: false }) _controlAffectedSelection = true;
             _confirmedActor = null;
             _captureFailureReason = "control-interrupted: 观察到明确挣脱提示，不继续施放/原子宏";
             PendingControl ??= new(Guid.NewGuid(), action.BattleId,
@@ -452,23 +494,6 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             var index = ReadActive(frame);
             return io.Actors.FirstOrDefault(actor => actor.Index == index)?.Name;
         }
-        private AvatarSelectionProtocol.Result<ImageRegion> SelectActor(CombatFlowAction action, NativeCombatActor actor, int attempts, CancellationToken ct)
-        {
-            var context = new AvatarActiveCheckContext();
-            return AvatarSelectionProtocol.Select(actor.Index, attempts, CaptureFreshFrame,
-                frame => frame.FrameStamp, io.IsCombatHud,
-                frame => frame.ReadOnce((io, typeof(AvatarActiveCheckContext)), () => io.ReadActive(frame, context)),
-                frame => new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp },
-                (index, request) =>
-                {
-                    var receipt = io.SelectActor(index, request, ct);
-                    if (receipt.Status is CombatBattleHostInputStatus.Sent or CombatBattleHostInputStatus.Unknown || receipt.NativeSubmitted > 0)
-                        action.RecordInputSubmission(request.Id);
-                    return receipt;
-                }, ms => io.WaitForSelection(ms, ct), ct, io.Clock,
-                trace: observed => CombatActionScope.Current?.Trace("switch-frame", $"expected={actor.Index} observed={observed}"));
-        }
-
         private ImageRegion? _capture;
         private readonly DiagnosticEvidenceScope? _evidence = DiagnosticEvidenceScope.Current;
         private readonly HashSet<Guid> _evidenceAttempts = new();
@@ -480,6 +505,12 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private string? _confirmedActor;
         private CaptureFrameStamp _confirmedSource;
         private bool _prepared;
+        private Task? _visionPreparation;
+        private Task? _commonVisionPreparation;
+        internal bool IsPreparingVision => !_prepared && (_commonVisionPreparation != null || _visionPreparation != null);
+        private CancellationTokenSource? _visionPreparationCancellation;
+        private long _visionPreparationStarted;
+        private bool _visionPreparationYielded;
         private long? _initialObservationDeadline;
         private bool _initialObservationAdmitted;
         internal bool NeedsBurstVision { get; set; } = true;
@@ -491,9 +522,36 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private readonly AvatarActiveCheckContext _activeContext = new();
         private AvatarSelectionProtocol.Continuation<ImageRegion>? _selection;
         private AvatarActiveCheckContext? _selectionContext;
-        private string? _selectionCommand;
+        private CombatFlowAction? _selectionAction;
+        private AvatarSelectionProtocol.Result<ImageRegion>? _selectionResult;
+        private bool _selectionTerminal;
+        private bool _selectionUnconfirmedCaptured, _selectionDeadlineCaptured;
+        private string? _lastSelectionTrace;
+        private int _selectionTraceCount;
         private string? _selectionActor;
         private Guid _selectionBattle;
+        internal (Guid Goal, long Deadline)? SelectionAssistance => _selection is { CanAssist: true } goal &&
+            PendingControl == null && _input != null && !_selectionTerminal &&
+            !io.Actors.Any(actor => _attempts?.HasUnresolved(actor.Name, Method.Skill) == true || _attempts?.HasUnresolved(actor.Name, Method.Burst) == true)
+                ? (goal.GoalId, goal.DeadlineTimestamp) : null;
+        internal async ValueTask RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (_selection?.GoalId != request.SelectionGoal || _selection.CanAssistFrom(request.Source) != true ||
+                SelectionAssistance == null || !_input!.TryReleaseInput(io.ReleaseInput))
+                throw new InvalidOperationException("选角辅助的新帧/键释放/目标边界不成立");
+            await RunHostOperationAsync(_selectionBattle, operation, ct);
+        }
+        internal void ObserveSelectionAssistance(CombatBattleHostInput request, CombatBattleHostInputResult receipt)
+        {
+            if (receipt.Status == CombatBattleHostInputStatus.Unknown)
+            {
+                _selectionTerminal = true;
+                TaskExecutionScope.StopUnconfirmedCombat("选角辅助移动结果未知，停止输入且不重复脉冲");
+            }
+            if (receipt.Status == CombatBattleHostInputStatus.Sent && receipt.CompletedTimestamp is { } completed)
+                _selection?.ObserveAssistance(request.Source, completed);
+        }
         private sealed record ExpiredRecovery(CombatFlowAction Action, CombatSkillAttempt Attempt, NativeCombatActor Actor)
         {
             public CombatSkillObservation? First { get; set; }
@@ -525,43 +583,99 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             if (result.NeedsRecovery) io.ResolveSelectionRecovery(actor, result, ct);
         }
 
-        internal void AdvanceDeferredSelection(CancellationToken ct)
+        public ValueTask AdvanceObservationAsync(CancellationToken ct)
         {
-            if (!HasDeferredSelection || _input == null) return;
+            using var realtime = new RecognitionReadinessScope();
+            try { return AdvanceObservationCore(ct); }
+            catch (RecognitionNotReadyException error)
+            {
+                _captureFailureReason = error.Message;
+                ClearCapture();
+                return ValueTask.CompletedTask;
+            }
+        }
+
+        private ValueTask AdvanceObservationCore(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_selectionTerminal) TaskExecutionScope.StopUnconfirmedCombat("本场选角/辅助输入已进入未确认终态");
+            if (_selection == null || _selectionResult != null || _selectionAction == null) return ValueTask.CompletedTask;
+            var action = _selectionAction;
+            _input ??= io.InputCoordinator.TryAcquire(action.BattleId, ReleaseOwnedInput)
+                ?? throw new InvalidOperationException("上一场输入尚未退出，禁止推进观察需求");
             using var operation = _input.EnterOperation();
-            using var settled = _selection!.Advance(ct, allowInput: false);
-            if (settled.AwaitingObservation) return;
-            var confirmed = settled.Confirmed;
-            CancelSelection(force: true);
-            _confirmedActor = null;
-            ClearCapture();
-            if (!confirmed)
-                throw new InvalidOperationException("已提交的旧切人未在原期限内闭合，禁止由新命令覆盖");
+            using var exclusive = io.BeginExclusive(allowPassiveObservation: true);
+            // 已撤回/到期的目标仍须按自己的输入事实收束；不借新动作的CanStart延长旧期限。
+            using var scope = action.CanStart ? new CombatActionScope(action, ct) : null;
+            if (!_selection.IsExpired)
+            {
+                if (!action.CanStart) _selection.RequestRetirement();
+                if (ControlInterrupted(CurrentFrame(), action))
+                {
+                    TraceSelection("control-awaiting");
+                    return ValueTask.CompletedTask;
+                }
+                if (_selectionContext is { NeedsLayoutPreparation: true } context && CurrentFrame() is { } layoutFrame)
+                {
+                    var preparation = io.PrepareActorObservation(layoutFrame, context, ct);
+                    if (preparation != AvatarLayoutPreparation.NotRequested)
+                    {
+                        action.Trace("layout-prepare", $"result={preparation} sourceSequence={layoutFrame.FrameStamp.Sequence}");
+                        ClearCapture();
+                        return ValueTask.CompletedTask;
+                    }
+                }
+            }
+            var result = _selection.Advance(ct, allowInput: action.CanStart);
+            try
+            {
+                if (result.NeedsRecovery)
+                {
+                    using var nonCombat = CombatActionScope.Suspend();
+                    using var recoveryRecognition = new RecognitionReadinessScope(nonBlocking: false);
+                    io.ResolveSelectionRecovery(FindActor(_selectionActor!)!, result, ct);
+                }
+                CheckSelectionOutcome(result);
+            }
+            catch { result.Dispose(); throw; }
+            if (!result.NeedsRecovery && result.TakeFrame() is { } frame)
+            {
+                ClearCapture();
+                _capture = frame; // 同一步的条件/技能入口复用，不再重复截图。
+            }
+            TraceSelection(result.State.ToString());
+            if (result.AwaitingObservation) result.Dispose();
+            else _selectionResult = result;
+            return ValueTask.CompletedTask;
         }
 
         private AvatarSelectionProtocol.Result<ImageRegion> SelectActorStep(CombatFlowAction action, NativeCombatActor actor, CancellationToken ct)
         {
-            if (_selection is { HasSubmittedInput: true, IsClosed: false } &&
-                (_selectionCommand != action.CommandId || _selectionActor != actor.Name || _selectionBattle != action.BattleId))
-                _controlAffectedSelection = true;
-            if (HasDeferredSelection)
+            ct.ThrowIfCancellationRequested();
+            if (_selection != null && (_selectionActor != actor.Name || _selectionBattle != action.BattleId))
             {
-                using var settled = _selection!.Advance(ct, allowInput: false);
-                if (settled.AwaitingObservation)
-                    return new(false, false, settled.Source, null, null, settled.InputFence, awaitingObservation: true);
-                CancelSelection(force: true);
-                if (!settled.Confirmed)
-                    throw new InvalidOperationException("控制中断前已发送的切人未在原期限内闭合，禁止向新目标继续发输入");
+                _selection.RequestRetirement();
+                if (_selectionResult == null) return new(false, false, default, null, null, null, awaitingObservation: true);
+                CheckSelectionOutcome(_selectionResult);
+                if (_selectionResult.State is not (AvatarSelectionProtocol.Outcome.Ready or AvatarSelectionProtocol.Outcome.RetiredWithoutCompletion or AvatarSelectionProtocol.Outcome.Unavailable))
+                    TaskExecutionScope.StopUnconfirmedCombat("选角原期限耗尽且未取得可交接的新帧，禁止由新目标覆盖");
+                CancelSelection();
                 _confirmedActor = null;
                 ClearCapture();
-                return new(false, false, settled.Source, null, null, settled.InputFence, awaitingObservation: true);
             }
-            if (_selection == null || _selectionCommand != action.CommandId || _selectionActor != actor.Name || _selectionBattle != action.BattleId)
+            if (_selectionResult != null)
             {
+                var result = _selectionResult;
+                _selectionResult = null; // 原需求终态只交付一次，frame所有权随result转移。
                 CancelSelection();
+                return result;
+            }
+            if (_selection == null)
+            {
                 var context = new AvatarActiveCheckContext();
                 _selectionContext = context;
-                _selectionCommand = action.CommandId;
+                _selectionAction = action;
                 _selectionActor = actor.Name;
                 _selectionBattle = action.BattleId;
                 _selection = new(actor.Index, SwitchAttempts,
@@ -574,25 +688,57 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                         var receipt = io.SelectActor(index, request, ct);
                         if (receipt.Status is CombatBattleHostInputStatus.Sent or CombatBattleHostInputStatus.Unknown || receipt.NativeSubmitted > 0)
                             action.RecordInputSubmission(request.Id);
-                        action.Trace("switch-submission", $"request={request.Id} source={request.Source.Sequence} index={index} status={receipt.Status} reason={receipt.Reason}");
+                        action.Trace("switch-submission", $"goal={_selection?.GoalId} pulse={request.Id} source={request.Source.Sequence} index={index} status={receipt.Status} reason={receipt.Reason}");
+                        if (receipt.Status == CombatBattleHostInputStatus.NotSent && _selection is { HasSubmittedInput: false } notSent)
+                            _evidence?.ForgetBefore("selection", notSent.GoalId.ToString("N"));
                         return receipt;
-                    }, io.Clock);
+                    }, io.Clock, canObserve: frame =>
+                    {
+                        var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
+                        return control.IsObserved && !control.KeyboardBreakoutRequested &&
+                            control.Motion is not (MotionStatus.Fly or MotionStatus.Climb);
+                    }, release: io.ReleaseInput, beforeSubmit: (frame, request) =>
+                    {
+                        if (_selection is { HasSubmittedInput: false } goal)
+                            _evidence?.RememberBefore(frame, "selection", goal.GoalId.ToString("N"),
+                                $"battle={action.BattleId} goal={goal.GoalId} pulse={request.Id} target={actor.Name}/{actor.Index} originalDeadline={goal.DeadlineTimestamp}; before native submission");
+                    });
             }
-            if (!_selection.IsExpired && _selectionContext is { NeedsLayoutPreparation: true } activeContext &&
-                CurrentFrame() is { } layoutFrame)
+            return new(false, false, default, null, null, null, awaitingObservation: true);
+        }
+
+        private void TraceSelection(string state)
+        {
+            if (_selection is not { } goal || _selectionAction is not { } action) return;
+            var source = goal.ObservedSource;
+            var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} actual={goal.ObservedIndex?.ToString() ?? "unknown"} state={state} reason={goal.Reason} source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} originalDeadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}s";
+            action.Trace("selection", detail);
+            var changed = state + ":" + goal.Reason + ":" + goal.ObservedIndex;
+            if (changed != _lastSelectionTrace && _selectionTraceCount++ < 16)
             {
-                var preparation = io.PrepareActorObservation(layoutFrame, activeContext, ct);
-                if (preparation != AvatarLayoutPreparation.NotRequested)
+                _lastSelectionTrace = changed;
+                try { Logger.LogDebug("SELECTION_GOAL {Detail}", detail); } catch { }
+            }
+            if (goal.HasSubmittedInput && state != nameof(AvatarSelectionProtocol.Outcome.Ready) && _capture != null)
+            {
+                var phase = action.RemainingBudget <= .2 && !_selectionDeadlineCaptured ? "deadline"
+                    : goal.ElapsedSeconds >= 1.5 && !_selectionUnconfirmedCaptured ? "unconfirmed" : null;
+                if (phase != null)
                 {
-                    var stamp = layoutFrame.FrameStamp;
-                    action.Trace("layout-prepare", $"result={preparation} sourceSequence={stamp.Sequence}");
-                    ClearCapture();
-                    return new(false, false, stamp, null, null, null, awaitingObservation: true);
+                    _evidence?.CaptureFault(_capture, "selection", goal.GoalId.ToString("N"), phase, detail, Logger);
+                    if (phase == "deadline") _selectionDeadlineCaptured = true;
+                    else _selectionUnconfirmedCaptured = true;
                 }
             }
-            var result = _selection.Advance(ct);
-            if (!result.AwaitingObservation) CancelSelection();
-            return result;
+        }
+
+        private void CheckSelectionOutcome(AvatarSelectionProtocol.Result<ImageRegion> result)
+        {
+            if (result.State == AvatarSelectionProtocol.Outcome.UnconfirmedTerminal)
+            {
+                _selectionTerminal = true;
+                TaskExecutionScope.StopUnconfirmedCombat($"切人输入结果未知且原目标 {_selectionActor} 未确认，禁止跳过或向其他角色继续输入");
+            }
         }
 
         private ImageRegion? TakeSelectionFrame()
@@ -608,32 +754,70 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
         public void CancelObservation(CombatFlowAction action)
         {
-            if (_selectionCommand == action.CommandId && _selectionBattle == action.BattleId)
-                CancelSelection(force: action.RemainingBudget <= 0);
+            if (ReferenceEquals(_selectionAction, action))
+            {
+                // 调度器可能先发现动作到期；不能绕过选角目标的未确认终态。
+                if (!_selectionTerminal && _selection is { HasUnconfirmedSubmission: true, IsExpired: true })
+                {
+                    _selectionTerminal = true;
+                    TaskExecutionScope.StopUnconfirmedCombat($"切人输入结果未知且原目标 {_selectionActor} 到期未确认，禁止当作可选跳过");
+                }
+                if (_selection is { HasSubmittedInput: false } or { IsClosed: true, HasUnconfirmedSubmission: false }) CancelSelection();
+                else _selection?.RequestRetirement();
+            }
             if (ReferenceEquals(_expiredRecovery?.Action, action)) _expiredRecovery = null;
         }
 
-        private void CancelSelection(bool force = false)
+        private void CancelSelection()
         {
-            if (!force && _selection is { HasSubmittedInput: true, IsClosed: false })
-            {
-                _controlAffectedSelection = true;
-                return;
-            }
+            if (_selection is { } goal) _evidence?.ForgetBefore("selection", goal.GoalId.ToString("N"));
+            _selectionResult?.Dispose();
+            _selectionResult = null;
             _selection?.Dispose();
             _selection = null;
             _selectionContext = null;
-            _selectionCommand = _selectionActor = null;
-            _controlAffectedSelection = false;
+            _selectionAction = null;
+            _selectionActor = null;
+            _selectionUnconfirmedCaptured = _selectionDeadlineCaptured = false;
+            _lastSelectionTrace = null;
+            _selectionTraceCount = 0;
         }
 
-        internal async ValueTask<bool> PrepareAsync(CancellationToken ct)
+        internal async ValueTask<bool> PrepareAsync(CancellationToken ct, double availableSeconds)
         {
-            if (_prepared) return true;
+            if (_prepared && io.IsVisionPrepared) return true;
+            if (_prepared)
+            {
+                // 仅重做已失效模型/尺寸的准备，不重建动作、选角目标、游标或其期限。
+                _prepared = _initialObservationAdmitted = false;
+                _visionPreparation = _commonVisionPreparation = null;
+                _visionPreparationCancellation?.Dispose();
+                _visionPreparationCancellation = null;
+                _initialObservationDeadline = io.Clock.GetTimestamp() + (long)(Math.Min(CombatFlowPolicy.ActionTimeoutSeconds,
+                    Math.Max(0, availableSeconds)) * io.Clock.TimestampFrequency);
+                ClearCapture();
+            }
             _stepStarted = io.Clock.GetTimestamp();
-            var started = System.Diagnostics.Stopwatch.GetTimestamp();
             ct.ThrowIfCancellationRequested();
             _initialObservationDeadline ??= _stepStarted + (long)(CombatFlowPolicy.ActionTimeoutSeconds * io.Clock.TimestampFrequency);
+            _visionPreparationCancellation ??= CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _commonVisionPreparation ??= io.PrepareCommonVisionAsync(_visionPreparationCancellation.Token);
+            CheckInitialObservationDeadline();
+            if (!_commonVisionPreparation.IsCompleted) return false;
+            await _commonVisionPreparation;
+            if (_visionPreparation != null)
+            {
+                if (io.Clock.GetTimestamp() >= _initialObservationDeadline)
+                    throw new InvalidOperationException("战斗视觉准备耗尽原准入期限，禁止通过迟到完成重开预算");
+                if (!_visionPreparation.IsCompleted) return false;
+                await _visionPreparation; // 已完成：只消费结果，不在短步里等待模型工作。
+                ct.ThrowIfCancellationRequested();
+                if (_visionPreparationYielded) ClearCapture(); // 模型样本不作为就绪后的游戏证据。
+                _initialObservationAdmitted = _prepared = true;
+                try { Logger.LogInformation("战斗视觉准备完成，冷等待墙钟 {Milliseconds:F1}ms；仍计入首次有效动作期限",
+                    System.Diagnostics.Stopwatch.GetElapsedTime(_visionPreparationStarted).TotalMilliseconds); } catch { }
+                return true;
+            }
             CheckInitialObservationDeadline();
             // 控制提示优先于不必要的Q模型准备。只复用原动作的受限恢复入口，不在准备阶段发键。
             using var exclusive = io.BeginExclusive(allowPassiveObservation: true);
@@ -665,7 +849,15 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             }
             finally { if (!held) frame.Dispose(); }
             try { Logger.LogInformation("战斗视觉准备：按当前策略初始化模型 needsBurst={NeedsBurst}，完成前不准入战斗输入", NeedsBurstVision); } catch { }
-            await io.PrepareVisionAsync(NeedsBurstVision, frame, ct);
+            _visionPreparationStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            _visionPreparation = PrepareOwnedVisionAsync(frame, _visionPreparationCancellation.Token);
+            if (!_visionPreparation.IsCompleted)
+            {
+                _visionPreparationYielded = true;
+                ClearCapture();
+                return false;
+            }
+            await _visionPreparation;
             ct.ThrowIfCancellationRequested();
             CheckInitialObservationDeadline();
             _initialObservationAdmitted = true;
@@ -673,21 +865,39 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             try
             {
                 Logger.LogInformation("战斗视觉准备完成，耗时 {Milliseconds:F1}ms；准备耗时独立于战斗判定延迟",
-                    System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                    System.Diagnostics.Stopwatch.GetElapsedTime(_visionPreparationStarted).TotalMilliseconds);
             }
             catch { }
             return true;
         }
 
+        private async Task PrepareOwnedVisionAsync(ImageRegion frame, CancellationToken ct)
+        {
+            using var sample = new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp };
+            using var preparation = new RecognitionReadinessScope(nonBlocking: false);
+            await io.PrepareVisionAsync(NeedsBurstVision, sample, ct).ConfigureAwait(false);
+        }
+
+        internal async Task PrepareVisionBeforeEntryAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            using var preparation = new RecognitionReadinessScope(nonBlocking: false);
+            await io.PrepareCommonVisionAsync(ct);
+            using var sample = io.Capture() ?? throw new InvalidOperationException("缺少视觉准备样本，尚未完成战斗准备");
+            await PrepareOwnedVisionAsync(sample, ct);
+            ct.ThrowIfCancellationRequested();
+            // 这里只准备模型，不创建选角/输入、也不发布任何游戏Ready事实。
+        }
+
         private void CheckInitialObservationDeadline()
         {
             if (!_initialObservationAdmitted && io.Clock.GetTimestamp() >= _initialObservationDeadline)
-                throw new InvalidOperationException($"战斗视觉准备在原{CombatFlowPolicy.ActionTimeoutSeconds}秒准入期限内未完成，禁止继续输入；{_captureFailureReason ?? "no-fresh-initial-observation"}");
+                throw new InvalidOperationException($"战斗视觉准备耗尽所属动作准入期限（最多{CombatFlowPolicy.ActionTimeoutSeconds}秒），禁止继续输入；{_captureFailureReason ?? "no-fresh-initial-observation"}");
         }
 
         public void InvalidateActorConfirmation()
         {
-            CancelSelection();
             _confirmedActor = null;
             _atomicObservationId = null;
             ClearCapture();
@@ -696,7 +906,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         public void BeginStep()
         {
             _stepStarted = io.Clock.GetTimestamp();
-            if ((_preparedCapture || _atomicObservationId != null) && _capture?.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) == true)
+            if (!HasSelection && (_preparedCapture || _atomicObservationId != null) && _capture?.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) == true)
                 _preparedCapture = false;
             else ClearCapture();
         }
@@ -750,7 +960,6 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             // 并发关闭时活动输入尚未退出则交由 Session.Dispose 的完成边界释放。
             _input.TryReleaseInput(() =>
             {
-                CancelSelection();
                 CancelDefeatProbe();
                 _expiredRecovery = null;
                 _atomicObservationId = null;
@@ -761,15 +970,16 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
         public ValueTask PrepareObservationAsync(CombatFlowAction action, string function, CancellationToken ct)
         {
-            PrepareObservationCore(action, function, ct, incremental: false);
+            PrepareObservationCore(action, function, ct);
             return ValueTask.CompletedTask;
         }
 
         public ValueTask<CombatObservationPreparation> PrepareObservationStepAsync(CombatFlowAction action, string function, CancellationToken ct) =>
-            ValueTask.FromResult(PrepareObservationCore(action, function, ct, incremental: true));
+            ValueTask.FromResult(PrepareObservationCore(action, function, ct));
 
-        private CombatObservationPreparation PrepareObservationCore(CombatFlowAction action, string function, CancellationToken ct, bool incremental)
+        private CombatObservationPreparation PrepareObservationCore(CombatFlowAction action, string function, CancellationToken ct)
         {
+            using var realtime = new RecognitionReadinessScope();
             ct.ThrowIfCancellationRequested();
             ObjectDisposedException.ThrowIf(_disposed, this);
             action.CaptureDiagnostics = CombatFlowDiagnosticWriter.IsEnabled(Logger);
@@ -777,11 +987,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             if (action.CaptureDiagnostics && _attempts != null)
                 action.DiagnosticAttemptId = _attempts.GetDiagnosticAttemptId(action.Command.Name, action.Command.Method);
             if (!action.CanStart || FindActor(action.Command.Name) is not { } avatar) return CombatObservationPreparation.Unavailable;
-            _input ??= io.InputCoordinator.TryAcquire(action.BattleId, ReleaseOwnedInput)
-                ?? throw new InvalidOperationException("上一场输入尚未退出或释放，禁止观测准备接管输入");
-            using var operation = _input.EnterOperation();
             using var exclusive = io.BeginExclusive(allowPassiveObservation: true);
-            using var scope = new CombatActionScope(action, ct);
             try
             {
                 if (ControlInterrupted(CurrentFrame(), action))
@@ -791,13 +997,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 }
                 if (!CanReuseActor(avatar))
                 {
-                    if (incremental) _confirmedActor = null;
-                    else InvalidateActorConfirmation();
-                    using var selection = incremental ? SelectActorStep(action, avatar, ct) : SelectActor(action, avatar, SwitchAttempts, ct);
+                    _confirmedActor = null;
+                    using var selection = SelectActorStep(action, avatar, ct);
                     if (selection.AwaitingObservation) return CombatObservationPreparation.AwaitingObservation;
                     if (selection.NeedsRecovery)
                     {
-                        io.ResolveSelectionRecovery(avatar, selection, ct);
                         return CombatObservationPreparation.Unavailable;
                     }
                     if (selection.Confirmed)
@@ -805,11 +1009,13 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                         _confirmedActor = avatar.Name;
                         _confirmedSource = selection.Source;
                         action.ReportActiveActor(avatar.Name);
-                        ClearCapture();
-                        _capture = selection.TakeFrame();
+                        if (selection.TakeFrame() is { } selectedFrame)
+                        {
+                            ClearCapture();
+                            _capture = selectedFrame;
+                        }
                     }
                 }
-                scope.Check();
                 if (_confirmedActor == avatar.Name && action.CanStart)
                 {
                     action.ReportActiveActor(avatar.Name);
@@ -818,7 +1024,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     return CombatObservationPreparation.Ready;
                 }
             }
-            catch (CombatActionInterruptedException) { io.ReleaseInput(); }
+            catch (RecognitionNotReadyException) { return CombatObservationPreparation.AwaitingObservation; }
+            catch (CombatActionInterruptedException) { }
             return CombatObservationPreparation.Unavailable;
         }
 
@@ -907,6 +1114,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
         public object? Observe(string function, IReadOnlyList<object?> args, string actor)
         {
+            using var realtime = new RecognitionReadinessScope();
             if (_capture != null && !_capture.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge)) ClearCapture();
             if (function == "q-energy-sample") return null; // 当前没有可验证的能量增量传感器。
             if (function == "last-check") return io.LastFinishCheckAge;
@@ -922,6 +1130,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             if (_observations.TryGetValue((function, target), out var cached)) return cached;
             object? result;
             try { result = ObserveCurrent(function, target); }
+            catch (RecognitionNotReadyException) { return null; }
             catch (Exception exception) when (exception is not (OperationCanceledException or CombatActionInterruptedException))
             {
                 Logger.LogDebug(exception, "战斗观测 {Function}({Actor}) 不可用，保留 Unknown", function, target);
@@ -990,6 +1199,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
         public async ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
         {
+            using var realtime = new RecognitionReadinessScope();
             ct.ThrowIfCancellationRequested();
             ObjectDisposedException.ThrowIf(_disposed, this);
             action.CaptureDiagnostics = CombatFlowDiagnosticWriter.IsEnabled(Logger);
@@ -1015,7 +1225,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             var hasUnresolved = _attempts.HasUnresolved(name, command.Method);
             action.Trace("dispatch", $"unresolved={hasUnresolved} confirmedActor={_confirmedActor}");
             // 先允许原请求领取迟到证据。就绪/CD 门禁只控制新输入，不能挡住已发送请求的确认。
-            if (!hasUnresolved && command.Method == Method.Burst && Observe("q-ready", [], name) is not true)
+            if (!hasUnresolved && command.Method == Method.Burst &&
+                !(_selection is { IsClosed: false } && _selectionActor == name && _selectionBattle == action.BattleId) &&
+                Observe("q-ready", [], name) is not true)
             {
                 action.DiagnosticReason = "Q 没有可靠的当前就绪证据";
                 if (command.LegacyOutcomePolicy && !command.HasFlag("required") &&
@@ -1114,7 +1326,6 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                     if (selection.NeedsRecovery)
                     {
-                        io.ResolveSelectionRecovery(avatar, selection, ct);
                         action.DiagnosticReason = "异常HUD已移交非战斗观察，尚未确认恢复";
                         return CombatFlowResult.Deferred;
                     }
@@ -1125,8 +1336,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                     _confirmedActor = name;
                     _confirmedSource = selection.Source;
-                    ClearCapture();
-                    _capture = selection.TakeFrame();
+                    if (selection.TakeFrame() is { } selectedFrame)
+                    {
+                        ClearCapture();
+                        _capture = selectedFrame;
+                    }
                 }
                 if (!atomicWait) action.ReportActiveActor(name);
                 // 已确认的旧施放槽只用于冷却互斥。必须先取得目标的新观察才能释放旧槽，
@@ -1213,6 +1427,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 ct.ThrowIfCancellationRequested();
                 return CombatFlowResult.Succeeded;
             }
+            catch (RecognitionNotReadyException error)
+            {
+                action.DiagnosticReason = error.Message;
+                return action.IsConfirmationOnly ? CombatFlowResult.Pending : CombatFlowResult.AwaitingObservation;
+            }
             catch (CombatActionInterruptedException)
             {
                 action.DiagnosticReason = _captureFailureReason ?? $"动作被维护/条件/预算边界中断，剩余预算 {action.RemainingBudget:F3}s";
@@ -1298,6 +1517,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 InvalidateActorConfirmation();
                 return result;
             }
+            catch (RecognitionNotReadyException error)
+            {
+                action.DiagnosticReason = error.Message;
+                return CombatFlowResult.AwaitingObservation;
+            }
             catch
             {
                 InvalidateActorConfirmation();
@@ -1352,7 +1576,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
         private bool CanReuseActor(NativeCombatActor avatar)
         {
-            if (HasDeferredSelection) return false;
+            if (HasSelection) return false;
             if (_confirmedActor != avatar.Name || !_confirmedSource.IsKnown || _input == null) return false;
             _ = CurrentFrame();
             if (_capture == null || _capture.FrameStamp.SessionId != _confirmedSource.SessionId || !io.IsCombatHud(_capture)) return false;
@@ -1376,7 +1600,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 .WithSource(frame?.FrameStamp ?? default, io.Clock);
         private void ReleaseOwnedInput()
         {
-            CancelSelection(force: true);
+            CancelSelection();
             CancelDefeatProbe();
             _expiredRecovery = null;
             ClearCapture();
@@ -1389,8 +1613,24 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _disposed = true;
             foreach (var attempt in _evidenceAttempts) _evidence?.ForgetBefore("skill", attempt.ToString("N"));
             _evidenceAttempts.Clear();
-            if (_input != null) _input.Dispose();
-            else { CancelSelection(force: true); CancelDefeatProbe(); _expiredRecovery = null; ClearCapture(); }
+            try
+            {
+                if (_input != null) _input.Dispose();
+                else { CancelSelection(); CancelDefeatProbe(); _expiredRecovery = null; ClearCapture(); }
+            }
+            finally
+            {
+                // 输入先释放；样本继续归受管准备任务所有，退役等待它的finally，不早释放Mat。
+                _visionPreparationCancellation?.Cancel();
+                try
+                {
+                    _commonVisionPreparation?.GetAwaiter().GetResult();
+                    _visionPreparation?.GetAwaiter().GetResult();
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception error) { try { Logger.LogDebug(error, "视觉准备退役，保留原任务结果"); } catch { } }
+                finally { _visionPreparationCancellation?.Dispose(); }
+            }
         }
     }
 }

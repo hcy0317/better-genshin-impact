@@ -16,7 +16,10 @@ public readonly record struct CombatSkillRecovery(CombatObservationPreparation S
 public interface ICombatFlowGame
 {
     bool ReportsInputReceipts => false;
+    bool HasObservationRequest => false;
     void BeginStep() { }
+    /// <summary>唯一有权推进已登记观察需求的输入入口；Prepare/Observe本身不发送按键。</summary>
+    ValueTask AdvanceObservationAsync(CancellationToken ct) => ValueTask.CompletedTask;
     void CheckDefeated(CancellationToken ct) { ct.ThrowIfCancellationRequested(); }
     void ReleaseHeldInput() { }
     CombatScopeObservation? ObserveScope() => null;
@@ -110,6 +113,24 @@ public sealed partial class CombatFlowExecution : IDisposable
     private bool _madeProgress;
     public CombatFlowContext Context { get; }
     public CombatFlowStatistics RuntimeStatistics => _battle.Diagnostics.Snapshot();
+    internal double ObservationDeadline
+    {
+        get
+        {
+            double Of(Frame frame)
+            {
+                var deadline = frame.Deadline;
+                if (frame.PendingAttempt != null) deadline = Math.Min(deadline, frame.PendingDeadline);
+                foreach (var action in new[] { frame.AwaitingAction, frame.PreparingCondition?.Action, frame.PreparingBurst,
+                             frame.PreparingRecharge?.Action, frame.PreparingRecharge?.Probe, frame.PendingFeed })
+                    if (action != null) deadline = Math.Min(deadline, action.AbsoluteDeadline);
+                return deadline;
+            }
+            var result = _selectionFrame == null ? double.PositiveInfinity : Of(_selectionFrame);
+            foreach (var frame in _frames) result = Math.Min(result, Of(frame));
+            return result;
+        }
+    }
     public int Round { get; private set; }
     public bool IsAtomic => _frames.Any(frame => frame.Block.Atomic && frame.AtomicAdmitted);
     internal void InterruptAtomicForControl()
@@ -208,7 +229,11 @@ public sealed partial class CombatFlowExecution : IDisposable
     {
         ObjectDisposedException.ThrowIf(_closed, this);
         ct.ThrowIfCancellationRequested();
-        if (beginObservationFrame) _game.BeginStep();
+        if (beginObservationFrame)
+        {
+            _game.BeginStep();
+            await _game.AdvanceObservationAsync(ct);
+        }
         if (Context.HasScopedEffects && _game.ObserveScope() is { } scope) Context.ObserveScope(scope);
         RefreshDeferredMaintenance();
         if (!_roundStarted)
@@ -334,7 +359,7 @@ public sealed partial class CombatFlowExecution : IDisposable
                 continue;
             }
             var calledBlock = node.Block ?? (command.Method == Method.Call ? _program.Blocks[command.Args![0]] : null);
-            if (!confirming && node.Condition != null)
+            if (!confirming && !resumingObservation && node.Condition != null)
             {
                 var alreadyCompleted = calledBlock != null && command.Options.GetValueOrDefault("once") == "battle" && _once.Contains(calledBlock.Name);
                 var eligible = alreadyCompleted
@@ -507,7 +532,8 @@ public sealed partial class CombatFlowExecution : IDisposable
             {
                 if (Context.HasScopedEffects && _game.ObserveScope() is { } latestScope) Context.ObserveScope(latestScope);
                 return !_closed && RechargeDemandStillRequired(frame) && LiveRequirementsHold(frame) &&
-                    (node.Condition == null || node.Condition.EvaluateBoolean((function, args) => Observe(function, args, frame, command.Name)) == true) &&
+                    // 入口已明确接纳；暂时不可读不是撤回。明确的新反证仍阻止物理输入。
+                    (node.Condition == null || node.Condition.EvaluateBoolean((function, args) => Observe(function, args, frame, command.Name)) != false) &&
                     RevalidatedSelectionsHold() &&
                     (atomicRemainder == null || RequirementsFit(frame, atomicRemainder.Value + CombatFlowPolicy.RecoverySeconds)) &&
                     (keep == null || keepRecord != null && Context.CanConsume(keep, keepRecord, requiredWindow));
@@ -780,6 +806,8 @@ public sealed partial class CombatFlowExecution : IDisposable
 
     private async ValueTask ApplyDueWatchAsync(CancellationToken ct)
     {
+        // 已完成的调用先归还父游标；不能把下一段所需维护记到刚完成的输出主轴里。
+        if (_frames.Count > 1 && _frames.TryPeek(out var completed) && completed.Index >= completed.Block.Nodes.Count) return;
         if (_maintenanceRecovery is { Watch: false }) return;
         if (IsAtomic || WaitingForRequiredOpening()) return;
         // 首次开场要求未完成时，维护转移不能越过它。

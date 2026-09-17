@@ -24,6 +24,7 @@ internal readonly record struct CombatBattleHostInput(CombatBattleHostInputKind 
     public Guid RequestId { get; init; }
     public CaptureFrameStamp Source { get; init; }
     public long DeadlineTimestamp { get; init; }
+    public Guid? SelectionGoal { get; init; }
 }
 internal enum CombatBattleHostInputStatus { NotSent, Sent, Unknown, Failed }
 internal readonly record struct CombatBattleHostInputResult(CombatBattleHostInputStatus Status,
@@ -101,6 +102,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     public async ValueTask<CombatBattleHostResult> AdvanceAsync(NativeCombatFlowRunner flow, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_closed, this);
+        var started = Stopwatch.GetTimestamp();
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -111,13 +113,15 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             var now = Now;
             if (options.TimeoutSeconds > 0 && now >= options.TimeoutSeconds)
                 return Stop("configured-timeout");
-            // 不在原子宏或施放确认中间抢走输入；它们仍受原策略截止时间和取消约束。
-            if (flow.IsAtomic || flow.HasPendingConfirmation || flow.HasAwaitingObservation)
-            {
-                await flow.StepAsync(ct);
-                return _result;
-            }
             var observation = ReadObservation(io.ObserveTarget);
+            var fresh = Accept(observation, out var newEvidence);
+            if (newEvidence)
+            {
+                _lastValidAt = now;
+                LastMotion = observation.Motion;
+                LastControl = observation.Control;
+                ObserveProgress(observation, now);
+            }
             if (observation.Quality == CombatObservationQuality.Available && observation.BattleId == io.BattleId &&
                 observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) && observation.Control.KeyboardBreakoutRequested)
             {
@@ -133,10 +137,27 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 await flow.StepAsync(ct);
                 return _result;
             }
+            // busy只禁止抢输入，不豁免只读危险/进展/原期限监督。
+            if (flow.IsAtomic || flow.HasPendingConfirmation || flow.HasAwaitingObservation)
+            {
+                if (!fresh && now - _lastValidAt >= ObservationDeadline && !options.ExternalCompletionAuthority)
+                    return Stop("busy-without-fresh-observation");
+                if (now - _lastProgressAt >= NoProgressDeadline && now >= _graceUntil)
+                    return Stop("busy-without-game-progress");
+                if (options.SeekEnabled && _approachPulses < MaximumApproachPulses && newEvidence &&
+                    CanApproach(observation, io.BattleId, io.Clock) && flow.SelectionAssistance is { } assistance)
+                {
+                    if (await SendAsync(new(CombatBattleHostInputKind.Approach)
+                        { SelectionGoal = assistance.Goal, DeadlineTimestamp = assistance.Deadline }, ct)) _approachPulses++;
+                    return _result;
+                }
+                await flow.StepAsync(ct);
+                return _result;
+            }
             if (_phase is Phase.BeforeParty or Phase.OpenParty or Phase.AwaitParty or Phase.CloseParty)
             {
                 if (_phase is Phase.BeforeParty or Phase.OpenParty && observation.Target != null &&
-                    Accept(observation, out var newCombatEvidence))
+                    fresh)
                 {
                     // 未发探测可以撤回；已发探测必须经过原回执/打开UI证据收束。
                     _phase = Phase.Fighting;
@@ -146,7 +167,6 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     _finishRequested = false;
                     _nextFinishCheck = now + Math.Max(.1, options.FinishCheckIntervalSeconds);
                     _lastValidAt = now;
-                    if (newCombatEvidence) ObserveProgress(observation, now);
                     if (_finalProbe && now - _lastProgressAt >= NoProgressDeadline)
                         return Stop("bounded-search-without-game-progress");
                     await flow.StepAsync(ct);
@@ -155,7 +175,6 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 return await AdvancePartyAsync(ct);
             }
 
-            var fresh = Accept(observation, out var newEvidence);
             if (!fresh)
             {
                 Reason = observation.Quality switch { CombatObservationQuality.Faulted => "observation-faulted",
@@ -171,14 +190,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 await io.DelayAsync(50, ct);
                 return _result;
             }
-            if (newEvidence)
-            {
-                _lastValidAt = now;
-                LastMotion = observation.Motion;
-                LastControl = observation.Control;
-                ObserveProgress(observation, now);
-            }
-            else if (_phase == Phase.Searching)
+            if (!newEvidence && _phase == Phase.Searching)
             {
                 await io.DelayAsync(50, ct);
                 return _result;
@@ -216,6 +228,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             try { io.ReleaseInput(); } catch { /* 不遮蔽原始取消/视觉/输入异常。 */ }
             throw;
         }
+        finally { flow.RecordHostStep(Stopwatch.GetElapsedTime(started)); }
     }
 
     private T ReadObservation<T>(Func<T> read)
@@ -328,7 +341,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120)), ct))
                     return _result;
             }
-            else if (observation.Motion == MotionStatus.Normal && target.Cue != SeekCueKind.DamageNumber && _approachPulses < MaximumApproachPulses)
+            else if (CanApproach(observation, io.BattleId, io.Clock) && _approachPulses < MaximumApproachPulses)
             {
                 if (await SendAsync(new(CombatBattleHostInputKind.Approach), ct)) _approachPulses++;
                 return _result;
@@ -363,6 +376,19 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         }
         return _result;
     }
+
+    // 姿态Unknown保持Unknown；只有同帧控制检查和实际对准的目标共同允许有界试探。
+    internal static bool CanApproach(CombatBattleObservation observation, Guid battleId, TimeProvider clock) =>
+        observation.Quality == CombatObservationQuality.Available && observation.BattleId == battleId &&
+        observation.Source.IsFresh(clock, TimeSpan.FromMilliseconds(150)) &&
+        observation.Control.IsObserved && !observation.Control.KeyboardBreakoutRequested &&
+        observation.Motion is not (MotionStatus.Climb or MotionStatus.Fly) &&
+        observation.Control.Motion is not (MotionStatus.Climb or MotionStatus.Fly) &&
+        observation.Target is { Cue: SeekCueKind.HealthBar or SeekCueKind.DirectionIndicator, Visual: { } visual } target &&
+        observation.Width > 0 && observation.Height > 0 &&
+        Math.Abs(target.Cue == SeekCueKind.DirectionIndicator
+            ? AutoFightSeek.GetIndicatorCameraOffset(target.Direction, visual, observation.Width, observation.Height)
+            : AutoFightSeek.GetVisibleEnemyCameraOffset(visual, observation.Width)) <= 20;
 
     private bool TryResumeStrategy()
     {
@@ -466,6 +492,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             var seconds = Math.Min(ObservationDeadline, remaining?.TotalSeconds ?? ObservationDeadline);
             if (options.TimeoutSeconds > 0) seconds = Math.Min(seconds, options.TimeoutSeconds - Now);
             _inputRequestDeadline = io.Clock.GetTimestamp() + (long)(Math.Max(0, seconds) * io.Clock.TimestampFrequency);
+            if (input.SelectionGoal != null) _inputRequestDeadline = Math.Min(_inputRequestDeadline, input.DeadlineTimestamp);
         }
         if (io.Clock.GetTimestamp() >= _inputRequestDeadline)
         {

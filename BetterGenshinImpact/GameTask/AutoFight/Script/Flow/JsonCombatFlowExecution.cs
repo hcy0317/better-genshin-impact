@@ -28,6 +28,8 @@ public sealed class JsonCombatFlowExecution : IDisposable
     public string? LastMaintenanceDecision => _active?.Execution.LastMaintenanceDecision ??
         _roots.Select(root => root.Execution.LastMaintenanceDecision).LastOrDefault(decision => decision != null);
     public CombatFlowStatistics RuntimeStatistics => _battle.Diagnostics.Snapshot();
+    internal double ObservationDeadline => Math.Min(_active?.Execution.ObservationDeadline ?? double.PositiveInfinity,
+        _preparing?.Root.Execution.ObservationDeadline ?? double.PositiveInfinity);
     public IReadOnlyCollection<string> Actors { get; }
     public IReadOnlyList<string> Diagnostics { get; }
     public bool IsAtomic => _active?.Execution.IsAtomic == true;
@@ -157,6 +159,7 @@ public sealed class JsonCombatFlowExecution : IDisposable
         ObjectDisposedException.ThrowIf(_closed, this);
         ct.ThrowIfCancellationRequested();
         _game.BeginStep();
+        await _game.AdvanceObservationAsync(ct);
         var resumedPreparation = _preparing != null;
         if (_preparing is { } preparing)
         {

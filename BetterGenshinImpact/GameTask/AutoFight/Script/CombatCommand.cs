@@ -5,6 +5,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using TimeSpan = System.TimeSpan;
 using Vanara.PInvoke;
@@ -33,6 +34,9 @@ public class CombatCommand
     // 内部兼容政策，不增加外部语法；普通片段的真实失败不能按可选增强节点忽略。
     internal bool LegacyOutcomePolicy { get; set; }
     internal double? GuardianDurationLimit { get; init; }
+    // 受管采集动作的E按住/瞄准/松开；内部物理payload，不增加用户策略语法。
+    internal IReadOnlyList<CombatCommand>? NativeSkillSequence { get; init; }
+    internal Action? NativeSkillObserver { get; init; }
     internal FormatException Error(string message, Exception? inner = null) =>
         SyntaxError(message, SourceLine, SourceColumn, inner, SourceFile);
 
@@ -62,6 +66,9 @@ public class CombatCommand
         IsCompilerGenerated = source.IsCompilerGenerated;
         LegacyOutcomePolicy = source.LegacyOutcomePolicy;
         GuardianDurationLimit = source.GuardianDurationLimit;
+        NativeSkillSequence = source.NativeSkillSequence == null ? null : Array.AsReadOnly(
+            source.NativeSkillSequence.Select(command => new CombatCommand(command)).ToArray());
+        NativeSkillObserver = source.NativeSkillObserver;
         foreach (var (key, value) in source.Options) Options.Add(key, value);
         Flags.UnionWith(source.Flags);
     }

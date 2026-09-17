@@ -168,7 +168,9 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             result = new(CombatBattleHostInputStatus.Sent, completedAt);
             operation.Check();
         }
-        await (controlRecovery
+        await (input.SelectionGoal != null
+            ? _flow.RunSelectionOperationAsync(input, Dispatch, ct)
+            : controlRecovery
             ? _flow.RunControlOperationAsync(input.RequestId, Dispatch, ct)
             : _flow.RunHostOperationAsync(Dispatch, ct));
         }
@@ -213,6 +215,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 _partyEvidenceSource = default;
             }
         }
+        if (input.SelectionGoal != null) _flow.ObserveSelectionAssistance(input, result);
         try
         {
             _device.Logger.LogDebug("HOST_INPUT_RESULT request={Request} kind={Kind} status={Status} reason={Reason} sourceSequence={SourceSequence} completedAt={CompletedAt} elapsedMs={ElapsedMs:F3} errorType={ErrorType}",

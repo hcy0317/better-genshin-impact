@@ -450,7 +450,7 @@ public class Dispatcher
     /// <param name="param">战斗任务参数</param>  
     /// <param name="customCt">自定义取消令牌</param>  
     /// <returns></returns>  
-    public async Task RunAutoFightTask(AutoFightParam param, CancellationToken? customCt = null)  
+    public async Task RunAutoFightTask(AutoFightParam param, CancellationToken? customCt = null)
     {  
         using var ownedTask = _taskGuard.Enter();
         if (param == null)  
@@ -462,7 +462,25 @@ public class Dispatcher
         var cancellationToken = cancellation.Token;
         var factory = GameTask.AutoFight.Factory.CombatTaskFactoryProvider.GetFactory(param.CombatStrategyPath);
         var fightTask = factory.CreateTask(param);
-        await fightTask.Start(cancellationToken);  
+        await fightTask.Start(cancellationToken);
+    }
+
+    /// <summary>只准备模型，不启动战斗或发送输入。null只准备公共OCR；true表示已核对TXT/JSON所选策略需求。</summary>
+    public async Task<bool> PrepareAutoFightTask(AutoFightParam? param = null, CancellationToken? customCt = null)
+    {
+        using var ownedTask = _taskGuard.Enter();
+        using var cancellation = LinkCancellation(customCt);
+        var ct = cancellation.Token;
+        ct.ThrowIfCancellationRequested();
+        await Core.Recognition.OCR.OcrFactory.PreparePaddleAsync(ct);
+        if (param == null) return false;
+        var factory = GameTask.AutoFight.Factory.CombatTaskFactoryProvider.GetFactory(param.CombatStrategyPath);
+        if (factory is GameTask.AutoFight.Factory.TxtCombatTaskFactory)
+            await new AutoFightTask(param).PrepareVisionAsync(ct);
+        else if (factory is GameTask.AutoFight.Factory.JsonCombatTaskFactory)
+            await new AutoFightJsonTask(param).PrepareVisionAsync(ct);
+        else return false; // 自定义/自动连招使用自身准备合同，不谎称已核对未知策略。
+        return true;
     }
     
     /// <summary>

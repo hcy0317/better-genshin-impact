@@ -119,19 +119,31 @@ public partial class Avatar
 
     private static readonly Random UnstuckRandom = new();
 
-    private static readonly Lazy<BgiYoloPredictor> QBurstClassifierLazy = new(() =>
-        App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiQClassify));
+    private static BgiYoloPredictor QBurstClassifier
+    {
+        get
+        {
+            var factory = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>();
+            if (!RecognitionReadinessScope.IsNonBlocking) return factory.GetOrCreateYoloPredictor(BgiOnnxModel.BgiQClassify);
+            return factory.TryGetCachedYoloPredictor(BgiOnnxModel.BgiQClassify, out var predictor)
+                ? predictor! : throw new RecognitionNotReadyException("Q模型未准备，实时观察不创建预测器");
+        }
+    }
+
+    internal static bool IsBurstVisionPrepared(int width, int height) =>
+        App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().TryGetCachedYoloPredictor(BgiOnnxModel.BgiQClassify, out var predictor) &&
+        predictor!.IsClassificationPrepared(width, height);
 
     internal static async Task PrepareCombatVisionAsync(CancellationToken ct, bool needsBurst = true, ImageRegion? preparationFrame = null)
     {
         ct.ThrowIfCancellationRequested();
         if (needsBurst)
         {
-            if (preparationFrame == null) await QBurstClassifierLazy.Value.WarmUpAsync(Logger, ct);
+            if (preparationFrame == null) await QBurstClassifier.WarmUpAsync(Logger, ct);
             else
             {
                 using var area = preparationFrame.DeriveCrop(AutoFightAssets.Get(preparationFrame).QRectForClassify);
-                await QBurstClassifierLazy.Value.PrepareClassificationAsync(area.CacheImage, Logger, ct);
+                await QBurstClassifier.PrepareClassificationAsync(area.CacheImage, Logger, ct);
             }
         }
         await OcrFactory.PreparePaddleAsync(ct);
@@ -801,7 +813,7 @@ public partial class Avatar
 
     internal static BurstObservation ObserveBurst(ImageRegion imageRegion, bool? expectedActorActive = null)
     {
-        var reading = CombatHudReader.ReadBurst(imageRegion, QBurstClassifierLazy.Value);
+        var reading = CombatHudReader.ReadBurst(imageRegion, QBurstClassifier);
         var observation = reading.Observation;
         CombatActionScope.Current?.Trace("q-classifier",
             $"label={reading.Label} confidence={reading.Confidence:F4} energy={observation.EnergyFull} cooling={observation.CoolingDown} ready={observation.Ready} actorActive={expectedActorActive}");
@@ -811,7 +823,7 @@ public partial class Avatar
     internal static BurstReadyState IsBurstReadyByClassify(ImageRegion imageRegion)
     {
         using var qRa = imageRegion.DeriveCrop(AutoFightAssets.Get(imageRegion).QRectForClassify);
-        var topClass = QBurstClassifierLazy.Value.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());
+        var topClass = QBurstClassifier.UsePredictor(p => p.Classify(qRa.CacheImage).GetTopClass());
         return ClassifyBurstReadiness(topClass.Name.Name, topClass.Confidence);
     }
 
