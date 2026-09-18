@@ -25,6 +25,23 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 // B层：真实解析/调度/在途协议与选角策略，帧到达和游戏物理效果是可控外部边界。
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData(2d, true)]
+    [InlineData(99d, false)]
+    public async Task LegacyBurstAfterConfirmedSkillDoesNotSpendPreparationAttemptsOnEveryUnknownFrame(double unknownUntil, bool casts)
+    {
+        var clock = new FakeTimeProvider();
+        var script = CombatScriptParser.ParseContext("那维莱特 e,q,attack(0.1)");
+        using var io = new PhysicalReplay(clock, true, 50, LoadProgram("那维莱特 e,q")) { BurstUnknownUntil = unknownUntil };
+        io.SetFrontActor("那维莱特");
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false);
+        Assert.Equal(casts ? CombatFlowResult.Succeeded : CombatFlowResult.Failed, await runner.RunRoundAsync(default));
+        Assert.Single(io.Inputs.Where(input => input.Skill == Method.Skill));
+        Assert.Equal(casts ? 1 : 0, io.Inputs.Count(input => input.Skill == Method.Burst));
+        if (casts) Assert.InRange(io.Inputs.Single(input => input.Skill == Method.Burst).At, unknownUntil, 8);
+        else Assert.InRange(runner.Context.Now, 8, 11);
+    }
+
     [Fact]
     public async Task FreshButPreSwitchAssistanceFrameDefersWithoutLosingTheGoalThenAcceptsPostInputFrame()
     {

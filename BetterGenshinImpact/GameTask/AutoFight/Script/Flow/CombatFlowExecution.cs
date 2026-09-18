@@ -561,7 +561,9 @@ public sealed partial class CombatFlowExecution : IDisposable
                 continue;
             }
             var hasPendingSkill = _game.HasPendingSkill(action);
-            if (!confirming && !hasPendingSkill && frame.PreparingRecharge == null && command.Method == Method.Burst && (frame.PreparingBurst != null || (Required(command) || command.LegacyOutcomePolicy || _program.Recharge(command) != null) &&
+            // 同一动作的准入等待仍使用原准备预算；已有准备阶段可继续，但不能每帧重新TrySpend。
+            if (!confirming && !hasPendingSkill && (!resumingObservation || frame.PreparingBurst != null) &&
+                frame.PreparingRecharge == null && command.Method == Method.Burst && (frame.PreparingBurst != null || (Required(command) || command.LegacyOutcomePolicy || _program.Recharge(command) != null) &&
                 ConditionEvaluator.Truth(_game.Observe("q-ready", [], command.Name)) != true &&
                 ConditionEvaluator.Truth(_game.Observe("q-cd", [], command.Name)) != true &&
                 (_game.Observe("q-energy-low", [], command.Name) == null || _game.Observe("q-cd", [], command.Name) == null)))
