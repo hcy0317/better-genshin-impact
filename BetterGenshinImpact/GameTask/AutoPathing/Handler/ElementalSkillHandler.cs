@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using Vanara.PInvoke;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
@@ -17,10 +18,9 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 [Obsolete]
 public class ElementalSkillHandler : IActionHandler
 {
-    public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
-    {
-        Logger.LogInformation("执行 {Text}", "释放元素战技");
-        Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
-        await Delay(1000, ct);
-    }
+    private readonly INativeCombatIo? _nativeIo;
+    public ElementalSkillHandler() { }
+    internal ElementalSkillHandler(INativeCombatIo nativeIo) => _nativeIo = nativeIo;
+    public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null) =>
+        await NativeActionHandler.ExecuteAsync(await NativeActionHandler.ResolveAsync(_nativeIo, ct), "e(wait),wait(1)", ct);
 }

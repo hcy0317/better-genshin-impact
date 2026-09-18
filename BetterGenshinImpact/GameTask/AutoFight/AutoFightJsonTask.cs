@@ -86,6 +86,14 @@ public class AutoFightJsonTask : ISoloTask
     /// </summary>
     public CombatScenes GetCombatScenesWithRetry() => CombatScenes.GetCombatScenesWithRetry();
 
+    internal async Task PrepareVisionAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var scenes = GetCombatScenesWithRetry();
+        using var flow = NativeCombatFlowRunner.Create(_strategy, scenes, _taskParam)!;
+        await flow.PrepareVisionBeforeEntryAsync(ct);
+    }
+
     /// <summary>
     /// 启动自动战斗（JSON策略模式）
     /// </summary>
@@ -522,21 +530,10 @@ public class AutoFightJsonTask : ISoloTask
                     if (forcePickup || !shouldSkip)
                     {
                         Logger.LogInformation("使用 枫原万叶-长E 拾取掉落物");
-                        if (picker.TrySwitch(10))
-                        {
-                            await Delay(100, _ct);
-                            await picker.WaitSkillCd(_ct);
-                            await SimulateHoldElementalSkillAsync(800, _ct);
-                            await SimulateMouseLeftClickLoopAsync(6, _ct);
-                            await Delay(1500, _ct);
-                            picker.AfterUseSkill();
-                            if (AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
-                                    _taskParam.KazuhaPickupEnabled,
-                                    _taskParam.PickDropsAfterFightEnabled))
-                            {
-                                await new ScanPickTask().Start(_ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
-                            }
-                        }
+                        await PickUpCollectHandler.RunAfterBattleAsync(picker, false, _ct);
+                        if (AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
+                                _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
+                            await new ScanPickTask().Start(_ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
                     }
                     else
                     {
@@ -545,64 +542,11 @@ public class AutoFightJsonTask : ISoloTask
                 }
                 else if (picker.Name == "琴")
                 {
-                    Logger.LogInformation("准备执行 琴-长E 聚物，尚未确认动作完成");
-
-                    var actionsToUse = PickUpCollectHandler.PickUpActions
-                        .Where(action => action.StartsWith("琴-长E" + " ", StringComparison.OrdinalIgnoreCase))
-                        .Select(action => action.Replace("琴-长E", "琴", StringComparison.OrdinalIgnoreCase))
-                        .ToArray();
-
-                    var find = _taskParam.QinDoublePickUp;
-                    var gatheringSucceeded = false;
-                    if (picker.TrySwitch(10))
-                    {
-                        await Delay(100, _ct);
-                        foreach (var miningActionStr in actionsToUse)
-                        {
-                            var pickUpAction = CombatScriptParser.ParseContext(miningActionStr);
-
-                            for (int i = 0; i < 2; i++)
-                            {
-                                await picker.WaitSkillCd(_ct);
-                                gatheringSucceeded = GatheredLootCommands.Run(picker, pickUpAction.CombatCommands,
-                                    () =>
-                                    {
-                                        if (!find) return;
-                                        using var imagePick = CaptureToRectArea();
-                                        if (imagePick.Find(AutoPickAssets.Get(imagePick, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickRo).IsExist())
-                                            find = false;
-                                    }, () => Simulation.ReleaseAllKey(), _ct);
-                                if (!gatheringSucceeded)
-                                {
-                                    Logger.LogWarning("琴聚物命令未确认执行，停止后续动作及成功短扫");
-                                    break;
-                                }
-
-                                if (!find)
-                                {
-                                    break;
-                                }
-
-                                if (i == 0)
-                                {
-                                    Logger.LogInformation("自动拾取；尝试再次执行 琴-长E 拾取");
-                                    picker.AfterUseSkill();
-                                }
-                                else
-                                {
-                                    break;
-                                }
-                            }
-
-                            Simulation.ReleaseAllKey();
-                        }
-                    }
-                    if (gatheringSucceeded && AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
-                        _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
-                    {
-                        Logger.LogInformation("琴聚物动作完成，执行3秒短时扫描拾取");
+                    Logger.LogInformation("准备执行 琴-长E 聚物，完成及冷却确认由统一执行器返回");
+                    await PickUpCollectHandler.RunAfterBattleAsync(picker, _taskParam.QinDoublePickUp, _ct);
+                    if (AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
+                            _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
                         await new ScanPickTask().Start(_ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
-                    }
                 }
             }
 

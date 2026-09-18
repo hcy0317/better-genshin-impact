@@ -27,6 +27,52 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class NativeAdapterLatencyTests(ITestOutputHelper output)
 {
     [OfflineNativeDecisionFact]
+    public async Task ColdOcrWithARealSpacePromptCannotBlockThePureEStepOrPretendControlWasObserved()
+    {
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var ocrFactory = new OcrFactory(NullLogger<BgiOnnxFactory>.Instance, () =>
+        {
+            entered.Set();
+            if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("test native initialization not released");
+            return new PreparedControlOcr();
+        });
+        var preparing = ocrFactory.PrepareAsync();
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        using var source = Cv2.ImRead(Environment.GetEnvironmentVariable("BGI_RECORDED_FREEZE_FRAME")!);
+        using var factory = new BgiOnnxFactory(NullLogger<BgiOnnxFactory>.Instance, forceCpuOcr: true);
+        using var burst = factory.CreateYoloPredictor(BgiOnnxModel.BgiQClassify);
+        var detector = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", source.Width, source.Height),
+            ocrFactory.PaddleOcr, "复苏", "使用道具复苏角色");
+        using var io = new RecordedIo(source, detector, ocrFactory.PaddleOcr, burst, actorName: "香菱");
+        using var runner = NativeCombatFlowRunner.Create(CombatFlowProgram.Compile("香菱 e(required)"), io);
+        var step = Task.Run(async () => await runner.StepAsync(default));
+        try
+        {
+            Assert.Same(step, await Task.WhenAny(step, Task.Delay(150)));
+            Assert.Equal(CombatFlowResult.AwaitingObservation, (await step).Result);
+            using var frame = new ImageRegion(source.Clone(), 0, 0);
+            var control = CombatMotionReader.ReadControl(frame, true, ocrFactory.PaddleOcr);
+            Assert.False(control.IsObserved);
+            Assert.False(control.KeyboardBreakoutRequested);
+            Assert.Equal(0, io.ControlPulses);
+        }
+        finally
+        {
+            release.Set();
+            await preparing;
+            await step;
+        }
+    }
+
+    private sealed class PreparedControlOcr : IOcrService
+    {
+        public string Ocr(Mat mat) => "Space";
+        public string OcrWithoutDetector(Mat mat) => "Space";
+        public OcrResult OcrResult(Mat mat) => new([]);
+    }
+
+    [OfflineNativeDecisionFact]
     public async Task RecordedControlRecoveryIncludesTheRealFourStateGatewayAndLogProducer()
     {
         var path = Environment.GetEnvironmentVariable("BGI_RECORDED_FREEZE_FRAME");
@@ -145,10 +191,14 @@ public class NativeAdapterLatencyTests(ITestOutputHelper output)
         do
         {
             adapter.BeginStep();
+            await adapter.AdvanceObservationAsync(default);
             prepared = await adapter.PrepareObservationStepAsync(preparation, "onfield", default);
             if (prepared == CombatObservationPreparation.AwaitingObservation) await Task.Delay(50);
         } while (prepared == CombatObservationPreparation.AwaitingObservation);
         Assert.Equal(CombatObservationPreparation.Ready, prepared);
+        using (var sample = new ImageRegion(source.Clone(), 0, 0))
+        using (var area = sample.DeriveCrop(AutoFightAssets.Get(sample).QRectForClassify))
+            await burst.PrepareClassificationAsync(area.CacheImage, NullLogger.Instance, default);
         adapter.BeginStep();
         initialization.Stop();
 

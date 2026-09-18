@@ -1,4 +1,5 @@
 using BetterGenshinImpact.Core.Recognition.OCR;
+using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
@@ -38,6 +39,8 @@ internal static class CombatHudReader
         frame.ReadOnce((typeof(CombatHudReader), "burst"), () =>
         {
             using var area = frame.DeriveCrop(AutoFightAssets.Get(frame).QRectForClassify);
+            if (RecognitionReadinessScope.IsNonBlocking && !predictor.IsClassificationPrepared(area.Width, area.Height))
+                throw new RecognitionNotReadyException("当前Q识别尺寸尚未完成首推理准备");
             var top = predictor.UsePredictor(p => p.Classify(area.CacheImage).GetTopClass());
             return new BurstReading(top.Name.Name, top.Confidence, BurstObservation.FromClassifier(top.Name.Name, top.Confidence));
         });

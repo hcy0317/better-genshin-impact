@@ -76,7 +76,7 @@ public class LinneaMiningTask
         _mineCount = mineCount;
         _preferRight = scanRounds > 1;
         _predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>()
-            .CreateYoloPredictor(BgiOnnxModel.BgiMine);
+            .GetOrCreateYoloPredictor(BgiOnnxModel.BgiMine);
         ClusterDistanceThreshold = BaseClusterDistance * _widthScale;
         EdgeIgnore = BaseEdgeIgnore * _widthScale;
         AlignmentExpansion = BaseAlignmentExpansion * _widthScale;
@@ -151,10 +151,12 @@ public class LinneaMiningTask
         catch (OperationCanceledException)
         {
             Logger.LogInformation("取消挖矿");
+            throw;
         }
         catch (Exception e)
         {
             Logger.LogError("挖矿异常: {Msg}", e.Message);
+            throw;
         }
         finally
         {
@@ -266,7 +268,7 @@ public class LinneaMiningTask
 
         // SaveDebugImage(ra.SrcMat);
 
-        var rawResult = _predictor.Predictor.Detect(ra.CacheImage);
+        var rawResult = _predictor.UsePredictor(predictor => predictor.Detect(ra.CacheImage));
 
         var centerX = ra.CacheImage.Width / 2.0;
         var centerY = ra.CacheImage.Height / 2.0;

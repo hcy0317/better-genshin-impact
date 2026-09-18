@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.Common.Job;
 using Microsoft.Extensions.Logging;
@@ -15,31 +16,23 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 /// </summary>
 public class LinneaMiningHandler : IActionHandler
 {
+    private readonly INativeCombatIo? _nativeIo;
+    public LinneaMiningHandler() { }
+    internal LinneaMiningHandler(INativeCombatIo nativeIo) => _nativeIo = nativeIo;
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {
         var (mineCount, scanRounds) = ParseParams(waypointForTrack?.ActionParams);
 
-        var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
-        if (combatScenes == null)
+        var io = await NativeActionHandler.ResolveAsync(_nativeIo, ct);
+        if (!System.Linq.Enumerable.Any(io.Actors, actor => actor.Name == "莉奈娅"))
         {
-            Logger.LogError("队伍识别未初始化成功！");
-            return;
+            throw new InvalidOperationException("队伍中没有莉奈娅，专用挖矿未执行");
         }
-
-        // 切人
-        var linnea = combatScenes.SelectAvatar("莉奈娅");
-        if (linnea is not null)
+        await NativeActionHandler.WithSelectedActorAsync(io, "莉奈娅", async token =>
         {
-            linnea.TrySwitch();
-            await Delay(500, ct);
-        }
-        else
-        {
-            Logger.LogError("队伍中未找到莉奈娅！");
-            return;
-        }
-
-        await new LinneaMiningTask(scanRounds, mineCount).Start(ct);
+            await io.DelayAsync(500, token);
+            await new LinneaMiningTask(scanRounds, mineCount).Start(token);
+        }, ct);
     }
 
     private static (int mineCount, int scanRounds) ParseParams(string? actionParams)

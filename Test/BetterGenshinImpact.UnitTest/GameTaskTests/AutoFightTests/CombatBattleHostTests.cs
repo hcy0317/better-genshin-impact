@@ -9,6 +9,116 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatBattleHostTests
 {
+    [Fact]
+    public async Task SearchFailureIncludesItsSourceBudgetAndTerminalEvidenceRequest()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1500 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Contains(io.Traces, trace => trace.CapturePhase == "search-start");
+        var terminal = Assert.Single(io.Traces.Where(trace => trace.CapturePhase == "terminal"));
+        Assert.Equal("bounded-search-finish-unconfirmed", terminal.Reason);
+        Assert.Equal(24, terminal.ScanUsed);
+        Assert.True(terminal.Observation.Source.IsKnown);
+        Assert.Equal(flow.Context.BattleId, terminal.BattleId);
+    }
+
+    [Fact]
+    public async Task RealProgressAfterAnExhaustedSearchDoesNotPoisonTheNextFinishProbe()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 1000 && !(host.CameraRequests == 24 && host.State == "BeforeParty"); i++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Equal(24, host.CameraRequests);
+        Assert.Equal("BeforeParty", host.State);
+        clock.Advance(TimeSpan.FromMilliseconds(400));
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                new(700, 400, 80, 30, 2400), 1, SeekCueKind.DamageNumber), 1920, 1080, 1);
+        Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Fighting", host.State);
+        io.TargetFactory = null;
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 100 && result == CombatBattleHostResult.Continue && host.State != "Searching"; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Continue, result);
+        Assert.Equal("Searching", host.State);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(100)]
+    public async Task SearchWaitsForTheCameraToSettleBeforeSendingAnotherMovement(int sourceLagMilliseconds)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        io.TargetFactory = stamp => new(stamp with
+        { CapturedTimestamp = stamp.CapturedTimestamp - clock.TimestampFrequency * sourceLagMilliseconds / 1000 },
+            flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080);
+        for (var i = 0; i < 100 && host.CameraRequests == 0; i++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Equal(1, host.CameraRequests);
+        var completedFirstMovement = clock.GetTimestamp();
+        for (var i = 0; i < 100 && host.CameraRequests == 1; i++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Equal(2, host.CameraRequests);
+        Assert.True(clock.GetElapsedTime(completedFirstMovement) >= TimeSpan.FromMilliseconds(350 + sourceLagMilliseconds),
+            $"第二次镜头输入仅间隔{clock.GetElapsedTime(completedFirstMovement).TotalMilliseconds}ms，未给场景稳定机会");
+    }
+
+    [Fact]
+    public void UnknownPostureMayPermitOnlyObservedAlignedBoundedMovement()
+    {
+        var clock = new FakeTimeProvider();
+        var battle = Guid.NewGuid();
+        var frame = new CombatBattleObservation(new CaptureFrameSource(clock).Next(), battle,
+            CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None, new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar),
+            1920, 1080) { Control = new(MotionStatus.Unknown, false) };
+        Assert.True(CombatBattleHost.CanApproach(frame, battle, clock));
+        Assert.Equal(MotionStatus.Unknown, frame.Motion);
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = default }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = new(MotionStatus.Unknown, true) }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = new(MotionStatus.Climb, false) }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Control = new(MotionStatus.Fly, false) }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = null }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = frame.Target!.Value with { Cue = SeekCueKind.FixedTopHealth } }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = frame.Target!.Value with { Cue = SeekCueKind.DamageNumber } }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame with { Target = frame.Target!.Value with { Visual = new(100, 400, 100, 4, 400) } }, battle, clock));
+        Assert.False(CombatBattleHost.CanApproach(frame, Guid.NewGuid(), clock));
+        clock.Advance(TimeSpan.FromMilliseconds(151));
+        Assert.False(CombatBattleHost.CanApproach(frame, battle, clock));
+    }
+
+    [Fact]
+    public async Task ExhaustingCameraAttemptsCannotAuthorizeWalkingInAnUnconfirmedDirection()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                new(350, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080)
+            { Motion = MotionStatus.Normal, Control = new(MotionStatus.Normal, false) };
+        using var host = new CombatBattleHost(io, new());
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.InRange(host.CameraRequests, 1, 24);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -280,7 +390,7 @@ public class CombatBattleHostTests
         var io = new ReplayIo(clock, flow.Context.BattleId);
         io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
             new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
-                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080) { Motion = MotionStatus.Normal };
+                new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080) { Control = new(MotionStatus.Unknown, false) };
         using var host = new CombatBattleHost(io, new());
         var result = CombatBattleHostResult.Continue;
         for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
@@ -432,6 +542,8 @@ public class CombatBattleHostTests
         public Guid BattleId => battleId;
         public List<CombatBattleHostInput> Inputs { get; } = [];
         public List<CombatBattleHostInput> Requests { get; } = [];
+        public List<CombatBattleHostTrace> Traces { get; } = [];
+        public void Trace(CombatBattleHostTrace observation) => Traces.Add(observation);
         public int UnsentAttempts { get; set; }
         public CombatBattleHostInputResult? ForcedResult { get; init; }
         public bool PartyOpen { get; private set; }

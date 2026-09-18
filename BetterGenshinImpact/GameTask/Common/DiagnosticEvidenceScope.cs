@@ -31,12 +31,28 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
     private readonly int _maxImages;
     private readonly long _maximumBytes;
     private readonly Dictionary<string, HashSet<string>> _phases = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string Owner, string Request, string Phase),
+        (CaptureFrameStamp Source, string Detail, ILogger Logger)> _frameRequests = new();
     private readonly Dictionary<(string Channel, string Request), (ImageRegion Frame, string Request, string Detail, long Bytes)> _before = new();
     private ILogger _logger = NullLogger.Instance;
     private int _accepted, _dropped, _writeFailures, _missingBefore;
     private long _bytes;
     private long _stagedBytes;
     private bool _closed;
+    private string? _retainedOwner;
+    private ImageRegion? _retainedFrame;
+    private long _retainedBytes;
+    private string? _retainedEpisode;
+
+    internal void EndFrameRequests(string owner, string request)
+    {
+        lock (_gate)
+        {
+            foreach (var key in _frameRequests.Keys.Where(key => key.Owner == owner && key.Request == request).ToArray())
+                _frameRequests.Remove(key);
+            if (_retainedOwner == owner && _retainedEpisode == request) ClearRetainedFrame();
+        }
+    }
 
     internal DiagnosticEvidenceScope(Func<DiagnosticEvidence, Mat, Task>? sink = null, int maxImages = 16,
         long maximumBytes = 128L * 1024 * 1024)
@@ -57,25 +73,137 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
     internal static DiagnosticEvidenceScope? Current => Active.Value;
     internal static DiagnosticEvidenceScope? CreateOwned() => Active.Value == null ? new() : null;
 
+    internal bool RequestFrame(string owner, string request, string phase, CaptureFrameStamp requestedSource,
+        string detail, ILogger logger)
+    {
+        lock (_gate)
+        {
+            if (ReferenceEquals(_logger, NullLogger.Instance)) _logger = logger;
+            if (phase == "terminal" && !_closed && _retainedOwner == owner && _retainedFrame is { } retained)
+            {
+                try
+                {
+                    if (retained.FrameStamp.SessionId != requestedSource.SessionId)
+                    { MissingFrame(request, phase, "capture-source-changed", logger); return false; }
+                    var saved = TryCaptureWithReason(retained, request, phase,
+                        $"requestedSource={requestedSource.SessionId}/{requestedSource.Sequence}; latest-existing-frame; {detail}", out var reason, logger);
+                    if (!saved) MissingFrame(request, phase, reason, logger);
+                    return saved;
+                }
+                finally { ClearRetainedFrame(); }
+            }
+            if (_closed || !requestedSource.IsKnown || _frameRequests.Count >= 4 || _accepted >= _maxImages)
+            {
+                MissingFrame(request, phase, _closed ? "scope-closed" : !requestedSource.IsKnown ? "source-unknown" :
+                    _accepted >= _maxImages ? "run-budget" : "request-queue-full", logger);
+                return false;
+            }
+            if (_phases.TryGetValue(request, out var seen) && (seen.Contains(phase) || seen.Count >= 3))
+            {
+                MissingFrame(request, phase, "duplicate-or-request-budget", logger);
+                return false;
+            }
+            _frameRequests.TryAdd((owner, request, phase), (requestedSource, detail, logger));
+            if (_retainedOwner != owner || _retainedEpisode != request)
+            {
+                ClearRetainedFrame();
+                _retainedOwner = owner;
+                _retainedEpisode = request;
+            }
+            return true;
+        }
+    }
+
+    internal void CaptureRequestedFrames(string owner, ImageRegion frame)
+    {
+        lock (_gate)
+        {
+            // 仅在宿主已经请求搜索取证后保留一张已有帧，终态无需再等生产者。
+            // 与技能暂存共用原字节预算；最多每500ms复制一次，不增加截图/OCR/落盘频率。
+            if (!_closed && _accepted < _maxImages && _retainedOwner == owner && frame.FrameStamp.IsKnown &&
+                (_retainedFrame == null || frame.FrameStamp.SessionId != _retainedFrame.FrameStamp.SessionId ||
+                 frame.FrameStamp.CapturedTimestamp - _retainedFrame.FrameStamp.CapturedTimestamp >= frame.FrameStamp.TimestampFrequency / 2))
+            {
+                try
+                {
+                    var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
+                    if (bytes <= _maximumBytes - _bytes - _stagedBytes + _retainedBytes)
+                    {
+                        var copy = new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp };
+                        var episode = _retainedEpisode;
+                        ClearRetainedFrame();
+                        _retainedOwner = owner;
+                        _retainedEpisode = episode;
+                        _retainedFrame = copy;
+                        _retainedBytes = bytes;
+                        _stagedBytes += bytes;
+                    }
+                }
+                catch { /* 仍可尝试请求帧；保留失败不能影响生产感知。 */ }
+            }
+            foreach (var key in _frameRequests.Keys.Where(key => key.Owner == owner).ToArray())
+            {
+                var request = _frameRequests[key];
+                if (!frame.FrameStamp.IsKnown || frame.FrameStamp.SessionId == request.Source.SessionId &&
+                    !frame.FrameStamp.IsAfter(request.Source)) continue;
+                _frameRequests.Remove(key);
+                if (frame.FrameStamp.SessionId != request.Source.SessionId)
+                {
+                    MissingFrame(key.Request, key.Phase, "capture-source-changed", request.Logger);
+                    continue;
+                }
+                var detail = $"requestedSource={request.Source.SessionId}/{request.Source.Sequence}; next-existing-frame; {request.Detail}";
+                if (!TryCaptureWithReason(frame, key.Request, key.Phase, detail, out var reason, request.Logger))
+                    MissingFrame(key.Request, key.Phase, reason, request.Logger);
+            }
+        }
+    }
+
+    private void MissingFrame(string request, string phase, string reason, ILogger logger)
+    {
+        _dropped++;
+        try { logger.LogDebug("EVIDENCE_CAPTURE_MISSING run={Run} request={Request} phase={Phase} reason={Reason}",
+            _runId, request, phase, reason); } catch { }
+    }
+
+    private void ClearRetainedFrame()
+    {
+        _retainedFrame?.Dispose();
+        _retainedFrame = null;
+        _retainedOwner = null;
+        _retainedEpisode = null;
+        _stagedBytes -= _retainedBytes;
+        _retainedBytes = 0;
+    }
+
     internal bool TryCapture(ImageRegion frame, string request, string phase, string detail, ILogger? logger = null,
         string? sourceRequest = null)
+        => TryCaptureWithReason(frame, request, phase, detail, out _, logger, sourceRequest);
+
+    private bool TryCaptureWithReason(ImageRegion frame, string request, string phase, string detail, out string reason,
+        ILogger? logger = null, string? sourceRequest = null)
     {
+        reason = "accepted";
         Mat? owned = null;
         try
         {
             lock (_gate)
             {
-                if (_closed || !frame.FrameStamp.IsKnown || frame.SrcMat.Empty()) return false;
+                if (_closed) { reason = "scope-closed"; return false; }
+                if (!frame.FrameStamp.IsKnown) { reason = "source-unknown"; return false; }
+                if (frame.SrcMat.Empty()) { reason = "empty-frame"; return false; }
                 if (logger != null && ReferenceEquals(_logger, NullLogger.Instance)) _logger = logger;
                 request = request.Length > 256 ? request[..256] : request;
                 phase = phase.Length > 64 ? phase[..64] : phase;
-                if (_phases.TryGetValue(request, out var seen) && (seen.Contains(phase) || seen.Count >= 3)) return false;
+                if (_phases.TryGetValue(request, out var seen) && (seen.Contains(phase) || seen.Count >= 3))
+                { reason = "duplicate-or-request-budget"; return false; }
                 var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
-                if (_accepted >= _maxImages || bytes > _maximumBytes - _bytes - _stagedBytes) { _dropped++; return false; }
+                if (_accepted >= _maxImages || bytes > _maximumBytes - _bytes - _stagedBytes)
+                { _dropped++; reason = "run-image-or-byte-budget"; return false; }
                 owned = frame.SrcMat.Clone();
                 var evidence = new DiagnosticEvidence(_runId, _accepted + 1, request, phase, frame.FrameStamp,
                     detail.Length > 2048 ? detail[..2048] : detail, sourceRequest);
-                if (!_queue.Writer.TryWrite((evidence, owned))) { _dropped++; return false; }
+                if (!_queue.Writer.TryWrite((evidence, owned))) { _dropped++; reason = "writer-queue-full"; return false; }
                 owned = null; // 从这里起只有writer拥有并释放图像。
                 _accepted++;
                 _bytes += bytes;
@@ -83,7 +211,7 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
                 return true;
             }
         }
-        catch { return false; /* 取证不能改变业务结果或发送额外输入。 */ }
+        catch (Exception error) { reason = "capture-error:" + error.GetType().Name; return false; }
         finally { owned?.Dispose(); }
     }
 
@@ -184,6 +312,10 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
             if (!_closed)
             {
                 _closed = true;
+                foreach (var pending in _frameRequests)
+                    MissingFrame(pending.Key.Request, pending.Key.Phase, "no-next-frame-before-run-end", pending.Value.Logger);
+                _frameRequests.Clear();
+                ClearRetainedFrame();
                 foreach (var before in _before.Values) before.Frame.Dispose();
                 _before.Clear();
                 _stagedBytes = 0;

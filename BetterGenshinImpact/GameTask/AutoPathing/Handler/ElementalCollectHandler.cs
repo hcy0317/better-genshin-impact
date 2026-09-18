@@ -5,6 +5,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Model;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
+using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using Microsoft.Extensions.Logging;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 
@@ -15,19 +17,18 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 /// </summary>
 public class ElementalCollectHandler(ElementalType elementalType) : IActionHandler
 {
+    private readonly INativeCombatIo? _nativeIo;
+    internal ElementalCollectHandler(ElementalType elementalType, INativeCombatIo nativeIo) : this(elementalType) => _nativeIo = nativeIo;
+
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {
-        var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
-        if (combatScenes == null)
-        {
-            Logger.LogError("队伍识别未初始化成功！");
-            return;
-        }
+        ct.ThrowIfCancellationRequested();
+        var io = await NativeActionHandler.ResolveAsync(_nativeIo, ct);
 
         // 筛选出对应元素的角色列表
         var elementalCollectAvatars = ElementalCollectAvatarConfigs.Lists.Where(x => x.ElementalType == elementalType).ToList();
         // 循环遍历角色列表
-        foreach (var combatScenesAvatar in combatScenes.GetAvatars())
+        foreach (var combatScenesAvatar in io.Actors)
         {
             // 判断是否为对应元素的角色
             var elementalCollectAvatar = elementalCollectAvatars.FirstOrDefault(x => x.Name == combatScenesAvatar.Name);
@@ -36,27 +37,13 @@ public class ElementalCollectHandler(ElementalType elementalType) : IActionHandl
                 continue;
             }
 
-            // 切人
-            if (combatScenesAvatar.TrySwitch())
-            {
-                if (elementalCollectAvatar.NormalAttack)
-                {
-                    combatScenesAvatar.Attack(100);
-                }
-                else if (elementalCollectAvatar.ElementalSkill)
-                {
-
-                    await combatScenesAvatar.WaitSkillCd(ct);
-                    combatScenesAvatar.UseSkill();
-                }
-            }
-            else
-            {
-                Logger.LogError("切人失败,无法进行{Element}元素采集", elementalType.ToChinese());
-            }
-
-            break;
+            if (!elementalCollectAvatar.NormalAttack && !elementalCollectAvatar.ElementalSkill)
+                throw new InvalidOperationException("该元素采集角色没有声明可执行动作：" + combatScenesAvatar.Name);
+            var action = elementalCollectAvatar.NormalAttack ? "attack(0.1)" : "e(wait)";
+            await NativeActionHandler.ExecuteAsync(io, combatScenesAvatar.Name + " " + action, ct);
+            return;
         }
+        throw new InvalidOperationException($"当前队伍没有可执行{elementalType.ToChinese()}元素采集的角色，路线未完成");
     }
 }
 

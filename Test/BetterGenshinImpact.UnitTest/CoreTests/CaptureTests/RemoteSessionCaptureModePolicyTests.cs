@@ -7,6 +7,7 @@ public class RemoteSessionCaptureModePolicyTests
     [Theory]
     [InlineData(CaptureModes.WindowsGraphicsCapture)]
     [InlineData(CaptureModes.WindowsGraphicsCaptureHdr)]
+    [InlineData(CaptureModes.WindowsGraphicsCaptureV2)]
     public void Resolve_ShouldUseBitBltForWindowsGraphicsCaptureInsideRemoteSession(CaptureModes requestedMode)
     {
         var resolvedMode = RemoteSessionCaptureModePolicy.Resolve(requestedMode, isRemoteSession: true);
@@ -19,6 +20,7 @@ public class RemoteSessionCaptureModePolicyTests
     [InlineData(CaptureModes.DwmGetDxSharedSurface, true)]
     [InlineData(CaptureModes.WindowsGraphicsCapture, false)]
     [InlineData(CaptureModes.WindowsGraphicsCaptureHdr, false)]
+    [InlineData(CaptureModes.WindowsGraphicsCaptureV2, false)]
     public void Resolve_ShouldPreserveModesThatDoNotNeedRemoteFallback(
         CaptureModes requestedMode,
         bool isRemoteSession)

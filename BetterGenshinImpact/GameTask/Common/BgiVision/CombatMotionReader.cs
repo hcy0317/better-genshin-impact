@@ -26,8 +26,13 @@ internal static class CombatMotionReader
 
     internal static CombatControlObservation ReadControl(ImageRegion frame, bool combatHud, IOcrService ocr)
     {
-        if (!combatHud || frame.SrcMat.Empty()) return new(MotionStatus.Unknown, false);
-        return frame.ReadOnce(typeof(CombatMotionReader), () => ReadFrame(frame, ocr));
+        if (!combatHud || frame.SrcMat.Empty()) return default;
+        return frame.ReadOnce(typeof(CombatMotionReader), () =>
+        {
+            using var realtime = new RecognitionReadinessScope();
+            try { return ReadFrame(frame, ocr); }
+            catch (RecognitionNotReadyException) { return default; }
+        });
     }
 
     private static CombatControlObservation ReadFrame(ImageRegion frame, IOcrService ocr)

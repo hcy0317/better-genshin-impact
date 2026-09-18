@@ -256,6 +256,25 @@ public class AutoFightTask : ISoloTask
         _finishDetectConfig = new TaskFightFinishDetectConfig(_taskParam);
     }
     public CombatScenes GetCombatScenesWithRetry() => CombatScenes.GetCombatScenesWithRetry();
+
+    internal async Task PrepareVisionAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var scenes = GetCombatScenesWithRetry();
+        using var flow = Script.Flow.NativeCombatFlowRunner.Create(SelectCombatCommands(scenes), scenes, loop: true, param: _taskParam);
+        await flow.PrepareVisionBeforeEntryAsync(ct);
+    }
+
+    private List<CombatCommand> SelectCombatCommands(CombatScenes scenes)
+    {
+        var commands = _combatScriptBag.FindCombatScript(scenes.GetAvatars());
+        var names = commands.Select(command => command.Name).Distinct()
+            .Select(name => scenes.SelectAvatar(name)?.Name).WhereNotNull().ToList();
+        var selected = new CombatScript(new(names), commands);
+        var applicable = selected.SelectForParty(scenes.GetAvatars().Select(avatar => avatar.Name));
+        if (names.Count <= 0 && !selected.HasFlowCommands) throw new Exception("没有可用战斗脚本");
+        return applicable;
+    }
     // 方法1：判断是否是单个数字
 
     /*public int delayTime=1500;
@@ -288,17 +307,7 @@ public class AutoFightTask : ISoloTask
 
 
         // var actionSchedulerByCd = ParseStringToDictionary(_taskParam.ActionSchedulerByCd);
-        var combatCommands = _combatScriptBag.FindCombatScript(combatScenes.GetAvatars());
-        // 命令用到的角色名 筛选交集
-        var commandAvatarNames = combatCommands.Select(c => c.Name).Distinct()
-            .Select(n => combatScenes.SelectAvatar(n)?.Name)
-            .WhereNotNull().ToList();
-        var selectedScript = new CombatScript(new(commandAvatarNames), combatCommands);
-        combatCommands = selectedScript.SelectForParty(combatScenes.GetAvatars().Select(avatar => avatar.Name));
-        if (commandAvatarNames.Count <= 0 && !selectedScript.HasFlowCommands)
-        {
-            throw new Exception("没有可用战斗脚本");
-        }
+        var combatCommands = SelectCombatCommands(combatScenes);
 
         // 新的取消token
         using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -585,31 +594,10 @@ public class AutoFightTask : ISoloTask
                     if (forcePickup || !shouldSkip)
                     {
                         Logger.LogInformation("使用 枫原万叶-长E 拾取掉落物");
-                        if (picker.TrySwitch(10))
-                        {
-                            await Delay(100, ct);
-                            // 等待元素战技 CD 就绪
-                            await picker.WaitSkillCd(ct);
-                            
-                            // 调用统一的辅助方法，模拟万叶长按 E 的输入序列：
-                            // 包含释放鼠标左键前摇防卡键 -> E 键 KeyDown -> 延时 800ms -> E 键 KeyUp -> 延时 50ms
-                            await SimulateHoldElementalSkillAsync(800, ct);    
-                            
-                            // 调用统一的辅助方法，模拟 6 次鼠标左键连续点击：
-                            // 配合万叶长 E 的滞空特性执行下落攻击，内部包含 try/finally 以保证取消任务时安全释放左键
-                            await SimulateMouseLeftClickLoopAsync(6, ct);      
-                            
-                            // 等待下落攻击和聚怪拾取动作彻底结束
-                            await Delay(1500, ct);
-                            // 截图并更新技能最新冷却时间
-                            picker.AfterUseSkill();
-                            if (AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
-                                    _taskParam.KazuhaPickupEnabled,
-                                    _taskParam.PickDropsAfterFightEnabled))
-                            {
-                                await new ScanPickTask().Start(ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
-                            }
-                        }
+                        await PickUpCollectHandler.RunAfterBattleAsync(picker, false, ct);
+                        if (AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
+                                _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
+                            await new ScanPickTask().Start(ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
                     }
                     else
                     {
@@ -618,65 +606,11 @@ public class AutoFightTask : ISoloTask
                 }
                 else if (picker.Name == "琴")
                 {
-                    Logger.LogInformation("准备执行 琴-长E 聚物，尚未确认动作完成");
-                    
-                    var actionsToUse = PickUpCollectHandler.PickUpActions
-                        .Where(action => action.StartsWith("琴-长E" + " ", StringComparison.OrdinalIgnoreCase))
-                        .Select(action => action.Replace("琴-长E","琴", StringComparison.OrdinalIgnoreCase))
-                        .ToArray();
-
-                    var find = _taskParam.QinDoublePickUp;
-                    var gatheringSucceeded = false;
-                    if (picker.TrySwitch(10))
-                    {
-                        await Delay(100, ct);
-                        foreach (var miningActionStr in actionsToUse)
-                        {
-                            var pickUpAction = CombatScriptParser.ParseContext(miningActionStr);
-
-                            for (int i = 0; i < 2; i++)
-                            {
-                                await picker.WaitSkillCd(ct);
-                                gatheringSucceeded = GatheredLootCommands.Run(picker, pickUpAction.CombatCommands,
-                                    () =>
-                                    {
-                                        if (!find) return;
-                                        using var imagePick = CaptureToRectArea();
-                                        if (imagePick.Find(AutoPickAssets.Get(imagePick, TaskContext.Instance().Config.AutoPickConfig.PickKey).PickRo).IsExist())
-                                            find = false;
-                                    }, () => Simulation.ReleaseAllKey(), ct);
-                                if (!gatheringSucceeded)
-                                {
-                                    Logger.LogWarning("琴聚物命令未确认执行，停止后续动作及成功短扫");
-                                    break;
-                                }
-
-                                if (!find)
-                                {
-                                    break;
-                                }
-
-                                if (i == 0)
-                                {
-                                    Logger.LogInformation("自动拾取；尝试再次执行 琴-长E 拾取");
-                                    // picker.LastSkillTime = DateTime.Now;不正确
-                                    picker.AfterUseSkill();
-                                }
-                                else
-                                {
-                                    break;
-                                }
-                            }
-                            
-                            Simulation.ReleaseAllKey();
-                        }
-                    }
-                    if (gatheringSucceeded && AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
-                        _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
-                    {
-                        Logger.LogInformation("琴聚物动作完成，执行3秒短时扫描拾取");
+                    Logger.LogInformation("准备执行 琴-长E 聚物，完成及冷却确认由统一执行器返回");
+                    await PickUpCollectHandler.RunAfterBattleAsync(picker, _taskParam.QinDoublePickUp, ct);
+                    if (AutoFightParam.ShouldRunKazuhaGatheredDropsScan(
+                            _taskParam.KazuhaPickupEnabled, _taskParam.PickDropsAfterFightEnabled))
                         await new ScanPickTask().Start(ct, AutoFightParam.KazuhaGatheredDropsScanSeconds);
-                    }
                 }
             }
             //切换过队伍的，需要再切回来

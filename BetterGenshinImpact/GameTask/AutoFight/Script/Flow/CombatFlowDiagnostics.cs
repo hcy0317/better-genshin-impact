@@ -163,6 +163,7 @@ internal sealed class CombatFlowDiagnostics
 internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagnostics diagnostics) : ICombatFlowGame
 {
     public bool ReportsInputReceipts => game.ReportsInputReceipts;
+    public bool HasObservationRequest => game.HasObservationRequest;
     public async ValueTask<CombatSkillRecovery> RecoverExpiredSkillStepAsync(CombatFlowAction action, CancellationToken ct)
     {
         var start = Stopwatch.GetTimestamp();
@@ -170,6 +171,13 @@ internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagn
         finally { diagnostics.Prepare(Stopwatch.GetElapsedTime(start).TotalMilliseconds); }
     }
     public void BeginStep() => game.BeginStep();
+    public async ValueTask AdvanceObservationAsync(CancellationToken ct)
+    {
+        var requested = game.HasObservationRequest;
+        var started = Stopwatch.GetTimestamp();
+        try { await game.AdvanceObservationAsync(ct).ConfigureAwait(false); }
+        finally { if (requested) diagnostics.Prepare(Stopwatch.GetElapsedTime(started).TotalMilliseconds); }
+    }
     public void CheckDefeated(CancellationToken ct) => game.CheckDefeated(ct);
     public bool HasPendingSkill(CombatFlowAction action) => game.HasPendingSkill(action);
     public void CancelObservation(CombatFlowAction action) => game.CancelObservation(action);

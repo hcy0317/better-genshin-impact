@@ -8,6 +8,7 @@ using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.View.Drawable;
 using OpenCvSharp;
 using Fischless.GameCapture;
+using BetterGenshinImpact.GameTask.Common;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -495,8 +496,8 @@ public static class AvatarRecognition
                     var capturedAtUtc = capture.FrameStamp.CapturedAt.UtcDateTime;
                     lastSource = capture.FrameStamp;
                     capturedFrames++;
-                    int preAimX = (int)(capture.Width * 0.5);
-                    int preAimY = (int)(capture.Height * (480.0 / 1080.0));
+                    // 只消费宿主按事件登记的有界取证请求，复用本次已有帧；正常帧不复制/落盘。
+                    DiagnosticEvidenceScope.Current?.CaptureRequestedFrames(battleId.ToString("N"), capture);
 
                     // 不在主界面时跳过本轮（避免菜单/地图/对话等界面下误操作）
                     if (!Bv.IsCombatHud(capture))
@@ -517,59 +518,31 @@ public static class AvatarRecognition
                     var control = CombatMotionReader.ReadControl(capture, combatHud: true, OcrFactory.Paddle);
                     lastControl = control;
                     var motion = control.Motion;
-                    // 1. 血条识别：检测红色血条并过滤左侧 UI 区域 (x > 200)
-                    var bars = FindBloodBars(capture);
-                    var valid = bars.Where(b => b.x > (int)(200 * AssetScale)).ToList();
-
+                    // 被动观察和寻敌使用同一几何分类；普通血条不能仅因连续静止就变成顶部固定血条。
+                    var target = ReadPassiveTarget(capture);
                     var drawList = new List<RectDrawable>();
-
-                    bool hasLegendaryBar = valid.Any(b => IsLegendaryBar(b.x, b.y));
-
                     // 2. 血条追踪：持续感知只发布观察，不直接发送战斗输入。
-                    if (hasLegendaryBar)
+                    if (target is { Cue: SeekCueKind.FixedTopHealth, Visual: { } fixedVisual })
                     {
                         indicatorCandidate = null;
-                        var bar = valid.First(b => IsLegendaryBar(b.x, b.y));
-                        var visual = new EnemySeekVisual(bar.x, bar.y, bar.width, bar.height, bar.width * bar.height);
-                        RecordPublication(PublishPassiveObservation(false, false, visual, capture.Width, capture.Height,
-                            capturedAtUtc, observationEpoch, new EnemySeekDecision(
-                                AutoFightSeekAction.ApproachFixedTopHealthTarget, EnemyIndicatorDirection.None,
-                                visual, 1, SeekCueKind.FixedTopHealth), capture.FrameStamp, battleId, motion: motion, control: control));
+                        RecordPublication(PublishPassiveObservation(false, false, fixedVisual, capture.Width, capture.Height,
+                            capturedAtUtc, observationEpoch, target, capture.FrameStamp, battleId, motion: motion, control: control));
                     }
-                    else if (valid.Count > 0)
+                    else if (target is { Cue: SeekCueKind.HealthBar, Visual: { } nearest })
                     {
                         indicatorCandidate = null;
-                        var nearest = valid.OrderBy(b =>
-                            Math.Abs((b.x + b.width / 2) - preAimX) +
-                            Math.Abs((b.y + b.height / 2) - preAimY)).First();
                         RecordPublication(PublishPassiveObservation(
                             hasNormalHealthBar: true,
                             hasDamageCue: false,
-                            new EnemySeekVisual(
-                                nearest.x,
-                                nearest.y,
-                                nearest.width,
-                                nearest.height,
-                                nearest.width * nearest.height),
+                            nearest,
                             capture.Width,
                             capture.Height,
                             capturedAtUtc,
                             observationEpoch, source: capture.FrameStamp, battleId: battleId, motion: motion, control: control));
 
-                        // 叠加层：最近血条绿色粗框，其余红色细框
                         if (drawResults)
                         {
-                            foreach (var b in valid)
-                            {
-                                var rect = new OpenCvSharp.Rect(b.x, b.y, b.width, b.height);
-                                bool isTarget = b.x == nearest.x && b.y == nearest.y &&
-                                                b.width == nearest.width && b.height == nearest.height;
-                                drawList.Add(capture.ToRectDrawable(rect,
-                                    isTarget ? "target" : "blood",
-                                    isTarget
-                                        ? _targetPen
-                                        : null));
-                            }
+                            drawList.Add(capture.ToRectDrawable(new Rect(nearest.X, nearest.Y, nearest.Width, nearest.Height), "target", _targetPen));
                         }
                     }
                     else
@@ -604,9 +577,7 @@ public static class AvatarRecognition
                         if (!damageResult.HasValue)
                         {
                             // 箭头静止复核在后台跨帧完成，不让策略等待 120ms。
-                            var indicator = AutoFightSeek.RecognizeSeekDecision(capture,
-                                new Scalar(255, 90, 90), null, out _, out _,
-                                indicatorOnly: true, saveDiagnostics: false);
+                            var indicator = target;
                             EnemySeekDecision? confirmedIndicator = null;
                             if (indicator.Action == AutoFightSeekAction.Approach && indicator.Visual is { } candidate)
                             {
@@ -662,6 +633,10 @@ public static class AvatarRecognition
             VisionContext.Instance().DrawContent.RemoveRect("ContinuousTargeting");
         }
     }
+
+    internal static EnemySeekDecision ReadPassiveTarget(ImageRegion frame) => frame.ReadOnce(
+        (typeof(AvatarRecognition), "target"), () => AutoFightSeek.RecognizeSeekDecision(frame,
+            new Scalar(255, 90, 90), null, out _, out _, saveDiagnostics: false));
 
     private static bool PublishPassiveObservation(
         bool hasNormalHealthBar,

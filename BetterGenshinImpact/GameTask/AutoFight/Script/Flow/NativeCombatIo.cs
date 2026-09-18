@@ -3,8 +3,13 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BetterGenshinImpact.Core.Recognition;
+using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Simulator;
+using BetterGenshinImpact.Core.Simulator.Extensions;
+using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
+using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -16,7 +21,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
 {
     private static readonly CombatInputCoordinator Coordinator = new();
+    private bool _visionRequested, _burstRequested;
+    private int _burstWidth, _burstHeight;
+    public bool IsVisionPrepared => _visionRequested && OcrFactory.IsPaddlePrepared &&
+        (!_burstRequested || Avatar.IsBurstVisionPrepared(_burstWidth, _burstHeight));
     public TimeProvider Clock => TimeProvider.System;
+    public double DpiScale => TaskContext.Instance().DpiScale;
     public ILogger Logger => TaskControl.Logger;
     public ICombatHostInputDevice ControlDevice { get; } = new NativeCombatHostInputDevice();
     public CombatInputCoordinator InputCoordinator => Coordinator;
@@ -26,9 +36,22 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         ?? throw new InvalidOperationException("当前队伍缺少角色：" + actor.Name);
 
     public Task PrepareVisionAsync(CancellationToken ct) => Avatar.PrepareCombatVisionAsync(ct);
+    public Task PrepareCommonVisionAsync(CancellationToken ct) => OcrFactory.PreparePaddleAsync(ct);
     public Task PrepareVisionAsync(bool needsBurst, CancellationToken ct) => Avatar.PrepareCombatVisionAsync(ct, needsBurst);
-    public Task PrepareVisionAsync(bool needsBurst, ImageRegion frame, CancellationToken ct) =>
-        Avatar.PrepareCombatVisionAsync(ct, needsBurst, frame);
+    public Task PrepareVisionAsync(bool needsBurst, ImageRegion frame, CancellationToken ct)
+    {
+        _visionRequested = true;
+        _burstRequested = needsBurst;
+        if (needsBurst) RequireBurstSize(frame);
+        // 调用方持有样本至Task完成。实际首推理和预测锁等待只在受管准备工作里执行。
+        return Task.Run(() => Avatar.PrepareCombatVisionAsync(ct, needsBurst, frame), CancellationToken.None);
+    }
+    private void RequireBurstSize(ImageRegion frame)
+    {
+        var rect = AutoFightAssets.Get(frame).QRectForClassify;
+        _burstWidth = rect.Width;
+        _burstHeight = rect.Height;
+    }
     public IDisposable BeginExclusive(bool allowPassiveObservation) => AvatarRecognition.BeginExclusiveOperation(allowPassiveObservation: allowPassiveObservation);
     public ImageRegion? Capture()
     {
@@ -59,8 +82,10 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     public bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown) => AvatarFor(actor).IsSkillReadyFromCurrentFrame(frame, cooldown);
     public BurstObservation ReadBurst(ImageRegion frame, bool active)
     {
+        RequireBurstSize(frame);
         var started = Clock.GetTimestamp();
         try { return Avatar.ObserveBurst(frame, active); }
+        catch (RecognitionNotReadyException) { return default; }
         finally
         {
             var elapsed = Clock.GetElapsedTime(started).TotalMilliseconds;
@@ -104,10 +129,35 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken ct)
         => SubmitCore(command, request, beforeFirstNative, ct, () =>
         {
-            if (command.Method == Method.Skill) AvatarFor(actor).SendSkillInput(command.HasFlag("hold"));
+            if (command.NativeSkillSequence is { } sequence) SendSkillSequence(actor, command, sequence, ct);
+            else if (command.Method == Method.Skill) AvatarFor(actor).SendSkillInput(command.HasFlag("hold"));
             else if (command.Method == Method.Burst) AvatarFor(actor).SendBurstInput();
             else command.Execute(AvatarFor(actor));
         });
+
+    private void SendSkillSequence(NativeCombatActor actor, CombatCommand command, IReadOnlyList<CombatCommand> sequence, CancellationToken ct)
+    {
+        static bool E(CombatCommand item) => item.Args?.FirstOrDefault() is "E" or "VK_E";
+        if (command.Method != Method.Skill || sequence.Count < 2 || sequence[0].Method != Method.KeyDown || !E(sequence[0]) ||
+            sequence[^1].Method != Method.KeyUp || !E(sequence[^1]) ||
+            sequence.Any(item => item.Name != actor.Name || item.NativeSkillSequence != null) ||
+            sequence.Skip(1).Take(sequence.Count - 2).Any(item => item.Method != Method.Wait && item.Method != Method.MoveBy))
+            throw new InvalidOperationException("采集技能的原生序列边界无效，禁止执行");
+        try
+        {
+            foreach (var primitive in sequence)
+            {
+                ct.ThrowIfCancellationRequested();
+                CombatActionScope.Current?.Check();
+                if (primitive.Method == Method.KeyDown) Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
+                else if (primitive.Method == Method.KeyUp) Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
+                else primitive.Execute(AvatarFor(actor));
+                ct.ThrowIfCancellationRequested();
+                command.NativeSkillObserver?.Invoke();
+            }
+        }
+        finally { ReleaseInput(); }
+    }
 
     public CombatBattleHostInputResult SubmitPathingInput(CombatCommand command, CombatNativeInputRequest request,
         Action beforeFirstNative, CancellationToken ct, CannonUiObservation scene = default) =>

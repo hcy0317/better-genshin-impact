@@ -18,6 +18,7 @@ public class OcrFactory : IDisposable, IAsyncDisposable
 
     public static IOcrService Paddle => App.ServiceProvider.GetRequiredService<OcrFactory>().PaddleOcr;
     internal IOcrService PaddleOcr => _lifetime.Service;
+    internal static bool IsPaddlePrepared => App.ServiceProvider.GetRequiredService<OcrFactory>()._lifetime.State == OcrServiceState.Ready;
 
     private readonly OcrServiceLifetime _lifetime;
     private readonly ILogger<BgiOnnxFactory> _logger;

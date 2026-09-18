@@ -14,83 +14,37 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 /// </summary>
 public class NahidaCollectHandler : IActionHandler
 {
-    private DateTime lastETime = DateTime.MinValue;
+    private readonly BetterGenshinImpact.GameTask.AutoFight.Script.Flow.INativeCombatIo? _nativeIo;
+    public NahidaCollectHandler() { }
+    internal NahidaCollectHandler(BetterGenshinImpact.GameTask.AutoFight.Script.Flow.INativeCombatIo nativeIo) => _nativeIo = nativeIo;
 
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {
-        Logger.LogInformation("执行 {Nhd} 长按E转圈拾取", "纳西妲");
-
-        var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
-        if (combatScenes == null)
+        var io = await NativeActionHandler.ResolveAsync(_nativeIo, ct);
+        const string actor = "纳西妲";
+        if (!System.Linq.Enumerable.Any(io.Actors, item => item.Name == actor))
+            throw new InvalidOperationException("队伍中没有纳西妲，采集未执行");
+        var commands = new System.Collections.Generic.List<BetterGenshinImpact.GameTask.AutoFight.Script.CombatCommand>();
+        void Add(string command) => commands.Add(new(actor, command));
+        var x = (int)(400 * io.DpiScale);
+        var y = (int)(-30 * io.DpiScale);
+        Add("moveby(0,10000)");
+        Add("wait(0.2)");
+        Add("keydown(E)");
+        Add("wait(0.2)");
+        for (var index = 0; index < 15; index++) { Add($"moveby({x},500)"); Add("wait(0.03)"); }
+        for (var remaining = 59; remaining >= 0; remaining--)
         {
-            Logger.LogError("队伍识别未初始化成功！");
-            return;
+            if (remaining == 40) y -= (int)(20 * io.DpiScale);
+            Add($"moveby({x},{y})");
+            Add("wait(0.03)");
         }
-
-        // 切人
-        var nahida = combatScenes.SelectAvatar("纳西妲");
-        if (nahida is not null)
-        {
-            nahida.TrySwitch();
-        }
-        else
-        {
-            Logger.LogError("队伍中未找到纳西妲角色！");
-            return;
-        }
-
-        await nahida.WaitSkillCd(ct);
-
-        var dpi = TaskContext.Instance().DpiScale;
-
-        int x = (int)(400 * dpi), y = (int)(-30 * dpi);
-        int i = 60;
-        // 视角拉到最下面
-        Simulation.SendInput.Mouse.MoveMouseBy(0, 10000);
-        await Delay(200, ct);
-
-        // 按住E技能 无死角扫码
-        Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
-        try
-        {
-            await Delay(200, ct);
-
-            // 先地面来一圈
-            for (int j = 0; j < 15; j++)
-            {
-                Simulation.SendInput.Mouse.MoveMouseBy(x, 500);
-                await Delay(30, ct);
-            }
-
-            // 然后抬斜向转圈
-            while (!ct.IsCancellationRequested && i > 0)
-            {
-                i--;
-                if (i == 40)
-                {
-                    y -= (int)(20 * dpi);
-                }
-
-                Simulation.SendInput.Mouse.MoveMouseBy(x, y);
-                await Delay(30, ct);
-            }
-        }
-        finally
-        {
-            // 就算被终止也要让按键弹回
-            Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
-            // 更新纳西妲CD
-            if (!ct.IsCancellationRequested)
-            {
-                await Delay(200, ct);
-                var cd = nahida.AfterUseSkill();
-                Logger.LogInformation("{Nhd} 长按E转圈,cd:{Cd}", "纳西妲", Math.Round(cd, 2));
-            }
-        }
-
-        await Delay(800, ct);
-        // 恢复视角
-        Simulation.SendInput.Mouse.MiddleButtonClick();
-        await Delay(1000, ct);
+        Add("keyup(E)");
+        Add("wait(0.2)");
+        Add("wait(0.8)");
+        Add("click(middle)");
+        Add("wait(1)");
+        // 原扫描轨迹作为一个E的物理输入，仍由统一协议在新帧CD上确认；没有手工成功记账。
+        await NativeActionHandler.ExecuteAsync(io, NativeActionHandler.WithConfirmedSkill(actor, commands, hold: true), ct);
     }
 }

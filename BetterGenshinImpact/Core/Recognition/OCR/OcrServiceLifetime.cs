@@ -15,6 +15,7 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
     private sealed record BorrowScope(OcrServiceLifetime Owner, BorrowScope? Parent);
     private static readonly AsyncLocal<BorrowScope?> CurrentBorrow = new();
     private readonly object _gate = new();
+    private readonly object _recognitionGate = new();
     private readonly Func<IOcrService> _create;
     private readonly Action<OcrLifecycleObservation>? _observe;
     private Task<IOcrService>? _initialization;
@@ -50,6 +51,7 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
             var generation = ++_generation;
             _initialization = Task.Run(() =>
             {
+                using var preparation = new RecognitionReadinessScope(nonBlocking: false);
                 var started = Stopwatch.GetTimestamp();
                 Observe(generation, OcrServiceState.Preparing, started);
                 try
@@ -92,23 +94,44 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
 
     private T Use<T>(Func<IOcrService, T> recognize)
     {
-        var initialization = GetInitialization();
-        var instance = initialization.GetAwaiter().GetResult();
-        lock (_gate)
+        Task<IOcrService> initialization;
+        if (RecognitionReadinessScope.IsNonBlocking)
         {
-            CheckAdmission();
-            if (!ReferenceEquals(_initialization, initialization) || !ReferenceEquals(instance, _instance))
-                throw new InvalidOperationException("OCR实例已经退役");
-            _borrowers++;
+            lock (_gate)
+            {
+                if (_closed || _retiring || _initialization?.IsCompletedSuccessfully != true)
+                    throw new RecognitionNotReadyException("OCR模型未就绪，当前观察保持未知");
+                initialization = _initialization;
+            }
         }
-        var previous = CurrentBorrow.Value;
-        CurrentBorrow.Value = new(this, previous);
-        try { return recognize(instance); }
-        finally
+        else initialization = GetInitialization();
+        var instance = initialization.GetAwaiter().GetResult(); // 实时分支只可能读取已完成的Task。
+        var entered = false;
+        try
         {
-            CurrentBorrow.Value = previous;
-            lock (_gate) if (--_borrowers == 0) _drained?.TrySetResult();
+            if (RecognitionReadinessScope.IsNonBlocking)
+            {
+                if (!System.Threading.Monitor.TryEnter(_recognitionGate)) throw new RecognitionNotReadyException("OCR正在被借用，当前观察不等待预测锁");
+                entered = true;
+            }
+            else System.Threading.Monitor.Enter(_recognitionGate, ref entered);
+            lock (_gate)
+            {
+                CheckAdmission();
+                if (!ReferenceEquals(_initialization, initialization) || !ReferenceEquals(instance, _instance))
+                    throw new InvalidOperationException("OCR实例已经退役");
+                _borrowers++;
+            }
+            var previous = CurrentBorrow.Value;
+            CurrentBorrow.Value = new(this, previous);
+            try { return recognize(instance); }
+            finally
+            {
+                CurrentBorrow.Value = previous;
+                lock (_gate) if (--_borrowers == 0) _drained?.TrySetResult();
+            }
         }
+        finally { if (entered) System.Threading.Monitor.Exit(_recognitionGate); }
     }
 
     internal Task UnloadAsync() => RetireAsync(close: false);

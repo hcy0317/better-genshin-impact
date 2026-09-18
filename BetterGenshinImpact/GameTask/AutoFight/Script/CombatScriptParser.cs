@@ -71,9 +71,14 @@ public partial class CombatScriptParser
             located.Data["CombatSourceLocated"] = true;
             throw located;
         }
-        combatScript.Path = path;
+        combatScript.Path = Path.GetFullPath(path);
         combatScript.Name = Path.GetFileNameWithoutExtension(path);
-        foreach (var command in combatScript.CombatCommands) command.SourceFile = path;
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(script)));
+        foreach (var command in combatScript.CombatCommands)
+        {
+            command.SourceFile = combatScript.Path;
+            command.SourceTextSha256 = hash;
+        }
         return combatScript;
     }
 
