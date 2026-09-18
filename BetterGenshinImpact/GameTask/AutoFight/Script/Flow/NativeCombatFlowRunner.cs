@@ -535,6 +535,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private AvatarSelectionProtocol.Continuation<ImageRegion>? _selection;
         private AvatarActiveCheckContext? _selectionContext;
         private CombatFlowAction? _selectionAction;
+        private CombatFlowAction? _readinessAction;
         private AvatarSelectionProtocol.Result<ImageRegion>? _selectionResult;
         private bool _selectionTerminal;
         private bool _selectionUnconfirmedCaptured, _selectionDeadlineCaptured;
@@ -779,6 +780,25 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
         public void CancelObservation(CombatFlowAction action)
         {
+            if (ReferenceEquals(_readinessAction, action))
+            {
+                _readinessAction = null;
+                if (action.RemainingBudget <= 0)
+                {
+                    // 调度可能直接跨过最后一次观察；在原命令收束处记录，不再采图或识别。
+                    try
+                    {
+                        var request = "skill-readiness:" + action.CommandId;
+                        var detail = $"battle={action.BattleId} command={action.CommandId} phase=deadline reason={action.DiagnosticReason} remaining={action.RemainingBudget:F3}";
+                        Logger.LogDebug("SKILL_READINESS_END {Detail}", detail);
+                        if (_capture != null && _evidence != null)
+                            _evidence.TryCapture(_capture, request, "deadline", "latest-existing-frame; " + detail, Logger);
+                        else Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} phase=deadline reason={Reason}",
+                            request, _capture == null ? "no-existing-frame" : "no-run-scope");
+                    }
+                    catch { /* 取证失败不得覆盖原动作结果。 */ }
+                }
+            }
             if (ReferenceEquals(_selectionAction, action))
             {
                 // 调度器可能先发现动作到期；不能绕过选角目标的未确认终态。
@@ -1254,10 +1274,15 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 !(_selection is { IsClosed: false } && _selectionActor == name && _selectionBattle == action.BattleId) &&
                 Observe("q-ready", [], name) is not true)
             {
-                action.DiagnosticReason = "Q 没有可靠的当前就绪证据";
-                if (command.LegacyOutcomePolicy && !command.HasFlag("required") &&
-                    (Observe("q-energy-low", [], name) is true || Observe("q-cd", [], name) is true)) return CombatFlowResult.Skipped;
-                return CombatFlowResult.Deferred;
+                _observations.TryGetValue(("q-energy-low", name), out var lowEnergy);
+                _observations.TryGetValue(("q-cd", name), out var cooling);
+                if (lowEnergy is true || cooling is true)
+                {
+                    action.DiagnosticReason = $"skill-readiness:known-unavailable burstCooling={cooling ?? "unknown"} energyLow={lowEnergy ?? "unknown"}";
+                    if (command.LegacyOutcomePolicy && !command.HasFlag("required")) return CombatFlowResult.Skipped;
+                    return CombatFlowResult.Deferred;
+                }
+                // 未知不能在共用准入之前退出；先核实当前角色，再按原动作期限等待。
             }
             if (!hasUnresolved && command.Method == Method.Skill && command.Args?.Contains("fast") == true
                 && io.TryGetKnownSkillCooldown(name, out var cd) && cd > 0)
@@ -1385,19 +1410,47 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 if (command.Method == Method.Skill || command.Method == Method.Burst)
                 {
                     var ready = Observe(command.Method == Method.Skill ? "e-ready" : "q-ready", [], name);
-                    if (ready is not true || _capture == null || ReadActive(_capture) != avatar.Index)
+                    var activeIndex = _capture == null ? 0 : ReadActive(_capture);
+                    if (ready is not true || _capture == null || activeIndex != avatar.Index)
                     {
-                        if (command.LegacyOutcomePolicy && command.Method == Method.Skill && command.HasFlag("fast") && ready is false)
+                        // 只读本步缓存，不为日志或分类再做OCR/模型推理。E图标未就绪不等于正CD。
+                        _observations.TryGetValue(("e-cd", name), out var skillCooldown);
+                        _observations.TryGetValue(("q-cd", name), out var burstCooling);
+                        _observations.TryGetValue(("q-energy-low", name), out var energyLow);
+                        var knownUnavailable = command.Method == Method.Skill
+                            ? skillCooldown is double positive && positive > 0
+                            : burstCooling is true || energyLow is true;
+                        var gate = activeIndex != avatar.Index ? "actor-unconfirmed" :
+                            knownUnavailable ? "known-unavailable" : "unknown-readiness";
+                        action.DiagnosticReason = "skill-readiness:" + gate;
+                        var gateSource = _capture?.FrameStamp ?? default;
+                        var detail = $"gate={gate} ready={ready ?? "unknown"} active={activeIndex} target={avatar.Index} " +
+                            $"cooldown={skillCooldown ?? "unknown"} burstCooling={burstCooling ?? "unknown"} energyLow={energyLow ?? "unknown"} " +
+                            $"sourceKnown={gateSource.IsKnown} source={gateSource.SessionId}/{gateSource.Sequence} " +
+                            $"sourceAgeMs={(gateSource.IsKnown && gateSource.TimestampFrequency == io.Clock.TimestampFrequency ? io.Clock.GetElapsedTime(gateSource.CapturedTimestamp).TotalMilliseconds.ToString("F1") : "unknown")} " +
+                            $"evidenceFailure={_captureFailureReason ?? "none"} remaining={action.RemainingBudget:F3}";
+                        action.Trace("skill-readiness", detail);
+                        if (_capture != null)
+                            _evidence?.TryCapture(_capture, "skill-readiness:" + action.CommandId,
+                                action.RemainingBudget <= .2 ? "deadline" : "unready", detail, Logger);
+                        if (command.LegacyOutcomePolicy && command.Method == Method.Skill && command.HasFlag("fast") && knownUnavailable)
                             return CombatFlowResult.Skipped;
                         if (command.Method == Method.Skill && !command.HasFlag("fast") &&
                             (command.HasFlag("wait") || Purpose == CombatScriptExecutionPurpose.Pathing && command.LegacyOutcomePolicy))
                         {
                             action.DiagnosticReason = "E尚未取得就绪证据，保留路径/显式等待的原命令与截止时间，下帧复核；不重放已完成位移";
+                            _readinessAction = action;
                             return CombatFlowResult.AwaitingObservation;
                         }
-                        action.DiagnosticReason = "当前新帧未确认目标角色及技能就绪";
+                        if (!knownUnavailable || activeIndex != avatar.Index)
+                        {
+                            _readinessAction = action;
+                            await YieldAsync(ct);
+                            return CombatFlowResult.AwaitingObservation;
+                        }
                         return CombatFlowResult.Deferred;
                     }
+                    _readinessAction = null;
                     var source = _capture.FrameStamp;
                     Guid? submittingAttempt = null;
                     var sent = CombatSkillInput.Send(_attempts, action, name, source,
@@ -1636,6 +1689,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
+            _readinessAction = null;
             foreach (var attempt in _evidenceAttempts) _evidence?.ForgetBefore("skill", attempt.ToString("N"));
             _evidenceAttempts.Clear();
             try
