@@ -9,8 +9,19 @@ internal sealed class SeekRecognitionDiagnostics
     public int RawComponents { get; internal set; }
     public int Accepted { get; internal set; }
     public int HealthWidthRejected { get; internal set; }
+    public int DarkTrackChecked { get; private set; }
+    public int DarkTrackAccepted { get; private set; }
+    public List<string> DarkTrackSamples { get; } = new();
     public Dictionary<string, int> Rejections { get; } = new();
     public List<SeekRejectedSample> NarrowBarSamples { get; } = new();
+
+    internal void RecordDarkTrack(EnemySeekVisual red, int trackWidth, string reason)
+    {
+        DarkTrackChecked++;
+        if (reason == "accepted") DarkTrackAccepted++;
+        if (DarkTrackSamples.Count < 8)
+            DarkTrackSamples.Add($"{red.X},{red.Y},red={red.Width},track={trackWidth}:{reason}");
+    }
 
     internal void Record(EnemySeekVisual visual, string? healthFailure, string indicatorResult,
         int minimumWidth, int imageWidth, int imageHeight, bool accepted)
@@ -27,6 +38,7 @@ internal sealed class SeekRecognitionDiagnostics
 
     internal string ToCompactString() =>
         $"raw={RawComponents} accepted={Accepted} healthWidthRejected={HealthWidthRejected} " +
+        $"darkTrackChecked={DarkTrackChecked} darkTrackAccepted={DarkTrackAccepted} darkTrack=[{string.Join(";", DarkTrackSamples)}] " +
         $"reject=[{string.Join(",", Rejections.Select(pair => $"{pair.Key}:{pair.Value}"))}] " +
         $"narrow=[{string.Join(";", NarrowBarSamples.Select(sample => $"{sample.X},{sample.Y},{sample.Width}x{sample.Height},minW={sample.MinimumWidth}"))}] narrowFeature=not-evaluated";
 }

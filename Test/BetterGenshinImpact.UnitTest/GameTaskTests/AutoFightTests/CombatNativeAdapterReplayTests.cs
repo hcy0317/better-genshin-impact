@@ -826,6 +826,90 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         else Assert.InRange(runner.Context.Now, 8, 9.2);
     }
 
+    [Theory]
+    [InlineData(1d, true, "e")]
+    [InlineData(99d, false, "e")]
+    [InlineData(1d, true, "e(fast)")]
+    [InlineData(99d, false, "e(fast)")]
+    public async Task UnknownCombatSkillReadinessKeepsTheOriginalCommandWithoutReplayingEarlierInput(double unreadyUntil, bool expectedSuccess, string skill)
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new SourceIdentityLogger();
+        var script = CombatScriptParser.ParseContext($"钟离 attack(0.1),{skill},attack(0.1)");
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("钟离 e"))
+        { SkillUnreadyUntil = unreadyUntil, Logger = logger };
+        io.SetFrontActor("钟离");
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false);
+        var result = await runner.RunRoundAsync(default);
+        Assert.Equal(expectedSuccess ? CombatFlowResult.Succeeded : CombatFlowResult.Failed, result);
+        Assert.Equal(expectedSuccess ? 1 : 0, io.Inputs.Count);
+        Assert.Equal(expectedSuccess ? 2 : 1, io.Primitives.Count);
+        if (expectedSuccess) Assert.InRange(io.Inputs[0].At, unreadyUntil, 8);
+        else Assert.InRange(runner.Context.Now, 8, 9.5);
+        runner.Dispose();
+        Assert.Contains(logger.Messages, message => message.Contains("skill-readiness") && message.Contains("gate=unknown-readiness") &&
+            message.Contains("active=1") && message.Contains("cooldown=unknown"));
+    }
+
+    [Theory]
+    [InlineData(1d, true)]
+    [InlineData(99d, false)]
+    public async Task UnknownOptionalEnhancedBurstReadinessReachesTheSharedBoundedObservationGate(double unknownUntil, bool casts)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("那维莱特 q");
+        using var io = new PhysicalReplay(clock, true, 50, program) { BurstUnknownUntil = unknownUntil };
+        io.SetFrontActor("那维莱特");
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        Assert.Equal(CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
+        if (casts)
+        {
+            Assert.Equal(Method.Burst, Assert.Single(io.Inputs).Skill);
+            Assert.InRange(io.Inputs[0].At, 1, 8);
+        }
+        else
+        {
+            Assert.Empty(io.Inputs); // 增强脚本的optional跳过不等于施放完成。
+            Assert.InRange(runner.Context.Now, 8, 9.5);
+        }
+    }
+
+    [Fact]
+    public async Task SkillReadinessDeadlineIsReportedEvenWhenSchedulingSkipsTheLastObservationWindow()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new SourceIdentityLogger();
+        var script = CombatScriptParser.ParseContext("钟离 e");
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("钟离 e"))
+        { SkillUnreadyUntil = 99, Logger = logger };
+        io.SetFrontActor("钟离");
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false);
+        for (var i = 0; i < 100 && runner.Context.Now < 1; i++) await runner.StepAsync(default);
+        await io.DelayAsync(9000, default);
+        Assert.Equal(CombatFlowResult.Failed, await runner.RunRoundAsync(default));
+        Assert.Empty(io.Inputs);
+        Assert.Contains(logger.Messages, message => message.Contains("SKILL_READINESS_END") && message.Contains("phase=deadline"));
+        Assert.Contains(logger.Messages, message => message.Contains("EVIDENCE_CAPTURE_MISSING") &&
+            message.Contains("phase=deadline") && message.Contains("no-existing-frame"));
+    }
+
+    [Fact]
+    public async Task CancellingUnknownCombatReadinessDoesNotSubmitTheSkillOrFollowingAction()
+    {
+        var clock = new FakeTimeProvider();
+        using var cancellation = new CancellationTokenSource();
+        var script = CombatScriptParser.ParseContext("钟离 attack(0.1),e,attack(0.1)");
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("钟离 e")) { SkillUnreadyUntil = 99 };
+        io.SetFrontActor("钟离");
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false);
+        io.AfterCapture = () => { if (runner.Context.Now >= 1) cancellation.Cancel(); };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runner.RunRoundAsync(cancellation.Token));
+        Assert.Single(io.Primitives);
+        Assert.Empty(io.Inputs);
+        Assert.False(io.HoldingInput);
+        Assert.False(runner.Context.IsOpen);
+    }
+
     [Fact]
     public async Task PathingFastSkillStillSkipsKnownCooldownWithoutWaitingOrClaimingACast()
     {
@@ -2182,6 +2266,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
         public bool RepeatInteractionFrame { get; init; }
         public double SkillUnreadyUntil { get; init; }
+        public double BurstUnknownUntil { get; init; }
         public double DelayLatenessMs { get; init; }
         private bool _interactionUi;
         public int RecoveryPulsesRequired { get; init; }
@@ -2315,6 +2400,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public BurstObservation ReadBurst(ImageRegion frame, bool active)
         {
             var sample = Frame(frame);
+            if (sample.At < BurstUnknownUntil) return default;
             var actor = Actors.FirstOrDefault(item => item.Name == sample.Actor);
             if (actor?.Name == "香菱" && !EnergyFull(actor, sample.At) && !Cooling(actor, Method.Burst, sample.At))
                 FirstRockDemandAt = Math.Min(FirstRockDemandAt, sample.At);

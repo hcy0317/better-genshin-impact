@@ -208,7 +208,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     await flow.StepAsync(ct);
                     return _result;
                 }
-                return await AdvancePartyAsync(ct);
+                return await AdvancePartyAsync(observation, fresh, ct);
             }
 
             if (!fresh)
@@ -498,7 +498,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         now >= _motionSettlesAt && (_motionSettlesAt == 0 ||
             io.Clock.GetElapsedTime(_started, observation.Source.CapturedTimestamp).TotalSeconds >= _motionSettlesAt);
 
-    private async ValueTask<CombatBattleHostResult> AdvancePartyAsync(CancellationToken ct)
+    private async ValueTask<CombatBattleHostResult> AdvancePartyAsync(CombatBattleObservation observation, bool fresh, CancellationToken ct)
     {
         var probeDelay = Math.Clamp(options.FinishProbeDelayMilliseconds, 0, 9000) / 1000d;
         // 从第一次进入BeforeParty（包含截图）起计时，未发送不能重开预算。
@@ -565,6 +565,18 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 else io.ReleaseInput(); // 没有本次打开UI的证据，不盲发关闭键。
                 _partyDeadline = 0;
                 if (_endConfirmed) return _result = CombatBattleHostResult.Completed;
+                // 已发探测先收束；只有新鲜的输入后目标及无编队栏样本允许恢复。
+                // 不能把关闭UI之前的旧目标用于恢复，也不能重置原搜索/进展预算。
+                if (!_partyEvidence && fresh && observation.Target != null &&
+                    _finish?.Fence?.Accepts(observation.Source) == true &&
+                    !_tracePartySample.BarVisible &&
+                    _tracePartySample.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
+                    _finish.Fence.Value.Accepts(_tracePartySample.Source) && TryResumeStrategy())
+                {
+                    _finishRequested = false;
+                    Reason = "target-returned-after-party-probe";
+                    return _result;
+                }
                 if (_finalProbe) return Stop("bounded-search-finish-unconfirmed");
                 _phase = Phase.Searching;
                 Reason = "searching-after-no-bar";

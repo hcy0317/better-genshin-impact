@@ -8,6 +8,106 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceScopeTests
 {
     [Fact]
+    public async Task DedupeMetadataEvictionDoesNotLimitTotalCaptures()
+    {
+        var saved = System.Threading.Channels.Channel.CreateUnbounded<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) =>
+        { saved.Writer.TryWrite(item); return Task.CompletedTask; });
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        var logger = new EvidenceLogger();
+        for (var i = 0; i <= 1024; i++)
+        {
+            Assert.True(scope.TryCapture(frame, "request-" + i, "terminal", "debug", logger));
+            await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.False(scope.TryCapture(frame, "request-1024", "terminal", "recent duplicate", logger));
+        Assert.True(scope.TryCapture(frame, "request-0", "terminal", "old metadata evicted", logger));
+        var last = await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(1026, last.Sequence);
+        await scope.DisposeAsync();
+        Assert.Contains(logger.Messages, message => message.Contains("imageLimit=unlimited") && message.Contains("byteLimit=unlimited"));
+    }
+
+    [Fact]
+    public async Task SlowDiskStillUsesABoundedQueueAndReportsPressureWithoutBlocking()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var images = new List<Mat>();
+        await using var scope = new DiagnosticEvidenceScope(async (_, image) =>
+        {
+            images.Add(image);
+            entered.TrySetResult();
+            await release.Task;
+        });
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        var logger = new EvidenceLogger();
+        try
+        {
+            Assert.True(scope.TryCapture(frame, "active", "first", "", logger));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            for (var i = 0; i < 4; i++) Assert.True(scope.TryCapture(frame, "queued-" + i, "first", "", logger));
+            var rejected = Task.Run(() => scope.TryCapture(frame, "overflow", "first", "", logger));
+            Assert.False(await rejected.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Contains(logger.Messages, message => message.Contains("writer-queue-full"));
+        }
+        finally { release.TrySetResult(); }
+        await scope.DisposeAsync();
+        Assert.Equal(5, images.Count);
+        Assert.All(images, image => Assert.True(image.IsDisposed));
+    }
+
+    [Fact]
+    public async Task DefaultScopeKeepsBeforeAndTerminalEvidenceAfter128MiB()
+    {
+        var saved = System.Threading.Channels.Channel.CreateUnbounded<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) =>
+        { saved.Writer.TryWrite(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 0; i < 24; i++)
+        {
+            frame.FrameStamp = source.Next();
+            Assert.True(scope.TryCapture(frame, "request-" + i, "first", "debug"), $"第{i + 1}张因旧字节配额被拒绝");
+            await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        frame.FrameStamp = source.Next();
+        Assert.True(scope.RememberBefore(frame, "skill", "late-skill", "before"));
+        scope.CaptureFault(frame, "skill", "late-skill", "unconfirmed", "after");
+        await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        var logger = new EvidenceLogger();
+        Assert.True(scope.RequestFrame("battle", "late-host", "search-start", frame.FrameStamp, "search", logger));
+        frame.FrameStamp = source.Next();
+        scope.CaptureRequestedFrames("battle", frame);
+        await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(scope.RequestFrame("battle", "late-host", "terminal", frame.FrameStamp, "stop", logger));
+        var terminal = await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("terminal", terminal.Phase);
+        Assert.Equal(frame.FrameStamp, terminal.Source);
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("run-budget"));
+    }
+
+    [Fact]
+    public async Task DefaultScopeKeepsCapturingAfterSixteenRequests()
+    {
+        var saved = System.Threading.Channels.Channel.CreateUnbounded<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) =>
+        { saved.Writer.TryWrite(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 0; i < 24; i++)
+        {
+            frame.FrameStamp = source.Next();
+            Assert.True(scope.TryCapture(frame, "request-" + i, "terminal", "debug"), $"第{i + 1}张因累计配额被拒绝");
+            var written = await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(i + 1, written.Sequence);
+        }
+    }
+
+    [Fact]
     public async Task ARecoveredEpisodeCannotRetainNormalFramesOrSupplyATerminalImage()
     {
         var saved = new List<DiagnosticEvidence>();
@@ -162,7 +262,7 @@ public class DiagnosticEvidenceScopeTests
     }
 
     [Fact]
-    public async Task OneRequestCannotExhaustTheRunAndUnusedBeforeFramesAreNotPersisted()
+    public async Task DifferentPhasesAreNotLimitedAndUnusedBeforeFramesAreNotPersisted()
     {
         var saved = new List<DiagnosticEvidence>();
         await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
@@ -172,10 +272,30 @@ public class DiagnosticEvidenceScopeTests
         scope.RememberBefore(frame, "skill", "completed", "not a failure");
         scope.ForgetBefore("skill", "completed");
         for (var index = 0; index < 3; index++) Assert.True(scope.TryCapture(frame, "failed", index.ToString(), ""));
-        Assert.False(scope.TryCapture(frame, "failed", "fourth", ""));
+        Assert.True(scope.TryCapture(frame, "failed", "fourth", ""));
+        Assert.False(scope.TryCapture(frame, "failed", "fourth", "duplicate event"));
         await scope.DisposeAsync();
-        Assert.Equal(3, saved.Count);
+        Assert.Equal(4, saved.Count);
         Assert.DoesNotContain(saved, item => item.Request == "completed");
+    }
+
+    [Fact]
+    public async Task OneRequestMayCaptureMoreThanThreeRequestedPhases()
+    {
+        var saved = System.Threading.Channels.Channel.CreateUnbounded<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) =>
+        { saved.Writer.TryWrite(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        var logger = new EvidenceLogger();
+        for (var i = 0; i < 6; i++)
+        {
+            Assert.True(scope.RequestFrame("battle", "same-request", "phase-" + i, source.Next(), "", logger));
+            frame.FrameStamp = source.Next();
+            scope.CaptureRequestedFrames("battle", frame);
+            var written = await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal("phase-" + i, written.Phase);
+        }
     }
 
     [Fact]
