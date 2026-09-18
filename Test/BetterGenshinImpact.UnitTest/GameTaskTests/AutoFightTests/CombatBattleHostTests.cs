@@ -9,6 +9,71 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatBattleHostTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TargetReturningAfterPartyInputResumesStrategyWithoutRestartingSearch(bool finalProbe)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        CombatBattleObservation Target(CaptureFrameStamp stamp) => new(stamp, flow.Context.BattleId,
+            CombatObservationQuality.Available, new(AutoFightSeekAction.ApproachVisibleEnemy,
+                EnemyIndicatorDirection.None, new(189, 417, 65, 7, 430), 1, SeekCueKind.HealthBar), 1920, 1080);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        io.TargetFactory = Target;
+        await host.AdvanceAsync(flow, default); // 建立原有目标，不把重新出现当首次进展。
+        io.TargetFactory = null;
+        var expectedMenus = finalProbe ? 2 : 1;
+        for (var i = 0; i < 1500 && io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.OpenParty) < expectedMenus; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal(expectedMenus, io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.OpenParty));
+        var attacks = game.Inputs;
+        var cameras = host.CameraRequests;
+        io.TargetFactory = Target;
+        for (var i = 0; i < 100 && game.Inputs == attacks; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.True(game.Inputs > attacks);
+        Assert.Equal(cameras, host.CameraRequests);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.CloseParty);
+        Assert.Contains(io.Traces, trace => trace.Reason == "target-returned-after-party-probe");
+    }
+
+    [Theory]
+    [InlineData("stale")]
+    [InlineData("other-battle")]
+    [InlineData("other-session")]
+    [InlineData("pre-input")]
+    [InlineData("unknown-party")]
+    public async Task FinalPartyProbeCannotResumeFromUntrustedTargetOrMissingPartySample(string invalid)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 1500 && !(host.CameraRequests == 24 && host.State == "CloseParty"); i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("CloseParty", host.State);
+        var opened = io.Inputs.Last(x => x.Kind == CombatBattleHostInputKind.OpenParty);
+        var attacks = game.Inputs;
+        io.TargetFactory = stamp => new(invalid switch
+        {
+            "stale" => stamp with { CapturedTimestamp = stamp.CapturedTimestamp - clock.TimestampFrequency },
+            "other-session" => stamp with { SessionId = Guid.NewGuid() },
+            "pre-input" => opened.Source,
+            _ => stamp
+        }, invalid == "other-battle" ? Guid.NewGuid() : flow.Context.BattleId,
+            CombatObservationQuality.Available, new(AutoFightSeekAction.ApproachVisibleEnemy,
+                EnemyIndicatorDirection.None, new(189, 417, 65, 7, 430), 1, SeekCueKind.DirectionIndicator), 1920, 1080);
+        // 缺少可用编队负证据时，即使目标本身新鲜也不恢复。
+        if (invalid == "unknown-party") clock.Advance(TimeSpan.FromMilliseconds(151));
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, await host.AdvanceAsync(flow, default));
+        Assert.Equal(attacks, game.Inputs);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.CloseParty);
+    }
+
     [Fact]
     public async Task SearchFailureIncludesItsSourceBudgetAndTerminalEvidenceRequest()
     {
@@ -600,3 +665,4 @@ public class CombatBattleHostTests
         public void ReleaseInput() { PartyOpen = false; }
     }
 }
+
