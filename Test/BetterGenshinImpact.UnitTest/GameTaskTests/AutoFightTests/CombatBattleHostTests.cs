@@ -10,6 +10,54 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatBattleHostTests
 {
     [Fact]
+    public async Task RealProgressAfterAnExhaustedSearchDoesNotPoisonTheNextFinishProbe()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 1000 && !(host.CameraRequests == 24 && host.State == "BeforeParty"); i++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Equal(24, host.CameraRequests);
+        Assert.Equal("BeforeParty", host.State);
+        clock.Advance(TimeSpan.FromMilliseconds(400));
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                new(700, 400, 80, 30, 2400), 1, SeekCueKind.DamageNumber), 1920, 1080, 1);
+        Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Fighting", host.State);
+        io.TargetFactory = null;
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 100 && result == CombatBattleHostResult.Continue && host.State != "Searching"; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Continue, result);
+        Assert.Equal("Searching", host.State);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(100)]
+    public async Task SearchWaitsForTheCameraToSettleBeforeSendingAnotherMovement(int sourceLagMilliseconds)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        io.TargetFactory = stamp => new(stamp with
+        { CapturedTimestamp = stamp.CapturedTimestamp - clock.TimestampFrequency * sourceLagMilliseconds / 1000 },
+            flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080);
+        for (var i = 0; i < 100 && host.CameraRequests == 0; i++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Equal(1, host.CameraRequests);
+        var completedFirstMovement = clock.GetTimestamp();
+        for (var i = 0; i < 100 && host.CameraRequests == 1; i++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Equal(2, host.CameraRequests);
+        Assert.True(clock.GetElapsedTime(completedFirstMovement) >= TimeSpan.FromMilliseconds(350 + sourceLagMilliseconds),
+            $"第二次镜头输入仅间隔{clock.GetElapsedTime(completedFirstMovement).TotalMilliseconds}ms，未给场景稳定机会");
+    }
+
+    [Fact]
     public void UnknownPostureMayPermitOnlyObservedAlignedBoundedMovement()
     {
         var clock = new FakeTimeProvider();

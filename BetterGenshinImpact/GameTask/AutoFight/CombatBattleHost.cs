@@ -267,7 +267,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     {
         var target = observation.Target;
         var damage = target?.Cue == SeekCueKind.DamageNumber;
-        if (now < _motionSettlesAt)
+        if (!IsSettledObservation(observation, now))
         {
             _hadDamage = damage;
             _lastDamageFingerprint = observation.CueFingerprint;
@@ -318,12 +318,19 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         _scanPulses = _approachPulses = 0;
         _detachPulses = 0;
         _externalSearchExhausted = false;
+        _finalProbe = false; // 真实进展关闭旧搜索，不污染下一次探测。
         Reason = damage ? "new-damage-cue" : "health-progress";
     }
 
     private async ValueTask<CombatBattleHostResult> AdvanceSearchAsync(CombatBattleObservation observation, CancellationToken ct)
     {
         if (!options.SeekEnabled) return Stop("finish-not-confirmed");
+        // 输入后的新帧不一定是稳定画面，不能连续运动提前耗尽预算。
+        if (!IsSettledObservation(observation, Now))
+        {
+            await io.DelayAsync(50, ct);
+            return _result;
+        }
         if (observation.Target is { } target && target.Visual is { } visual)
         {
             if (target.Cue is SeekCueKind.FixedTopHealth or SeekCueKind.DamageNumber)
@@ -402,6 +409,10 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         Reason = "bounded-reengagement";
         return true;
     }
+
+    private bool IsSettledObservation(CombatBattleObservation observation, double now) =>
+        now >= _motionSettlesAt && (_motionSettlesAt == 0 ||
+            io.Clock.GetElapsedTime(_started, observation.Source.CapturedTimestamp).TotalSeconds >= _motionSettlesAt);
 
     private async ValueTask<CombatBattleHostResult> AdvancePartyAsync(CancellationToken ct)
     {
