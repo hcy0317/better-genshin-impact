@@ -17,6 +17,18 @@ internal readonly record struct CombatBattleObservation(CaptureFrameStamp Source
     public CombatControlObservation Control { get; init; }
 }
 internal enum CombatBattleHostResult { Continue, Completed, Unconfirmed }
+internal sealed record CombatBattleHostTrace(Guid BattleId, string Episode, string State, string Reason,
+    CombatBattleHostResult Result, CombatBattleObservation Observation, int ScanUsed, int ApproachUsed,
+    double ProgressAge, double SettleRemaining, bool FinalProbe, string? CapturePhase = null)
+{
+    public Guid? InputRequest { get; init; }
+    public CaptureFrameStamp InputSource { get; init; }
+    public CombatBattleHostInputStatus? InputStatus { get; init; }
+    public CombatBattleHostInputKind? InputKind { get; init; }
+    public PartySetupFinishObservation PartySample { get; init; }
+    public string? PartyReason { get; init; }
+    public string? ClosedEpisode { get; init; }
+}
 internal enum CombatBattleHostInputKind { Camera, Approach, OpenParty, CloseParty, Detach, Breakout }
 internal readonly record struct CombatBattleHostInput(CombatBattleHostInputKind Kind,
     int X = 0, int Y = 0, bool PartyEvidence = false)
@@ -46,6 +58,7 @@ internal interface ICombatBattleHostIo
     ValueTask<CombatBattleHostInputResult> SendAsync(CombatBattleHostInput input, CancellationToken ct);
     ValueTask DelayAsync(int milliseconds, CancellationToken ct);
     void ReleaseInput();
+    void Trace(CombatBattleHostTrace observation) { }
 }
 
 internal sealed record CombatBattleHostOptions
@@ -91,6 +104,18 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private long _inputRequestDeadline;
     private bool UsesPartyFinish => options.FinishDetectionEnabled && !options.ExternalCompletionAuthority;
     private CombatBattleHostResult _result;
+    private CombatBattleObservation _diagnosticObservation;
+    private string _evidenceEpisode = Guid.NewGuid().ToString("N");
+    private string? _closedEvidenceEpisode;
+    private bool _evidenceActive;
+    private bool _terminalTraced;
+    private double _nextTrace;
+    private Guid? _traceInputRequest;
+    private CaptureFrameStamp _traceInputSource;
+    private CombatBattleHostInputStatus? _traceInputStatus;
+    private CombatBattleHostInputKind? _traceInputKind;
+    private PartySetupFinishObservation _tracePartySample;
+    private string? _tracePartyReason;
     public string Reason { get; private set; } = "starting";
     public string State => _phase.ToString();
     public long CameraRequests { get; private set; }
@@ -103,6 +128,11 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     {
         ObjectDisposedException.ThrowIf(_closed, this);
         var started = Stopwatch.GetTimestamp();
+        var previousPhase = _phase;
+        var previousFinalProbe = _finalProbe;
+        var previousCamera = CameraRequests;
+        var previousApproach = ApproachRequests;
+        string? exceptionReason = null;
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -114,6 +144,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             if (options.TimeoutSeconds > 0 && now >= options.TimeoutSeconds)
                 return Stop("configured-timeout");
             var observation = ReadObservation(io.ObserveTarget);
+            _diagnosticObservation = observation;
             var fresh = Accept(observation, out var newEvidence);
             if (newEvidence)
             {
@@ -223,12 +254,45 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             await flow.StepAsync(ct);
             return _result;
         }
-        catch
+        catch (Exception error)
         {
+            exceptionReason = error is OperationCanceledException ? "cancelled" : "exception:" + error.GetType().Name;
             try { io.ReleaseInput(); } catch { /* 不遮蔽原始取消/视觉/输入异常。 */ }
             throw;
         }
-        finally { flow.RecordHostStep(Stopwatch.GetElapsedTime(started)); }
+        finally
+        {
+            try
+            {
+                string? capturePhase = null;
+                if (!_terminalTraced && (_result != CombatBattleHostResult.Continue || exceptionReason != null))
+                {
+                    _terminalTraced = true;
+                    capturePhase = _result == CombatBattleHostResult.Completed ? null : "terminal";
+                    if (_result == CombatBattleHostResult.Completed && _evidenceActive)
+                    { _closedEvidenceEpisode = _evidenceEpisode; _evidenceActive = false; }
+                }
+                else if (_finalProbe && !previousFinalProbe) capturePhase = "search-final";
+                else if (_phase == Phase.Searching && previousPhase != Phase.Searching) capturePhase = "search-start";
+                if (capturePhase is "search-start" or "search-final") _evidenceActive = true;
+                if (capturePhase != null || previousPhase != _phase || previousCamera != CameraRequests ||
+                    previousApproach != ApproachRequests || Now >= _nextTrace || exceptionReason != null || _closedEvidenceEpisode != null)
+                {
+                    _nextTrace = Now + .5;
+                    io.Trace(new(io.BattleId, _evidenceEpisode, State, exceptionReason ?? Reason, _result,
+                        _diagnosticObservation, _scanPulses, _approachPulses, Now - _lastProgressAt,
+                        Math.Max(0, _motionSettlesAt - Now), _finalProbe, capturePhase)
+                    {
+                        InputRequest = _traceInputRequest, InputSource = _traceInputSource, InputStatus = _traceInputStatus,
+                        InputKind = _traceInputKind, PartySample = _tracePartySample, PartyReason = _tracePartyReason,
+                        ClosedEpisode = _closedEvidenceEpisode
+                    });
+                }
+            }
+            catch { /* 诊断失败不得改变动作、取消或清理结果。 */ }
+            _closedEvidenceEpisode = null;
+            flow.RecordHostStep(Stopwatch.GetElapsedTime(started));
+        }
     }
 
     private T ReadObservation<T>(Func<T> read)
@@ -313,19 +377,26 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             _stableVisual = visual;
         }
         if (!progressed) return;
+        if (_evidenceActive)
+        {
+            _closedEvidenceEpisode = _evidenceEpisode;
+            _evidenceEpisode = Guid.NewGuid().ToString("N");
+            _evidenceActive = false;
+        }
         _lastProgressAt = now;
         _reengaged = false;
         _scanPulses = _approachPulses = 0;
         _detachPulses = 0;
         _externalSearchExhausted = false;
-        _finalProbe = false; // 真实进展关闭旧搜索，不污染下一次探测。
+        _finalProbe = false; // 真实游戏进展关闭旧搜索episode，不污染下一次结束探测。
         Reason = damage ? "new-damage-cue" : "health-progress";
     }
 
     private async ValueTask<CombatBattleHostResult> AdvanceSearchAsync(CombatBattleObservation observation, CancellationToken ct)
     {
         if (!options.SeekEnabled) return Stop("finish-not-confirmed");
-        // 输入后的新帧不一定是稳定画面，不能连续运动提前耗尽预算。
+        // 输入后的新帧不一定是稳定画面。先给场景稳定机会，不能让连续镜头
+        // 不断延后进展观测的稳定期并提前用完原搜索预算。
         if (!IsSettledObservation(observation, Now))
         {
             await io.DelayAsync(50, ct);
@@ -425,8 +496,11 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         {
             case Phase.BeforeParty:
                 _before = ReadObservation(io.ObservePartyBar);
+                _tracePartySample = _before;
+                _tracePartyReason = "pre-input-sample";
                 if (!_before.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)))
                 {
+                    _tracePartyReason = _before.Source.IsKnown ? "pre-input-stale-source" : "pre-input-source-unknown";
                     await io.DelayAsync(50, ct);
                     return _result;
                 }
@@ -449,12 +523,18 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             case Phase.AwaitParty:
                 if (Now < _nextProbe) { await io.DelayAsync(50, ct); break; }
                 var sample = ReadObservation(io.ObservePartyBar);
+                _tracePartySample = sample;
                 var freshPartySource = sample.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
                     _finish!.Fence?.Accepts(sample.Source) == true;
+                _tracePartyReason = !sample.Source.IsKnown ? "source-unknown" :
+                    !sample.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) ? "stale-source" :
+                    _finish!.Fence?.Accepts(sample.Source) != true ? "input-fence-rejected" :
+                    !sample.BarVisible ? "bar-not-visible" : "awaiting-independent-confirmation";
                 _partyEvidence |= sample.BarVisible && freshPartySource;
                 if (freshPartySource && _finish!.Observe(sample))
                 {
                     _endConfirmed = true;
+                    _tracePartyReason = "confirmed";
                     Reason = "confirmed-post-input-party-bar";
                     _phase = Phase.CloseParty;
                 }
@@ -511,10 +591,15 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             return new(CombatBattleHostInputStatus.NotSent, Reason: Reason);
         }
         input = input with { RequestId = _inputRequestId, Source = source, DeadlineTimestamp = _inputRequestDeadline };
+        _traceInputRequest = input.RequestId;
+        _traceInputSource = source;
+        _traceInputKind = input.Kind;
+        _traceInputStatus = null;
         var started = Stopwatch.GetTimestamp();
         CombatBattleHostInputResult result;
         try { result = await io.SendAsync(input, ct); }
         finally { CombatRuntimeMetrics.Shared.Record("host.input", Stopwatch.GetElapsedTime(started)); }
+        _traceInputStatus = result.Status;
         ct.ThrowIfCancellationRequested();
         TaskExecutionScope.ThrowIfFailed();
         switch (result.Status)

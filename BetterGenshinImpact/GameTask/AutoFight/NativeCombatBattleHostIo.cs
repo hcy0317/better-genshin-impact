@@ -21,6 +21,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     private readonly NativeCombatIo? _vision;
     private readonly ICombatHostInputDevice _device;
     private readonly Func<PartySetupFinishObservation>? _partyObservation;
+    private readonly Func<CombatBattleObservation>? _targetObservation;
     private bool _partyRequested, _partyEvidence;
     private CaptureFrameFence? _partyFence;
     private CaptureFrameStamp _partyEvidenceSource;
@@ -31,11 +32,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         : this(flow, new NativeCombatHostInputDevice()) => _vision = new(scenes);
 
     internal NativeCombatBattleHostIo(NativeCombatFlowRunner flow, ICombatHostInputDevice device,
-        Func<PartySetupFinishObservation>? partyObservation = null)
-    { _flow = flow; _device = device; _partyObservation = partyObservation; }
+        Func<PartySetupFinishObservation>? partyObservation = null, Func<CombatBattleObservation>? targetObservation = null)
+    { _flow = flow; _device = device; _partyObservation = partyObservation; _targetObservation = targetObservation; }
 
     public CombatBattleObservation ObserveTarget()
     {
+        if (_targetObservation != null) return _targetObservation();
         var observation = AvatarRecognition.LatestPassiveObservation;
         var current = AvatarRecognition.PassiveCaptureGate;
         var quality = observation.Quality;
@@ -53,6 +55,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         PartySetupFinishObservation ReadNative()
         {
             using var capture = _vision?.Capture();
+            if (capture != null) DiagnosticEvidenceScope.Current?.CaptureRequestedFrames(BattleId.ToString("N"), capture);
             return capture == null ? default : AutoFightTask.ObservePartySetupBar(capture, capture.FrameStamp.Sequence);
         }
         var observed = _partyObservation?.Invoke() ?? ReadNative();
@@ -67,6 +70,27 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     public ValueTask<CombatBattleHostInputResult> SendAsync(CombatBattleHostInput input, CancellationToken ct) =>
         SendCoreAsync(input, ct, controlRecovery: false);
+
+    public void Trace(CombatBattleHostTrace trace)
+    {
+        if (trace.ClosedEpisode is { } closed)
+            DiagnosticEvidenceScope.Current?.EndFrameRequests(BattleId.ToString("N"), closed);
+        var frame = trace.Observation;
+        var detail = $"battle={trace.BattleId} episode={trace.Episode} state={trace.State} reason={trace.Reason} result={trace.Result} " +
+            $"source={frame.Source.SessionId}/{frame.Source.Sequence} quality={frame.Quality} cue={frame.Target?.Cue} " +
+            $"visual={frame.Target?.Visual} direction={frame.Target?.Direction} motion={frame.Motion} control={frame.Control} " +
+            $"scan={trace.ScanUsed}/24 approach={trace.ApproachUsed}/12 progressAge={trace.ProgressAge:F3} " +
+            $"settleRemaining={trace.SettleRemaining:F3} finalProbe={trace.FinalProbe}";
+        detail += $" sourceAgeMs={(frame.Source.IsKnown && frame.Source.TimestampFrequency == Clock.TimestampFrequency ? Clock.GetElapsedTime(frame.Source.CapturedTimestamp).TotalMilliseconds.ToString("F1") : "unavailable")} " +
+            $"inputRequest={trace.InputRequest} inputSource={trace.InputSource.SessionId}/{trace.InputSource.Sequence} inputKind={trace.InputKind} inputStatus={trace.InputStatus} " +
+            $"partySource={trace.PartySample.Source.SessionId}/{trace.PartySample.Source.Sequence} partyBar={trace.PartySample.BarVisible} partyReason={trace.PartyReason}";
+        _device.Logger.LogDebug("FIGHT_HOST_DECISION {Detail}", detail);
+        if (trace.CapturePhase is not { } phase) return;
+        var evidence = DiagnosticEvidenceScope.Current;
+        if (evidence == null)
+            _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase={Phase} reason=no-run-scope", BattleId, phase);
+        else evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger);
+    }
 
     internal ValueTask<CombatBattleHostInputResult> SendControlAsync(CombatBattleHostInput input, CancellationToken ct)
     {

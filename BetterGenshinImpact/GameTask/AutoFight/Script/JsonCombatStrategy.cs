@@ -8,6 +8,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 /// </summary>
 public class JsonCombatStrategy
 {
+    internal string? SourceFile { get; set; }
+    internal string? SourceTextSha256 { get; set; }
     public int FormatVersion { get; set; } = 1;
     public JsonInfo Info { get; set; } = new();
     public List<JsonAction> Actions { get; set; } = [];

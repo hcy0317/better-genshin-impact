@@ -31,7 +31,9 @@ public static class JsonCombatStrategyParser
         }
 
         var json = File.ReadAllText(path);
-        return Parse(json, log);
+        var strategy = Parse(json, log);
+        strategy.SourceFile = Path.GetFullPath(path);
+        return strategy;
     }
 
     /// <summary>
@@ -82,6 +84,7 @@ public static class JsonCombatStrategyParser
         log.LogInformation("JSON 战斗策略加载完成：{Name}，共 {Count} 个动作",
             strategy.Info.Name, strategy.Actions.Count);
 
+        strategy.SourceTextSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(json)));
         return strategy;
     }
 

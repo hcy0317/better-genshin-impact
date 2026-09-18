@@ -105,6 +105,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         _readDiagnosticStatistics = () => RuntimeStatistics;
         _game = game;
         _execution = new(program, _game, clock);
+        foreach (var source in program.Sources) TraceStrategy("TXT", source.Path, source.TextHash);
         if (game is NativeGame configured) configured.NeedsBurstVision = program.NeedsBurstVision();
         if (game is NativeGame)
             foreach (var diagnostic in program.Diagnostics) _diagnosticLogger.LogWarning("战斗策略数据：{Diagnostic}", diagnostic);
@@ -141,6 +142,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         _readDiagnosticStatistics = () => RuntimeStatistics;
         _game = game;
         _jsonExecution = new(strategy, game, database, clock, (game as NativeGame)?.ActorNames, guardian);
+        TraceStrategy("JSON", strategy.SourceFile, strategy.SourceTextSha256);
         if (game is NativeGame configured) configured.NeedsBurstVision = _jsonExecution.NeedsBurstVision;
         if (game is NativeGame)
             foreach (var diagnostic in _jsonExecution.Diagnostics) _diagnosticLogger.LogWarning("战斗策略数据：{Diagnostic}", diagnostic);
@@ -149,6 +151,16 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     internal static NativeCombatFlowRunner? Create(JsonCombatStrategy strategy, ICombatFlowGame game,
         SkillCatalogSnapshot? database = null, TimeProvider? clock = null, ILogger? logger = null, LegacyGuardianOptions? guardian = null) =>
         new(strategy, game, database, clock, logger, guardian);
+
+    private void TraceStrategy(string format, string? path, string? textHash)
+    {
+        try
+        {
+            _diagnosticLogger.LogInformation("FIGHT_STRATEGY battle={Battle} executor=NativeCombatFlowRunner format={Format} path={Path} parsedUtf8TextSha256={TextHash} assembly={Version}",
+                Context.BattleId, format, path ?? "in-memory", textHash ?? "unavailable", typeof(NativeCombatFlowRunner).Assembly.GetName().Version);
+        }
+        catch { /* 来源日志不能改变已编译策略。 */ }
+    }
 
     internal static NativeCombatFlowRunner? Create(JsonCombatStrategy strategy, ICombatFlowGame game,
         Func<SkillCatalogSnapshot> readSnapshot, TimeProvider? clock = null, ILogger? logger = null) =>

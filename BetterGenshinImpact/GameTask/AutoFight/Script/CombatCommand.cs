@@ -28,6 +28,7 @@ public class CombatCommand
     public List<int> ActivatingRound { get; set; }
     public int? RoundParity { get; set; }
     public string? SourceFile { get; set; }
+    internal string? SourceTextSha256 { get; set; }
     public int SourceLine { get; set; } = 1;
     public int SourceColumn { get; set; } = 1;
     internal bool IsCompilerGenerated { get; init; }
@@ -61,6 +62,7 @@ public class CombatCommand
         ActivatingRound = new(source.ActivatingRound ?? []);
         RoundParity = source.RoundParity;
         SourceFile = source.SourceFile;
+        SourceTextSha256 = source.SourceTextSha256;
         SourceLine = source.SourceLine;
         SourceColumn = source.SourceColumn;
         IsCompilerGenerated = source.IsCompilerGenerated;

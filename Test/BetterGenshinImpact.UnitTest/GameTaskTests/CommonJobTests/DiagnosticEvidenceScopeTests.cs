@@ -8,6 +8,102 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceScopeTests
 {
     [Fact]
+    public async Task ARecoveredEpisodeCannotRetainNormalFramesOrSupplyATerminalImage()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        var request = source.Next();
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        var logger = new EvidenceLogger();
+        scope.RequestFrame("battle", "old-episode", "search-start", request, "", logger);
+        scope.CaptureRequestedFrames("battle", frame);
+        scope.EndFrameRequests("battle", "old-episode");
+        scope.CaptureRequestedFrames("battle", frame);
+        scope.RequestFrame("battle", "next-episode", "terminal", frame.FrameStamp, "", logger);
+        await scope.DisposeAsync();
+        Assert.DoesNotContain(saved, item => item.Phase == "terminal");
+        Assert.Contains(logger.Messages, text => text.Contains("no-next-frame-before-run-end"));
+    }
+
+    [Fact]
+    public async Task PendingRequestsAreBoundedAndForeignFramesCannotSatisfyThem()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var requested = new CaptureFrameSource().Next();
+        var logger = new EvidenceLogger();
+        for (var i = 0; i < 4; i++) Assert.True(scope.RequestFrame("battle", "request-" + i, "terminal", requested, "", logger));
+        Assert.False(scope.RequestFrame("battle", "overflow", "terminal", requested, "", logger));
+        using var foreign = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        scope.CaptureRequestedFrames("battle", foreign);
+        await scope.DisposeAsync();
+        Assert.Empty(saved);
+        Assert.Contains(logger.Messages, text => text.Contains("request-queue-full"));
+        Assert.Equal(4, logger.Messages.Count(text => text.Contains("capture-source-changed")));
+    }
+
+    [Fact]
+    public async Task ARunEndingWithoutAnyFrameRecordsWhyTheTerminalImageIsMissing()
+    {
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => throw new InvalidOperationException("no frame should reach writer"));
+        scope.RequestFrame("battle", "episode", "terminal", new CaptureFrameSource().Next(), "cancelled", logger);
+        await scope.DisposeAsync();
+        Assert.Contains(logger.Messages, text => text.Contains("no-next-frame-before-run-end"));
+    }
+
+    private sealed class EvidenceLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+            TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
+    }
+
+    [Fact]
+    public async Task TerminalUsesTheLastExistingSearchFrameWhenTheProducerHasAlreadyStopped()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        var requested = source.Next();
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = source.Next() };
+        var logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+        scope.RequestFrame("battle", "episode", "search-start", requested, "search", logger);
+        scope.CaptureRequestedFrames("battle", frame);
+        scope.RequestFrame("battle", "episode", "terminal", frame.FrameStamp, "stopped", logger);
+        await scope.DisposeAsync(); // 不再提供帧，模拟宿主终态立即取消生产者。
+        var terminal = Assert.Single(saved.Where(item => item.Phase == "terminal"));
+        Assert.Equal(frame.FrameStamp, terminal.Source);
+        Assert.Contains("latest-existing-frame", terminal.Detail);
+    }
+
+    [Fact]
+    public async Task RequestedHostEvidenceUsesTheNextExistingFrameWithoutRelabellingItsSource()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        var requested = source.Next();
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = source.Next() };
+        Assert.True(scope.RequestFrame("battle", "episode", "terminal", requested, "decision",
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance));
+        Assert.Empty(saved);
+        scope.CaptureRequestedFrames("different-battle", frame);
+        scope.CaptureRequestedFrames("battle", frame);
+        await scope.DisposeAsync();
+        var captured = Assert.Single(saved);
+        Assert.Equal(frame.FrameStamp, captured.Source);
+        Assert.NotEqual(requested, captured.Source);
+        Assert.Contains("requestedSource=", captured.Detail);
+    }
+
+    [Fact]
     public async Task PendingAndMaintenanceKeepTheirOwnBeforeFramesWithinTheSameBoundedSlots()
     {
         var saved = new List<DiagnosticEvidence>();

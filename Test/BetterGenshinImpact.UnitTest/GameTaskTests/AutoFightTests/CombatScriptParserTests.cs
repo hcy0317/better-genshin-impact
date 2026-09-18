@@ -4,6 +4,27 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatScriptParserTests
 {
+    [Fact]
+    public void ParsedSourceIdentityRemainsBoundToTheLoadedTextWhenDiskChanges()
+    {
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"bgi-source-{Guid.NewGuid():N}.txt");
+        try
+        {
+            const string original = "琴 attack(0.1)";
+            System.IO.File.WriteAllText(path, original);
+            var loaded = CombatScriptParser.Parse(path);
+            System.IO.File.WriteAllText(path, "琴 attack(0.2)");
+            var expected = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(original)));
+            Assert.All(loaded.CombatCommands, command =>
+            {
+                Assert.Equal(System.IO.Path.GetFullPath(path), command.SourceFile);
+                Assert.Equal(expected, command.SourceTextSha256);
+                Assert.Equal(expected, new CombatCommand(command).SourceTextSha256);
+            });
+        }
+        finally { System.IO.File.Delete(path); }
+    }
+
     /// <summary>
     /// 无角色前缀的指令中含有空格参数（如 walk(s, 0.2)），不应将空格误识别为角色分隔符
     /// </summary>

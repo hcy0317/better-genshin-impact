@@ -26,6 +26,96 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
     [Fact]
+    public void NativeTxtAndJsonEntryLogsIdentifyTheirOwnLoadedSource()
+    {
+        var textPath = Path.Combine(Path.GetTempPath(), $"bgi-txt-{Guid.NewGuid():N}.txt");
+        var jsonPath = Path.Combine(Path.GetTempPath(), $"bgi-json-{Guid.NewGuid():N}.json");
+        try
+        {
+            File.WriteAllText(textPath, "那维莱特 e");
+            File.WriteAllText(jsonPath, "{\"info\":{\"name\":\"fixture\"},\"actions\":[{\"character\":\"那维莱特\",\"action\":\"e\"}]}");
+            var clock = new FakeTimeProvider();
+            var logger = new SourceIdentityLogger();
+            var script = CombatScriptParser.Parse(textPath);
+            using var game = new PhysicalReplay(clock, false, 50, LoadProgram("那维莱特 e")) { Logger = logger };
+            using var textRunner = NativeCombatFlowRunner.Create(CombatFlowProgram.Compile(script), game);
+            var strategy = JsonCombatStrategyParser.ParseFile(jsonPath);
+            using var jsonRunner = NativeCombatFlowRunner.Create(strategy, NativeCombatFlowRunner.CreateAdapter(game), clock: clock)!;
+            var textLog = Assert.Single(logger.Messages.Where(message => message.Contains("format=TXT")));
+            var jsonLog = Assert.Single(logger.Messages.Where(message => message.Contains("format=JSON")));
+            Assert.Contains(textPath, textLog);
+            Assert.Contains(script.CombatCommands[0].SourceTextSha256!, textLog);
+            Assert.Contains(textRunner.Context.BattleId.ToString(), textLog);
+            Assert.Contains(jsonPath, jsonLog);
+            Assert.Contains(strategy.SourceTextSha256!, jsonLog);
+            Assert.Contains(jsonRunner.Context.BattleId.ToString(), jsonLog);
+            Assert.DoesNotContain(jsonPath, textLog);
+            Assert.DoesNotContain(textPath, jsonLog);
+        }
+        finally { File.Delete(textPath); File.Delete(jsonPath); }
+    }
+
+    private sealed class SourceIdentityLogger : ILogger
+    {
+        public List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, exception));
+    }
+
+    [Fact]
+    public async Task NativeHostRecoversTheSkillAxisAfterTargetLossAndEvidenceDoesNotChangeInputs()
+    {
+        async Task<(List<(string Actor, Method Skill, double At)> Inputs, int Images)> Run(bool captureEvidence)
+        {
+            var clock = new FakeTimeProvider();
+            var program = LoadProgram("那维莱特 e(fast),q(if=q-ready(那维莱特)),attack(0.1)");
+            using var game = new PhysicalReplay(clock, true, 50, program);
+            using var flow = NativeCombatFlowRunner.Create(new JsonCombatStrategy
+            {
+                Actions = [new() { Character = "那维莱特", Action = "e(fast),q(if=q-ready(那维莱特)),attack(0.1)" }]
+            }, NativeCombatFlowRunner.CreateAdapter(game), clock: clock)!;
+            var source = new CaptureFrameSource(clock);
+            long? cameraAt = null;
+            var device = new HostDevice(clock)
+            {
+                AfterCamera = () => cameraAt = clock.GetTimestamp(),
+                AdvanceClock = ms => game.DelayAsync(ms, default).GetAwaiter().GetResult()
+            };
+            var saved = new List<DiagnosticEvidence>();
+            await using var evidence = captureEvidence
+                ? new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }) : null;
+            CombatBattleObservation Target()
+            {
+                var stamp = source.Next();
+                using var pixels = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = stamp };
+                evidence?.CaptureRequestedFrames(flow.Context.BattleId.ToString("N"), pixels);
+                var settled = cameraAt.HasValue && clock.GetElapsedTime(cameraAt.Value).TotalMilliseconds >= 350;
+                return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+                    settled ? new EnemySeekDecision(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                        new(700, 400, 80, 30, 2400), 1, SeekCueKind.DamageNumber) : null,
+                    1920, 1080, (ulong)(flow.Context.Now * 10) + 1);
+            }
+            var native = new NativeCombatBattleHostIo(flow, device,
+                () => { var stamp = source.Next(); return new(stamp.Sequence, stamp.CapturedAt, 1920, 1080, false, 0) { Source = stamp }; }, Target);
+            using var host = new CombatBattleHost(native, new() { FinishCheckIntervalSeconds = .1 });
+            for (var i = 0; i < 3000 && flow.Context.Now < 28; i++)
+                Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+            Assert.NotNull(cameraAt);
+            Assert.Contains(game.Inputs, input => input.Skill == Method.Skill && input.At > 15);
+            Assert.Contains(game.Inputs, input => input.Skill == Method.Burst);
+            Assert.Single(device.Inputs.Where(input => input == "camera"));
+            if (evidence != null) await evidence.DisposeAsync();
+            return (game.Inputs.ToList(), saved.Count);
+        }
+        var plain = await Run(false);
+        var recorded = await Run(true);
+        Assert.Equal(plain.Inputs, recorded.Inputs);
+        Assert.True(recorded.Images > 0);
+    }
+
+    [Fact]
     public async Task ActualAdaptiveMiningCannotEnterItsSpecialOperationBeforeSelectionIsConfirmed()
     {
         var clock = new FakeTimeProvider();
@@ -1089,8 +1179,10 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public int Preparations { get; private set; }
         public List<string> Inputs { get; } = [];
         public Action? AfterParty { get; init; }
+        public Action? AfterCamera { get; init; }
+        public Action<int>? AdvanceClock { get; init; }
         public void PrepareInput() => Preparations++;
-        public void MoveCamera(int x, int y) => Inputs.Add("camera");
+        public void MoveCamera(int x, int y) { Inputs.Add("camera"); AfterCamera?.Invoke(); }
         public void MoveForward(bool down) => Inputs.Add(down ? "forward-down" : "forward-up");
         public void PressDrop()
         {
@@ -1105,11 +1197,17 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             if (NativeReceipts) new WindowsInputMessageDispatcher(null,
                 inputs => RejectSecondParty && _partyCalls == 2 ? 0U : (uint)inputs.Length, () => 5)
                 .DispatchInput(new User32.INPUT[2]);
-            clock.Advance(TimeSpan.FromMilliseconds(10));
+            if (AdvanceClock != null) AdvanceClock(10);
+            else clock.Advance(TimeSpan.FromMilliseconds(10));
             AfterParty?.Invoke();
         }
         public ValueTask DelayAsync(int milliseconds, CancellationToken ct)
-        { ct.ThrowIfCancellationRequested(); clock.Advance(TimeSpan.FromMilliseconds(milliseconds)); return ValueTask.CompletedTask; }
+        {
+            ct.ThrowIfCancellationRequested();
+            if (AdvanceClock != null) AdvanceClock(milliseconds);
+            else clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class FirstBeginDelayLogger(FakeTimeProvider clock) : ILogger

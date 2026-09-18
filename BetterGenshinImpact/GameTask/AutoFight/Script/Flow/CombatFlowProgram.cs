@@ -51,6 +51,7 @@ public sealed partial class CombatFlowProgram
     private readonly Dictionary<CombatCommand, CombatCommand> _feeds = new();
     private readonly List<string> _diagnostics = [];
     public IReadOnlyList<string> Diagnostics => _diagnostics;
+    internal IReadOnlyList<(string? Path, string? TextHash)> Sources { get; private set; } = [];
     public IReadOnlyCollection<string> Actors { get; private set; } = Array.Empty<string>();
     public bool Loop { get; private set; }
     internal bool LegacyOutcomePolicy { get; private set; }
@@ -71,6 +72,7 @@ public sealed partial class CombatFlowProgram
         CombatFlowCompatibility.Compile(script.CombatCommands);
         foreach (var command in script.CombatCommands) CombatParameterRegistry.Validate(command);
         var program = new CombatFlowProgram { Actors = script.AvatarNames.ToArray(),
+            Sources = script.CombatCommands.Select(command => (command.SourceFile, command.SourceTextSha256)).Distinct().ToArray(),
             LegacyOutcomePolicy = script.CombatCommands.Any(command => command.LegacyOutcomePolicy) };
         var stack = new Stack<CombatFlowBlock>();
         stack.Push(program.Root);

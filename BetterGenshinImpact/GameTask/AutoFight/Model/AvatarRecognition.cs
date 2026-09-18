@@ -8,6 +8,7 @@ using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.View.Drawable;
 using OpenCvSharp;
 using Fischless.GameCapture;
+using BetterGenshinImpact.GameTask.Common;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -495,6 +496,8 @@ public static class AvatarRecognition
                     var capturedAtUtc = capture.FrameStamp.CapturedAt.UtcDateTime;
                     lastSource = capture.FrameStamp;
                     capturedFrames++;
+                    // 只消费宿主按事件登记的有界取证请求，复用本次已有帧；正常帧不复制/落盘。
+                    DiagnosticEvidenceScope.Current?.CaptureRequestedFrames(battleId.ToString("N"), capture);
 
                     // 不在主界面时跳过本轮（避免菜单/地图/对话等界面下误操作）
                     if (!Bv.IsCombatHud(capture))

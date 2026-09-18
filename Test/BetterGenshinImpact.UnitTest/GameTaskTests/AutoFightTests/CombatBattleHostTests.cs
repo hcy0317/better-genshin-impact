@@ -10,6 +10,25 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatBattleHostTests
 {
     [Fact]
+    public async Task SearchFailureIncludesItsSourceBudgetAndTerminalEvidenceRequest()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1500 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Contains(io.Traces, trace => trace.CapturePhase == "search-start");
+        var terminal = Assert.Single(io.Traces.Where(trace => trace.CapturePhase == "terminal"));
+        Assert.Equal("bounded-search-finish-unconfirmed", terminal.Reason);
+        Assert.Equal(24, terminal.ScanUsed);
+        Assert.True(terminal.Observation.Source.IsKnown);
+        Assert.Equal(flow.Context.BattleId, terminal.BattleId);
+    }
+
+    [Fact]
     public async Task RealProgressAfterAnExhaustedSearchDoesNotPoisonTheNextFinishProbe()
     {
         var clock = new FakeTimeProvider();
@@ -523,6 +542,8 @@ public class CombatBattleHostTests
         public Guid BattleId => battleId;
         public List<CombatBattleHostInput> Inputs { get; } = [];
         public List<CombatBattleHostInput> Requests { get; } = [];
+        public List<CombatBattleHostTrace> Traces { get; } = [];
+        public void Trace(CombatBattleHostTrace observation) => Traces.Add(observation);
         public int UnsentAttempts { get; set; }
         public CombatBattleHostInputResult? ForcedResult { get; init; }
         public bool PartyOpen { get; private set; }
