@@ -26,77 +26,63 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
     [Theory]
-    [InlineData(2d, true)]
-    [InlineData(99d, false)]
-    public async Task LegacyBurstAfterConfirmedSkillDoesNotSpendPreparationAttemptsOnEveryUnknownFrame(double unknownUntil, bool casts)
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EstablishedSelectionCapturesUnknownOrBreakoutControlBeforeItsEarlyReturn(bool breakout)
     {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
         var clock = new FakeTimeProvider();
-        var script = CombatScriptParser.ParseContext("那维莱特 e,q,attack(0.1)");
-        using var io = new PhysicalReplay(clock, true, 50, LoadProgram("那维莱特 e,q")) { BurstUnknownUntil = unknownUntil };
+        var program = LoadProgram("那维莱特 e(required)");
+        using var io = new PhysicalReplay(clock, false, 50, program)
+        {
+            ControlOverride = at => at < .15 ? new(MotionStatus.Unknown, false) :
+                breakout ? new(MotionStatus.Unknown, true) : default
+        };
         io.SetFrontActor("那维莱特");
-        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false);
-        Assert.Equal(casts ? CombatFlowResult.Succeeded : CombatFlowResult.Failed, await runner.RunRoundAsync(default));
-        Assert.Single(io.Inputs.Where(input => input.Skill == Method.Skill));
-        Assert.Equal(casts ? 1 : 0, io.Inputs.Count(input => input.Skill == Method.Burst));
-        if (casts) Assert.InRange(io.Inputs.Single(input => input.Skill == Method.Burst).At, unknownUntil, 8);
-        else Assert.InRange(runner.Context.Now, 8, 11);
+        using (var runner = NativeCombatFlowRunner.Create(program, io))
+            await Record.ExceptionAsync(async () => await runner.RunRoundAsync(default));
+        await evidence.DisposeAsync();
+        Assert.Empty(io.Selections);
+        Assert.Empty(io.Inputs);
+        Assert.Contains(saved, item => item.Phase == "blocked-before-input" && item.Source.IsKnown &&
+            item.Detail.Contains(breakout ? "keyboardBreakout=True" : "controlObserved=False"));
     }
 
     [Fact]
-    public async Task FreshButPreSwitchAssistanceFrameDefersWithoutLosingTheGoalThenAcceptsPostInputFrame()
+    public async Task UnconfirmedShortSkillEvidenceSeparatesInputContextFromPostInputReadiness()
     {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
         var clock = new FakeTimeProvider();
-        var program = LoadProgram("琴 e(required)");
-        using var io = new PhysicalReplay(clock, false, 50, program) { SelectionNeedsMovement = true, IgnoreSwitchUntil = 99 };
-        using var runner = NativeCombatFlowRunner.Create(program, io);
-        for (var i = 0; i < 50 && runner.SelectionAssistance == null; i++) await runner.StepAsync(default);
-        var assistance = runner.SelectionAssistance!.Value;
-        var old = io.Producer.Next(io.LastSelectionTimestamp - clock.TimestampFrequency * 13 / 1000);
-        Assert.True(old.IsFresh(clock, TimeSpan.FromMilliseconds(150)));
-        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Approach)
-        { RequestId = Guid.NewGuid(), SelectionGoal = assistance.Goal, Source = old, DeadlineTimestamp = assistance.Deadline };
-        var native = new NativeCombatBattleHostIo(runner, io.ControlDevice);
-        var deferred = await native.SendAsync(request, default);
-        Assert.Equal(CombatBattleHostInputStatus.NotSent, deferred.Status);
-        Assert.Equal("selection-awaiting-post-input-frame", deferred.Reason);
-        Assert.Equal(0, io.ApproachPulses);
-        Assert.Equal(assistance, runner.SelectionAssistance);
-        var submitted = await native.SendAsync(request with { Source = io.Producer.Next() }, default);
-        Assert.Equal(CombatBattleHostInputStatus.Sent, submitted.Status);
-        Assert.Equal(1, io.ApproachPulses);
+        var script = CombatScriptParser.ParseContext("钟离 e");
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("钟离 e")) { DropFirstSkill = true };
+        io.SetFrontActor("钟离");
+        using (var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false, purpose: CombatScriptExecutionPurpose.Pathing))
+            Assert.Equal(CombatFlowResult.Failed, await runner.RunRoundAsync(default));
+        await evidence.DisposeAsync();
+        Assert.Single(io.Inputs);
+        Assert.Contains(saved, item => item.Phase == "before-skill" && item.Detail.Contains("hold=False") &&
+            item.Detail.Contains("purpose=Pathing") && item.Detail.Contains("motion=Unknown") && item.Detail.Contains("controlObserved=True"));
+        Assert.Contains(saved, item => item.Phase == "deadline" && item.Detail.Contains("cooling=False") && item.Detail.Contains("ready=True"));
     }
 
     [Theory]
-    [InlineData("goal")]
-    [InlineData("session")]
-    [InlineData("expired")]
-    [InlineData("cancelled")]
-    public async Task DeferredAssistanceDoesNotRelaxIdentityDeadlineOrCancellation(string boundary)
+    [InlineData(MotionStatus.Climb)]
+    [InlineData(MotionStatus.Fly)]
+    public async Task BlockedSelectionBeforeAnyInputStillCapturesItsControlReasonAndSource(MotionStatus motion)
     {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
         var clock = new FakeTimeProvider();
-        var program = LoadProgram("琴 e(required)");
-        using var io = new PhysicalReplay(clock, false, 50, program) { SelectionNeedsMovement = true, IgnoreSwitchUntil = 99 };
-        using var runner = NativeCombatFlowRunner.Create(program, io);
-        for (var i = 0; i < 50 && runner.SelectionAssistance == null; i++) await runner.StepAsync(default);
-        var assistance = runner.SelectionAssistance!.Value;
-        if (boundary == "expired") await io.DelayAsync(9000, default);
-        var source = io.Producer.Next();
-        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Approach)
-        {
-            RequestId = Guid.NewGuid(), SelectionGoal = boundary == "goal" ? Guid.NewGuid() : assistance.Goal,
-            Source = boundary == "session" ? source with { SessionId = Guid.NewGuid() } : source,
-            DeadlineTimestamp = assistance.Deadline
-        };
-        var native = new NativeCombatBattleHostIo(runner, io.ControlDevice);
-        using var cancellation = new CancellationTokenSource();
-        if (boundary == "cancelled")
-        {
-            cancellation.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await native.SendAsync(request, cancellation.Token));
-        }
-        else Assert.Equal(CombatBattleHostInputStatus.Failed, (await native.SendAsync(request, default)).Status);
-        Assert.Equal(0, io.ApproachPulses);
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e(required)")) { ObservedMotion = motion };
+        using (var runner = NativeCombatFlowRunner.Create(LoadProgram("琴 e(required)"), io))
+            Assert.Equal(CombatFlowResult.Failed, await runner.RunRoundAsync(default));
+        await evidence.DisposeAsync();
+        Assert.Empty(io.Selections);
         Assert.Empty(io.Inputs);
+        Assert.Contains(saved, item => item.Phase == "blocked-before-input" && item.Detail.Contains($"motion={motion}") &&
+            item.Detail.Contains("submitted=False") && item.Source.IsKnown);
     }
 
     [Fact]
@@ -487,6 +473,63 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             Assert.Equal(1, io.ApproachPulses);
         }
         else Assert.Null(error);
+    }
+
+    [Fact]
+    public async Task FreshButPreSwitchAssistanceFrameDefersWithoutLosingTheGoalThenAcceptsPostInputFrame()
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 e(required)");
+        using var io = new PhysicalReplay(clock, false, 50, program) { SelectionNeedsMovement = true, IgnoreSwitchUntil = 99 };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        for (var i = 0; i < 50 && runner.SelectionAssistance == null; i++) await runner.StepAsync(default);
+        var assistance = runner.SelectionAssistance!.Value;
+        var old = io.Producer.Next(io.LastSelectionTimestamp - clock.TimestampFrequency * 13 / 1000);
+        Assert.True(old.IsFresh(clock, TimeSpan.FromMilliseconds(150)));
+        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Approach)
+        { RequestId = Guid.NewGuid(), SelectionGoal = assistance.Goal, Source = old, DeadlineTimestamp = assistance.Deadline };
+        var native = new NativeCombatBattleHostIo(runner, io.ControlDevice);
+        var deferred = await native.SendAsync(request, default);
+        Assert.Equal(CombatBattleHostInputStatus.NotSent, deferred.Status);
+        Assert.Equal("selection-awaiting-post-input-frame", deferred.Reason);
+        Assert.Equal(0, io.ApproachPulses);
+        Assert.Equal(assistance, runner.SelectionAssistance);
+        var submitted = await native.SendAsync(request with { Source = io.Producer.Next() }, default);
+        Assert.Equal(CombatBattleHostInputStatus.Sent, submitted.Status);
+        Assert.Equal(1, io.ApproachPulses);
+    }
+
+    [Theory]
+    [InlineData("goal")]
+    [InlineData("session")]
+    [InlineData("expired")]
+    [InlineData("cancelled")]
+    public async Task DeferredAssistanceDoesNotRelaxIdentityDeadlineOrCancellation(string boundary)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 e(required)");
+        using var io = new PhysicalReplay(clock, false, 50, program) { SelectionNeedsMovement = true, IgnoreSwitchUntil = 99 };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        for (var i = 0; i < 50 && runner.SelectionAssistance == null; i++) await runner.StepAsync(default);
+        var assistance = runner.SelectionAssistance!.Value;
+        if (boundary == "expired") await io.DelayAsync(9000, default);
+        var source = io.Producer.Next();
+        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Approach)
+        {
+            RequestId = Guid.NewGuid(), SelectionGoal = boundary == "goal" ? Guid.NewGuid() : assistance.Goal,
+            Source = boundary == "session" ? source with { SessionId = Guid.NewGuid() } : source,
+            DeadlineTimestamp = assistance.Deadline
+        };
+        var native = new NativeCombatBattleHostIo(runner, io.ControlDevice);
+        using var cancellation = new CancellationTokenSource();
+        if (boundary == "cancelled")
+        {
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await native.SendAsync(request, cancellation.Token));
+        }
+        else Assert.Equal(CombatBattleHostInputStatus.Failed, (await native.SendAsync(request, default)).Status);
+        Assert.Equal(0, io.ApproachPulses);
+        Assert.Empty(io.Inputs);
     }
 
     [Fact]
@@ -946,6 +989,23 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             Assert.Empty(io.Inputs); // 增强脚本的optional跳过不等于施放完成。
             Assert.InRange(runner.Context.Now, 8, 9.5);
         }
+    }
+
+    [Theory]
+    [InlineData(2d, true)]
+    [InlineData(99d, false)]
+    public async Task LegacyBurstAfterConfirmedSkillDoesNotSpendPreparationAttemptsOnEveryUnknownFrame(double unknownUntil, bool casts)
+    {
+        var clock = new FakeTimeProvider();
+        var script = CombatScriptParser.ParseContext("那维莱特 e,q,attack(0.1)");
+        using var io = new PhysicalReplay(clock, true, 50, LoadProgram("那维莱特 e,q")) { BurstUnknownUntil = unknownUntil };
+        io.SetFrontActor("那维莱特");
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false);
+        Assert.Equal(casts ? CombatFlowResult.Succeeded : CombatFlowResult.Failed, await runner.RunRoundAsync(default));
+        Assert.Single(io.Inputs.Where(input => input.Skill == Method.Skill));
+        Assert.Equal(casts ? 1 : 0, io.Inputs.Count(input => input.Skill == Method.Burst));
+        if (casts) Assert.InRange(io.Inputs.Single(input => input.Skill == Method.Burst).At, unknownUntil, 8);
+        else Assert.InRange(runner.Context.Now, 8, 11);
     }
 
     [Fact]
@@ -2352,8 +2412,10 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         private ICombatHostInputDevice? _controlDevice;
         public ICombatHostInputDevice ControlDevice => _controlDevice ??= new ReplayControlDevice(this);
         public Func<double, bool>? ControlAt { get; init; }
+        public MotionStatus ObservedMotion { get; init; } = MotionStatus.Unknown;
+        public Func<double, CombatControlObservation>? ControlOverride { get; init; }
         public BetterGenshinImpact.GameTask.Common.BgiVision.CombatControlObservation ReadControl(ImageRegion frame) =>
-            new(BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Unknown, Frame(frame).Controlled);
+            ControlOverride?.Invoke(Frame(frame).At) ?? new(ObservedMotion, Frame(frame).Controlled);
         public List<ImageRegion> CapturedFrames { get; } = [];
         public bool ResourceEvents { get; init; }
         public bool DropFirstSkill { get; init; }

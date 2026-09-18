@@ -471,6 +471,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         {
             if (frame == null || !frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) || !io.IsCombatHud(frame)) return false;
             var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
+            if (ReferenceEquals(_selectionAction, action)) ObserveSelectionControl(frame, control);
             if (!control.IsObserved)
             {
                 _captureFailureReason = "control-not-ready: 本帧控制检查尚未完成，保持原意图但不准入输入";
@@ -539,6 +540,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private AvatarSelectionProtocol.Result<ImageRegion>? _selectionResult;
         private bool _selectionTerminal;
         private bool _selectionUnconfirmedCaptured, _selectionDeadlineCaptured;
+        private bool _selectionBlockedCaptured;
+        private CombatControlObservation _selectionControl;
+        private CaptureFrameStamp _selectionControlSource;
         private string? _lastSelectionTrace;
         private int _selectionTraceCount;
         private string? _selectionActor;
@@ -731,8 +735,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }, io.Clock, canObserve: frame =>
                     {
                         var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
-                        return control.IsObserved && !control.KeyboardBreakoutRequested &&
-                            control.Motion is not (MotionStatus.Fly or MotionStatus.Climb);
+                        return ObserveSelectionControl(frame, control);
                     }, release: io.ReleaseInput, beforeSubmit: (frame, request) =>
                     {
                         if (_selection is { HasSubmittedInput: false } goal)
@@ -743,13 +746,38 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             return new(false, false, default, null, null, null, awaitingObservation: true);
         }
 
+        private bool ObserveSelectionControl(ImageRegion frame, CombatControlObservation control)
+        {
+            _selectionControl = control;
+            _selectionControlSource = frame.FrameStamp;
+            var allowed = control.IsObserved && !control.KeyboardBreakoutRequested &&
+                control.Motion is not (MotionStatus.Fly or MotionStatus.Climb);
+            if (!allowed && _selection is { HasSubmittedInput: false } goal && _selectionAction is { } action)
+            {
+                var phase = action.RemainingBudget <= .2 && !_selectionDeadlineCaptured ? "deadline"
+                    : (goal.ElapsedSeconds >= 1.5 || control.KeyboardBreakoutRequested) && !_selectionBlockedCaptured ? "blocked-before-input" : null;
+                if (phase != null)
+                {
+                    // 协议Unknown和外层control早退都在持有原帧时取证；正挣脱提示在恢复前记录一次。
+                    var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} submitted=False " +
+                        $"controlObserved={control.IsObserved} motion={control.Motion} keyboardBreakout={control.KeyboardBreakoutRequested} " +
+                        $"purpose={Purpose} command={DescribeCommand(action.Command)} deadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}";
+                    _evidence?.TryCapture(frame, "selection:" + goal.GoalId, phase, detail, Logger);
+                    if (phase == "deadline") _selectionDeadlineCaptured = true;
+                    else _selectionBlockedCaptured = true;
+                }
+            }
+            return allowed;
+        }
+
         private void TraceSelection(string state)
         {
             if (_selection is not { } goal || _selectionAction is not { } action) return;
             var source = goal.ObservedSource;
-            var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} actual={goal.ObservedIndex?.ToString() ?? "unknown"} state={state} reason={goal.Reason} source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} originalDeadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}s";
+            var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} actual={goal.ObservedIndex?.ToString() ?? "unknown"} state={state} reason={goal.Reason} source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} originalDeadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}s " +
+                $"controlObserved={_selectionControl.IsObserved} motion={_selectionControl.Motion} keyboardBreakout={_selectionControl.KeyboardBreakoutRequested} controlSource={_selectionControlSource.SessionId}/{_selectionControlSource.Sequence}";
             action.Trace("selection", detail);
-            var changed = state + ":" + goal.Reason + ":" + goal.ObservedIndex;
+            var changed = state + ":" + goal.Reason + ":" + goal.ObservedIndex + ":" + _selectionControl;
             if (changed != _lastSelectionTrace && _selectionTraceCount++ < 16)
             {
                 _lastSelectionTrace = changed;
@@ -767,6 +795,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 }
             }
         }
+
+        private static string DescribeCommand(CombatCommand command) =>
+            $"{command.Name} {command.Method.Alias[0]}({string.Join(",", command.Args ?? [])})";
 
         private void CheckSelectionOutcome(AvatarSelectionProtocol.Result<ImageRegion> result)
         {
@@ -834,6 +865,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _selectionAction = null;
             _selectionActor = null;
             _selectionUnconfirmedCaptured = _selectionDeadlineCaptured = false;
+            _selectionBlockedCaptured = false;
+            _selectionControl = default;
+            _selectionControlSource = default;
             _lastSelectionTrace = null;
             _selectionTraceCount = 0;
         }
@@ -1332,11 +1366,13 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     _atomicObservationId = action.AtomicObservationId;
                 }
                 var pendingCd = 0d;
+                var pendingObservation = "frame-or-hud-unavailable";
                 CombatFlowResult? Reconcile() => ReconcilePendingSkill(_attempts, action, name, () =>
                 {
                     var capture = CurrentFrame();
                     if (capture == null || !io.IsCombatHud(capture)) return Sample(action, capture, null, null);
                     var active = ReadActive(capture) == avatar.Index;
+                    pendingObservation = $"actorActive={active} source={capture.FrameStamp.SessionId}/{capture.FrameStamp.Sequence}";
                     if (!active) return Sample(action, capture, null, null);
                     var observedCd = command.Method == Method.Skill ? io.ReadSkillCooldown(avatar, capture) : 0;
                     pendingCd = observedCd;
@@ -1345,7 +1381,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     bool? cooling = command.Method == Method.Skill
                         ? observedCd > 0 ? true : skillReady ? false : null : burst.CoolingDown;
                     var sample = Sample(action, capture, cooling, command.Method == Method.Skill ? skillReady : burst.Ready);
-                    action.Trace("pending-observation", $"actorActive={active} cd={observedCd:F3} cooling={sample.CoolingDown} ready={sample.Ready}");
+                    pendingObservation += $" cd={observedCd:F3} cooling={sample.CoolingDown} ready={sample.Ready}";
+                    action.Trace("pending-observation", pendingObservation);
                     return GatePendingSkillObservation(sample, active);
                 });
                 var observedAttempt = hasUnresolved ? _attempts.GetAttempt(name, command.Method) : null;
@@ -1357,7 +1394,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                         action.Now - observedAttempt.InputAt >= 1)
                         _evidence?.CaptureFault(_capture, "skill", request,
                             observedAttempt.Deadline - action.Now <= .2 ? "deadline" : "unconfirmed",
-                            $"battle={action.BattleId} command={action.CommandId} actor={name} skill={command.Method} inputAt={observedAttempt.InputAt:F3} deadline={observedAttempt.Deadline:F3} now={action.Now:F3} reason={action.DiagnosticReason}", Logger);
+                            $"battle={action.BattleId} command={action.CommandId} syntax={DescribeCommand(command)} purpose={Purpose} actor={name} inputAt={observedAttempt.InputAt:F3} deadline={observedAttempt.Deadline:F3} now={action.Now:F3} reason={action.DiagnosticReason} {pendingObservation}", Logger);
                     if (pendingResult is CombatFlowResult.Succeeded or CombatFlowResult.Failed)
                     {
                         _evidence?.ForgetBefore("skill", request);
@@ -1462,6 +1499,12 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                     _readinessAction = null;
                     var source = _capture.FrameStamp;
+                    // 选角/控制准入已在本帧读取，ReadOnce复用同一结果而非再做识别。
+                    var inputControl = _capture.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(_capture));
+                    var inputContext = $"syntax={DescribeCommand(command)} hold={command.HasFlag("hold")} purpose={Purpose} " +
+                        $"actor={name}/{avatar.Index} controlObserved={inputControl.IsObserved} motion={inputControl.Motion} " +
+                        $"keyboardBreakout={inputControl.KeyboardBreakoutRequested} source={source.SessionId}/{source.Sequence}";
+                    action.Trace("skill-input-context", inputContext);
                     Guid? submittingAttempt = null;
                     var sent = CombatSkillInput.Send(_attempts, action, name, source,
                         (request, begin) => io.SubmitInput(avatar, command, request, () =>
@@ -1471,7 +1514,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                             {
                                 submittingAttempt = attempt.AttemptId;
                                 if (_evidence?.RememberBefore(_capture, "skill", attempt.AttemptId.ToString("N"),
-                                    $"battle={action.BattleId} command={action.CommandId} actor={name} skill={command.Method} deadline={action.AbsoluteDeadline:F3}; before native submission") == true)
+                                    $"battle={action.BattleId} command={action.CommandId} {inputContext} deadline={action.AbsoluteDeadline:F3}; before native submission") == true)
                                     _evidenceAttempts.Add(attempt.AttemptId);
                             }
                         }, ct), ct, io.Clock);
