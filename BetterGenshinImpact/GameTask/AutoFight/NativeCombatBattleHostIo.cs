@@ -202,10 +202,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             result = new(CombatBattleHostInputStatus.Sent, completedAt);
             operation.Check();
         }
-        await (input.SelectionGoal != null
-            ? _flow.RunSelectionOperationAsync(input, Dispatch, ct)
-            : controlRecovery
-            ? _flow.RunControlOperationAsync(input.RequestId, Dispatch, ct)
+        if (input.SelectionGoal != null)
+        {
+            if (!await _flow.RunSelectionOperationAsync(input, Dispatch, ct))
+                result = new(CombatBattleHostInputStatus.NotSent, Reason: "selection-awaiting-post-input-frame");
+        }
+        else await (controlRecovery ? _flow.RunControlOperationAsync(input.RequestId, Dispatch, ct)
             : _flow.RunHostOperationAsync(Dispatch, ct));
         }
         catch (OperationCanceledException) { throw; }
