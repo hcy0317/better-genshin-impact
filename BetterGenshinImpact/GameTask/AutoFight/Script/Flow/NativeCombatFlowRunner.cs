@@ -59,7 +59,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     public bool IsAtRootBoundary => _execution?.IsAtRootBoundary ?? _jsonExecution!.IsAtRootBoundary;
     internal (Guid Goal, long Deadline)? SelectionAssistance => !_disposed && Volatile.Read(ref _advancing) == 0 &&
         !IsAtomic && !HasPendingConfirmation && _game is NativeGame native ? native.SelectionAssistance : null;
-    internal ValueTask RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
+    internal ValueTask<bool> RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
     {
         if (request.Kind != CombatBattleHostInputKind.Approach || SelectionAssistance?.Goal != request.SelectionGoal ||
             _game is not NativeGame native)
@@ -547,7 +547,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             PendingControl == null && _input != null && !_selectionTerminal &&
             !io.Actors.Any(actor => _attempts?.HasUnresolved(actor.Name, Method.Skill) == true || _attempts?.HasUnresolved(actor.Name, Method.Burst) == true)
                 ? (goal.GoalId, goal.DeadlineTimestamp) : null;
-        internal async ValueTask RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
+        internal async ValueTask<bool> RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
             InvalidOperationException Rejected(string code)
@@ -562,11 +562,21 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 error.Data["CombatFailureCode"] = code;
                 return error;
             }
-            if (_selection?.GoalId != request.SelectionGoal) throw Rejected("selection-goal-mismatch");
-            if (_selection?.CanAssistFrom(request.Source) != true) throw Rejected("selection-source-rejected");
+            if (_selection is not { } selection || selection.GoalId != request.SelectionGoal) throw Rejected("selection-goal-mismatch");
             if (SelectionAssistance == null) throw Rejected("selection-owner-unavailable");
+            if (!request.Source.IsKnown || request.Source.SessionId != selection.ObservedSource.SessionId ||
+                request.Source.TimestampFrequency != io.Clock.TimestampFrequency)
+                throw Rejected("selection-source-identity-mismatch");
+            if (!selection.CanAssistFrom(request.Source))
+            {
+                // 同一有效目标的输入前/过期帧只等待，不发送辅助移动，不刷新原期限。
+                try { Logger.LogDebug("SELECTION_ASSIST_DEFER request={Request} {Source}",
+                    request.RequestId, selection.DescribeAssistanceSource(request.Source)); } catch { }
+                return false;
+            }
             if (!_input!.TryReleaseInput(io.ReleaseInput)) throw Rejected("selection-release-failed");
             await RunHostOperationAsync(_selectionBattle, operation, ct);
+            return true;
         }
         internal void ObserveSelectionAssistance(CombatBattleHostInput request, CombatBattleHostInputResult receipt)
         {

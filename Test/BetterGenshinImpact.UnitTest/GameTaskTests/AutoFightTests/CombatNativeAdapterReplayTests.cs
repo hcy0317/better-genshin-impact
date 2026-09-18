@@ -26,6 +26,63 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
     [Fact]
+    public async Task FreshButPreSwitchAssistanceFrameDefersWithoutLosingTheGoalThenAcceptsPostInputFrame()
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 e(required)");
+        using var io = new PhysicalReplay(clock, false, 50, program) { SelectionNeedsMovement = true, IgnoreSwitchUntil = 99 };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        for (var i = 0; i < 50 && runner.SelectionAssistance == null; i++) await runner.StepAsync(default);
+        var assistance = runner.SelectionAssistance!.Value;
+        var old = io.Producer.Next(io.LastSelectionTimestamp - clock.TimestampFrequency * 13 / 1000);
+        Assert.True(old.IsFresh(clock, TimeSpan.FromMilliseconds(150)));
+        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Approach)
+        { RequestId = Guid.NewGuid(), SelectionGoal = assistance.Goal, Source = old, DeadlineTimestamp = assistance.Deadline };
+        var native = new NativeCombatBattleHostIo(runner, io.ControlDevice);
+        var deferred = await native.SendAsync(request, default);
+        Assert.Equal(CombatBattleHostInputStatus.NotSent, deferred.Status);
+        Assert.Equal("selection-awaiting-post-input-frame", deferred.Reason);
+        Assert.Equal(0, io.ApproachPulses);
+        Assert.Equal(assistance, runner.SelectionAssistance);
+        var submitted = await native.SendAsync(request with { Source = io.Producer.Next() }, default);
+        Assert.Equal(CombatBattleHostInputStatus.Sent, submitted.Status);
+        Assert.Equal(1, io.ApproachPulses);
+    }
+
+    [Theory]
+    [InlineData("goal")]
+    [InlineData("session")]
+    [InlineData("expired")]
+    [InlineData("cancelled")]
+    public async Task DeferredAssistanceDoesNotRelaxIdentityDeadlineOrCancellation(string boundary)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 e(required)");
+        using var io = new PhysicalReplay(clock, false, 50, program) { SelectionNeedsMovement = true, IgnoreSwitchUntil = 99 };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        for (var i = 0; i < 50 && runner.SelectionAssistance == null; i++) await runner.StepAsync(default);
+        var assistance = runner.SelectionAssistance!.Value;
+        if (boundary == "expired") await io.DelayAsync(9000, default);
+        var source = io.Producer.Next();
+        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Approach)
+        {
+            RequestId = Guid.NewGuid(), SelectionGoal = boundary == "goal" ? Guid.NewGuid() : assistance.Goal,
+            Source = boundary == "session" ? source with { SessionId = Guid.NewGuid() } : source,
+            DeadlineTimestamp = assistance.Deadline
+        };
+        var native = new NativeCombatBattleHostIo(runner, io.ControlDevice);
+        using var cancellation = new CancellationTokenSource();
+        if (boundary == "cancelled")
+        {
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await native.SendAsync(request, cancellation.Token));
+        }
+        else Assert.Equal(CombatBattleHostInputStatus.Failed, (await native.SendAsync(request, default)).Status);
+        Assert.Equal(0, io.ApproachPulses);
+        Assert.Empty(io.Inputs);
+    }
+
+    [Fact]
     public void NativeTxtAndJsonEntryLogsIdentifyTheirOwnLoadedSource()
     {
         var textPath = Path.Combine(Path.GetTempPath(), $"bgi-txt-{Guid.NewGuid():N}.txt");
@@ -2244,6 +2301,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public string? HeldFrameFault { get; init; }
         private CaptureFrameStamp _lastDelivered;
         public List<int> Selections { get; } = [];
+        public long LastSelectionTimestamp { get; private set; }
         public double FirstAttack { get; private set; } = double.PositiveInfinity;
         public void PrimeKnownSkillCooldown(string actor, double seconds) => _knownECdUntil[actor] = Now + seconds;
         public void PrimeSkillCooldown(string actor, double seconds)
@@ -2436,6 +2494,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
         public CombatBattleHostInputResult SelectActor(int index, CombatNativeInputRequest request, CancellationToken ct)
         {
+            LastSelectionTimestamp = Clock.GetTimestamp();
             Selections.Add(index);
             ct.ThrowIfCancellationRequested();
             var actor = Actors.Single(item => item.Index == index).Name;
