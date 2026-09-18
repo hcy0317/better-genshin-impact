@@ -8,6 +8,34 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class AvatarSelectionProtocolTests
 {
     [Fact]
+    public void AssistanceDiagnosticsDistinguishAFreshFrameFromAPostInputFrame()
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        CaptureFrameStamp queuedBeforeInput = default;
+        using var goal = new AvatarSelectionProtocol.Continuation<ObservedFrame>(1, 10, TimeSpan.FromSeconds(2),
+            () => new(source.Next()), f => f.Source, _ => true, _ => 2, f => new(f.Source),
+            (_, _) =>
+            {
+                queuedBeforeInput = source.Next();
+                clock.Advance(TimeSpan.FromMilliseconds(20));
+                return new(CombatBattleHostInputStatus.Sent, clock.GetTimestamp());
+            }, clock);
+        using (goal.Advance(default)) { }
+        clock.Advance(TimeSpan.FromMilliseconds(50));
+        using (goal.Advance(default)) { }
+        clock.Advance(TimeSpan.FromMilliseconds(50));
+        using (goal.Advance(default)) { }
+        Assert.True(goal.CanAssist);
+        Assert.True(queuedBeforeInput.IsFresh(clock, TimeSpan.FromMilliseconds(150)));
+        Assert.False(goal.CanAssistFrom(queuedBeforeInput));
+        var diagnostic = goal.DescribeAssistanceSource(queuedBeforeInput);
+        Assert.Contains("fresh=True", diagnostic);
+        Assert.Contains("fenceAccepted=False", diagnostic);
+        Assert.Contains("inputCompleted=", diagnostic);
+    }
+
+    [Fact]
     public void MovementReceiptKeepsItsFenceWhenTheAdmittedFrameAgesDuringThePhysicalPulse()
     {
         var clock = new FakeTimeProvider();

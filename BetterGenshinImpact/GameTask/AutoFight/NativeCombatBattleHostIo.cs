@@ -44,10 +44,13 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         if (observation.CaptureEpoch != current.Epoch || !current.CanCapture)
             quality = CombatObservationQuality.Unavailable;
         EnemySeekDecision? target = AutoFightSeek.TryCreatePassiveDecision(observation, Clock.GetUtcNow().UtcDateTime,
-            out var decision, out _, out _) ? decision : null;
+            out var decision, out _, out _, out var passiveGate) ? decision : null;
+        if (observation.CaptureEpoch != current.Epoch) passiveGate = "capture-epoch-mismatch";
+        else if (!current.CanCapture) passiveGate = "capture-exclusive";
         return new(observation.Source, observation.BattleId, quality, target,
             observation.ImageWidth, observation.ImageHeight, observation.CueFingerprint)
-        { Motion = observation.Motion, Control = observation.Control };
+        { Motion = observation.Motion, Control = observation.Control, Recognition = observation.Recognition,
+            PassiveGate = passiveGate, DamageFallback = observation.DamageFallback };
     }
 
     public PartySetupFinishObservation ObservePartyBar()
@@ -78,13 +81,20 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         var frame = trace.Observation;
         var detail = $"battle={trace.BattleId} episode={trace.Episode} state={trace.State} reason={trace.Reason} result={trace.Result} " +
             $"source={frame.Source.SessionId}/{frame.Source.Sequence} quality={frame.Quality} cue={frame.Target?.Cue} " +
-            $"visual={frame.Target?.Visual} direction={frame.Target?.Direction} motion={frame.Motion} control={frame.Control} " +
+            $"visual={frame.Target?.Visual} direction={frame.Target?.Direction} motion={frame.Motion} " +
+            $"controlObserved={frame.Control.IsObserved} controlMotion={frame.Control.Motion} keyboardBreakout={frame.Control.KeyboardBreakoutRequested} " +
             $"scan={trace.ScanUsed}/24 approach={trace.ApproachUsed}/12 progressAge={trace.ProgressAge:F3} " +
             $"settleRemaining={trace.SettleRemaining:F3} finalProbe={trace.FinalProbe}";
         detail += $" sourceAgeMs={(frame.Source.IsKnown && frame.Source.TimestampFrequency == Clock.TimestampFrequency ? Clock.GetElapsedTime(frame.Source.CapturedTimestamp).TotalMilliseconds.ToString("F1") : "unavailable")} " +
             $"inputRequest={trace.InputRequest} inputSource={trace.InputSource.SessionId}/{trace.InputSource.Sequence} inputKind={trace.InputKind} inputStatus={trace.InputStatus} " +
             $"partySource={trace.PartySample.Source.SessionId}/{trace.PartySample.Source.Sequence} partyBar={trace.PartySample.BarVisible} partyReason={trace.PartyReason}";
+        detail += $" passiveGate={frame.PassiveGate ?? "not-observed"} hostGate={trace.ObservationGate ?? "not-observed"} " +
+            $"damageFallback={frame.DamageFallback ?? "not-run"} perception=[{frame.Recognition?.ToCompactString() ?? "not-observed"}]";
         _device.Logger.LogDebug("FIGHT_HOST_DECISION {Detail}", detail);
+        if (trace.CapturePhase == "terminal")
+            _device.Logger.LogWarning("FIGHT_FAILURE_DETAIL failureId={Battle}/{Episode} termination={Termination} hostGate={HostGate} passiveGate={PassiveGate} partyGate={PartyGate} perception={Perception}",
+                trace.BattleId, trace.Episode, trace.Reason, trace.ObservationGate ?? "not-observed", frame.PassiveGate ?? "not-observed",
+                trace.PartyReason ?? "not-observed", frame.Recognition?.ToCompactString() ?? "not-observed");
         if (trace.CapturePhase is not { } phase) return;
         var evidence = DiagnosticEvidenceScope.Current;
         if (evidence == null)
