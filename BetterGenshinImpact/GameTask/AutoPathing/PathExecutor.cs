@@ -48,6 +48,7 @@ public partial class PathExecutor
     private readonly TrapEscaper _trapEscaper;
     private readonly BlessingOfTheWelkinMoonTask _blessingOfTheWelkinMoonTask = new();
     private AutoSkipTrigger? _autoSkipTrigger;
+    private long _arrivalReachedAt;
     public int SuccessFight = 0;
     //路径追踪完全走完所有路径结束的标识
     public bool SuccessEnd = false;
@@ -227,6 +228,7 @@ public partial class PathExecutor
                             await MoveTo(waypoint);
                         }
 
+                        _arrivalReachedAt = Stopwatch.GetTimestamp();
                         await BeforeMoveCloseToTarget(waypoint);
 
                         if (IsTargetPoint(waypoint))
@@ -1213,10 +1215,25 @@ public partial class PathExecutor
             await Delay(20, ct);
         }
 
-        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+        _arrivalReachedAt = Stopwatch.GetTimestamp();
+        await SettleArrivalAsync(waypoint.Action,
+            () => Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp),
+            (milliseconds, token) => Delay(milliseconds, token), ct);
+    }
 
-        // 到达目的地后停顿一秒
-        await Delay(1000, ct);
+    internal static async Task SettleArrivalAsync(string? action, Action releaseMovement,
+        Func<int, CancellationToken, Task> delay, CancellationToken token)
+    {
+        releaseMovement();
+        token.ThrowIfCancellationRequested();
+        if (action != ActionEnum.Fight.Code) await delay(1000, token);
+    }
+
+    internal static Task DispatchArrivalActionAsync(IActionHandler handler, WaypointForTrack? waypoint,
+        object? config, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        return handler.RunAsync(token, waypoint, config);
     }
 
     private async Task BeforeMoveCloseToTarget(WaypointForTrack waypoint)
@@ -1266,8 +1283,11 @@ public partial class PathExecutor
             || waypoint.Action == ActionEnum.PickUpCollect.Code)
         {
             var handler = ActionFactory.GetAfterHandler(waypoint.Action);
+            Logger.LogDebug("PATH_ACTION_HANDOFF action={Action} sinceArrivalMs={Milliseconds:F1} fixedSettleMs={Settle}",
+                waypoint.Action, _arrivalReachedAt == 0 ? -1 : Stopwatch.GetElapsedTime(_arrivalReachedAt).TotalMilliseconds,
+                waypoint.Action == ActionEnum.Fight.Code ? 0 : IsTargetPoint(waypoint) ? 1000 : 0);
             //,PartyConfig
-            await handler.RunAsync(ct, waypoint, PartyConfig);
+            await DispatchArrivalActionAsync(handler, waypoint, PartyConfig, ct);
             //统计结束战斗的次数
             if (waypoint.Action == ActionEnum.Fight.Code)
             {
