@@ -71,6 +71,13 @@ internal static class AvatarSelectionProtocol
             !_uncertainSubmission && _consecutiveMismatch >= 2;
         internal bool CanAssistFrom(CaptureFrameStamp source) => CanAssist &&
             source.IsFresh(_clock, _maximumAge) && _fence?.Accepts(source) == true;
+        internal string DescribeAssistanceSource(CaptureFrameStamp source) =>
+            $"goal={GoalId} closed={_closed} expired={IsExpired} retired={RetirementRequested} " +
+            $"submitted={HasSubmittedInput} uncertain={_uncertainSubmission} mismatchFrames={_consecutiveMismatch} " +
+            $"source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} captured={source.CapturedTimestamp} fresh={source.IsFresh(_clock, _maximumAge)} " +
+            $"sourceFrequency={source.TimestampFrequency} clockFrequency={_clock.TimestampFrequency} maxAgeMs={_maximumAge.TotalMilliseconds:F1} " +
+            $"fenceSource={_fence?.Before.SessionId}/{_fence?.Before.Sequence} inputCompleted={_fence?.InputCompletedTimestamp} " +
+            $"fenceAccepted={_fence?.Accepts(source) == true} deadline={_deadline}";
         internal void ObserveAssistance(CaptureFrameStamp source, long completed)
         {
             // 新鲜度在原生输入前检查。这里记录已经发生的副作用，不能因物理等待把它丢弃。

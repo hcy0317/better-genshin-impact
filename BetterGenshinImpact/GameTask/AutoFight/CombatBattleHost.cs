@@ -15,6 +15,9 @@ internal readonly record struct CombatBattleObservation(CaptureFrameStamp Source
 {
     public MotionStatus Motion { get; init; } = MotionStatus.Unknown;
     public CombatControlObservation Control { get; init; }
+    public SeekRecognitionDiagnostics? Recognition { get; init; }
+    public string? PassiveGate { get; init; }
+    public string? DamageFallback { get; init; }
 }
 internal enum CombatBattleHostResult { Continue, Completed, Unconfirmed }
 internal sealed record CombatBattleHostTrace(Guid BattleId, string Episode, string State, string Reason,
@@ -28,6 +31,7 @@ internal sealed record CombatBattleHostTrace(Guid BattleId, string Episode, stri
     public PartySetupFinishObservation PartySample { get; init; }
     public string? PartyReason { get; init; }
     public string? ClosedEpisode { get; init; }
+    public string? ObservationGate { get; init; }
 }
 internal enum CombatBattleHostInputKind { Camera, Approach, OpenParty, CloseParty, Detach, Breakout }
 internal readonly record struct CombatBattleHostInput(CombatBattleHostInputKind Kind,
@@ -116,6 +120,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private CombatBattleHostInputKind? _traceInputKind;
     private PartySetupFinishObservation _tracePartySample;
     private string? _tracePartyReason;
+    private string? _traceObservationGate;
     public string Reason { get; private set; } = "starting";
     public string State => _phase.ToString();
     public long CameraRequests { get; private set; }
@@ -145,7 +150,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 return Stop("configured-timeout");
             var observation = ReadObservation(io.ObserveTarget);
             _diagnosticObservation = observation;
-            var fresh = Accept(observation, out var newEvidence);
+            var fresh = Accept(observation, out var newEvidence, out _traceObservationGate);
             if (newEvidence)
             {
                 _lastValidAt = now;
@@ -256,7 +261,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         }
         catch (Exception error)
         {
-            exceptionReason = error is OperationCanceledException ? "cancelled" : "exception:" + error.GetType().Name;
+            exceptionReason = error is OperationCanceledException ? "cancelled" :
+                "exception:" + (error.Data["CombatFailureCode"] as string ?? error.GetType().Name);
             try { io.ReleaseInput(); } catch { /* 不遮蔽原始取消/视觉/输入异常。 */ }
             throw;
         }
@@ -285,7 +291,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     {
                         InputRequest = _traceInputRequest, InputSource = _traceInputSource, InputStatus = _traceInputStatus,
                         InputKind = _traceInputKind, PartySample = _tracePartySample, PartyReason = _tracePartyReason,
-                        ClosedEpisode = _closedEvidenceEpisode
+                        ClosedEpisode = _closedEvidenceEpisode, ObservationGate = _traceObservationGate
                     });
                 }
             }
@@ -314,16 +320,23 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         return value;
     }
 
-    private bool Accept(CombatBattleObservation observation, out bool newEvidence)
+    private bool Accept(CombatBattleObservation observation, out bool newEvidence, out string reason)
     {
         newEvidence = false;
-        if (observation.Quality != CombatObservationQuality.Available || observation.BattleId != io.BattleId ||
-            !observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150))) return false;
+        reason = "quality:" + observation.Quality;
+        if (observation.Quality != CombatObservationQuality.Available) return false;
+        reason = "battle-mismatch";
+        if (observation.BattleId != io.BattleId) return false;
+        reason = observation.Source.IsKnown ? "source-age-or-clock-invalid" : "source-unknown";
+        if (!observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150))) return false;
+        reason = "source-order-or-session-rejected";
         if (_lastSource.IsKnown && observation.Source != _lastSource && !observation.Source.IsAfter(_lastSource)) return false;
+        reason = "input-fence-rejected";
         if (_inputFence is { } fence && !fence.Accepts(observation.Source)) return false;
         newEvidence = !_lastSource.IsKnown || observation.Source.IsAfter(_lastSource);
         if (newEvidence) _lastSource = observation.Source;
         _inputFence = null;
+        reason = newEvidence ? "accepted-new-frame" : "accepted-reused-frame";
         return true;
     }
 

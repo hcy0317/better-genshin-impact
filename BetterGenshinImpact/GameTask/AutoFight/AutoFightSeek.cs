@@ -829,22 +829,28 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             out EnemySeekDecision decision,
             out int imageWidth,
             out int imageHeight)
+            => TryCreatePassiveDecision(observation, observedAtUtc, out decision, out imageWidth, out imageHeight, out _);
+
+        internal static bool TryCreatePassiveDecision(
+            PassiveTargetObservation observation, DateTime observedAtUtc,
+            out EnemySeekDecision decision, out int imageWidth, out int imageHeight, out string reason)
         {
             decision = default;
             imageWidth = observation.ImageWidth;
             imageHeight = observation.ImageHeight;
             var age = observedAtUtc - observation.CapturedAtUtc;
-            if (age < TimeSpan.Zero ||
-                age > TimeSpan.FromMilliseconds(250) ||
-                imageWidth <= 0 ||
-                imageHeight <= 0 ||
-                observation.Visual is not { } visual)
-            {
-                return false;
-            }
+            reason = "future-observation";
+            if (age < TimeSpan.Zero) return false;
+            reason = "passive-observation-older-than-250ms";
+            if (age > TimeSpan.FromMilliseconds(250)) return false;
+            reason = "invalid-image-size";
+            if (imageWidth <= 0 || imageHeight <= 0) return false;
+            reason = observation.TargetAbsenceReason ?? "no-published-visual";
+            if (observation.Visual is not { } visual) return false;
 
             if (observation.HasNormalHealthBar)
             {
+                reason = "health-bar";
                 decision = new EnemySeekDecision(
                     AutoFightSeekAction.ApproachVisibleEnemy,
                     EnemyIndicatorDirection.None,
@@ -855,6 +861,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             }
             if (observation.HasDamageCue)
             {
+                reason = "damage-cue";
                 decision = new EnemySeekDecision(
                     AutoFightSeekAction.KeepFighting,
                     EnemyIndicatorDirection.None,
@@ -865,9 +872,11 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             }
             if (observation.IndicatorDecision is { } indicator)
             {
+                reason = "indicator-or-fixed-health";
                 decision = indicator;
                 return true;
             }
+            reason = "published-visual-without-cue";
             return false;
         }
 
@@ -1411,10 +1420,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         }
 
         private static bool IsHealthBar(EnemySeekVisual visual, int imageHeight)
+            => HealthBarGeometryFailure(visual, imageHeight, out _) == null;
+
+        private static string? HealthBarGeometryFailure(EnemySeekVisual visual, int imageHeight, out int minimumWidth)
         {
+            minimumWidth = 0;
             if (visual.IndicatorBearingDegrees.HasValue)
             {
-                return false;
+                return "bearing";
             }
 
             var scale = imageHeight / 1080d;
@@ -1428,16 +1441,16 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var thickHealthBarThreshold = Math.Max(
                 minimumHeight,
                 (int)Math.Round(15 * scale, MidpointRounding.AwayFromZero));
-            var minimumWidth = visual.Height >= thickHealthBarThreshold
+            minimumWidth = visual.Height >= thickHealthBarThreshold
                 ? Math.Max(12, (int)Math.Round(18 * scale, MidpointRounding.AwayFromZero))
                 : Math.Max(
                     Math.Max(16, (int)Math.Round(24 * scale, MidpointRounding.AwayFromZero)),
                     visual.Height * 3);
             var thickFillRatio = visual.Area / (double)Math.Max(1, visual.Width * visual.Height);
-            return visual.Height >= minimumHeight
-                   && visual.Height <= maximumHeight
-                   && visual.Width >= minimumWidth
-                   && (visual.Height < thickHealthBarThreshold || thickFillRatio >= 0.70);
+            if (visual.Height < minimumHeight || visual.Height > maximumHeight) return "height";
+            if (visual.Width < minimumWidth) return "width";
+            if (visual.Height >= thickHealthBarThreshold && thickFillRatio < 0.70) return "fill";
+            return null;
         }
 
         internal static bool IsDirectionIndicatorGeometry(EnemySeekVisual visual, int imageWidth, int imageHeight)
@@ -1909,7 +1922,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         internal static EnemySeekDecision RecognizeSeekDecision(
             ImageRegion image, Scalar bloodLower, Scalar? bloodHigher,
             out int imageWidth, out int imageHeight, bool indicatorOnly = false,
-            bool saveDiagnostics = true)
+            bool saveDiagnostics = true, SeekRecognitionDiagnostics? diagnostics = null)
         {
             var detectionRegion = GetSeekDetectionRegion(image.Width, image.Height);
             using var imageCrop = image.DeriveCrop(
@@ -1932,6 +1945,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 connectivity: PixelConnectivity.Connectivity4,
                 ltype: MatType.CV_32S);
 
+            if (diagnostics != null) diagnostics.RawComponents = numLabels - 1;
             if (numLabels <= 1)
             {
                 if (indicatorOnly)
@@ -1976,7 +1990,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     imageCrop.SrcMat,
                     visual,
                     imageCrop.Width,
-                    imageCrop.Height))
+                    imageCrop.Height, diagnostics))
                 .Where(visual => visual.HasValue)
                 .Select(visual => visual!.Value)
                 .ToList();
@@ -2137,32 +2151,40 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             Mat? source,
             EnemySeekVisual visual,
             int imageWidth,
-            int imageHeight)
+            int imageHeight,
+            SeekRecognitionDiagnostics? diagnostics = null)
         {
-            if (IsHealthBar(visual, imageHeight))
+            var healthFailure = HealthBarGeometryFailure(visual, imageHeight, out var minimumWidth);
+            EnemySeekVisual? Finish(EnemySeekVisual? accepted, string indicatorResult)
             {
-                if (!IsPlayerHudHealthBar(visual, imageWidth, imageHeight)
-                    && MatchesHealthBarFeature(mask, source, visual))
+                diagnostics?.Record(visual, healthFailure, indicatorResult, minimumWidth, imageWidth, imageHeight, accepted.HasValue);
+                return accepted;
+            }
+            if (healthFailure == null)
+            {
+                if (IsPlayerHudHealthBar(visual, imageWidth, imageHeight)) healthFailure = "hud";
+                else if (MatchesHealthBarFeature(mask, source, visual))
                 {
-                    return visual;
+                    return Finish(visual, "not-run");
                 }
+                else healthFailure = "feature";
             }
 
             if (!IsDirectionIndicatorGeometry(visual, imageWidth, imageHeight))
             {
-                return null;
+                return Finish(null, "geometry");
             }
 
             var templates = DirectionIndicatorTemplates.Value;
             if (templates.Count == 0)
             {
-                return null;
+                return Finish(null, "templates");
             }
 
             if (source != null
                 && !HasDirectionIndicatorPinkRedShare(source, visual))
             {
-                return null;
+                return Finish(null, "color");
             }
 
             using var candidate = new Mat(mask, new Rect(
@@ -2175,7 +2197,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     templates.Select(template => template.Contour).ToArray(),
                     DirectionIndicatorFeatureThreshold))
             {
-                return null;
+                return Finish(null, "template");
             }
 
             var bearingMatch = MatchDirectionIndicatorTemplateBearing(
@@ -2187,12 +2209,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     GetIndicatorScreenBearingDegrees(visual, imageWidth, imageHeight))
                 > DirectionIndicatorMaxScreenBearingDelta)
             {
-                return null;
+                return Finish(null, "screen-bearing");
             }
 
-            return bearingMatch.HasValue
+            return Finish(bearingMatch.HasValue
                 ? visual with { IndicatorBearingDegrees = bearingMatch.Value.bearing }
-                : null;
+                : null, bearingMatch.HasValue ? "accepted" : "bearing");
         }
 
         internal static bool MatchesHealthBarFeature(

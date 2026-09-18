@@ -283,6 +283,9 @@ public static class AvatarRecognition
             config.DamageNumberRecognitionMode);
     }
 
+    internal static string DescribeDamageFallback(DamageNumberRecognitionMode mode, bool found) =>
+        mode == DamageNumberRecognitionMode.Disabled ? "not-run:Disabled" : $"{(found ? "found" : "not-found")}:{mode}";
+
     /// <summary>
     /// 根据配置的伤害数字识别模式寻找伤害数字/反应文字。
     ///   - Disabled：直接返回 null
@@ -519,14 +522,16 @@ public static class AvatarRecognition
                     lastControl = control;
                     var motion = control.Motion;
                     // 被动观察和寻敌使用同一几何分类；普通血条不能仅因连续静止就变成顶部固定血条。
-                    var target = ReadPassiveTarget(capture);
+                    var targetRead = ReadPassiveTargetEvidence(capture);
+                    var target = targetRead.Decision;
                     var drawList = new List<RectDrawable>();
                     // 2. 血条追踪：持续感知只发布观察，不直接发送战斗输入。
                     if (target is { Cue: SeekCueKind.FixedTopHealth, Visual: { } fixedVisual })
                     {
                         indicatorCandidate = null;
                         RecordPublication(PublishPassiveObservation(false, false, fixedVisual, capture.Width, capture.Height,
-                            capturedAtUtc, observationEpoch, target, capture.FrameStamp, battleId, motion: motion, control: control));
+                            capturedAtUtc, observationEpoch, target, capture.FrameStamp, battleId, motion: motion, control: control,
+                            recognition: targetRead.Diagnostics));
                     }
                     else if (target is { Cue: SeekCueKind.HealthBar, Visual: { } nearest })
                     {
@@ -538,7 +543,8 @@ public static class AvatarRecognition
                             capture.Width,
                             capture.Height,
                             capturedAtUtc,
-                            observationEpoch, source: capture.FrameStamp, battleId: battleId, motion: motion, control: control));
+                            observationEpoch, source: capture.FrameStamp, battleId: battleId, motion: motion, control: control,
+                            recognition: targetRead.Diagnostics));
 
                         if (drawResults)
                         {
@@ -562,7 +568,8 @@ public static class AvatarRecognition
                                 capture.Height,
                                 capturedAtUtc,
                                 observationEpoch, source: capture.FrameStamp, battleId: battleId,
-                                cueFingerprint: FingerprintDamageCue(capture, damageVisual), motion: motion, control: control));
+                                cueFingerprint: FingerprintDamageCue(capture, damageVisual), motion: motion, control: control,
+                                recognition: targetRead.Diagnostics, damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, true)));
 
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
@@ -602,7 +609,12 @@ public static class AvatarRecognition
                                 capture.Height,
                                 capturedAtUtc,
                                 observationEpoch,
-                                confirmedIndicator, capture.FrameStamp, battleId, motion: motion, control: control));
+                                confirmedIndicator, capture.FrameStamp, battleId, motion: motion, control: control,
+                                recognition: targetRead.Diagnostics,
+                                absenceReason: confirmedIndicator != null ? null : indicatorCandidate != null ? "indicator-awaiting-stability" :
+                                    targetRead.Diagnostics.RawComponents == 0 ? "no-color-components" :
+                                    targetRead.Diagnostics.Accepted == 0 ? "all-visual-candidates-filtered" : "target-selection-empty",
+                                damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, false)));
                         }
                     }
 
@@ -634,9 +646,16 @@ public static class AvatarRecognition
         }
     }
 
-    internal static EnemySeekDecision ReadPassiveTarget(ImageRegion frame) => frame.ReadOnce(
-        (typeof(AvatarRecognition), "target"), () => AutoFightSeek.RecognizeSeekDecision(frame,
-            new Scalar(255, 90, 90), null, out _, out _, saveDiagnostics: false));
+    internal static EnemySeekDecision ReadPassiveTarget(ImageRegion frame) => ReadPassiveTargetEvidence(frame).Decision;
+
+    internal static (EnemySeekDecision Decision, SeekRecognitionDiagnostics Diagnostics) ReadPassiveTargetEvidence(ImageRegion frame) =>
+        frame.ReadOnce((typeof(AvatarRecognition), "target"), () =>
+        {
+            var diagnostics = new SeekRecognitionDiagnostics();
+            var decision = AutoFightSeek.RecognizeSeekDecision(frame,
+                new Scalar(255, 90, 90), null, out _, out _, saveDiagnostics: false, diagnostics: diagnostics);
+            return (decision, diagnostics);
+        });
 
     private static bool PublishPassiveObservation(
         bool hasNormalHealthBar,
@@ -649,7 +668,8 @@ public static class AvatarRecognition
         EnemySeekDecision? indicatorDecision = null,
         CaptureFrameStamp source = default, Guid battleId = default,
         CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0, MotionStatus motion = MotionStatus.Unknown,
-        CombatControlObservation control = default)
+        CombatControlObservation control = default, SeekRecognitionDiagnostics? recognition = null,
+        string? absenceReason = null, string? damageFallback = null)
     {
         lock (_seekLock)
         {
@@ -671,7 +691,8 @@ public static class AvatarRecognition
                     imageHeight,
                     indicatorDecision)
                 { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
-                    CueFingerprint = cueFingerprint, Motion = motion, Control = control };
+                    CueFingerprint = cueFingerprint, Motion = motion, Control = control,
+                    Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback };
             }
             return true;
         }
@@ -731,4 +752,7 @@ internal readonly record struct PassiveTargetObservation(
     public ulong CueFingerprint { get; init; }
     public MotionStatus Motion { get; init; } = MotionStatus.Unknown;
     public CombatControlObservation Control { get; init; }
+    public SeekRecognitionDiagnostics? Recognition { get; init; }
+    public string? TargetAbsenceReason { get; init; }
+    public string? DamageFallback { get; init; }
 }

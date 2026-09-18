@@ -549,9 +549,22 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         internal async ValueTask RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            if (_selection?.GoalId != request.SelectionGoal || _selection.CanAssistFrom(request.Source) != true ||
-                SelectionAssistance == null || !_input!.TryReleaseInput(io.ReleaseInput))
-                throw new InvalidOperationException("选角辅助的新帧/键释放/目标边界不成立");
+            InvalidOperationException Rejected(string code)
+            {
+                var unresolved = _attempts == null ? "not-created" : string.Join(",", io.Actors.Where(actor =>
+                    _attempts.HasUnresolved(actor.Name, Method.Skill) || _attempts.HasUnresolved(actor.Name, Method.Burst)).Select(actor => actor.Name));
+                var detail = $"battle={_selectionBattle} request={request.RequestId} requestedGoal={request.SelectionGoal} " +
+                    $"controlPending={PendingControl != null} inputOwner={_input != null} terminal={_selectionTerminal} unresolvedActors={unresolved} " +
+                    (_selection?.DescribeAssistanceSource(request.Source) ?? "selection=missing");
+                try { io.Logger.LogWarning("SELECTION_ASSIST_REJECT code={Code} {Detail}", code, detail); } catch { }
+                var error = new InvalidOperationException($"选角辅助的新帧/键释放/目标边界不成立 [{code}]：{detail}");
+                error.Data["CombatFailureCode"] = code;
+                return error;
+            }
+            if (_selection?.GoalId != request.SelectionGoal) throw Rejected("selection-goal-mismatch");
+            if (_selection?.CanAssistFrom(request.Source) != true) throw Rejected("selection-source-rejected");
+            if (SelectionAssistance == null) throw Rejected("selection-owner-unavailable");
+            if (!_input!.TryReleaseInput(io.ReleaseInput)) throw Rejected("selection-release-failed");
             await RunHostOperationAsync(_selectionBattle, operation, ct);
         }
         internal void ObserveSelectionAssistance(CombatBattleHostInput request, CombatBattleHostInputResult receipt)
