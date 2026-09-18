@@ -11,7 +11,7 @@ internal static class RemoteSessionCaptureModePolicy
             return requestedMode;
         }
 
-        return requestedMode is CaptureModes.WindowsGraphicsCapture or CaptureModes.WindowsGraphicsCaptureHdr
+        return requestedMode is CaptureModes.WindowsGraphicsCapture or CaptureModes.WindowsGraphicsCaptureHdr or CaptureModes.WindowsGraphicsCaptureV2
             ? CaptureModes.BitBlt
             : requestedMode;
     }

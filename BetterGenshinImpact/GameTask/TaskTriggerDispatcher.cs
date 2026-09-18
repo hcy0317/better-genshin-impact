@@ -163,7 +163,9 @@ namespace BetterGenshinImpact.GameTask
                     GameCapture.Start(hWnd,
                         new Dictionary<string, object>()
                         {
-                    { "autoFixWin11BitBlt", OsVersionHelper.IsWindows11_OrGreater && TaskContext.Instance().Config.AutoFixWin11BitBlt }
+                            { "autoFixWin11BitBlt", OsVersionHelper.IsWindows11_OrGreater && TaskContext.Instance().Config.AutoFixWin11BitBlt },
+                            { "MinUpdateIntervalMs", TaskContext.Instance().Config.WgcMinUpdateIntervalMs },
+                            { "UseCpuConvert", TaskContext.Instance().Config.WgcV2UseCpuConvert }
                         }
                     );
 
