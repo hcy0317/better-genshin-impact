@@ -487,6 +487,33 @@ public class CombatBattleHostTests
         Assert.InRange(host.CameraRequests, 1, 24);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OnlyRedHealthReductionNotDarkTrackGeometryCountsAsBattleProgress(bool redDecreases)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp =>
+        {
+            var seconds = clock.GetElapsedTime(started).TotalSeconds;
+            var redWidth = redDecreases ? Math.Max(8, 60 - 4 * (int)(seconds / 5)) : 14;
+            var visual = new EnemySeekVisual(900, 400, redWidth, 6, redWidth * 6)
+            { HealthBarTrackWidth = (int)(seconds % 2) == 0 ? 70 : 90 };
+            return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+                new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, visual, 1, SeekCueKind.HealthBar), 1920, 1080);
+        };
+        using var host = new CombatBattleHost(io, new() { SeekEnabled = false, FinishDetectionEnabled = false });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 3000 && clock.GetElapsedTime(started).TotalSeconds < 60 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(redDecreases ? CombatBattleHostResult.Continue : CombatBattleHostResult.Unconfirmed, result);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, redDecreases ? 60 : 45, redDecreases ? 61 : 46);
+        Assert.Empty(io.Inputs);
+    }
+
     [Fact]
     public async Task OnlyFreshIndependentPostInputPartyEvidenceCompletesAndClosesTheUi()
     {
@@ -665,4 +692,3 @@ public class CombatBattleHostTests
         public void ReleaseInput() { PartyOpen = false; }
     }
 }
-

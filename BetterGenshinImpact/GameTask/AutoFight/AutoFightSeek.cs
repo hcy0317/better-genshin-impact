@@ -246,7 +246,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         int Area,
         double? IndicatorBearingDegrees = null)
     {
-        internal int CenterX => X + Width / 2;
+        // Width始终是红色剩余量；暗槽只补充定位/分类，不能伪装为血量进展。
+        internal int HealthBarTrackWidth { get; init; }
+        internal int CenterX => X + Math.Max(Width, HealthBarTrackWidth) / 2;
         internal int CenterY => Y + Height / 2;
     }
 
@@ -1448,7 +1450,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     visual.Height * 3);
             var thickFillRatio = visual.Area / (double)Math.Max(1, visual.Width * visual.Height);
             if (visual.Height < minimumHeight || visual.Height > maximumHeight) return "height";
-            if (visual.Width < minimumWidth) return "width";
+            if (Math.Max(visual.Width, visual.HealthBarTrackWidth) < minimumWidth) return "width";
             if (visual.Height >= thickHealthBarThreshold && thickFillRatio < 0.70) return "fill";
             return null;
         }
@@ -2159,6 +2161,18 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             {
                 diagnostics?.Record(visual, healthFailure, indicatorResult, minimumWidth, imageWidth, imageHeight, accepted.HasValue);
                 return accepted;
+            }
+            if (healthFailure == "width" && source != null &&
+                visual.Width >= Math.Max(6, (int)Math.Round(6 * imageHeight / 1080d)) &&
+                visual.Height <= Math.Max(6, (int)Math.Round(12 * imageHeight / 1080d)) &&
+                !IsPlayerHudHealthBar(visual, imageWidth, imageHeight) &&
+                MatchesHealthBarFeature(mask, source, visual))
+            {
+                var width = DepletedHealthBarReader.ReadTrackWidth(source, visual, minimumWidth, out var reason);
+                var recovered = visual with { HealthBarTrackWidth = width };
+                var accepted = width > 0 && !IsPlayerHudHealthBar(recovered, imageWidth, imageHeight);
+                diagnostics?.RecordDarkTrack(visual, width, accepted ? "accepted" : width > 0 ? "hud" : reason);
+                if (accepted) return Finish(recovered, "not-run");
             }
             if (healthFailure == null)
             {
