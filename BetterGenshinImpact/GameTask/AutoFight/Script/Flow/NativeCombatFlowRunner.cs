@@ -218,7 +218,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
     public void Step(CancellationToken ct) => StepAsync(ct).AsTask().GetAwaiter().GetResult();
 
-    public async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct)
+    public ValueTask<CombatFlowStep> StepAsync(CancellationToken ct) => StepAsync(ct, allowNewRound: true);
+
+    internal async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct, bool allowNewRound)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (Interlocked.CompareExchange(ref _advancing, 1, 0) != 0)
@@ -271,7 +273,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     ? "增强战斗连续 3 轮关键流程失败，不执行复活重试"
                     : "增强战斗失败后持续无新执行进展，恢复观察时限已到；不切队或传送。" + MaintenanceDecision);
             }
-            var step = await (_execution?.StepAsync(ct) ?? _jsonExecution!.StepAsync(ct));
+            var step = await (_execution?.StepAsync(ct, beginObservationFrame: true, allowNewRound)
+                              ?? _jsonExecution!.StepAsync(ct, allowNewRound));
             if (_game is NativeGame { PendingControl: not null })
             {
                 _stepBeforeControl = step;

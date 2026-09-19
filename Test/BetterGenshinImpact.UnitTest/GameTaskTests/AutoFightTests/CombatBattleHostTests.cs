@@ -10,6 +10,121 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatBattleHostTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DrainStepCannotStartAnIdleRootAndNormalStepsStillCan(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(json, game, clock);
+        var idle = await flow.StepAsync(default, allowNewRound: false);
+        Assert.Equal(CombatFlowResult.Deferred, idle.Result);
+        Assert.Equal(0, game.Inputs);
+        Assert.Equal(CombatFlowResult.Succeeded, await flow.RunRoundAsync(default));
+        var inputs = game.Inputs;
+        for (var i = 0; i < 3; i++) await flow.StepAsync(default, allowNewRound: false);
+        Assert.Equal(inputs, game.Inputs);
+        Assert.Equal(CombatFlowResult.Succeeded, await flow.RunRoundAsync(default));
+        Assert.True(game.Inputs > inputs);
+    }
+
+    [Fact]
+    public async Task JsonDrainingPreparationCannotStartTheNewlyEligiblePriorityRule()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new DrainPreparationGame();
+        using var flow = NativeCombatFlowRunner.Create(new JsonCombatStrategy
+        {
+            Actions = [
+                new() { Character = "琴", Action = "attack(0.1)", Condition = new() { Expression = "q-ready(琴)" } },
+                new() { Character = "琴", Action = "attack(0.2)", Condition = new() { Expression = "e-ready(琴)" } }]
+        }, game, clock: clock)!;
+        Assert.Equal(CombatFlowResult.AwaitingObservation, (await flow.StepAsync(default)).Result);
+        Assert.True(flow.HasAwaitingObservation);
+        game.Release = true;
+        await flow.StepAsync(default, allowNewRound: false);
+        Assert.False(flow.HasAwaitingObservation);
+        Assert.Equal(0, game.Inputs);
+        await flow.StepAsync(default, allowNewRound: false);
+        Assert.Equal(0, game.Inputs);
+        Assert.Equal(CombatFlowResult.Succeeded, await flow.RunRoundAsync(default));
+        Assert.Equal(1, game.Inputs);
+    }
+
+    private sealed class DrainPreparationGame : ICombatFlowGame
+    {
+        public bool Release { get; set; }
+        public int Inputs { get; private set; }
+        private bool _prepared;
+        public object? Observe(string function, IReadOnlyList<object?> args, string actor) =>
+            _prepared ? true : function == "q-ready" ? false : null;
+        public ValueTask<CombatObservationPreparation> PrepareObservationStepAsync(CombatFlowAction action, string function, CancellationToken ct)
+        {
+            if (!Release) return ValueTask.FromResult(CombatObservationPreparation.AwaitingObservation);
+            _prepared = true;
+            action.ReportActiveActor("琴");
+            return ValueTask.FromResult(CombatObservationPreparation.Ready);
+        }
+        public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
+        {
+            if (action.TryBeginInput()) Inputs++;
+            return ValueTask.FromResult(CombatFlowResult.Succeeded);
+        }
+        public ValueTask YieldAsync(CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReengagementDeadlineDrainsExistingObservationWithoutStartingAnotherAction(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new LateObservationGame(clock);
+        using var flow = CreateFlow(json, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar), 1920, 1080);
+        await host.AdvanceAsync(flow, default);
+        io.TargetFactory = null;
+        for (var i = 0; i < 1500 && host.State != "Reengaging"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Reengaging", host.State);
+        clock.Advance(TimeSpan.FromSeconds(14.8));
+        game.HoldObservation = true;
+        for (var i = 0; i < 10 && !flow.HasAwaitingObservation; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.True(flow.HasAwaitingObservation);
+        clock.Advance(TimeSpan.FromSeconds(.3));
+        Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        game.HoldObservation = false;
+        for (var i = 0; i < 10 && flow.HasAwaitingObservation; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.False(flow.HasAwaitingObservation);
+        var inputs = game.Inputs;
+        Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("BeforeParty", host.State);
+        Assert.Equal(inputs, game.Inputs);
+    }
+
+    private sealed class LateObservationGame(FakeTimeProvider clock) : ICombatFlowGame
+    {
+        public bool HoldObservation { get; set; }
+        public int Inputs { get; private set; }
+        public object? Observe(string function, IReadOnlyList<object?> args, string actor) => true;
+        public ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (HoldObservation) return ValueTask.FromResult(CombatFlowResult.AwaitingObservation);
+            action.TryBeginInput();
+            Inputs++;
+            clock.Advance(TimeSpan.FromMilliseconds(100));
+            return ValueTask.FromResult(CombatFlowResult.Succeeded);
+        }
+        public ValueTask YieldAsync(CancellationToken ct) => ValueTask.CompletedTask;
+    }
+
+    [Theory]
     [InlineData(true)]
     [InlineData(false)]
     public async Task ReengagementCancellationOrObservationFailureReleasesInputImmediately(bool cancel)
@@ -86,7 +201,8 @@ public class CombatBattleHostTests
         Assert.True(terminal.ProgressAge < 47);
         Assert.Equal(24, host.CameraRequests);
         Assert.Equal(0, host.ApproachRequests);
-        Assert.Equal(3, io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.OpenParty));
+        // 重进已抵达45秒时直接停止，不再额外发送一次编队探测。
+        Assert.Equal(initialDelay == 0 ? 3 : 2, io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.OpenParty));
         Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.CloseParty);
         Assert.True(game.Inputs > 5);
     }
