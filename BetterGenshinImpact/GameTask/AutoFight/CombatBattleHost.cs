@@ -98,6 +98,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private double _nextFinishCheck = Math.Max(options.InitialBlockSeconds, options.FinishCheckIntervalSeconds);
     private EnemySeekVisual? _stableVisual;
     private int _minimumHealthWidth, _healthBaselineCandidate, _scanPulses, _approachPulses;
+    private int _searchVerticalOffset;
     private double _healthBaselineSince;
     private double _motionSettlesAt, _nextNonCombatCheck;
     private ulong _lastDamageFingerprint;
@@ -399,6 +400,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         _lastProgressAt = now;
         _reengaged = false;
         _scanPulses = _approachPulses = 0;
+        _searchVerticalOffset = 0;
         _detachPulses = 0;
         _externalSearchExhausted = false;
         _finalProbe = false; // 真实游戏进展关闭旧搜索episode，不污染下一次结束探测。
@@ -448,7 +450,12 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         {
             var offset = AutoFightSeek.GetSeekCameraOffset(observation.Width, observation.Height,
                 _scanPulses / 4, _scanPulses % 4);
-            if (!await SendAsync(new(CombatBattleHostInputKind.Camera, offset.x, offset.y), ct)) return _result;
+            // 旧寻敌入口会先定位轨道中心；宿主没有该步骤，不能只累加轨道内的波浪差值。
+            // 按本轮已发送的纵向位移进入下一采样高度，发送失败不推进轨迹。
+            var verticalTarget = AutoFightSeek.GetSeekCameraVerticalTargetOffset(observation.Height,
+                _scanPulses / 4, _scanPulses % 4 + 1);
+            if (!await SendAsync(new(CombatBattleHostInputKind.Camera, offset.x, verticalTarget - _searchVerticalOffset), ct)) return _result;
+            _searchVerticalOffset = verticalTarget;
         }
         _scanPulses++;
         if (_scanPulses >= MaximumSearchPulses)
