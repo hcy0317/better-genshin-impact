@@ -553,11 +553,17 @@ public sealed partial class CombatFlowExecution : IDisposable
                 canReuseConfirmedActor: IsAtomic && (command.Method == Method.Wait || command.Method == Method.MoveBy || command.Method == Method.KeyUp),
                 confirmationAttempt: confirming ? frame.PendingAttempt : null, callPath: CurrentCallPath(),
                 atomicObservationId: frame.Block.RawAtomicPlan != null ? frame.Id : null);
+            bool CanSkipUnsentOptionalBurstAtDeadline() => command.LegacyOutcomePolicy &&
+                command.Method == Method.Burst && !Required(command) && !confirming &&
+                action.AtomicObservationId == null && action.IsAwaitingUnsentBurstReadiness &&
+                action.RemainingBudget <= 0 && action.EffectiveInputAt == null &&
+                action.SubmissionCount == 0 && action.PendingAttempt == null &&
+                !_game.HasPendingSkill(action) && CanStart();
             if (!action.CanStart)
             {
-                // 普通片段等待的原动作到期仍未执行，不是用户允许的可选跳过。
+                // 仅用户允许的未发送可选Q就绪等待可跳过；其余普通动作到期仍失败。
                 CompleteNode(frame, command, command.LegacyOutcomePolicy && resumingObservation && action.RemainingBudget <= 0
-                    ? CombatFlowResult.Failed : CombatFlowResult.Skipped);
+                    && !CanSkipUnsentOptionalBurstAtDeadline() ? CombatFlowResult.Failed : CombatFlowResult.Skipped);
                 continue;
             }
             var hasPendingSkill = _game.HasPendingSkill(action);
@@ -616,7 +622,7 @@ public sealed partial class CombatFlowExecution : IDisposable
             var actionResult = await _game.ExecuteAsync(action, ct);
             // 执行端也可能跨过原期限；先收束原等待，再清游标，不能把迟到未执行当成可选跳过。
             if (resumingObservation && command.LegacyOutcomePolicy && action.RemainingBudget <= 0 &&
-                actionResult == CombatFlowResult.Skipped)
+                actionResult == CombatFlowResult.Skipped && !CanSkipUnsentOptionalBurstAtDeadline())
                 actionResult = CombatFlowResult.Failed;
             // 旧的高层游戏端口以自身声明的输入事实兼容；Native改由真实提交回执记录。
             if (!_game.ReportsInputReceipts) action.RecordLegacyInput();

@@ -1289,6 +1289,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         public async ValueTask<CombatFlowResult> ExecuteAsync(CombatFlowAction action, CancellationToken ct)
         {
             using var realtime = new RecognitionReadinessScope();
+            action.IsAwaitingUnsentBurstReadiness = false;
             ct.ThrowIfCancellationRequested();
             ObjectDisposedException.ThrowIf(_disposed, this);
             action.CaptureDiagnostics = CombatFlowDiagnosticWriter.IsEnabled(Logger);
@@ -1471,6 +1472,15 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                             knownUnavailable ? "known-unavailable" : "unknown-readiness";
                         action.DiagnosticReason = "skill-readiness:" + gate;
                         var gateSource = _capture?.FrameStamp ?? default;
+                        if (command.Method == Method.Burst && ready == null && !knownUnavailable &&
+                            !hasUnresolved && activeIndex == avatar.Index && _capture != null &&
+                            gateSource.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge))
+                        {
+                            var readinessControl = _capture.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(_capture));
+                            action.IsAwaitingUnsentBurstReadiness = readinessControl.IsObserved &&
+                                !readinessControl.KeyboardBreakoutRequested &&
+                                readinessControl.Motion is not (MotionStatus.Fly or MotionStatus.Climb);
+                        }
                         var detail = $"gate={gate} ready={ready ?? "unknown"} active={activeIndex} target={avatar.Index} " +
                             $"cooldown={skillCooldown ?? "unknown"} burstCooling={burstCooling ?? "unknown"} energyLow={energyLow ?? "unknown"} " +
                             $"sourceKnown={gateSource.IsKnown} source={gateSource.SessionId}/{gateSource.Sequence} " +

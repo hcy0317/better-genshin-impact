@@ -84,6 +84,8 @@ public sealed class CombatFlowAction
         return true;
     }
     internal bool CanReuseConfirmedActor { get; }
+    // 生产适配器从本次有效就绪观察写入；不得用诊断文本或曾经Unknown推断跳过许可。
+    internal bool IsAwaitingUnsentBurstReadiness { get; set; }
     internal string? DiagnosticReason { get; set; }
     internal bool CaptureDiagnostics { get; set; }
     internal Guid? DiagnosticAttemptId { get; set; }
