@@ -24,7 +24,8 @@ internal static class PathingPrimitiveInput
         if (command.Method != Method.KeyPress || command.Args is not { Count: 1 }) return false;
         var key = User32Helper.ToVk(command.Args[0]);
         // 不放开技能、鼠标、确认/消费或任意按键；只支持已有大世界交互及导航指令。
-        return key is User32.VK.VK_F or User32.VK.VK_ESCAPE or User32.VK.VK_W or
+        // SPACE用于路径中的跳跃/收起风之翼；不能先等待禁止飞行切人的选角协议。
+        return key is User32.VK.VK_F or User32.VK.VK_ESCAPE or User32.VK.VK_SPACE or User32.VK.VK_W or
             User32.VK.VK_A or User32.VK.VK_S or User32.VK.VK_D;
     }
 

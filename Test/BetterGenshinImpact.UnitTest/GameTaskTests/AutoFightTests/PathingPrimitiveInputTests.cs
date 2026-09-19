@@ -27,6 +27,8 @@ public class PathingPrimitiveInputTests
     [Theory]
     [InlineData("keypress(f)", true)]
     [InlineData("keypress(ESCAPE)", true)]
+    [InlineData("keypress(VK_SPACE)", true)]
+    [InlineData("keypress(SPACE)", true)]
     [InlineData("w(0.5)", true)]
     [InlineData("wait(3)", true)]
     [InlineData("keypress(e)", false)]
