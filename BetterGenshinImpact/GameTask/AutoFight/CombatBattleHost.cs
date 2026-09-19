@@ -83,7 +83,7 @@ internal sealed record CombatBattleHostOptions
 /// </summary>
 internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostOptions options) : IDisposable
 {
-    private enum Phase { Fighting, BeforeParty, OpenParty, AwaitParty, CloseParty, Searching }
+    private enum Phase { Fighting, BeforeParty, OpenParty, AwaitParty, CloseParty, Searching, Reengaging }
     private const double ObservationDeadline = 15;
     private const double NoProgressDeadline = 45;
     private const int MaximumSearchPulses = AutoFightParam.MaxSeekRotationCount * 4;
@@ -104,6 +104,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private ulong _lastDamageFingerprint;
     private bool _hadDamage, _firstTarget, _reengaged, _finalProbe, _partyEvidence, _endConfirmed, _finishRequested, _closed;
     private bool _externalSearchExhausted;
+    private bool _hasGameProgress;
     private int _detachPulses;
     private Guid _inputRequestId;
     private long _inputRequestDeadline;
@@ -159,6 +160,17 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 LastControl = observation.Control;
                 ObserveProgress(observation, now);
             }
+            if (_phase == Phase.Reengaging && !_finalProbe) _phase = Phase.Fighting;
+            if (_phase == Phase.Reengaging && Now >= _graceUntil)
+            {
+                // 原重进期限优先于观察/在途等待，不能在末段丢帧后再续一个观察窗口。
+                if (!fresh || flow.IsAtomic || flow.HasPendingConfirmation || flow.HasAwaitingObservation ||
+                    observation.Control.KeyboardBreakoutRequested)
+                    return Stop("reengagement-deadline-without-safe-finish-probe");
+                _finishRequested = false;
+                _phase = Phase.BeforeParty;
+                return _result;
+            }
             if (observation.Quality == CombatObservationQuality.Available && observation.BattleId == io.BattleId &&
                 observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) && observation.Control.KeyboardBreakoutRequested)
             {
@@ -209,7 +221,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     await flow.StepAsync(ct);
                     return _result;
                 }
-                return await AdvancePartyAsync(observation, fresh, ct);
+                return await AdvancePartyAsync(observation, fresh, newEvidence, ct);
             }
 
             if (!fresh)
@@ -233,6 +245,13 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 return _result;
             }
             if (_phase == Phase.Searching) return await AdvanceSearchAsync(observation, ct);
+            if (_phase == Phase.Reengaging)
+            {
+                _finishRequested = false;
+                // 只推进原策略；不因每轮check重开纯搜索，也不豁免Native输入/护盾门禁。
+                await flow.StepAsync(ct);
+                return _result;
+            }
             if (options.ControlRecoveryEnabled && newEvidence && observation.Motion == MotionStatus.Climb && flow.IsAtRootBoundary && _detachPulses < 2)
             {
                 if (await SendAsync(new(CombatBattleHostInputKind.Detach), ct)) _detachPulses++;
@@ -391,6 +410,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             _stableVisual = visual;
         }
         if (!progressed) return;
+        _hasGameProgress = true;
         if (_evidenceActive)
         {
             _closedEvidenceEpisode = _evidenceEpisode;
@@ -433,6 +453,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             {
                 if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120)), ct))
                     return _result;
+                _scanPulses++;
+                return _result; // 包括最后一次镜头：下一次稳定新帧才判定是否耗尽。
             }
             else if (CanApproach(observation, io.BattleId, io.Clock) && _approachPulses < MaximumApproachPulses)
             {
@@ -456,8 +478,9 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 _scanPulses / 4, _scanPulses % 4 + 1);
             if (!await SendAsync(new(CombatBattleHostInputKind.Camera, offset.x, verticalTarget - _searchVerticalOffset), ct)) return _result;
             _searchVerticalOffset = verticalTarget;
+            _scanPulses++;
+            return _result;
         }
-        _scanPulses++;
         if (_scanPulses >= MaximumSearchPulses)
         {
             _finalProbe = true;
@@ -505,7 +528,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         now >= _motionSettlesAt && (_motionSettlesAt == 0 ||
             io.Clock.GetElapsedTime(_started, observation.Source.CapturedTimestamp).TotalSeconds >= _motionSettlesAt);
 
-    private async ValueTask<CombatBattleHostResult> AdvancePartyAsync(CombatBattleObservation observation, bool fresh, CancellationToken ct)
+    private async ValueTask<CombatBattleHostResult> AdvancePartyAsync(CombatBattleObservation observation, bool fresh,
+        bool newEvidence, CancellationToken ct)
     {
         var probeDelay = Math.Clamp(options.FinishProbeDelayMilliseconds, 0, 9000) / 1000d;
         // 从第一次进入BeforeParty（包含截图）起计时，未发送不能重开预算。
@@ -582,6 +606,26 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 {
                     _finishRequested = false;
                     Reason = "target-returned-after-party-probe";
+                    return _result;
+                }
+                if (_finalProbe && !_partyEvidence && _hasGameProgress && !_reengaged &&
+                    observation.Target == null && Now - _lastProgressAt < NoProgressDeadline &&
+                    _finish?.Fence is { } finishFence && !_tracePartySample.BarVisible &&
+                    _tracePartySample.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
+                    finishFence.Accepts(_tracePartySample.Source))
+                {
+                    // AwaitParty转入CloseParty时常仍是同一目标帧；不借重复/失效帧准入。
+                    // 仅在本次负样本尚新鲜时等待下一帧，不续期该样本或原进展预算。
+                    if (!fresh || !newEvidence || !finishFence.Accepts(observation.Source))
+                    {
+                        await io.DelayAsync(50, ct);
+                        return _result;
+                    }
+                    _reengaged = true;
+                    _graceUntil = Math.Min(Now + CombatFlowPolicy.EpisodeTimeoutSeconds, _lastProgressAt + NoProgressDeadline);
+                    _phase = Phase.Reengaging;
+                    _finishRequested = false;
+                    Reason = "bounded-strategy-after-unconfirmed-search";
                     return _result;
                 }
                 if (_finalProbe) return Stop("bounded-search-finish-unconfirmed");

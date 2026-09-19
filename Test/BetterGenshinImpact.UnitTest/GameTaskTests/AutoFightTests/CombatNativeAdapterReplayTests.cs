@@ -26,6 +26,48 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
     [Fact]
+    public async Task NativeHostReengagementResumesTheSameInputOwnerAndStillHonorsCancellation()
+    {
+        var clock = new FakeTimeProvider();
+        var script = CombatScriptParser.ParseContext("那维莱特 attack(0.1),check");
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("那维莱特 attack(0.1),check"));
+        using var flow = NativeCombatFlowRunner.Create(script.CombatCommands, physical, true);
+        var device = new HostDevice(clock)
+        { AdvanceClock = ms => physical.DelayAsync(ms, default).GetAwaiter().GetResult() };
+        var targetReads = 0;
+        var native = new NativeCombatBattleHostIo(flow, device,
+            partyObservation: () =>
+            {
+                var source = physical.Producer.Next();
+                return new(source.Sequence, source.CapturedAt, 1920, 1080, false, (ulong)source.Sequence) { Source = source };
+            },
+            targetObservation: () =>
+            {
+                var source = physical.Producer.Next();
+                EnemySeekDecision? target = targetReads++ == 0
+                    ? new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar)
+                    : null;
+                return new(source, flow.Context.BattleId, CombatObservationQuality.Available, target, 1920, 1080);
+            });
+        using var host = new CombatBattleHost(native, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 1500 && host.State != "Reengaging"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Reengaging", host.State);
+        var before = physical.Primitives.Count;
+        for (var i = 0; i < 100 && physical.Primitives.Count == before; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.True(physical.Primitives.Count > before);
+        Assert.Equal(Method.Attack, physical.Primitives.Last().Method);
+        Assert.Equal(24, device.Inputs.Count(input => input == "camera"));
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var count = physical.Primitives.Count;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await host.AdvanceAsync(flow, cancelled.Token));
+        Assert.Equal(count, physical.Primitives.Count);
+        Assert.False(physical.HoldingInput);
+    }
+
+    [Fact]
     public async Task AnonymousPathingSpaceWhileFlyingRunsOnceWithoutSelectingAnActor()
     {
         var clock = new FakeTimeProvider();

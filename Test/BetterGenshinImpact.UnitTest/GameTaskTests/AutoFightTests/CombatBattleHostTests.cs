@@ -9,6 +9,183 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatBattleHostTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ReengagementCancellationOrObservationFailureReleasesInputImmediately(bool cancel)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar), 1920, 1080);
+        await host.AdvanceAsync(flow, default);
+        io.TargetFactory = null;
+        for (var i = 0; i < 1500 && host.State != "Reengaging"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Reengaging", host.State);
+        using var cancellation = new CancellationTokenSource();
+        if (cancel) cancellation.Cancel();
+        else io.TargetFactory = _ => throw new IOException("recorded observation failed");
+        var releaseCount = io.ReleaseCount;
+        var inputCount = io.Inputs.Count;
+        var error = await Record.ExceptionAsync(async () => await host.AdvanceAsync(flow, cancellation.Token));
+        if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<IOException>(error);
+        Assert.Equal(releaseCount + 1, io.ReleaseCount);
+        Assert.Equal(inputCount, io.Inputs.Count);
+    }
+
+    [Fact]
+    public async Task ReengagementObservationLossCannotRenewItsDeadline()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar), 1920, 1080);
+        await host.AdvanceAsync(flow, default);
+        io.TargetFactory = null;
+        for (var i = 0; i < 1500 && host.State != "Reengaging"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Reengaging", host.State);
+        var started = clock.GetTimestamp();
+        clock.Advance(TimeSpan.FromSeconds(14));
+        Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Unavailable, null, 1920, 1080);
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1000 && result == CombatBattleHostResult.Continue; i++) result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 15, 15.2);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(28)]
+    public async Task ReengagementWithoutNewProgressKeepsTheOriginalBudgetsAndStopsUnconfirmed(double initialDelay)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = NativeCombatFlowRunner.Create(
+            CombatFlowProgram.Compile("strategy(loop=battle)\n琴 attack(0.1),check"), game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar), 1920, 1080);
+        await host.AdvanceAsync(flow, default);
+        io.TargetFactory = null;
+        clock.Advance(TimeSpan.FromSeconds(initialDelay));
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 5000 && result == CombatBattleHostResult.Continue; i++) result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        var reengagement = io.Traces.First(trace => trace.State == "Reengaging");
+        var terminal = Assert.Single(io.Traces.Where(trace => trace.CapturePhase == "terminal"));
+        Assert.True(terminal.ProgressAge >= Math.Min(reengagement.ProgressAge + 15, 45));
+        Assert.True(terminal.ProgressAge < 47);
+        Assert.Equal(24, host.CameraRequests);
+        Assert.Equal(0, host.ApproachRequests);
+        Assert.Equal(3, io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.OpenParty));
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.CloseParty);
+        Assert.True(game.Inputs > 5);
+    }
+
+    [Theory]
+    [InlineData("no-progress")]
+    [InlineData("stale-party")]
+    [InlineData("repeated-target")]
+    [InlineData("foreign-battle")]
+    public async Task ReengagementCannotStartWithoutTrustedEpisodeAndFreshEvidence(string invalid)
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        if (invalid != "no-progress")
+        {
+            io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+                new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar), 1920, 1080);
+            await host.AdvanceAsync(flow, default);
+            io.TargetFactory = null;
+        }
+        for (var i = 0; i < 1500 && !(host.CameraRequests == 24 && host.State == "CloseParty"); i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("CloseParty", host.State);
+        var actions = game.Inputs;
+        if (invalid == "stale-party") clock.Advance(TimeSpan.FromMilliseconds(151));
+        if (invalid == "repeated-target")
+        {
+            var frozen = io.Traces.Last().Observation;
+            io.TargetFactory = _ => frozen;
+        }
+        if (invalid == "foreign-battle")
+            io.TargetFactory = stamp => new(stamp, Guid.NewGuid(), CombatObservationQuality.Available, null, 1920, 1080);
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 30 && result == CombatBattleHostResult.Continue; i++) result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Equal(actions, game.Inputs);
+        Assert.Equal(24, host.CameraRequests);
+        Assert.DoesNotContain(io.Traces, trace => trace.State == "Reengaging");
+    }
+
+    [Fact]
+    public async Task RecentProgressAndTemporarilyHiddenTargetGetsOneStrategyOpportunityBeforeFinalFailure()
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var game = new ReturningGame(clock);
+        using var flow = NativeCombatFlowRunner.Create(
+            CombatFlowProgram.Compile("strategy(loop=battle)\n琴 attack(0.1),check"), game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        io.TargetFactory = stamp =>
+        {
+            var at = clock.GetElapsedTime(started).TotalSeconds;
+            EnemySeekDecision? target = at < .05
+                ? new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar)
+                : at is >= 18 and < 18.4
+                    ? new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, new(700, 400, 80, 30, 2400), 1, SeekCueKind.DamageNumber)
+                    : null;
+            return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, target, 1920, 1080, (ulong)stamp.Sequence);
+        };
+        io.PartyFactory = stamp => new(stamp.Sequence, stamp.CapturedAt, 1920, 1080,
+            io.PartyOpen && clock.GetElapsedTime(started).TotalSeconds >= 18.4, (ulong)stamp.Sequence) { Source = stamp };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        var result = CombatBattleHostResult.Continue;
+        var actionsAtSearchEnd = -1;
+        for (var i = 0; i < 5000 && result == CombatBattleHostResult.Continue; i++)
+        {
+            result = await host.AdvanceAsync(flow, default);
+            if (host.CameraRequests == 24 && actionsAtSearchEnd < 0) actionsAtSearchEnd = game.Inputs;
+        }
+        Assert.Equal(CombatBattleHostResult.Completed, result);
+        Assert.True(actionsAtSearchEnd >= 0 && game.Inputs > actionsAtSearchEnd);
+        Assert.Equal(24, host.CameraRequests);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 18.4, 30);
+        Assert.Contains(io.Traces, trace => trace.State == "Reengaging");
+        Assert.Contains(io.Inputs, input => input.Kind == CombatBattleHostInputKind.CloseParty);
+    }
+
+    [Fact]
+    public async Task FinalSearchMovementMustBeObservedAfterSettlingBeforeFinalPartyProbe()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId) { SourcePeriodMilliseconds = 50 };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 1500 && host.CameraRequests < 24; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal(24, host.CameraRequests);
+        var lastMovement = clock.GetTimestamp();
+        Assert.Equal("Searching", host.State);
+        for (var i = 0; i < 50 && host.State == "Searching"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("BeforeParty", host.State);
+        Assert.True(clock.GetElapsedTime(lastMovement) >= TimeSpan.FromMilliseconds(350));
+        Assert.Equal(24, host.CameraRequests);
+    }
+
     [Fact]
     public async Task SearchCameraActuallyVisitsHighMiddleAndLowTracks()
     {
@@ -664,6 +841,7 @@ public class CombatBattleHostTests
         public bool RepeatSource { get; init; }
         public int SourcePeriodMilliseconds { get; init; }
         public int DelayCalls { get; private set; }
+        public int ReleaseCount { get; private set; }
         public Func<CaptureFrameStamp, CombatBattleObservation>? TargetFactory { get; set; }
         public Action? AfterTargetCapture { get; set; }
         public Func<CaptureFrameStamp, PartySetupFinishObservation>? PartyFactory { get; set; }
@@ -711,6 +889,6 @@ public class CombatBattleHostTests
             clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
             return ValueTask.CompletedTask;
         }
-        public void ReleaseInput() { PartyOpen = false; }
+        public void ReleaseInput() { PartyOpen = false; ReleaseCount++; }
     }
 }
