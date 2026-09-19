@@ -154,7 +154,9 @@ public sealed class JsonCombatFlowExecution : IDisposable
         if (legacy && _entries.Length == 0) throw new InvalidOperationException("NO_APPLICABLE_ACTOR");
     }
 
-    public async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct = default)
+    public ValueTask<CombatFlowStep> StepAsync(CancellationToken ct = default) => StepAsync(ct, allowNewRound: true);
+
+    internal async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct, bool allowNewRound)
     {
         ObjectDisposedException.ThrowIf(_closed, this);
         ct.ThrowIfCancellationRequested();
@@ -166,11 +168,12 @@ public sealed class JsonCombatFlowExecution : IDisposable
             var eligible = await preparing.Root.Execution.EvaluateConditionAsync(preparing.Condition, preparing.Root.Action.Character, ct);
             if (preparing.Root.Execution.HasAwaitingObservation) return new(CombatFlowResult.AwaitingObservation, false);
             _preparing = null;
+            if (!allowNewRound) return new(CombatFlowResult.Deferred, false);
             // 等待期间不换根；准备完成后沿用既有“同帧从最高优先级重算”的策略。
             _active = SelectObservedRoot();
             if (_active == null) return new(CombatFlowResult.Skipped, false);
         }
-        if (!resumedPreparation && (_active == null || _active.Execution.IsAtRootBoundary && !_active.Execution.NeedsCompletion))
+        if (allowNewRound && !resumedPreparation && (_active == null || _active.Execution.IsAtRootBoundary && !_active.Execution.NeedsCompletion))
         {
             var preparationVersion = _battle.ConditionPreparationVersion;
             async ValueTask<Root?> SelectWithPreparationAsync()
@@ -198,10 +201,11 @@ public sealed class JsonCombatFlowExecution : IDisposable
         }
         if (_active == null)
         {
+            if (!allowNewRound) return new(CombatFlowResult.Deferred, false);
             await _game.YieldAsync(ct);
             return new(CombatFlowResult.Skipped, false);
         }
-        var step = await _active.Execution.StepAsync(ct, beginObservationFrame: false);
+        var step = await _active.Execution.StepAsync(ct, beginObservationFrame: false, allowNewRound);
         if (_active.Execution.MadeProgressInRound) _unproductiveRoots.Clear();
         if (step.RoundCompleted)
         {

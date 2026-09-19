@@ -105,6 +105,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private bool _hadDamage, _firstTarget, _reengaged, _finalProbe, _partyEvidence, _endConfirmed, _finishRequested, _closed;
     private bool _externalSearchExhausted;
     private bool _hasGameProgress;
+    private bool _reengagementDraining;
     private int _detachPulses;
     private Guid _inputRequestId;
     private long _inputRequestDeadline;
@@ -160,16 +161,33 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 LastControl = observation.Control;
                 ObserveProgress(observation, now);
             }
-            if (_phase == Phase.Reengaging && !_finalProbe) _phase = Phase.Fighting;
+            if (_phase == Phase.Reengaging && !_finalProbe)
+            {
+                _phase = Phase.Fighting;
+            }
+            if (_phase != Phase.Reengaging) _reengagementDraining = false;
             if (_phase == Phase.Reengaging && Now >= _graceUntil)
             {
-                // 原重进期限优先于观察/在途等待，不能在末段丢帧后再续一个观察窗口。
-                if (!fresh || flow.IsAtomic || flow.HasPendingConfirmation || flow.HasAwaitingObservation ||
-                    observation.Control.KeyboardBreakoutRequested)
-                    return Stop("reengagement-deadline-without-safe-finish-probe");
-                _finishRequested = false;
-                _phase = Phase.BeforeParty;
-                return _result;
+                if (Now - _lastProgressAt >= NoProgressDeadline)
+                    return Stop("reengagement-without-game-progress");
+                if (flow.IsAtomic || flow.HasPendingConfirmation || flow.HasAwaitingObservation)
+                    _reengagementDraining = true;
+                else
+                {
+                    if (!fresh)
+                    {
+                        // 只有既有动作收束后可等原观察上界，不能给空闲丢帧续一个窗口。
+                        if (!_reengagementDraining || Now - _lastValidAt >= ObservationDeadline)
+                            return Stop("reengagement-deadline-without-safe-finish-probe");
+                        await io.DelayAsync(50, ct);
+                        return _result;
+                    }
+                    if (observation.Control.KeyboardBreakoutRequested)
+                        return Stop("reengagement-deadline-without-safe-finish-probe");
+                    _finishRequested = false;
+                    _phase = Phase.BeforeParty;
+                    return _result;
+                }
             }
             if (observation.Quality == CombatObservationQuality.Available && observation.BattleId == io.BattleId &&
                 observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) && observation.Control.KeyboardBreakoutRequested)
@@ -183,7 +201,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     _inputRequestId = Guid.Empty;
                     _inputRequestDeadline = 0;
                 }
-                await flow.StepAsync(ct);
+                await AdvanceFlowAsync(flow, ct);
                 return _result;
             }
             // busy只禁止抢输入，不豁免只读危险/进展/原期限监督。
@@ -200,7 +218,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                         { SelectionGoal = assistance.Goal, DeadlineTimestamp = assistance.Deadline }, ct)) _approachPulses++;
                     return _result;
                 }
-                await flow.StepAsync(ct);
+                await AdvanceFlowAsync(flow, ct);
                 return _result;
             }
             if (_phase is Phase.BeforeParty or Phase.OpenParty or Phase.AwaitParty or Phase.CloseParty)
@@ -249,7 +267,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             {
                 _finishRequested = false;
                 // 只推进原策略；不因每轮check重开纯搜索，也不豁免Native输入/护盾门禁。
-                await flow.StepAsync(ct);
+                await AdvanceFlowAsync(flow, ct);
                 return _result;
             }
             if (options.ControlRecoveryEnabled && newEvidence && observation.Motion == MotionStatus.Climb && flow.IsAtRootBoundary && _detachPulses < 2)
@@ -278,6 +296,10 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             }
             await flow.StepAsync(ct);
             return _result;
+        }
+        catch (ReengagementDeadlineException)
+        {
+            return Stop("reengagement-without-game-progress");
         }
         catch (Exception error)
         {
@@ -318,6 +340,31 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             catch { /* 诊断失败不得改变动作、取消或清理结果。 */ }
             _closedEvidenceEpisode = null;
             flow.RecordHostStep(Stopwatch.GetElapsedTime(started));
+        }
+    }
+
+    private sealed class ReengagementDeadlineException : Exception;
+
+    private async ValueTask<CombatFlowStep> AdvanceFlowAsync(NativeCombatFlowRunner flow, CancellationToken ct)
+    {
+        if (_phase != Phase.Reengaging) return await flow.StepAsync(ct);
+        ct.ThrowIfCancellationRequested();
+        var remaining = _lastProgressAt + NoProgressDeadline - Now;
+        if (remaining <= 0) throw new ReengagementDeadlineException();
+        // 本Step的协作取消沿原执行链传到动作检查、分片等待和输入前检查。
+        // 使用原绝对截止剩余量，不改动作预算；父取消/更早动作期限始终优先。
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(remaining), io.Clock);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+        try
+        {
+            var step = await flow.StepAsync(linked.Token, allowNewRound: !_reengagementDraining);
+            linked.Token.ThrowIfCancellationRequested();
+            return step;
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // 已等待原调用清理完成，不遗留仍能输入的后台任务。
+            throw new ReengagementDeadlineException();
         }
     }
 

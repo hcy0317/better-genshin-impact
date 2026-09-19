@@ -26,6 +26,43 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
     [Fact]
+    public async Task ReengagementHardDeadlineStopsASingleNativeAtomicWaitAndReleasesHeldInput()
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var program = LoadProgram("call(宏,required)\nsegment(宏,define,atomic,timeout=60,record=完成) { 那维莱特 keydown(VK_LBUTTON), wait(1.6), moveby(10,0), keyup(VK_LBUTTON) }");
+        using var physical = new PhysicalReplay(clock, false, 50, program);
+        using var flow = NativeCombatFlowRunner.Create(program, physical);
+        var device = new HostDevice(clock)
+        { AdvanceClock = ms => physical.DelayAsync(ms, default).GetAwaiter().GetResult() };
+        var reads = 0;
+        var native = new NativeCombatBattleHostIo(flow, device,
+            partyObservation: () =>
+            {
+                var stamp = physical.Producer.Next();
+                return new(stamp.Sequence, stamp.CapturedAt, 1920, 1080, false, (ulong)stamp.Sequence) { Source = stamp };
+            },
+            targetObservation: () => new(physical.Producer.Next(), flow.Context.BattleId, CombatObservationQuality.Available,
+                reads++ == 0 ? new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                    new(700, 400, 80, 5, 400), 1, SeekCueKind.HealthBar) : null, 1920, 1080));
+        using var host = new CombatBattleHost(native, new() { FinishCheckIntervalSeconds = .1 });
+        for (var i = 0; i < 1500 && host.State != "Reengaging"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Reengaging", host.State);
+        for (var i = 0; i < 50 && !physical.HoldingInput; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.True(physical.HoldingInput);
+        Assert.True(flow.IsAtomic);
+        await physical.DelayAsync((int)Math.Round((44.9 - clock.GetElapsedTime(started).TotalSeconds) * 1000), default);
+        var before = physical.Primitives.Count;
+        var result = await host.AdvanceAsync(flow, default);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 45, 45.051);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Equal(before, physical.Primitives.Count);
+        Assert.False(physical.HoldingInput);
+    }
+
+    [Fact]
     public async Task NativeHostReengagementResumesTheSameInputOwnerAndStillHonorsCancellation()
     {
         var clock = new FakeTimeProvider();

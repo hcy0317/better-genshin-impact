@@ -207,13 +207,13 @@ public sealed partial class CombatFlowExecution : IDisposable
 
     public ValueTask<CombatFlowStep> StepAsync(CancellationToken ct = default) => StepAsync(ct, beginObservationFrame: true);
 
-    internal async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct, bool beginObservationFrame)
+    internal async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct, bool beginObservationFrame, bool allowNewRound = true)
     {
         var start = System.Diagnostics.Stopwatch.GetTimestamp();
         CombatFlowStep? result = null;
         try
         {
-            result = await StepCoreAsync(ct, beginObservationFrame);
+            result = await StepCoreAsync(ct, beginObservationFrame, allowNewRound);
             return result.Value;
         }
         catch (Exception error)
@@ -225,7 +225,7 @@ public sealed partial class CombatFlowExecution : IDisposable
         finally { _battle.Diagnostics.Step(System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds, result); }
     }
 
-    private async ValueTask<CombatFlowStep> StepCoreAsync(CancellationToken ct, bool beginObservationFrame)
+    private async ValueTask<CombatFlowStep> StepCoreAsync(CancellationToken ct, bool beginObservationFrame, bool allowNewRound)
     {
         ObjectDisposedException.ThrowIf(_closed, this);
         ct.ThrowIfCancellationRequested();
@@ -238,6 +238,7 @@ public sealed partial class CombatFlowExecution : IDisposable
         RefreshDeferredMaintenance();
         if (!_roundStarted)
         {
+            if (!allowNewRound) return new(CombatFlowResult.Deferred, false);
             _roundStarted = true;
             _acted = false;
             _madeProgress = false;
