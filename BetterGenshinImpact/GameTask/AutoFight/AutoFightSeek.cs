@@ -1457,6 +1457,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
         internal static bool IsDirectionIndicatorGeometry(EnemySeekVisual visual, int imageWidth, int imageHeight)
         {
+            return IsDirectionIndicatorFootprint(visual, imageWidth, imageHeight)
+                   && visual.Area / (double)(visual.Width * visual.Height) is >= 0.30 and <= 0.78;
+        }
+
+        private static bool IsDirectionIndicatorFootprint(EnemySeekVisual visual, int imageWidth, int imageHeight)
+        {
             // 实拍箭头的红色轮廓约 30x24~36x31。现场误报集中在 15x15、17x17、
             // 18x21 等小红块；短边、长边和面积必须同时达到真实箭头尺度。
             if (visual.Width is > 46 || visual.Height is > 46
@@ -1467,9 +1473,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 return false;
             }
 
-            var fillRatio = visual.Area / (double)(visual.Width * visual.Height);
             var aspectRatio = visual.Width / (double)visual.Height;
-            if (fillRatio is < 0.30 or > 0.78 || aspectRatio is < 0.57 or > 1.75)
+            if (aspectRatio is < 0.57 or > 1.75)
             {
                 return false;
             }
@@ -1986,7 +1991,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
             }
 
-            visuals = visuals
+            var rawVisuals = visuals;
+            visuals = rawVisuals
                 .Select(visual => ClassifySeekVisual(
                     mask,
                     imageCrop.SrcMat,
@@ -1996,6 +2002,13 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 .Where(visual => visual.HasValue)
                 .Select(visual => visual!.Value)
                 .ToList();
+
+            if (visuals.Count == 0 || indicatorOnly && !visuals.Any(v => v.IndicatorBearingDegrees.HasValue))
+            {
+                var recovered = RecoverFragmentedDirectionIndicators(mask, imageCrop.SrcMat, rawVisuals);
+                visuals.AddRange(recovered);
+                if (diagnostics != null) diagnostics.Accepted += recovered.Count;
+            }
 
             if (indicatorOnly)
             {
@@ -2032,6 +2045,44 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 imageCrop.Height);
             if (saveDiagnostics) SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, decision);
             return decision;
+        }
+
+        private static IReadOnlyList<EnemySeekVisual> RecoverFragmentedDirectionIndicators(
+            Mat mask, Mat source, IReadOnlyList<EnemySeekVisual> rawVisuals)
+        {
+            var recovered = new List<EnemySeekVisual>();
+            var seen = new HashSet<Rect>();
+            using var kernel = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(3, 3));
+            foreach (var seed in rawVisuals
+                         .Where(v => IsDirectionIndicatorFootprint(v, source.Width, source.Height))
+                         .OrderByDescending(v => v.Area).Take(8))
+            {
+                var left = Math.Max(0, seed.X - 6);
+                var top = Math.Max(0, seed.Y - 6);
+                var bounds = new Rect(left, top, Math.Min(mask.Width, seed.X + seed.Width + 6) - left,
+                    Math.Min(mask.Height, seed.Y + seed.Height + 6) - top);
+                // 独立小图避免读取ROI外像素；原始mask和血条路径不受闭运算影响。
+                using var region = new Mat(mask, bounds);
+                using var local = region.Clone();
+                using var closed = new Mat();
+                Cv2.MorphologyEx(local, closed, MorphTypes.Close, kernel);
+                using var labels = new Mat();
+                using var stats = new Mat();
+                using var centroids = new Mat();
+                var count = Cv2.ConnectedComponentsWithStats(closed, labels, stats, centroids,
+                    PixelConnectivity.Connectivity4, MatType.CV_32S);
+                for (var i = 1; i < count; i++)
+                {
+                    var visual = new EnemySeekVisual(left + stats.At<int>(i, 0), top + stats.At<int>(i, 1),
+                        stats.At<int>(i, 2), stats.At<int>(i, 3), stats.At<int>(i, 4));
+                    var rect = new Rect(visual.X, visual.Y, visual.Width, visual.Height);
+                    var accepted = ClassifyDirectionIndicator(closed, source, visual, source.Width, source.Height,
+                        out _, new Point(left, top));
+                    if (accepted is { IndicatorBearingDegrees: not null } && seen.Add(rect))
+                        recovered.Add(accepted.Value);
+                }
+            }
+            return recovered;
         }
 
         private static void SaveSeekSelectionScreenshot(
@@ -2184,26 +2235,36 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 else healthFailure = "feature";
             }
 
+            var indicator = ClassifyDirectionIndicator(mask, source, visual, imageWidth, imageHeight, out var indicatorReason);
+            return Finish(indicator, indicatorReason);
+        }
+
+        private static EnemySeekVisual? ClassifyDirectionIndicator(Mat mask, Mat? source,
+            EnemySeekVisual visual, int imageWidth, int imageHeight, out string reason, Point maskOrigin = default)
+        {
+            reason = "geometry";
             if (!IsDirectionIndicatorGeometry(visual, imageWidth, imageHeight))
             {
-                return Finish(null, "geometry");
+                return null;
             }
 
             var templates = DirectionIndicatorTemplates.Value;
             if (templates.Count == 0)
             {
-                return Finish(null, "templates");
+                reason = "templates";
+                return null;
             }
 
             if (source != null
                 && !HasDirectionIndicatorPinkRedShare(source, visual))
             {
-                return Finish(null, "color");
+                reason = "color";
+                return null;
             }
 
             using var candidate = new Mat(mask, new Rect(
-                visual.X,
-                visual.Y,
+                visual.X - maskOrigin.X,
+                visual.Y - maskOrigin.Y,
                 visual.Width,
                 visual.Height)).Clone();
             if (!MatchesDirectionIndicatorFeature(
@@ -2211,7 +2272,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     templates.Select(template => template.Contour).ToArray(),
                     DirectionIndicatorFeatureThreshold))
             {
-                return Finish(null, "template");
+                reason = "template";
+                return null;
             }
 
             var bearingMatch = MatchDirectionIndicatorTemplateBearing(
@@ -2223,12 +2285,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     GetIndicatorScreenBearingDegrees(visual, imageWidth, imageHeight))
                 > DirectionIndicatorMaxScreenBearingDelta)
             {
-                return Finish(null, "screen-bearing");
+                reason = "screen-bearing";
+                return null;
             }
 
-            return Finish(bearingMatch.HasValue
+            reason = bearingMatch.HasValue ? "accepted" : "bearing";
+            return bearingMatch.HasValue
                 ? visual with { IndicatorBearingDegrees = bearingMatch.Value.bearing }
-                : null, bearingMatch.HasValue ? "accepted" : "bearing");
+                : null;
         }
 
         internal static bool MatchesHealthBarFeature(
