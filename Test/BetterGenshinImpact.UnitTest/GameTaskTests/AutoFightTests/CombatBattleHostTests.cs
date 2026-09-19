@@ -9,6 +9,28 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatBattleHostTests
 {
+    [Fact]
+    public async Task SearchCameraActuallyVisitsHighMiddleAndLowTracks()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1500 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+
+        var camera = io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.Camera).ToArray();
+        Assert.Equal(24, camera.Length);
+        var pitch = 0;
+        var visited = camera.Select(input => pitch += input.Y).ToArray();
+        // 1080p: 每个高度单位为432；首轮从高轨扫描，随后经过中、低轨。
+        Assert.Equal(new[] { -1296, -864, -432, -864, -432, 0, 432, 0,
+            432, 864, 1296, 864, -432, -864, -1296, -864,
+            432, 0, -432, 0, 1296, 864, 432, 864 }, visited);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
