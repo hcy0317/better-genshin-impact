@@ -25,6 +25,61 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 // B层：真实解析/调度/在途协议与选角策略，帧到达和游戏物理效果是可控外部边界。
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
+    [Fact]
+    public async Task AnonymousPathingSpaceWhileFlyingRunsOnceWithoutSelectingAnActor()
+    {
+        var clock = new FakeTimeProvider();
+        var script = CombatScriptParser.ParseContext("keypress(VK_SPACE),wait(0.6)", false);
+        using var io = new PhysicalReplay(clock, false, 50, CombatFlowProgram.Compile(script))
+        { ObservedMotion = MotionStatus.Fly };
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false,
+            purpose: CombatScriptExecutionPurpose.Pathing);
+
+        Assert.Equal(CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
+        var sent = Assert.Single(io.Primitives);
+        Assert.Equal(Method.KeyPress, sent.Method);
+        Assert.Equal(User32.VK.VK_SPACE, User32Helper.ToVk(Assert.Single(sent.Args!)));
+        Assert.Empty(io.Selections);
+        Assert.Empty(io.Inputs);
+        Assert.True(runner.Context.Now >= .6);
+    }
+
+    [Theory]
+    [InlineData("named")]
+    [InlineData("combat")]
+    [InlineData("atomic")]
+    [InlineData("stale")]
+    [InlineData("control-unknown")]
+    [InlineData("cancelled")]
+    public async Task PathingSpaceDoesNotBypassOtherAdmissionBoundaries(string boundary)
+    {
+        var clock = new FakeTimeProvider();
+        var text = boundary switch
+        {
+            "named" => "那维莱特 keypress(VK_SPACE)",
+            "atomic" => "call(flight,required)\nsegment(start,name=flight,atomic)\nkeypress(VK_SPACE)\nsegment(end)",
+            _ => "keypress(VK_SPACE),wait(0.6)"
+        };
+        var script = CombatScriptParser.ParseContext(text, false);
+        using var io = new PhysicalReplay(clock, false, 50, CombatFlowProgram.Compile(script))
+        {
+            ObservedMotion = MotionStatus.Fly,
+            InitialFrameFault = boundary == "stale" ? "stale" : null,
+            ControlOverride = boundary == "control-unknown" ? _ => default : null
+        };
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false,
+            purpose: boundary == "combat" ? CombatScriptExecutionPurpose.Combat : CombatScriptExecutionPurpose.Pathing);
+        using var cancellation = new CancellationTokenSource();
+        if (boundary == "cancelled") cancellation.Cancel();
+        CombatFlowResult? result = null;
+        var error = await Record.ExceptionAsync(async () => result = await runner.RunRoundAsync(cancellation.Token));
+        Assert.True(error != null || result != CombatFlowResult.Succeeded);
+        if (boundary == "cancelled") Assert.IsAssignableFrom<OperationCanceledException>(error);
+        Assert.Empty(io.Primitives);
+        Assert.Empty(io.Inputs);
+        Assert.Empty(io.Selections);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
