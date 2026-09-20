@@ -25,6 +25,156 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 // B层：真实解析/调度/在途协议与选角策略，帧到达和游戏物理效果是可控外部边界。
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NativeMaintenanceCanTakeOverWhenItBecomesDueDuringSelectionAdmission(bool json)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("""
+            strategy(loop=battle)
+            timing(盾,cd=12,duration=20)
+            钟离 e(hold,wait,timing=盾,record=护盾,maintain=护盾,watch=护盾,before=4,required)
+            钟离 wait(13)
+            琴 attack(0.1)
+            """);
+        using var io = new PhysicalReplay(clock, false, 50, program);
+        using var runner = json ? NativeCombatFlowRunner.Create(new JsonCombatStrategy
+        {
+            Info = new() { Declarations = ["""
+                timing(盾,cd=12,duration=20)
+                segment(主体,define) {
+                    钟离 e(hold,wait,timing=盾,record=护盾,maintain=护盾,watch=护盾,before=4,required)
+                    钟离 wait(13)
+                    琴 attack(0.1)
+                }
+                """] },
+            Actions = [new() { Character = "钟离", Action = "strategy(loop=battle),call(主体,required)" }]
+        }, NativeCombatFlowRunner.CreateAdapter(io), clock: clock)!
+            : NativeCombatFlowRunner.Create(program, io);
+        var crossed = false;
+        io.BeforeSelectionInput = () =>
+        {
+            if (crossed || runner.Context.Find("护盾") == null) return;
+            crossed = true;
+            io.DelayAsync(2100, default).GetAwaiter().GetResult();
+        };
+        for (var i = 0; i < 1000 && runner.Context.Now < 22 && io.Inputs.Count < 2; i++)
+            await runner.StepAsync(default);
+        Assert.True(crossed);
+        Assert.Equal(2, io.Inputs.Count);
+        Assert.All(io.Inputs, input => Assert.Equal("钟离", input.Actor));
+        Assert.DoesNotContain(4, io.Selections);
+        Assert.DoesNotContain(io.Primitives, command => command.Method == Method.Attack);
+        Assert.False(io.HoldingInput);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SelectionObservationYieldsToMaintenanceWithoutSendingOrFailingTheBattle(bool duringSubmission)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 attack(0.1)"));
+        var adapter = NativeCombatFlowRunner.CreateAdapter(io);
+        using var owner = (IDisposable)adapter;
+        using var context = new CombatFlowContext(clock);
+        var maintenanceDue = false;
+        var action = new CombatFlowAction(new CombatCommand("琴", "attack(0.1)"), context, () => true,
+            context.Now + 8, shouldYield: () => maintenanceDue);
+        adapter.BeginStep();
+        Assert.Equal(CombatObservationPreparation.AwaitingObservation,
+            await adapter.PrepareObservationStepAsync(action, "onfield", default));
+        if (duringSubmission) io.BeforeSelectionInput = () => maintenanceDue = true;
+        else maintenanceDue = true;
+        Assert.True(action.CanStart);
+        Assert.Equal(duringSubmission, action.CanContinue);
+        await adapter.AdvanceObservationAsync(default);
+        if (duringSubmission)
+        {
+            adapter.BeginStep();
+            await adapter.AdvanceObservationAsync(default);
+        }
+        Assert.Empty(io.Selections);
+        Assert.Empty(io.Inputs);
+        Assert.False(io.HoldingInput);
+        Assert.False(adapter.HasObservationRequest);
+        Assert.Null(action.EffectiveInputAt);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MaintenanceRetirementKeepsSubmittedSelectionFactsAndUnknownDeadline(bool unknown)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 attack(0.1)"))
+        { UnknownSwitchOutcome = unknown, IgnoreSwitchUntil = 100 };
+        var adapter = NativeCombatFlowRunner.CreateAdapter(io);
+        using var owner = (IDisposable)adapter;
+        using var context = new CombatFlowContext(clock);
+        var due = false;
+        var action = new CombatFlowAction(new CombatCommand("琴", "attack(0.1)"), context, () => true,
+            context.Now + 4, shouldYield: () => due);
+        adapter.BeginStep();
+        await adapter.PrepareObservationStepAsync(action, "onfield", default);
+        await adapter.AdvanceObservationAsync(default);
+        Assert.Single(io.Selections);
+        due = true;
+        Exception? failure = null;
+        for (var i = 0; i < 100 && adapter.HasObservationRequest && failure == null; i++)
+        {
+            await io.DelayAsync(50, default);
+            adapter.BeginStep();
+            failure = await Record.ExceptionAsync(async () => await adapter.AdvanceObservationAsync(default));
+        }
+        Assert.Single(io.Selections);
+        Assert.Empty(io.Inputs);
+        Assert.Null(action.EffectiveInputAt);
+        if (unknown)
+        {
+            Assert.IsType<CombatNotFinishedException>(failure);
+            Assert.InRange(context.Now, 4, 4.15);
+        }
+        else
+        {
+            Assert.Null(failure);
+            Assert.False(adapter.HasObservationRequest);
+            Assert.True(context.Now < 4);
+        }
+    }
+
+    [Theory]
+    [InlineData("cancel")]
+    [InlineData("input-error")]
+    [InlineData("release-error")]
+    public async Task SelectionObservationStillPropagatesCancellationAndRealFailures(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 attack(0.1)"));
+        var adapter = NativeCombatFlowRunner.CreateAdapter(io);
+        using var owner = (IDisposable)adapter;
+        using var context = new CombatFlowContext(clock);
+        using var cancellation = new CancellationTokenSource();
+        var due = false;
+        var action = new CombatFlowAction(new CombatCommand("琴", "attack(0.1)"), context, () => true,
+            context.Now + 4, shouldYield: () => due);
+        adapter.BeginStep();
+        await adapter.PrepareObservationStepAsync(action, "onfield", cancellation.Token);
+        io.BeforeSelectionInput = () =>
+        {
+            if (fault == "cancel") cancellation.Cancel();
+            else if (fault == "input-error") throw new IOException("native-input-fault");
+            else { due = true; io.InputReleaseError = new IOException("release-fault"); }
+        };
+        var error = await Record.ExceptionAsync(async () => await adapter.AdvanceObservationAsync(cancellation.Token));
+        io.InputReleaseError = null;
+        if (fault == "cancel") Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<IOException>(error);
+        Assert.Empty(io.Selections);
+        Assert.Empty(io.Inputs);
+    }
+
     [Fact]
     public async Task ReengagementHardDeadlineStopsASingleNativeAtomicWaitAndReleasesHeldInput()
     {
@@ -2746,8 +2896,13 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             if (TryGetKnownSkillCooldown(actor.Name, out var cooldown) && cooldown > 0) WaitForSelection((int)Math.Ceiling(cooldown * 1000), ct);
             return Task.CompletedTask;
         }
+        public Action? BeforeSelectionInput { get; set; }
+        public Exception? InputReleaseError { get; set; }
         public CombatBattleHostInputResult SelectActor(int index, CombatNativeInputRequest request, CancellationToken ct)
         {
+            BeforeSelectionInput?.Invoke();
+            // 与生产NativeCombatIo相同：选角物理输入也受当前动作维护/预算约束。
+            CombatActionScope.Current?.Check();
             LastSelectionTimestamp = Clock.GetTimestamp();
             Selections.Add(index);
             ct.ThrowIfCancellationRequested();
@@ -2868,7 +3023,11 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         { ct.ThrowIfCancellationRequested(); _visionInvalidated = false; VisionPreparations.Add(needsBurst); return VisionReadiness ?? Task.CompletedTask; }
         public IDisposable BeginExclusive(bool allowPassiveObservation) => new Lease();
         private sealed class Lease : IDisposable { public void Dispose() { } }
-        public void ReleaseInput() => _held = false;
+        public void ReleaseInput()
+        {
+            if (InputReleaseError != null) throw InputReleaseError;
+            _held = false;
+        }
         public Task DelayAsync(int milliseconds, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested(); Advance(milliseconds + DelayLatenessMs); ct.ThrowIfCancellationRequested();
