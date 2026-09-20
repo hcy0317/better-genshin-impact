@@ -636,6 +636,16 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 ClearCapture();
                 return ValueTask.CompletedTask;
             }
+            catch (CombatActionInterruptedException)
+            {
+                ct.ThrowIfCancellationRequested();
+                // 观察到提交之间维护/条件可能变化。保留原目标的输入事实，
+                // 只请求退役；本步不重发，后续仍由原fence和期限决定能否交接。
+                _selection?.RequestRetirement();
+                io.ReleaseInput();
+                ClearCapture();
+                return ValueTask.CompletedTask;
+            }
         }
 
         private ValueTask AdvanceObservationCore(CancellationToken ct)
@@ -650,10 +660,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             using var operation = _input.EnterOperation();
             using var exclusive = io.BeginExclusive(allowPassiveObservation: true);
             // 已撤回/到期的目标仍须按自己的输入事实收束；不借新动作的CanStart延长旧期限。
-            using var scope = action.CanStart ? new CombatActionScope(action, ct) : null;
+            var allowInput = action.CanStart && action.CanContinue && !_selection.RetirementRequested;
+            if (!allowInput) _selection.RequestRetirement();
+            using var scope = allowInput ? new CombatActionScope(action, ct) : null;
             if (!_selection.IsExpired)
             {
-                if (!action.CanStart) _selection.RequestRetirement();
                 if (ControlInterrupted(CurrentFrame(), action))
                 {
                     TraceSelection("control-awaiting");
@@ -670,7 +681,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                 }
             }
-            var result = _selection.Advance(ct, allowInput: action.CanStart);
+            var result = _selection.Advance(ct, allowInput);
             try
             {
                 if (result.NeedsRecovery)

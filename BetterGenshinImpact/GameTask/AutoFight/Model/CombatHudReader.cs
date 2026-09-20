@@ -30,7 +30,8 @@ internal static class CombatHudReader
         frame.ReadOnce((typeof(CombatHudReader), "e-cooldown"), () =>
         {
             using var area = frame.DeriveCrop(AutoFightAssets.Get(frame).ECooldownRect);
-            using var white = OpenCvCommonHelper.InRangeHsv(area.SrcMat, new Scalar(0, 0, 235), new Scalar(0, 25, 255));
+            // 实拍冷却数字可为灰白色（约211），不能要求接近纯白而抹掉已施放证据。
+            using var white = OpenCvCommonHelper.InRangeHsv(area.SrcMat, new Scalar(0, 0, 200), new Scalar(0, 25, 255));
             var raw = ocr.OcrWithoutDetector(white);
             return new CooldownReading(raw, StringUtils.TryParseDouble(raw));
         });
