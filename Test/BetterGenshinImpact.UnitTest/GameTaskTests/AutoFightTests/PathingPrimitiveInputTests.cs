@@ -8,6 +8,19 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class PathingPrimitiveInputTests
 {
     [Fact]
+    public void JumpAliasesKeepTheirOriginalPhysicalMethodAndJumpToBoundary()
+    {
+        foreach (var alias in new[] { "j", "jump", "跳跃", "jump(.5)" })
+        {
+            var command = new CombatCommand(CombatScriptParser.CurrentAvatarName, alias);
+            Assert.Equal(Method.Jump, command.Method);
+            Assert.True(PathingPrimitiveInput.Supports(command));
+        }
+        var transfer = new CombatCommand(CombatScriptParser.CurrentAvatarName, "jump(片段)");
+        Assert.Equal(Method.JumpTo, transfer.Method);
+        Assert.False(PathingPrimitiveInput.Supports(transfer));
+    }
+    [Fact]
     public void CannonPermissionBelongsToOneObservedSourceAndDoesNotGrantNamedOrGenericConfirmation()
     {
         var source = new CaptureFrameSource().Next();

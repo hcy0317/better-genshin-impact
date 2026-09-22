@@ -38,6 +38,92 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         public double? ReadySince;
         public CaptureFrameFence? InputFence;
         public CaptureFrameStamp LastSource;
+        public bool RecoveryEligible;
+        public bool RecoveryClaimed;
+        public double RecoveryWindowEnd;
+        public CombatSkillObservation? RecoveryReady;
+        public CaptureFrameStamp RecoverySource;
+        public Guid RecoveryRequest;
+        public bool RecoveryDispatchStarted;
+    }
+
+    internal void MarkOriginalReceipt(Guid attemptId, CombatBattleHostInputResult receipt, double now, TimeProvider clock)
+    {
+        lock (_gate)
+        {
+            var slot = _slots.Values.FirstOrDefault(value => value.Attempt.AttemptId == attemptId);
+            if (_closed || slot == null) return;
+            slot.RecoveryEligible = receipt.Status == CombatBattleHostInputStatus.Sent && receipt.Error == null &&
+                receipt.NativeRequested is > 0 && receipt.NativeSubmitted == receipt.NativeRequested &&
+                receipt.StartedTimestamp is { } started && receipt.CompletedTimestamp is { } completed &&
+                started <= completed && completed <= clock.GetTimestamp() &&
+                slot.InputFence is { } fence && started >= fence.Before.CapturedTimestamp;
+            if (slot.RecoveryEligible)
+                slot.RecoveryWindowEnd = Math.Min(slot.Attempt.Deadline,
+                    now - clock.GetElapsedTime(receipt.CompletedTimestamp!.Value).TotalSeconds + 1);
+        }
+    }
+
+    internal CombatSkillRecoveryPulse? TryClaimRecovery(CombatFlowAction action, CombatSkillObservation sample,
+        bool actorAndControlValid)
+    {
+        lock (_gate)
+        {
+            var command = action.Command;
+            if (_closed || !_slots.TryGetValue((command.Name, command.Method), out var slot) ||
+                slot.Attempt.AttemptId != action.PendingAttempt?.AttemptId || slot.Attempt.CommandId != action.CommandId ||
+                slot.Attempt.BattleId != action.BattleId) return null;
+            var allowed = command.NativeSkillSequence == null &&
+                (command.Name == "班尼特" && command.Method == Method.Burst && !command.HasFlag("hold") ||
+                 command.Name == "钟离" && command.Method == Method.Skill && command.HasFlag("hold"));
+            if (!allowed || !slot.RecoveryEligible || slot.RecoveryClaimed || slot.SawCooldown || slot.Confirmed ||
+                !action.CanStart || !action.CanContinue || action.Now >= slot.RecoveryWindowEnd ||
+                action.RemainingBudget < CombatFlowPolicy.ActionSeconds(command)) return null;
+            if (!actorAndControlValid || sample.BattleId != battleId || !sample.SourceBound || !sample.SourceAcceptedFresh ||
+                slot.InputFence is not { } fence || !fence.Accepts(sample.SourceStamp) ||
+                sample.SourceStamp.SessionId != fence.Before.SessionId ||
+                slot.RecoverySource.IsKnown && !sample.SourceStamp.IsAfter(slot.RecoverySource) ||
+                sample.Ready != true || sample.CoolingDown != false)
+            {
+                slot.RecoveryReady = null;
+                return null;
+            }
+            slot.RecoverySource = sample.SourceStamp;
+            slot.RecoveryReady ??= sample;
+            if (sample.CapturedAt - slot.RecoveryReady.Value.CapturedAt < .2) return null;
+            slot.RecoveryClaimed = true;
+            slot.RecoveryRequest = Guid.NewGuid();
+            return new(slot.Attempt, slot.RecoveryRequest, sample.SourceStamp, slot.RecoveryWindowEnd);
+        }
+    }
+
+    internal bool CanSendRecovery(CombatSkillRecoveryPulse pulse)
+    {
+        lock (_gate)
+            return !_closed && _slots.TryGetValue((pulse.Attempt.Actor, pulse.Attempt.Skill), out var slot) &&
+                slot.Attempt.AttemptId == pulse.Attempt.AttemptId && slot.RecoveryClaimed &&
+                slot.RecoveryRequest == pulse.RequestId && !slot.SawCooldown && !slot.Confirmed;
+    }
+
+    internal bool TryStartRecovery(CombatSkillRecoveryPulse pulse)
+    {
+        lock (_gate)
+        {
+            if (!CanSendRecovery(pulse) || !_slots.TryGetValue((pulse.Attempt.Actor, pulse.Attempt.Skill), out var slot) ||
+                slot.RecoveryDispatchStarted) return false;
+            slot.RecoveryDispatchStarted = true;
+            return true;
+        }
+    }
+
+    internal void CompleteRecovery(CombatSkillRecoveryPulse pulse, CaptureFrameFence fence)
+    {
+        lock (_gate)
+        {
+            if (!_closed && _slots.TryGetValue((pulse.Attempt.Actor, pulse.Attempt.Skill), out var slot) &&
+                slot.Attempt.AttemptId == pulse.Attempt.AttemptId && slot.RecoveryRequest == pulse.RequestId)
+                slot.InputFence = fence;
+        }
     }
 
     internal void MarkInputCompleted(Guid attemptId, CaptureFrameFence fence)

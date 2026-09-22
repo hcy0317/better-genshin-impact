@@ -12,38 +12,41 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 public class StopFlyingHandler : IActionHandler
 {
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
+        => await RunAsync(ct, waypointForTrack, new PathMoveToIo(native: true));
+
+    internal async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack, PathMoveToIo io)
     {
         // 如果有参数，先自由落体，然后恢复飞行
         if (waypointForTrack != null
             && !string.IsNullOrEmpty(waypointForTrack.ActionParams)
             && int.TryParse(waypointForTrack.ActionParams, out var stopFlyingWaitTime))
         {
-            Simulation.SendInput.SimulateAction(GIActions.Jump);
-            await Delay(stopFlyingWaitTime, ct);
-            Simulation.SendInput.SimulateAction(GIActions.Jump);
-            await Delay(300, ct);
+            io.Send(GIActions.Jump, KeyType.KeyPress);
+            await io.Delay(stopFlyingWaitTime, ct);
+            io.Send(GIActions.Jump, KeyType.KeyPress);
+            await io.Delay(300, ct);
         }
 
         // 路线节点不等于当前仍在空中，已在地面时禁止把下落攻击变成普攻。
         var attacked = LandingAttackGuard.TryAttack(() =>
         {
-            using var screen = CaptureToRectArea();
-            return Bv.GetMotionStatus(screen);
-        }, () => Simulation.SendInput.SimulateAction(GIActions.NormalAttack), ct);
+            using var screen = io.Capture();
+            return io.Motion(screen);
+        }, () => io.Send(GIActions.NormalAttack, KeyType.KeyPress), ct);
         if (!attacked)
         {
-            Logger.LogInformation("动作：未确认飞行，跳过下落攻击");
+            io.Logger.LogInformation("动作：未确认飞行，跳过下落攻击");
             return;
         }
-        Logger.LogInformation("动作：下落攻击");
+        io.Logger.LogInformation("动作：下落攻击");
         int i;
         for (i = 0; i < 50; i++)
         {
-            using var screen = CaptureToRectArea();
-            var isFlying = Bv.GetMotionStatus(screen) == MotionStatus.Fly;
+            using var screen = io.Capture();
+            var isFlying = io.Motion(screen) == MotionStatus.Fly;
             if (isFlying)
             {
-                await Delay(300, ct);
+                await io.Delay(300, ct);
             }
             else
             {
@@ -53,11 +56,11 @@ public class StopFlyingHandler : IActionHandler
 
         if (i == 50)
         {
-            Logger.LogWarning("动作：下落攻击 超时结束");
+            io.Logger.LogWarning("动作：下落攻击 超时结束");
         }
         else
         {
-            Logger.LogInformation("动作：下落攻击 结束");
+            io.Logger.LogInformation("动作：下落攻击 结束");
         }
     }
 }

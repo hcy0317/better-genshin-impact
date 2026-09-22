@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition;
@@ -441,6 +442,41 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
     private sealed class NativeGame(INativeCombatIo io) : ICombatFlowGame, IDisposable
     {
+        private sealed record HeldEOwner(Guid Battle, Guid Span, string Actor, Vanara.PInvoke.User32.VK Key);
+        private HeldEOwner? _heldE;
+        private CaptureFrameStamp _heldESource;
+        private void ReleaseHeldEOwner()
+        {
+            var held = _heldE;
+            _heldE = null;
+            _heldESource = default;
+            if (held != null) io.ReleaseHeldE(held.Key);
+        }
+
+        private void ObserveHeldE(CombatFlowAction action, NativeCombatActor actor, bool allowSameSource = false, bool release = false)
+        {
+            var held = _heldE;
+            var previous = _heldESource;
+            // 松键先行，即使随后的身份/控制核验失败也不能继续持有。
+            if (release) ReleaseHeldEOwner();
+            if (held == null || held.Battle != action.BattleId || held.Span != action.HeldESpanId ||
+                held.Actor != actor.Name || io.HeldEPhysicalKey() != held.Key) throw new CombatActionInterruptedException();
+            ClearCapture();
+            var frame = CurrentFrame();
+            if (frame == null || !previous.IsKnown ||
+                !(allowSameSource && frame.FrameStamp == previous) && !frame.FrameStamp.IsAfter(previous) ||
+                frame.FrameStamp.SessionId != previous.SessionId ||
+                !frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) || !io.IsCombatHud(frame) ||
+                ReadActive(frame) != actor.Index) throw new CombatActionInterruptedException();
+            var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
+            if (!control.IsObserved || control.KeyboardBreakoutRequested || control.Motion is MotionStatus.Climb or MotionStatus.Fly)
+                throw new CombatActionInterruptedException();
+            if (!frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge))
+                throw new CombatActionInterruptedException();
+            CombatActionScope.Current?.Check();
+            if (!release) _heldESource = frame.FrameStamp;
+            _confirmedSource = frame.FrameStamp;
+        }
         internal CombatScriptExecutionPurpose Purpose { get; init; }
         private CaptureFrameFence? _pathingInputFence;
         public bool ReportsInputReceipts => true;
@@ -549,8 +585,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private string? _lastSelectionTrace;
         private int _selectionTraceCount;
         private string? _selectionActor;
+        private bool _selectionObservationOnly;
         private Guid _selectionBattle;
-        internal (Guid Goal, long Deadline)? SelectionAssistance => _selection is { CanAssist: true } goal &&
+        internal (Guid Goal, long Deadline)? SelectionAssistance => !_selectionObservationOnly && _selection is { CanAssist: true } goal &&
             PendingControl == null && _input != null && !_selectionTerminal &&
             !io.Actors.Any(actor => _attempts?.HasUnresolved(actor.Name, Method.Skill) == true || _attempts?.HasUnresolved(actor.Name, Method.Burst) == true)
                 ? (goal.GoalId, goal.DeadlineTimestamp) : null;
@@ -660,9 +697,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             using var operation = _input.EnterOperation();
             using var exclusive = io.BeginExclusive(allowPassiveObservation: true);
             // 已撤回/到期的目标仍须按自己的输入事实收束；不借新动作的CanStart延长旧期限。
-            var allowInput = action.CanStart && action.CanContinue && !_selection.RetirementRequested;
-            if (!allowInput) _selection.RequestRetirement();
-            using var scope = allowInput ? new CombatActionScope(action, ct) : null;
+            var canContinue = action.CanStart && action.CanContinue && !_selection.RetirementRequested;
+            if (!canContinue) _selection.RequestRetirement();
+            using var scope = canContinue ? new CombatActionScope(action, ct) : null;
             if (!_selection.IsExpired)
             {
                 if (ControlInterrupted(CurrentFrame(), action))
@@ -681,7 +718,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                 }
             }
-            var result = _selection.Advance(ct, allowInput);
+            var result = _selection.Advance(ct, canContinue && !_selectionObservationOnly);
             try
             {
                 if (result.NeedsRecovery)
@@ -732,6 +769,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 _selectionAction = action;
                 _selectionActor = actor.Name;
                 _selectionBattle = action.BattleId;
+                _selectionObservationOnly = IsObservationOnlyPathingAttack(action);
                 _selection = new(actor.Index, SwitchAttempts,
                     TimeSpan.FromSeconds(action.RemainingBudget),
                     TakeSelectionFrame, frame => frame.FrameStamp, io.IsCombatHud,
@@ -739,6 +777,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     frame => new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp },
                     (index, request) =>
                     {
+                        if (_selectionObservationOnly) throw new CombatActionInterruptedException();
                         var receipt = io.SelectActor(index, request, ct);
                         if (receipt.Status is CombatBattleHostInputStatus.Sent or CombatBattleHostInputStatus.Unknown || receipt.NativeSubmitted > 0)
                             action.RecordInputSubmission(request.Id);
@@ -752,6 +791,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                         return ObserveSelectionControl(frame, control);
                     }, release: io.ReleaseInput, beforeSubmit: (frame, request) =>
                     {
+                        if (_selectionObservationOnly) throw new CombatActionInterruptedException();
                         if (_selection is { HasSubmittedInput: false } goal)
                             _evidence?.RememberBefore(frame, "selection", goal.GoalId.ToString("N"),
                                 $"battle={action.BattleId} goal={goal.GoalId} pulse={request.Id} target={actor.Name}/{actor.Index} originalDeadline={goal.DeadlineTimestamp}; before native submission");
@@ -765,7 +805,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _selectionControl = control;
             _selectionControlSource = frame.FrameStamp;
             var allowed = control.IsObserved && !control.KeyboardBreakoutRequested &&
-                control.Motion is not (MotionStatus.Fly or MotionStatus.Climb);
+                control.Motion != MotionStatus.Climb && (control.Motion != MotionStatus.Fly || _selectionObservationOnly);
             if (!allowed && _selection is { HasSubmittedInput: false } goal && _selectionAction is { } action)
             {
                 var phase = action.RemainingBudget <= .2 && !_selectionDeadlineCaptured ? "deadline"
@@ -878,6 +918,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _selectionContext = null;
             _selectionAction = null;
             _selectionActor = null;
+            _selectionObservationOnly = false;
             _selectionUnconfirmedCaptured = _selectionDeadlineCaptured = false;
             _selectionBlockedCaptured = false;
             _selectionControl = default;
@@ -1066,6 +1107,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 CancelDefeatProbe();
                 _expiredRecovery = null;
                 _atomicObservationId = null;
+                ReleaseHeldEOwner();
                 ClearCapture();
                 io.ReleaseInput();
             });
@@ -1310,16 +1352,20 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             var command = action.Command;
             if (!action.CanStart)
             {
+                ReleaseHeldEOwner();
                 action.DiagnosticReason = "动作预算或前置条件不再满足";
                 return CombatFlowResult.Skipped;
             }
             if (Purpose == CombatScriptExecutionPurpose.Pathing && command.LegacyOutcomePolicy &&
-                action.AtomicObservationId == null && (PathingPrimitiveInput.Supports(command) ||
+                action.AtomicObservationId == null && (command.Method != Method.Jump || !action.InAtomicScope) &&
+                (PathingPrimitiveInput.Supports(command) ||
                     PathingPrimitiveInput.RequiresCannonScene(command)))
                 return await ExecutePathingPrimitiveAsync(action, ct);
             // 条件准备取得的帧仍属于本步/本输入owner；方法边界本身不是画面失效事件。
             if (_capture != null && !_capture.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge)) ClearCapture();
-            var name = command.Name == CombatScriptParser.CurrentAvatarName ? CurrentActor() : command.Name;
+            var observationOnly = IsObservationOnlyPathingAttack(action);
+            var name = observationOnly ? action.ObservationOnlyActor ??= CurrentActor() :
+                command.Name == CombatScriptParser.CurrentAvatarName ? CurrentActor() : command.Name;
             if (name == null || FindActor(name) is not { } avatar) return CombatFlowResult.Failed;
             _attempts ??= new(action.BattleId);
             if (action.IsConfirmationOnly && _attempts.GetAttempt(name, command.Method)?.AttemptId != action.PendingAttempt?.AttemptId)
@@ -1368,6 +1414,36 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             try
             {
                 ct.ThrowIfCancellationRequested();
+                if (action.HeldESpanId != null && (command.Method == Method.Wait || command.Method == Method.KeyUp || command.Method == Method.MoveBy))
+                {
+                    // A held span never invokes selection: losing evidence ends ownership instead.
+                    scope.Check();
+                    if (command.Method == Method.MoveBy)
+                    {
+                        ObserveHeldE(action, avatar, allowSameSource: true);
+                        scope.Check();
+                        return SubmitPrimitive(action, avatar, command, _heldESource, ct, requireCompleteReceipt: true);
+                    }
+                    if (command.Method == Method.KeyUp)
+                    {
+                        ObserveHeldE(action, avatar, allowSameSource: true, release: true);
+                        scope.Check();
+                        if (!action.TryBeginInput()) throw new CombatActionInterruptedException();
+                        ReleaseHeldEOwner();
+                        return CombatFlowResult.Succeeded;
+                    }
+                    if (!action.TryBeginInput()) throw new CombatActionInterruptedException();
+                    var holdSeconds = double.Parse(command.Args![0], System.Globalization.CultureInfo.InvariantCulture);
+                    var initial = true;
+                    await scope.WaitHeldWithObservationAsync((int)Math.Ceiling(holdSeconds * 1000),
+                        () =>
+                        {
+                            // 首片沿用down的fresh许可，不把同源读取登记成新的观察。
+                            ObserveHeldE(action, avatar, allowSameSource: initial);
+                            initial = false;
+                        }, io.DelayAsync);
+                    return CombatFlowResult.Succeeded;
+                }
                 if (!hasUnresolved && ControlInterrupted(CurrentFrame(), action))
                 {
                     action.DiagnosticReason = _captureFailureReason;
@@ -1382,6 +1458,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 }
                 var pendingCd = 0d;
                 var pendingObservation = "frame-or-hud-unavailable";
+                CombatSkillObservation recoverySample = default;
+                var recoveryControlValid = false;
                 CombatFlowResult? Reconcile() => ReconcilePendingSkill(_attempts, action, name, () =>
                 {
                     var capture = CurrentFrame();
@@ -1396,6 +1474,10 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     bool? cooling = command.Method == Method.Skill
                         ? observedCd > 0 ? true : skillReady ? false : null : burst.CoolingDown;
                     var sample = Sample(action, capture, cooling, command.Method == Method.Skill ? skillReady : burst.Ready);
+                    recoverySample = sample;
+                    var control = capture.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(capture));
+                    recoveryControlValid = control.IsObserved && !control.KeyboardBreakoutRequested &&
+                        control.Motion is not (MotionStatus.Climb or MotionStatus.Fly);
                     pendingObservation += $" cd={observedCd:F3} cooling={sample.CoolingDown} ready={sample.Ready}";
                     action.Trace("pending-observation", pendingObservation);
                     return GatePendingSkillObservation(sample, active);
@@ -1418,6 +1500,14 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 }
                 if (pendingResult != null)
                 {
+                    if (pendingResult == CombatFlowResult.Pending &&
+                        _attempts.TryClaimRecovery(action, recoverySample, recoveryControlValid) is { } pulse)
+                    {
+                        CombatSkillInput.SendRecovery(_attempts, action, pulse,
+                            (request, begin) => io.SubmitInput(avatar, command, request, begin, ct), ct, io.Clock);
+                        ClearCapture();
+                        action.DiagnosticReason = "原attempt单次恢复脉冲已领取，仍等待输入后实际施放证据";
+                    }
                     if (pendingResult == CombatFlowResult.Succeeded && command.Method == Method.Skill)
                         io.ConfirmSkill(avatar, pendingCd,
                             io.Clock.GetUtcNow().UtcDateTime.AddSeconds(-(action.Now - action.EffectiveInputAt!.Value)));
@@ -1427,7 +1517,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 // 未决Q的动画可能暂时遮住角色栏；上面的纯观察不能再次切人或进入恢复。
                 // atomic 内纯等待没有新物理输入，保留连续输入所有权，由下一输入重新核实新帧。
                 var atomicWait = action.CanReuseConfirmedActor && command.Method == Method.Wait && _confirmedActor == name;
-                if (!atomicWait && !CanReuseActor(avatar))
+                if (!atomicWait && (observationOnly && !action.ObservationOnlyActorConfirmed || !CanReuseActor(avatar)))
                 {
                     _confirmedActor = null;
                     using var selection = SelectActorStep(action, avatar, ct);
@@ -1448,6 +1538,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                     _confirmedActor = name;
                     _confirmedSource = selection.Source;
+                    if (observationOnly) action.ObservationOnlyActorConfirmed = true;
                     if (selection.TakeFrame() is { } selectedFrame)
                     {
                         ClearCapture();
@@ -1572,6 +1663,48 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 var primitive = new CombatCommand(command.Name, command.Method.Alias[0] + "(" + string.Join(",", arguments) + ")");
                 var primitiveFrame = CurrentFrame();
                 if (primitiveFrame == null) return CombatFlowResult.AwaitingObservation;
+                if (action.HeldESpanId is { } span && command.Method == Method.KeyDown)
+                {
+                    var physical = io.HeldEPhysicalKey();
+                    if (physical == null || _heldE != null) throw new CombatActionInterruptedException();
+                    var request = new CombatNativeInputRequest(action.InputRequestId, primitiveFrame.FrameStamp,
+                        checked(io.Clock.GetTimestamp() + (long)(action.RemainingBudget * io.Clock.TimestampFrequency)));
+                    CombatBattleHostInputResult receipt;
+                    try
+                    {
+                        receipt = io.SubmitHeldE(physical.Value, true, request, () =>
+                        {
+                            scope.Check();
+                            if (io.HeldEPhysicalKey() != physical || !action.TryBeginInput())
+                                throw new CombatInputNotAdmittedException();
+                        }, ct);
+                    }
+                    catch { io.ReleaseHeldE(physical.Value); throw; }
+                    if (receipt.Status is CombatBattleHostInputStatus.Sent or CombatBattleHostInputStatus.Unknown || receipt.NativeSubmitted > 0)
+                        action.RecordInputSubmission(request.Id);
+                    if (receipt.Status != CombatBattleHostInputStatus.Sent || receipt.NativeRequested is not > 0 ||
+                        receipt.NativeSubmitted != receipt.NativeRequested || receipt.Error != null)
+                    {
+                        io.ReleaseHeldE(physical.Value);
+                        throw receipt.Error ?? new InvalidOperationException("E持键未取得完整原生回执，禁止继续或重放");
+                    }
+                    _heldE = new(action.BattleId, span, name, physical.Value);
+                    _heldESource = primitiveFrame.FrameStamp;
+                    return CombatFlowResult.Succeeded;
+                }
+                if (observationOnly)
+                {
+                    var control = primitiveFrame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(primitiveFrame));
+                    if (!action.CanContinue || !io.IsCombatHud(primitiveFrame) || ReadActive(primitiveFrame) != avatar.Index ||
+                        primitiveFrame.FrameStamp.SessionId != _confirmedSource.SessionId ||
+                        primitiveFrame.FrameStamp != _confirmedSource && !primitiveFrame.FrameStamp.IsAfter(_confirmedSource) ||
+                        !primitiveFrame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) || !control.IsObserved ||
+                        control.KeyboardBreakoutRequested || control.Motion == MotionStatus.Climb)
+                    {
+                        action.ObservationOnlyActorConfirmed = false;
+                        return CombatFlowResult.AwaitingObservation;
+                    }
+                }
                 var submitted = SubmitPrimitive(action, avatar, primitive, primitiveFrame.FrameStamp, ct);
                 if (submitted != CombatFlowResult.Succeeded) return submitted;
                 if (action.AtomicObservationId != null) _lastAtomicInputId = action.AtomicObservationId;
@@ -1589,9 +1722,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             }
             catch (CombatActionInterruptedException)
             {
+                ReleaseHeldEOwner();
                 action.DiagnosticReason = _captureFailureReason ?? $"动作被维护/条件/预算边界中断，剩余预算 {action.RemainingBudget:F3}s";
                 // 先在本场仍拥有输入时结束持续键/宏，再让调度器转移；不伪造动作完成。
                 io.ReleaseInput();
+                if (action.HeldESpanId != null) return CombatFlowResult.Failed;
                 if (action.RemainingBudget <= 0) return CombatFlowResult.Failed;
                 if (action.InputAt != null && (command.Method == Method.Skill || command.Method == Method.Burst))
                 {
@@ -1601,6 +1736,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             }
             catch
             {
+                ReleaseHeldEOwner();
                 InvalidateActorConfirmation();
                 io.ReleaseInput();
                 throw;
@@ -1608,11 +1744,17 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         }
 
         private CombatFlowResult SubmitPrimitive(CombatFlowAction action, NativeCombatActor? actor,
-            CombatCommand command, CaptureFrameStamp source, CancellationToken ct, CannonUiObservation scene = default)
+            CombatCommand command, CaptureFrameStamp source, CancellationToken ct, CannonUiObservation scene = default,
+            bool requireCompleteReceipt = false)
         {
             var request = new CombatNativeInputRequest(action.InputRequestId, source,
                 checked(io.Clock.GetTimestamp() + (long)(action.RemainingBudget * io.Clock.TimestampFrequency)));
-            void Begin() { if (!action.TryBeginInput()) throw new CombatInputNotAdmittedException(); }
+            void Begin()
+            {
+                if ((command.Method == Method.Jump || requireCompleteReceipt) && !action.CanContinue)
+                    throw new CombatInputNotAdmittedException();
+                if (!action.TryBeginInput()) throw new CombatInputNotAdmittedException();
+            }
             var receipt = actor == null ? io.SubmitPathingInput(command, request, Begin, ct, scene)
                 : io.SubmitInput(actor, command, request, Begin, ct);
             if (receipt.Status is CombatBattleHostInputStatus.Sent or CombatBattleHostInputStatus.Unknown || receipt.NativeSubmitted > 0)
@@ -1620,6 +1762,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             else action.ClearUnsubmittedInput();
             ct.ThrowIfCancellationRequested();
             if (receipt.Status == CombatBattleHostInputStatus.NotSent) return CombatFlowResult.AwaitingObservation;
+            if (requireCompleteReceipt && (receipt.Status != CombatBattleHostInputStatus.Sent || receipt.NativeRequested is not > 0 ||
+                receipt.NativeRequested != receipt.NativeSubmitted))
+                TaskExecutionScope.StopUnconfirmedCombat("持键瞄准输入未取得完整回执，停止区间且禁止重放");
             if (receipt.Status == CombatBattleHostInputStatus.Unknown)
                 TaskExecutionScope.StopUnconfirmedCombat("原始输入结果未知，禁止重放未完成指令");
             if (receipt.Status == CombatBattleHostInputStatus.Failed)
@@ -1646,8 +1791,20 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 var frame = CurrentFrame();
                 if (frame == null || _pathingInputFence is { } fence && !fence.Accepts(frame.FrameStamp))
                     return CombatFlowResult.AwaitingObservation;
-                _pathingInputFence = null;
-                if (ControlInterrupted(frame, action)) return CombatFlowResult.AwaitingObservation;
+                if (action.Command.Method == Method.Jump)
+                {
+                    if (!io.IsMainUi(frame) || !io.IsCombatHud(frame)) return CombatFlowResult.AwaitingObservation;
+                    var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
+                    scope.Check();
+                    if (!control.IsObserved || control.KeyboardBreakoutRequested ||
+                        !frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge)) return CombatFlowResult.AwaitingObservation;
+                }
+                else
+                {
+                    // 纯等待没有新的输入完成事实，不能消费前一次Jump的来源会话约束。
+                    if (action.Command.Method != Method.Wait) _pathingInputFence = null;
+                    if (ControlInterrupted(frame, action)) return CombatFlowResult.AwaitingObservation;
+                }
                 action.Trace("pathing-primitive", $"source={frame.FrameStamp.Sequence} actorRequired=false; 不推断战斗/交互目标已完成");
                 if (action.Command.Method == Method.Wait)
                 {
@@ -1729,6 +1886,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             return frame;
         }
 
+        private bool IsObservationOnlyPathingAttack(CombatFlowAction action) =>
+            Purpose == CombatScriptExecutionPurpose.Pathing && action.Command.LegacyOutcomePolicy &&
+            action.Command.Name == CombatScriptParser.CurrentAvatarName && action.Command.Method == Method.Attack &&
+            !action.InAtomicScope;
+
         private bool CanReuseActor(NativeCombatActor avatar)
         {
             if (HasSelection) return false;
@@ -1755,11 +1917,23 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 .WithSource(frame?.FrameStamp ?? default, io.Clock);
         private void ReleaseOwnedInput()
         {
-            CancelSelection();
-            CancelDefeatProbe();
-            _expiredRecovery = null;
-            ClearCapture();
-            _attempts?.Dispose();
+            Exception? failure = null;
+            void Retire(Action cleanup)
+            {
+                try { cleanup(); }
+                catch (Exception error) { failure ??= error; }
+            }
+            try { Retire(ReleaseHeldEOwner); }
+            finally
+            {
+                // 物理松键失败仍须退休图像/观察/技能槽，但不能据此释放输入协调器所有权。
+                Retire(CancelSelection);
+                Retire(CancelDefeatProbe);
+                _expiredRecovery = null;
+                Retire(ClearCapture);
+                Retire(() => _attempts?.Dispose());
+            }
+            if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
             io.ReleaseInput();
         }
         public void Dispose()

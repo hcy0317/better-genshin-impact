@@ -25,6 +25,7 @@ internal sealed class CombatFlowBlock(string name)
     public double Timeout { get; init; } = double.PositiveInfinity;
     public double EstimatedSeconds { get; set; }
     public CombatRawAtomicPlan? RawAtomicPlan { get; set; }
+    public bool HeldEPlan { get; set; }
     public HashSet<string> CoverageRecords { get; } = new(StringComparer.Ordinal);
     public HashSet<string> EntryCoverageRecords { get; } = new(StringComparer.Ordinal);
     public HashSet<string> ProducedRecords { get; } = new(StringComparer.Ordinal);
@@ -385,6 +386,7 @@ public sealed partial class CombatFlowProgram
             }
             if (block.CompletionRecord is { } completion) block.ProducedRecords.Add(completion);
             block.RawAtomicPlan = CombatRawAtomicPlan.Create(block);
+            block.HeldEPlan = CombatHeldEPlan.Matches(block);
             if (block.RawAtomicPlan != null) block.EstimatedSeconds = block.RawAtomicPlan.Estimate(0);
             if (block.Atomic && block.EstimatedSeconds > block.Timeout)
                 throw block.Error("atomic 片段超过有界执行预算，请拆分动作或显式调整 timeout：" + block.Name);

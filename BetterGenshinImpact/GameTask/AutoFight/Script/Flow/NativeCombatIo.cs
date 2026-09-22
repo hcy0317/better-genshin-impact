@@ -176,5 +176,25 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         return receipt;
     }
     public void ReleaseInput() => Simulation.ReleaseAllKey();
+    public Vanara.PInvoke.User32.VK? HeldEPhysicalKey() =>
+        ResolveHeldEPhysicalKey(ViewModel.Pages.KeyBindingsSettingsPageViewModel.MappingKey);
+
+    internal static Vanara.PInvoke.User32.VK? ResolveHeldEPhysicalKey(Func<Vanara.PInvoke.User32.VK, Vanara.PInvoke.User32.VK> mapping)
+    {
+        var key = mapping(Vanara.PInvoke.User32.VK.VK_E);
+        if (!Enum.IsDefined(key) || (int)key <= 6) return null;
+        for (var index = 0; index < 5; index++)
+            if (key == mapping((Vanara.PInvoke.User32.VK)((int)Vanara.PInvoke.User32.VK.VK_1 + index))) return null;
+        return key;
+    }
+    public CombatBattleHostInputResult SubmitHeldE(Vanara.PInvoke.User32.VK key, bool down,
+        CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken ct) =>
+        new CombatNativeInput(Clock, Logger, () => TaskControl.CheckAndSleep(0)).Submit(request,
+            down ? "held-e-down" : "held-e-up", () =>
+            {
+                if (down) Simulation.SendInput.Keyboard.KeyDown(key);
+                else Simulation.SendInput.Keyboard.KeyUp(key);
+            }, ct, beforeFirstNative);
+    public void ReleaseHeldE(Vanara.PInvoke.User32.VK key) => Simulation.SendInput.Keyboard.KeyUp(key);
     public Task DelayAsync(int milliseconds, CancellationToken ct) => Task.Delay(milliseconds, ct);
 }

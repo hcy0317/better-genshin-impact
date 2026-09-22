@@ -61,6 +61,12 @@ public class WaypointForTrack : Waypoint
     }
 
     public WaypointForTrack(Waypoint waypoint, RouteMapContext mapContext)
+        : this(waypoint, mapContext, point => MapManager.GetMap(mapContext).ConvertGenshinMapCoordinatesToImageCoordinates(point))
+    {
+    }
+
+    internal WaypointForTrack(Waypoint waypoint, RouteMapContext mapContext,
+        Func<OpenCvSharp.Point2f, OpenCvSharp.Point2f> convertCoordinates)
     {
         Id = waypoint.Id;
         Type = waypoint.Type;
@@ -72,7 +78,7 @@ public class WaypointForTrack : Waypoint
         MapName = mapContext.MapName;
         MapMatchMethod = mapContext.MapMatchMethod;
         MapLayerSelector = mapContext.LayerSelector;
-        var MatP = MapManager.GetMap(mapContext).ConvertGenshinMapCoordinatesToImageCoordinates(new OpenCvSharp.Point2f((float)waypoint.X, (float)waypoint.Y));
+        var MatP = convertCoordinates(new OpenCvSharp.Point2f((float)waypoint.X, (float)waypoint.Y));
         MatX = MatP.X;
         MatY = MatP.Y;
         X = MatX;

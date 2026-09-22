@@ -26,6 +26,418 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
     [Theory]
+    [InlineData(MotionStatus.Fly, "wait(.35),j,wait(2),j", 2.35)]
+    [InlineData(MotionStatus.Climb, "wait(.4),j,wait(1),j", 1.4)]
+    public async Task AnonymousJumpAliasesUseOnlyTheExistingPathingPrimitive(MotionStatus motion, string script, double wait)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)")) { ObservedMotion = motion };
+        io.SetFrontActor("未识别形态");
+        using var runner = NativeCombatFlowRunner.Create(CombatScriptParser.ParseLineCommands(script, CombatScriptParser.CurrentAvatarName),
+            io, false, purpose: CombatScriptExecutionPurpose.Pathing);
+        Assert.Equal(CombatFlowResult.Succeeded, await RunBoundedReplayRound(runner, io));
+        Assert.Equal(2, io.PathingPrimitives.Count(command => command.Method == Method.Jump));
+        Assert.Empty(io.Selections);
+        Assert.InRange(runner.Context.Now, wait, wait + 1);
+    }
+
+    [Theory]
+    [InlineData("hud")]
+    [InlineData("unknown-control")]
+    [InlineData("breakout")]
+    [InlineData("stale")]
+    [InlineData("slow-control")]
+    [InlineData("atomic")]
+    [InlineData("combat")]
+    [InlineData("named")]
+    [InlineData("cancel")]
+    [InlineData("deadline")]
+    public async Task AnonymousJumpAdmissionRejectsInvalidEvidence(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var cancellation = new CancellationTokenSource();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)"))
+        {
+            InitialFrameFault = fault == "stale" ? "stale" : null,
+            CombatHudVisible = fault != "hud",
+            ControlReadCost = fault == "slow-control" ? 200 : fault == "deadline" ? 9000 : 0,
+            BeforePathingInput = fault == "cancel" ? () => cancellation.Cancel() : null,
+            ControlOverride = _ => fault == "unknown-control" ? default : new(MotionStatus.Fly, fault == "breakout")
+        };
+        io.SetFrontActor("未识别形态");
+        var name = fault == "named" ? "琴" : CombatScriptParser.CurrentAvatarName;
+        var commands = CombatScriptParser.ParseLineCommands("j", name);
+        if (fault == "atomic") commands = [new("", "segment(start,atomic,required)"), .. commands, new("", "segment(end)")];
+        using var runner = NativeCombatFlowRunner.Create(commands, io, false,
+            purpose: fault == "combat" ? CombatScriptExecutionPurpose.Combat : CombatScriptExecutionPurpose.Pathing);
+        var failure = await Record.ExceptionAsync(async () => await RunBoundedReplayRound(runner, io, ct: cancellation.Token));
+        AssertNoHostBootstrapFailure(failure);
+        Assert.DoesNotContain(io.PathingPrimitives, command => command.Method == Method.Jump);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HeldEAimingMoveByKeepsTheOriginalKeyUntilPairedUp(bool nonBlocking)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, nonBlocking ? 0 : 20, LoadProgram("琴 attack(.1)"))
+            { NonBlockingHeldCapture = nonBlocking };
+        io.SetFrontActor("琴");
+        using var runner = NativeCombatFlowRunner.Create(CombatScriptParser.ParseLineCommands(
+            "keydown(e),wait(.2),moveby(0,-200),wait(.31),moveby(5,10),keyup(E)", "琴"), io, false);
+        Assert.Equal(CombatFlowResult.Succeeded, await RunBoundedReplayRound(runner, io, nonBlocking ? 0 : 50));
+        var down = Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        var up = Assert.Single(io.KeyEvents.Where(x => x.Up));
+        Assert.True(up.At - down.At >= .51);
+        Assert.Equal(new[] { "0,-200", "5,10" }, io.Primitives.Where(x => x.Method == Method.MoveBy).Select(x => string.Join(",", x.Args!)));
+        Assert.All(io.MoveByHeldStates, held => Assert.True(held));
+        Assert.Empty(io.Selections);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HeldEAimingRejectsObservationsThatBecomeStaleDuringRecognition(bool activeRead)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)"))
+            { HeldActiveReadCost = activeRead ? 200 : 0, HeldControlReadCost = activeRead ? 0 : 200 };
+        io.SetFrontActor("琴");
+        using var runner = NativeCombatFlowRunner.Create(CombatScriptParser.ParseLineCommands(
+            "keydown(E),wait(.51),keyup(E)", "琴"), io, false);
+        Assert.Equal(CombatFlowResult.Failed, await RunBoundedReplayRound(runner, io));
+        Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        Assert.Contains(io.KeyEvents, x => x.Up);
+        Assert.False(io.HoldingInput);
+    }
+    private static async Task<CombatFlowResult> RunBoundedReplayRound(NativeCombatFlowRunner runner, PhysicalReplay io,
+        int pollingMilliseconds = 50, CancellationToken ct = default)
+    {
+        for (var i = 0; i < 600; i++)
+        {
+            var step = await runner.StepAsync(ct);
+            if (step.RoundCompleted) return step.Result;
+            // Host polling advances independently of a cheap/nonblocking capture.
+            await io.DelayAsync(pollingMilliseconds, ct);
+        }
+        throw new TimeoutException("回放未在有界host步数内返回；不放宽生产期限");
+    }
+
+    private static void AssertNoHostBootstrapFailure(Exception? failure) =>
+        Assert.DoesNotContain("Application host startup is prohibited", failure?.ToString() ?? "");
+
+    [Theory]
+    [InlineData("not-sent")]
+    [InlineData("unknown")]
+    [InlineData("partial")]
+    [InlineData("repeat")]
+    [InlineData("foreign")]
+    [InlineData("wait-foreign")]
+    public async Task AnonymousJumpReceiptAndFenceNeverAuthorizeAReplay(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)"))
+            { PathingJumpFault = fault };
+        io.SetFrontActor("未识别形态");
+        using var runner = NativeCombatFlowRunner.Create(CombatScriptParser.ParseLineCommands(
+            fault == "wait-foreign" ? "j,wait(.1),j" : "j,j", CombatScriptParser.CurrentAvatarName),
+            io, false, purpose: CombatScriptExecutionPurpose.Pathing);
+        var error = await Record.ExceptionAsync(async () => await RunBoundedReplayRound(runner, io));
+        AssertNoHostBootstrapFailure(error);
+        if (fault == "not-sent")
+        {
+            Assert.Null(error);
+            Assert.Equal(2, io.PathingPrimitives.Count(command => command.Method == Method.Jump));
+            Assert.Equal(3, io.PathingJumpAttempts);
+            Assert.True(io.PathingJumpSources[1].IsAfter(io.PathingJumpSources[0]));
+        }
+        else Assert.Single(io.PathingPrimitives.Where(command => command.Method == Method.Jump));
+        Assert.Empty(io.Selections);
+        Assert.False(io.HoldingInput);
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("partial")]
+    [InlineData("mapping")]
+    public async Task HeldEAimingMoveByFailureReleasesWithoutReplay(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        PhysicalReplay? replay = null;
+        using var io = replay = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)"))
+        {
+            MoveByReceiptFault = fault,
+            HeldMapping = () => fault == "mapping" && replay!.KeyEvents.Count > 0 ? User32.VK.VK_R : User32.VK.VK_E
+        };
+        io.SetFrontActor("琴");
+        using var runner = NativeCombatFlowRunner.Create(CombatScriptParser.ParseLineCommands(
+            "keydown(E),moveby(0,-200),wait(.51),keyup(E)", "琴"), io, false);
+        var failure = await Record.ExceptionAsync(async () => await RunBoundedReplayRound(runner, io));
+        AssertNoHostBootstrapFailure(failure);
+        Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        Assert.Contains(io.KeyEvents, x => x.Up && x.Key == User32.VK.VK_E);
+        Assert.Equal(fault == "mapping" ? 0 : 1, io.MoveByHeldStates.Count);
+        Assert.Empty(io.Selections);
+        Assert.False(io.HoldingInput);
+    }
+
+    [Theory]
+    [InlineData("班尼特", "q(required,record=恢复记录)")]
+    [InlineData("钟离", "e(hold,required,record=恢复记录)")]
+    public async Task CompleteIgnoredSkillCanRecoverOnceInsideTheOriginalConfirmationAttempt(string actor, string syntax)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram($"{actor} {syntax}");
+        using var io = new PhysicalReplay(clock, false, 20, program)
+            { Actors = [new(actor, 1)], DropFirstSkill = true, CompleteSkillReceipts = true };
+        io.SetFrontActor(actor);
+        io.ScheduleEnergy(0, actor, true);
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        var pendingObserved = false;
+        CombatFlowResult result = CombatFlowResult.Unknown;
+        for (var i = 0; i < 400; i++)
+        {
+            var step = await runner.StepAsync(default);
+            pendingObserved |= runner.HasPendingConfirmation;
+            if (step.RoundCompleted) { result = step.Result; break; }
+        }
+        Assert.True(pendingObserved);
+        Assert.Equal(2, io.Inputs.Count);
+        Assert.Equal(CombatFlowResult.Succeeded, result);
+        Assert.Equal(2, io.SkillRequests.Distinct().Count());
+        Assert.Equal(1, runner.Context.Find("恢复记录")!.Generation);
+    }
+
+    [Fact]
+    public async Task TwoIgnoredNativePulsesStillFailWithoutExtendingTheOriginalAttempt()
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("班尼特 q(required)");
+        using var io = new PhysicalReplay(clock, false, 20, program)
+            { Actors = [new("班尼特", 1)], DropAllSkills = true, CompleteSkillReceipts = true };
+        io.SetFrontActor("班尼特");
+        io.ScheduleEnergy(0, "班尼特", true);
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        Assert.Equal(CombatFlowResult.Failed, await runner.RunRoundAsync(default));
+        Assert.Equal(2, io.Inputs.Count);
+        Assert.InRange(runner.Context.Now - io.Inputs[0].At, 8, 9);
+    }
+    [Theory]
+    [InlineData("E", "E")]
+    [InlineData("e", "E")]
+    [InlineData("vk_e", "VK_E")]
+    public async Task PairedRawEHoldsForItsDeclaredWaitWithoutSelectionRelease(string downKey, string upKey)
+    {
+        var clock = new FakeTimeProvider();
+        var commands = CombatScriptParser.ParseLineCommands($"keydown({downKey}),wait(0.51),keyup({upKey})", "枫原万叶");
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 attack(0.1)"))
+        { Actors = [new("枫原万叶", 1)] };
+        io.SetFrontActor("枫原万叶");
+        using var runner = NativeCombatFlowRunner.Create(commands, io, loop: false);
+        for (var i = 0; i < 300 && io.KeyEvents.All(x => !x.Up); i++) await runner.StepAsync(default);
+        var down = Assert.Single(io.KeyEvents.Where(x => !x.Up && x.Key == User32.VK.VK_E));
+        var up = io.KeyEvents.First(x => x.Up && x.Key == User32.VK.VK_E);
+        Assert.True(up.At - down.At >= .51, $"E held only {up.At - down.At:F3}s");
+        Assert.DoesNotContain(io.KeyEvents, x => x.ReleaseAll && x.At > down.At && x.At < down.At + .51);
+    }
+
+    [Fact]
+    public async Task HeldEAtTwentyFpsReusesInitialPermissionAndReleasesAtFinalPartialSlice()
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 0, LoadProgram("琴 attack(0.1)"))
+            { Actors = [new("枫原万叶", 1)], NonBlockingHeldCapture = true };
+        io.SetFrontActor("枫原万叶");
+        using var runner = NativeCombatFlowRunner.Create(
+            CombatScriptParser.ParseLineCommands("keydown(E),wait(.51),keyup(E)", "枫原万叶"), io, false);
+        var result = await runner.RunRoundAsync(default);
+        Assert.Equal(CombatFlowResult.Succeeded, result);
+        var down = Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        var up = Assert.Single(io.KeyEvents.Where(x => x.Up));
+        // 原等待接口按整数毫秒向上取整，最多一个毫秒而不是等下一张50ms帧。
+        Assert.InRange(up.At - down.At, .51 - .000001, .511 + .000001);
+        Assert.Empty(io.Selections);
+    }
+
+    [Theory]
+    [InlineData("actor")]
+    [InlineData("control")]
+    [InlineData("mapping")]
+    [InlineData("cancel")]
+    public async Task PairedRawELosesOwnershipWithoutSelectingOrReplaying(string failure)
+    {
+        var clock = new FakeTimeProvider();
+        using var cancellation = new CancellationTokenSource();
+        var commands = CombatScriptParser.ParseLineCommands("keydown(E),wait(1.5),keyup(E)", "枫原万叶");
+        PhysicalReplay? replay = null;
+        using var io = replay = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(0.1)"))
+        {
+            Actors = [new("枫原万叶", 1), new("琴", 2)],
+            HeldMapping = () => failure == "mapping" && replay!.KeyEvents.Count > 0 ? User32.VK.VK_R : User32.VK.VK_E,
+            ControlOverride = _ => new(MotionStatus.Unknown, failure == "control" && replay!.KeyEvents.Count > 0)
+        };
+        io.SetFrontActor("枫原万叶");
+        io.AfterCapture = () =>
+        {
+            if (io.KeyEvents.Count == 0) return;
+            if (failure == "actor") io.SetFrontActor("琴");
+            if (failure == "cancel") cancellation.Cancel();
+        };
+        using var runner = NativeCombatFlowRunner.Create(commands, io, loop: false);
+        for (var i = 0; i < 300 && io.KeyEvents.All(x => !x.Up); i++)
+        {
+            var error = await Record.ExceptionAsync(async () => await runner.StepAsync(cancellation.Token));
+            if (error != null) break;
+        }
+        runner.Dispose();
+        Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        Assert.Contains(io.KeyEvents, x => x.Up && x.Key == User32.VK.VK_E);
+        Assert.Empty(io.Selections);
+        Assert.False(io.HoldingInput);
+    }
+
+    [Theory]
+    [InlineData("frozen")]
+    [InlineData("future")]
+    [InlineData("restart")]
+    [InlineData("foreign-actor")]
+    [InlineData("no-hud")]
+    public async Task PairedRawERejectsInvalidHeldFrames(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(0.1)"))
+            { Actors = [new("枫原万叶", 1)], HeldFrameFault = fault };
+        io.SetFrontActor("枫原万叶");
+        using var runner = NativeCombatFlowRunner.Create(
+            CombatScriptParser.ParseLineCommands("keydown(E),wait(1.5),keyup(E)", "枫原万叶"), io, false);
+        for (var i = 0; i < 300 && io.KeyEvents.All(x => !x.Up); i++) await runner.StepAsync(default);
+        Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        Assert.Contains(io.KeyEvents, x => x.Up);
+        Assert.Empty(io.Selections);
+        Assert.False(io.HoldingInput);
+    }
+
+    [Theory]
+    [InlineData("mapping")]
+    [InlineData("partial")]
+    [InlineData("unknown")]
+    public async Task PairedRawERequiresSafeMappingAndCompleteNativeReceipt(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(0.1)"))
+        {
+            Actors = [new("枫原万叶", 1)],
+            HeldMapping = () => fault == "mapping" ? null : User32.VK.VK_E,
+            HeldReceipt = fault
+        };
+        io.SetFrontActor("枫原万叶");
+        using var runner = NativeCombatFlowRunner.Create(
+            CombatScriptParser.ParseLineCommands("keydown(E),wait(.51),keyup(E)", "枫原万叶"), io, false);
+        for (var i = 0; i < 100; i++)
+        {
+            var error = await Record.ExceptionAsync(async () => await runner.StepAsync(default));
+            if (error != null || io.KeyEvents.Any(x => x.Up)) break;
+        }
+        Assert.True(io.KeyEvents.Count(x => !x.Up) <= 1);
+        Assert.False(io.HoldingInput);
+        Assert.Empty(io.Selections);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HeldEDoesNotSurviveKeepWithdrawalOrItsOriginalDeadline(bool deadline)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("""
+            record(许可,duration=20)
+            segment(start,name=持键,atomic,timeout=8,required)
+            枫原万叶 keydown(E,required),wait(1.5,keep=许可,required),keyup(E,required)
+            segment(end,record=持键完成)
+            """);
+        using var io = new PhysicalReplay(clock, false, 20, program) { Actors = [new("枫原万叶", 1)] };
+        io.SetFrontActor("枫原万叶");
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        var revoked = false;
+        io.AfterCapture = () =>
+        {
+            if (revoked || io.KeyEvents.Count == 0) return;
+            revoked = true;
+            if (deadline) io.DelayAsync(9000, default).GetAwaiter().GetResult();
+            else runner.Context.TryRecord("许可", runner.Context.Now - .01, .001);
+        };
+        var result = await runner.RunRoundAsync(default);
+        Assert.True(revoked);
+        Assert.Equal(CombatFlowResult.Failed, result);
+        Assert.Null(runner.Context.Find("持键完成"));
+        Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        Assert.Contains(io.KeyEvents, x => x.Up);
+        Assert.False(io.HoldingInput);
+        Assert.Empty(io.Selections);
+    }
+
+    [Fact]
+    public async Task HeldEReleaseFailureIsNotReportedAsSuccessfulCompletion()
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)"))
+            { Actors = [new("枫原万叶", 1)] };
+        io.SetFrontActor("枫原万叶");
+        using var runner = NativeCombatFlowRunner.Create(
+            CombatScriptParser.ParseLineCommands("keydown(E),wait(.51),keyup(E)", "枫原万叶"), io, false);
+        io.AfterCapture = () => { if (io.KeyEvents.Count > 0) io.InputReleaseError = new IOException("release failed"); };
+        try
+        {
+            Assert.NotNull(await Record.ExceptionAsync(async () => await runner.RunRoundAsync(default)));
+            Assert.Null(io.InputCoordinator.TryAcquire(Guid.NewGuid(), () => { }));
+            Assert.Single(io.KeyEvents.Where(x => !x.Up));
+        }
+        finally { io.AfterCapture = null; io.InputReleaseError = null; runner.Dispose(); }
+        Assert.False(io.HoldingInput);
+    }
+
+    [Fact]
+    public async Task DirectAdapterDisposeAfterHeldEDownRetiresFramesEvenWhenPhysicalReleaseFails()
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)"))
+            { Actors = [new("枫原万叶", 1)] };
+        io.SetFrontActor("枫原万叶");
+        var adapter = NativeCombatFlowRunner.CreateAdapter(io);
+        using var context = new CombatFlowContext(clock);
+        var action = new CombatFlowAction(new CombatCommand("枫原万叶", "keydown(E)"), context,
+            () => true, 8, inAtomicScope: true, heldESpanId: Guid.NewGuid());
+        var failure = new IOException("held physical release failed");
+        try
+        {
+            CombatFlowResult result = CombatFlowResult.Unknown;
+            for (var i = 0; i < 100 && result != CombatFlowResult.Succeeded; i++)
+            {
+                adapter.BeginStep();
+                if (adapter.HasObservationRequest) await adapter.AdvanceObservationAsync(default);
+                else result = await adapter.ExecuteAsync(action, default);
+                if (result != CombatFlowResult.Succeeded) await adapter.YieldAsync(default);
+            }
+            Assert.Equal(CombatFlowResult.Succeeded, result);
+            Assert.Single(io.KeyEvents.Where(x => !x.Up));
+            Assert.Contains(io.CapturedFrames, frame => !frame.SrcMat.IsDisposed);
+            io.InputReleaseError = failure;
+            Assert.Same(failure, Record.Exception(() => ((IDisposable)adapter).Dispose()));
+            Assert.Null(io.InputCoordinator.TryAcquire(Guid.NewGuid(), () => { }));
+            Assert.All(io.CapturedFrames, frame => Assert.True(frame.SrcMat.IsDisposed));
+        }
+        finally
+        {
+            io.InputReleaseError = null;
+            ((IDisposable)adapter).Dispose();
+            io.ReleaseInput();
+            // The red regression must not itself retain unmanaged test images.
+            foreach (var frame in io.CapturedFrames)
+                if (!frame.SrcMat.IsDisposed) frame.Dispose();
+        }
+    }
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task NativeMaintenanceCanTakeOverWhenItBecomesDueDuringSelectionAdmission(bool json)
@@ -254,6 +666,28 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.False(physical.HoldingInput);
     }
 
+    [Theory]
+    [InlineData("0.3")]
+    [InlineData("1.5")]
+    public async Task AnonymousPathingAttackObservesFlyingActorWithoutSwitching(string seconds)
+    {
+        var clock = new FakeTimeProvider();
+        var script = CombatScriptParser.ParseContext($"attack({seconds})", false);
+        using var io = new PhysicalReplay(clock, false, 50, CombatFlowProgram.Compile(script))
+        { ObservedMotion = MotionStatus.Fly };
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false,
+            purpose: CombatScriptExecutionPurpose.Pathing);
+        Assert.Equal(CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
+        var attack = Assert.Single(io.Primitives);
+        Assert.Equal(Method.Attack, attack.Method);
+        Assert.Equal(seconds, Assert.Single(attack.Args!));
+        Assert.Empty(io.Selections);
+        var observations = io.ActiveObservations.Distinct().ToArray();
+        Assert.True(observations.Length >= 2);
+        Assert.All(observations, item => Assert.Equal(3, item.Index));
+        Assert.True(observations[1].Source.IsAfter(observations[0].Source));
+    }
+
     [Fact]
     public async Task AnonymousPathingSpaceWhileFlyingRunsOnceWithoutSelectingAnActor()
     {
@@ -271,6 +705,89 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Empty(io.Selections);
         Assert.Empty(io.Inputs);
         Assert.True(runner.Context.Now >= .6);
+    }
+
+    [Theory]
+    [InlineData("named")]
+    [InlineData("combat")]
+    [InlineData("atomic")]
+    [InlineData("climb")]
+    [InlineData("control-unknown")]
+    [InlineData("stale")]
+    [InlineData("repeated")]
+    [InlineData("cross-session")]
+    [InlineData("actor-changed")]
+    [InlineData("cancelled")]
+    [InlineData("deadline")]
+    public async Task AnonymousPathingAttackCannotBypassObservationBoundaries(string boundary)
+    {
+        var clock = new FakeTimeProvider();
+        var text = boundary switch
+        {
+            "named" => "那维莱特 attack(0.3)",
+            "atomic" => "call(flight,required)\nsegment(start,name=flight,atomic)\nattack(0.3)\nsegment(end)",
+            _ => "attack(0.3)"
+        };
+        var script = CombatScriptParser.ParseContext(text, false);
+        using var io = new PhysicalReplay(clock, false, 50, CombatFlowProgram.Compile(script))
+        {
+            ObservedMotion = boundary == "climb" ? MotionStatus.Climb : MotionStatus.Fly,
+            ControlOverride = boundary == "control-unknown" ? _ => default : null,
+            InitialFrameFault = boundary is "stale" or "repeated" or "cross-session" ? boundary : null
+        };
+        using var cancellation = new CancellationTokenSource();
+        var captures = 0;
+        io.AfterCapture = () =>
+        {
+            if (++captures != 1) return;
+            if (boundary == "actor-changed") io.SetFrontActor("琴");
+            if (boundary == "cancelled") cancellation.Cancel();
+            if (boundary == "deadline") clock.Advance(TimeSpan.FromSeconds(10));
+        };
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false,
+            purpose: boundary == "combat" ? CombatScriptExecutionPurpose.Combat : CombatScriptExecutionPurpose.Pathing);
+        CombatFlowResult? result = null;
+        var error = await Record.ExceptionAsync(async () => result = await runner.RunRoundAsync(cancellation.Token));
+        Assert.True(error != null || result != CombatFlowResult.Succeeded);
+        Assert.Empty(io.Primitives);
+        Assert.Empty(io.Selections);
+        Assert.Equal(0, io.ApproachPulses);
+    }
+
+    [Theory]
+    [InlineData("climb")]
+    [InlineData("unknown")]
+    [InlineData("actor")]
+    [InlineData("session")]
+    [InlineData("cancelled")]
+    public async Task AnonymousPathingAttackRechecksAdmissionAfterSelectionReady(string boundary)
+    {
+        var clock = new FakeTimeProvider();
+        var script = CombatScriptParser.ParseContext("attack(0.3)", false);
+        var readyReleased = false;
+        using var cancellation = new CancellationTokenSource();
+        using var io = new PhysicalReplay(clock, false, 50, CombatFlowProgram.Compile(script))
+        {
+            ControlOverride = _ => readyReleased && boundary == "unknown" ? default :
+                new(readyReleased && boundary == "climb" ? MotionStatus.Climb : MotionStatus.Fly, false)
+        };
+        io.AfterRelease = () =>
+        {
+            if (readyReleased) return;
+            readyReleased = true;
+            clock.Advance(TimeSpan.FromMilliseconds(250));
+            if (boundary == "actor") io.SetFrontActor("琴");
+            if (boundary == "session") io.Producer.Restart();
+            if (boundary == "cancelled") cancellation.Cancel();
+        };
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false,
+            purpose: CombatScriptExecutionPurpose.Pathing);
+        CombatFlowResult? result = null;
+        var error = await Record.ExceptionAsync(async () => result = await runner.RunRoundAsync(cancellation.Token));
+        Assert.True(readyReleased);
+        Assert.True(error != null || result != CombatFlowResult.Succeeded);
+        Assert.Empty(io.Primitives);
+        Assert.Empty(io.Selections);
     }
 
     [Theory]
@@ -2677,6 +3194,8 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         private string? _selected;
         private double _selectionCompletes;
         private bool _held;
+        private readonly HashSet<User32.VK> _heldKeys = [];
+        public List<(User32.VK Key, bool Up, double At, bool ReleaseAll)> KeyEvents { get; } = [];
         private readonly Dictionary<(string, Method), (double Visible, double Ready)> _cooldowns = new();
         private readonly Dictionary<string, double> _knownECdUntil = new();
         private readonly Dictionary<CaptureFrameStamp, Snapshot> _snapshots = new();
@@ -2687,9 +3206,22 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public IReadOnlyList<CaptureFrameStamp> FirstInputCooldownSources { get; private set; } = [];
         public HashSet<double> HeldReleases { get; } = [];
         public List<CombatCommand> Primitives { get; } = [];
+        public List<CombatCommand> PathingPrimitives { get; } = [];
+        public string? PathingJumpFault { get; init; }
+        public Action? BeforePathingInput { get; init; }
+        public int PathingJumpAttempts { get; private set; }
+        public List<CaptureFrameStamp> PathingJumpSources { get; } = [];
+        private bool _restartedDuringWait;
+        public string? MoveByReceiptFault { get; init; }
+        public List<bool> MoveByHeldStates { get; } = [];
+        public bool CombatHudVisible { get; init; } = true;
+        public double HeldActiveReadCost { get; init; }
+        public double HeldControlReadCost { get; init; }
+        public double ControlReadCost { get; init; }
         public Exception? PrimitivePostError { get; init; }
         public double FirstShieldConfirmed { get; private set; } = double.PositiveInfinity;
         public Action? AfterCapture { get; set; }
+        public Action? AfterRelease { get; set; }
         public double IgnoreSwitchUntil { get; init; }
         public bool UnknownSwitchOutcome { get; init; }
         public bool SelectionNeedsMovement { get; init; }
@@ -2703,6 +3235,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public string? HeldFrameFault { get; init; }
         private CaptureFrameStamp _lastDelivered;
         public List<int> Selections { get; } = [];
+        public List<(CaptureFrameStamp Source, int Index)> ActiveObservations { get; } = [];
         public long LastSelectionTimestamp { get; private set; }
         public double FirstAttack { get; private set; } = double.PositiveInfinity;
         public void PrimeKnownSkillCooldown(string actor, double seconds) => _knownECdUntil[actor] = Now + seconds;
@@ -2713,6 +3246,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
         public bool HoldingInput => _held;
         public bool FreezeWhileHeld { get; init; }
+        public bool NonBlockingHeldCapture { get; init; }
         public bool HideHudAfterInteraction { get; init; }
         public bool KnownCannonInteraction { get; init; }
         public bool ForeignCannonSource { get; init; }
@@ -2739,11 +3273,18 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public Func<double, bool>? ControlAt { get; init; }
         public MotionStatus ObservedMotion { get; init; } = MotionStatus.Unknown;
         public Func<double, CombatControlObservation>? ControlOverride { get; init; }
-        public BetterGenshinImpact.GameTask.Common.BgiVision.CombatControlObservation ReadControl(ImageRegion frame) =>
-            ControlOverride?.Invoke(Frame(frame).At) ?? new(ObservedMotion, Frame(frame).Controlled);
+        public BetterGenshinImpact.GameTask.Common.BgiVision.CombatControlObservation ReadControl(ImageRegion frame)
+        {
+            var result = ControlOverride?.Invoke(Frame(frame).At) ?? new(ObservedMotion, Frame(frame).Controlled);
+            Advance(ControlReadCost + (_held ? HeldControlReadCost : 0));
+            return result;
+        }
         public List<ImageRegion> CapturedFrames { get; } = [];
         public bool ResourceEvents { get; init; }
         public bool DropFirstSkill { get; init; }
+        public bool DropAllSkills { get; init; }
+        public bool CompleteSkillReceipts { get; init; }
+        public List<Guid> SkillRequests { get; } = [];
         public bool RockEnergyEvents { get; init; }
         public double FirstRockDemandAt { get; private set; } = double.PositiveInfinity;
         public void SetFrontActor(string actor) { _actor = actor; _selected = null; }
@@ -2763,6 +3304,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 
         public PhysicalReplay(FakeTimeProvider clock, bool burstReady, double cost, CombatFlowProgram program)
         {
+            Assert.True(ApplicationHostBootstrapGuard.IsProhibited);
             _clock = clock; _producer = new(clock); _cost = cost; _burstReady = burstReady; _program = program;
             _started = clock.GetTimestamp(); _latest = _producer.Next();
             _nextFrameTimestamp = _started + clock.TimestampFrequency / 20;
@@ -2786,18 +3328,21 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 
         public ImageRegion? Capture()
         {
-            var wait = _clock.GetElapsedTime(_clock.GetTimestamp(), _nextFrameTimestamp).TotalMilliseconds;
+            var wait = _held && NonBlockingHeldCapture ? 0 : _clock.GetElapsedTime(_clock.GetTimestamp(), _nextFrameTimestamp).TotalMilliseconds;
             Advance(wait);
             var source = _latest;
+            if (PathingJumpSources.Count > 0 && PathingJumpFault == "repeat") source = PathingJumpSources[0];
             var initialFault = Now < InitialFrameFaultUntil ? InitialFrameFault : null;
             if (initialFault == "stale") source = source with { CapturedTimestamp = source.CapturedTimestamp - _clock.TimestampFrequency / 5 };
+            if (initialFault == "repeated" && _lastDelivered.IsKnown) source = _lastDelivered;
+            if (initialFault == "cross-session") { _producer.Restart(); source = _producer.Next(); }
             if (_interactionUi && RepeatInteractionFrame) source = _lastDelivered;
             if (_held && HeldFrameFault == "frozen") source = _lastDelivered;
             if (_held && HeldFrameFault == "future") source = source with { CapturedTimestamp = _clock.GetTimestamp() + _clock.TimestampFrequency };
             if (_held && HeldFrameFault == "restart") { _producer.Restart(); source = _producer.Next(); }
             var at = _clock.GetElapsedTime(_started, source.CapturedTimestamp).TotalSeconds;
             var animation = _cooldowns.TryGetValue((_actor, Method.Burst), out var burst) && at < burst.Visible;
-            _snapshots[source] = new(animation || _interactionUi ? null : _held && HeldFrameFault == "foreign-actor" ? "琴" : _actor, at,
+            _snapshots[source] = new(animation || _interactionUi || _held && HeldFrameFault == "no-hud" ? null : _held && HeldFrameFault == "foreign-actor" ? "琴" : _actor, at,
                 FreezeWhileHeld && _held || ControlAt?.Invoke(at) == true || at >= ControlStartsAt && ControlPulses < RecoveryPulsesRequired);
             _lastDelivered = source;
             Advance(Math.Max(0, (initialFault == "slow" ? 250 : _held ? HeldCaptureCost ?? _cost : _cost) - wait));
@@ -2835,10 +3380,15 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             }
             public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => new(owner.DelayAsync(milliseconds, ct));
         }
-        public bool IsCombatHud(ImageRegion frame) => Frame(frame).Actor != null;
+        public bool IsCombatHud(ImageRegion frame) => CombatHudVisible && Frame(frame).Actor != null;
         public bool IsMainUi(ImageRegion frame) => IsCombatHud(frame);
-        public int ReadActive(ImageRegion frame, AvatarActiveCheckContext context) =>
-            Actors.FirstOrDefault(actor => actor.Name == Frame(frame).Actor)?.Index ?? -1;
+        public int ReadActive(ImageRegion frame, AvatarActiveCheckContext context)
+        {
+            var index = Actors.FirstOrDefault(actor => actor.Name == Frame(frame).Actor)?.Index ?? -1;
+            ActiveObservations.Add((frame.FrameStamp, index));
+            if (_held) Advance(HeldActiveReadCost);
+            return index;
+        }
         public bool? IsActorActive(NativeCombatActor actor, ImageRegion frame) =>
             Frame(frame).Actor is { } active ? active == actor.Name : null;
         private bool Cooling(NativeCombatActor actor, Method skill, double at) =>
@@ -2931,7 +3481,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         {
             if (Inputs.Count == 0) FirstInputCooldownSources = _cooldownReadSources.ToArray();
             Inputs.Add((actor.Name, skill, Now));
-            if (DropFirstSkill && Inputs.Count == 1)
+            if (DropAllSkills || DropFirstSkill && Inputs.Count == 1)
             {
                 WaitForSelection(hold ? 1000 : 50, default);
                 return;
@@ -2955,6 +3505,8 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         {
             ct.ThrowIfCancellationRequested();
             begin();
+            var started = Clock.GetTimestamp();
+            if (command.Method == Method.Skill || command.Method == Method.Burst) SkillRequests.Add(request.Id);
             if (command.NativeSkillSequence is { } sequence)
             {
                 if (Inputs.Count == 0) FirstInputCooldownSources = _cooldownReadSources.ToArray();
@@ -2978,30 +3530,58 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             else if (command.Method == Method.Skill) Send(actor, Method.Skill, command.HasFlag("hold"));
             else if (command.Method == Method.Burst) Send(actor, Method.Burst, false);
             else ExecutePrimitive(actor, command);
-            return new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp(),
-                Error: Primitives.Count == 1 ? PrimitivePostError : null);
+            return new(command.Method == Method.MoveBy && MoveByReceiptFault == "unknown" ? CombatBattleHostInputStatus.Unknown : CombatBattleHostInputStatus.Sent, Clock.GetTimestamp(),
+                Error: Primitives.Count == 1 ? PrimitivePostError : null)
+            {
+                NativeRequested = CompleteSkillReceipts ? 2 : command.Method == Method.MoveBy ? MoveByReceiptFault == "partial" ? 2 : 1 : null,
+                NativeSubmitted = CompleteSkillReceipts ? 2 : command.Method == Method.MoveBy ? 1 : null,
+                StartedTimestamp = CompleteSkillReceipts ? started : null
+            };
         }
         public CombatBattleHostInputResult SubmitPathingInput(CombatCommand command, CombatNativeInputRequest request,
             Action begin, CancellationToken ct, CannonUiObservation scene = default)
         {
+            BeforePathingInput?.Invoke();
             ct.ThrowIfCancellationRequested();
             if (!PathingPrimitiveInput.Supports(command, scene, request.Source))
                 return new(CombatBattleHostInputStatus.Failed, Reason: "scene-does-not-authorize-input");
+            if (command.Method == Method.Jump && ++PathingJumpAttempts == 1 && PathingJumpFault == "not-sent")
+                return new(CombatBattleHostInputStatus.NotSent);
             begin();
             ExecutePrimitive(new(CombatScriptParser.CurrentAvatarName, 0), command);
+            PathingPrimitives.Add(command);
+            if (command.Method == Method.Jump)
+            {
+                PathingJumpSources.Add(request.Source);
+                if (PathingJumpFault == "foreign") { _producer.Restart(); Advance(50); }
+                if (PathingJumpFault is "unknown" or "partial")
+                    return new(CombatBattleHostInputStatus.Unknown)
+                        { NativeRequested = 2, NativeSubmitted = PathingJumpFault == "partial" ? 1 : null,
+                            ObservableAfterTimestamp = Clock.GetTimestamp() };
+            }
             return new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp());
         }
         public void ExecutePrimitive(NativeCombatActor actor, CombatCommand command)
         {
             Primitives.Add(command);
+            if (command.Method == Method.MoveBy) MoveByHeldStates.Add(_held);
             if (HideHudAfterInteraction && command.Method == Method.KeyPress)
             {
                 if (User32Helper.ToVk(command.Args![0]) == User32.VK.VK_F) _interactionUi = true;
                 if (User32Helper.ToVk(command.Args![0]) == User32.VK.VK_ESCAPE) _interactionUi = false;
             }
-            if (command.Method == Method.KeyDown) _held = true;
+            if (command.Method == Method.KeyDown)
+            {
+                _held = true;
+                var key = User32Helper.ToVk(command.Args![0]);
+                _heldKeys.Add(key);
+                KeyEvents.Add((key, false, Now, false));
+            }
             if (command.Method == Method.KeyUp)
             {
+                var key = User32Helper.ToVk(command.Args![0]);
+                _heldKeys.Remove(key);
+                KeyEvents.Add((key, true, Now, false));
                 if (_held && actor.Name == "那维莱特") HeldReleases.Add(Now);
                 _held = false;
             }
@@ -3026,10 +3606,37 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public void ReleaseInput()
         {
             if (InputReleaseError != null) throw InputReleaseError;
+            foreach (var key in _heldKeys) KeyEvents.Add((key, true, Now, true));
+            _heldKeys.Clear();
             _held = false;
+            AfterRelease?.Invoke();
+        }
+        public Func<User32.VK?>? HeldMapping { get; init; }
+        public string? HeldReceipt { get; init; }
+        public User32.VK? HeldEPhysicalKey() => HeldMapping == null ? User32.VK.VK_E : HeldMapping();
+        public CombatBattleHostInputResult SubmitHeldE(User32.VK key, bool down, CombatNativeInputRequest request,
+            Action begin, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            begin();
+            ExecutePrimitive(new(_actor, 1), new CombatCommand(_actor, $"{(down ? "keydown" : "keyup")}({key})"));
+            return new(HeldReceipt == "unknown" ? CombatBattleHostInputStatus.Unknown : CombatBattleHostInputStatus.Sent, Clock.GetTimestamp())
+                { NativeRequested = HeldReceipt == "partial" ? 2 : 1, NativeSubmitted = 1, StartedTimestamp = Clock.GetTimestamp() };
+        }
+        public void ReleaseHeldE(User32.VK key)
+        {
+            if (InputReleaseError != null) throw InputReleaseError;
+            if (_heldKeys.Remove(key)) KeyEvents.Add((key, true, Now, false));
+            _held = _heldKeys.Count != 0;
         }
         public Task DelayAsync(int milliseconds, CancellationToken ct)
         {
+            if (PathingJumpFault == "wait-foreign" && PathingJumpSources.Count == 1 &&
+                CombatActionScope.Current != null && !_restartedDuringWait)
+            {
+                _restartedDuringWait = true;
+                _producer.Restart();
+            }
             ct.ThrowIfCancellationRequested(); Advance(milliseconds + DelayLatenessMs); ct.ThrowIfCancellationRequested();
             return Task.CompletedTask;
         }
