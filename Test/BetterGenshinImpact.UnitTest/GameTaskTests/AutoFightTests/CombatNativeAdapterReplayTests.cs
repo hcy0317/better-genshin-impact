@@ -2557,6 +2557,31 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Equal("琴", Assert.Single(io.Inputs).Actor);
     }
 
+    [Theory]
+    [InlineData(";迪希雅 attack(0.25),e;attack(0.4),s(1)")]
+    [InlineData("keypress(f);芙宁娜 e,wait(0.2),e;迪希雅 e;")]
+    [InlineData("keypress(f);迪希雅 e;芙宁娜 e;")]
+    [InlineData("keypress(f),keypress(f);芙宁娜 e;")]
+    [InlineData("attack(0.3),keypress(f),attack(0.3),keypress(f),attack(0.5),keypress(f),s(0.2);迪希雅 e;")]
+    [InlineData("keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f);迪希雅 e,wait(0.1),e;芙宁娜 e;")]
+    [InlineData(";迪希雅 w(0.01);w(0.01),wait(0.2),w(0.01),wait(0.2),attack(0.4),wait(1),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),s(0.2)")]
+    public async Task RecordedGatheringFragmentsExecuteWithoutOptionalNamedActors(string text)
+    {
+        var clock = new FakeTimeProvider();
+        var commands = CombatScriptParser.ParseContext(text, false).CombatCommands;
+        using var io = new PhysicalReplay(clock, false, 0, LoadProgram("琴 e"))
+        { Actors = [new("钟离", 1), new("娜维娅", 2), new("枫原万叶", 3), new("琴", 4)] };
+        io.SetFrontActor("钟离");
+        using var runner = NativeCombatFlowRunner.Create(commands, io, false,
+            CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing);
+        CombatFlowStep step = default;
+        for (var i = 0; i < 400 && !step.RoundCompleted; i++) step = await runner.StepAsync(default);
+        Assert.True(step.RoundCompleted);
+        Assert.Equal(CombatFlowResult.Succeeded, step.Result);
+        Assert.Empty(io.Inputs); // 缺席角色的E从未发送。
+        Assert.True(io.Primitives.Count + io.PathingPrimitives.Count > 0);
+    }
+
     [Fact]
     public async Task PlainJsonFiltersMissingPartyAlternativesBeforeSelectingAnAction()
     {

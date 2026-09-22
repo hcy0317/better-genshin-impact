@@ -108,7 +108,10 @@ public static class CombatScriptExecutor
         CombatExecutionResult Fail(string reason) => new(CombatExecutionKind.Failed, reason);
         if (script.CombatCommands.Count == 0) return Task.FromResult(Fail("EMPTY_FRAGMENT"));
         if (available.Count == 0) return Task.FromResult(Fail("PARTY_NOT_INITIALIZED"));
-        if (named.Count > 0 && !named.Overlaps(available)) return Task.FromResult(Fail("NO_APPLICABLE_ACTOR"));
+        var hasCurrentActorAction = script.CombatCommands.Any(c => !c.Method.IsFlowControl &&
+            c.Name == CombatScriptParser.CurrentAvatarName);
+        if (!hasCurrentActorAction && named.Count > 0 && !named.Overlaps(available))
+            return Task.FromResult(Fail("NO_APPLICABLE_ACTOR"));
         if (script.HasFlowCommands) throw new InvalidOperationException("增强策略必须由完整流程校验，不能套用旧模板过滤");
         if (mode == CombatScriptExecutionMode.RequiredSequence && !named.IsSubsetOf(available))
             return Task.FromResult(Fail("REQUIRED_ACTOR_MISSING:" + string.Join(",", named.Except(available))));

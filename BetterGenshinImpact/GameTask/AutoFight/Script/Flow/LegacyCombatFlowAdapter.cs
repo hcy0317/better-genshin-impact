@@ -44,7 +44,9 @@ internal static class LegacyCombatFlowAdapter
         var enhanced = commands.Any(command => command.RequiresFlow);
         if ((enhanced || mode == CombatScriptExecutionMode.RequiredSequence) && !named.IsSubsetOf(available))
             throw Failure("REQUIRED_ACTOR_MISSING:" + string.Join(",", named.Except(available)));
-        if (!enhanced && named.Count > 0 && !named.Overlaps(available))
+        var hasCurrentActorAction = commands.Any(command => !command.Method.IsFlowControl &&
+            command.Name == CombatScriptParser.CurrentAvatarName);
+        if (!enhanced && !hasCurrentActorAction && named.Count > 0 && !named.Overlaps(available))
             throw Failure($"NO_APPLICABLE_ACTOR: 路线所需角色=[{string.Join(",", named)}]，当前队伍=[{string.Join(",", available)}]");
         return available;
     }
