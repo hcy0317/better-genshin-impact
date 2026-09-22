@@ -112,7 +112,8 @@ internal static class UiRecovery
         return UiTransition.WaitAsync("return-main", requireOverworld ? UiTarget.Overworld : UiTarget.Main,
             driver, ct, TimeSpan.FromSeconds(20),
             // 退出门图标只能证明菜单存在，不能证明点击会返回HUD；使用已知的关闭动作。
-            observed => observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape : null,
+            observed => observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape :
+                observed.CanDismissDomainTip ? UiAction.DismissDomainTip : null,
             logger: logger, clock: clock, captureFailure: captureFailure);
     }
 
@@ -126,12 +127,14 @@ internal static class UiRecovery
         return UiTransition.WaitAsync("exit-domain", UiTarget.Overworld, driver, ct, TimeSpan.FromSeconds(20),
             observed =>
             {
+                if (observed.DomainTip.IsCandidate) domainFrames = 0;
                 if (requested)
                     return !confirmed && requestFrame != null && observed.IsAfter(requestFrame) && observed.Prompt && observed.BlackConfirm && !observed.Revive
-                        ? UiAction.ConfirmDomainExit : null;
+                        ? UiAction.ConfirmDomainExit : observed.CanDismissDomainTip ? UiAction.DismissDomainTip : null;
                 domainFrames = observed.Matches(UiTarget.DomainMain) ? domainFrames + 1 : 0;
                 if (domainFrames >= 2) return UiAction.RequestDomainExit;
-                return observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape : null;
+                return observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape :
+                    observed.CanDismissDomainTip ? UiAction.DismissDomainTip : null;
             }, logger: logger, clock: clock, captureFailure: captureFailure,
             actionCompleted: (action, applied, observed) =>
             {

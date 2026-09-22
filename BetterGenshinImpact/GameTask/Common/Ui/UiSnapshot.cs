@@ -4,7 +4,7 @@ using Fischless.GameCapture;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal enum UiTarget { Main, Overworld, DomainMain, Party, PartyList, PartyOrMain, Menu, Crafting }
-internal enum UiAction { Escape, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty }
+internal enum UiAction { Escape, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip }
 
 internal enum UiReadinessKind { Ready, TemporarilyUnavailable, Unknown, Terminal }
 internal readonly record struct UiReadiness(UiReadinessKind Kind, string Reason, bool CanProbe = false);
@@ -55,6 +55,10 @@ internal sealed record UiSnapshot(long FrameId)
     public bool Crafting { get; init; }
     public bool Handbook { get; init; }
     public bool Cannon { get; init; }
+    public DomainTipObservation DomainTip { get; init; }
+    public bool CanDismissDomainTip => HasUsableEvidence && DomainTip.IsFor(SourceStamp) && DomainTip.CanDismiss &&
+        !BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive && !FullPartyDefeat && !BlackConfirm &&
+        !MenuBack && !Crafting && !Handbook && !Cannon && !ExitDoor && !Closable;
     public UiWorldObservation? World { get; init; }
 
     public UiReadiness PartyEntryReadiness()
@@ -72,9 +76,11 @@ internal sealed record UiSnapshot(long FrameId)
     }
 
     public bool MainReady => HasUsableEvidence && MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
-        && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook && !Cannon;
+        && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook && !Cannon && !DomainTip.IsCandidate;
     public bool MapReady => HasUsableEvidence && BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
         && !FullPartyDefeat && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook;
+    // Candidate text alone never adds an escape permission. Existing positive
+    // page evidence still retains its original closing action over background text.
     public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || Cannon);
     public bool Matches(UiTarget target) => HasUsableEvidence && !FullPartyDefeat && target switch
     {
@@ -92,6 +98,7 @@ internal sealed record UiSnapshot(long FrameId)
 
     public int Signature => (MainHud ? 1 : 0) | (BigMap ? 2 : 0) | (Party ? 4 : 0)
         | (PartyList ? 8 : 0) | (Talk ? 16 : 0) | (Prompt ? 32 : 0) | (Revive ? 64 : 0)
-        | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0) | (Cannon ? 32768 : 0);
-    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},cannon={Cannon},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason}";
+        | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0) | (Cannon ? 32768 : 0)
+        | (DomainTip.IsCandidate ? 65536 : 0) | (DomainTip.CanDismiss ? 131072 : 0);
+    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},cannon={Cannon},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason}";
 }

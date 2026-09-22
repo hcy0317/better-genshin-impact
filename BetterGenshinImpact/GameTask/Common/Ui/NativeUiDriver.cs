@@ -16,22 +16,48 @@ using Vanara.PInvoke;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 /// <summary>仅在关键UI边界抓图，所有图像在单次读取/输入调用结束前释放。</summary>
-internal sealed class NativeUiDriver(bool inspectWorld = false) : IUiDriver, IDisposable
+internal sealed class NativeUiDriver : IUiDriver, IDisposable
 {
-    private readonly IDisposable _exclusive = AvatarRecognition.BeginExclusiveOperation();
+    private readonly NativeUiDriverIo _io;
+    private readonly IDisposable _exclusive;
     private CaptureFrameFence? _inputFence;
     private bool _disposed;
+
+    internal NativeUiDriver(bool inspectWorld = false) : this(NativeUiDriverIo.CreateNative(inspectWorld)) { }
+
+    internal NativeUiDriver(NativeUiDriverIo io)
+    {
+        ArgumentNullException.ThrowIfNull(io);
+        io.Validate();
+        _io = io;
+        _exclusive = io.BeginExclusive();
+    }
+
+    private UiSnapshot ReadCurrent(ImageRegion image) => Read(image, ocr: _io.Ocr(),
+        domainTipTexts: _io.Texts(), clock: _io.Clock, readScene: _io.ReadScene);
 
     public UiSnapshot Capture()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         UiOperation.Current?.Check();
-        using var image = TaskControl.CaptureToRectArea();
-        var snapshot = Read(image, inspectWorld);
+        using var image = _io.Capture();
+        var snapshot = ReadCurrent(image);
         return _inputFence is { } fence ? snapshot.AfterInput(fence) : snapshot;
     }
 
     internal static UiSnapshot Read(ImageRegion image, bool inspectWorld = false, IOcrService? ocr = null,
+        ReviveUiDetector? reviveDetector = null, DomainTipTexts? domainTipTexts = null,
+        TimeProvider? clock = null, Func<ImageRegion, UiSnapshot>? readScene = null)
+    {
+        var snapshot = readScene == null ? ReadNativeScene(image, inspectWorld, ocr, reviveDetector) : readScene(image);
+        // Legacy static callers need not initialize localization services. Native
+        // driver instances always supply the existing game-culture text pair.
+        if (domainTipTexts is { } texts)
+            snapshot = snapshot with { DomainTip = DomainTipUiReader.Read(image, ocr ?? OcrFactory.Paddle, texts) };
+        return snapshot.WithSource(image.FrameStamp, clock ?? TimeProvider.System, UiSnapshot.RecoveryMaximumAge);
+    }
+
+    internal static UiSnapshot ReadNativeScene(ImageRegion image, bool inspectWorld = false, IOcrService? ocr = null,
         ReviveUiDetector? reviveDetector = null)
     {
         bool Has(string name)
@@ -78,13 +104,13 @@ internal sealed class NativeUiDriver(bool inspectWorld = false) : IUiDriver, IDi
             }
             finally { foreach (var message in messages) message.Dispose(); }
         }
-        return snapshot.WithSource(image.FrameStamp, TimeProvider.System, UiSnapshot.RecoveryMaximumAge);
+        return snapshot;
     }
 
-    public Task DelayAsync(int milliseconds, CancellationToken ct) => TaskControl.Delay(milliseconds, ct);
+    public Task DelayAsync(int milliseconds, CancellationToken ct) => _io.Delay(milliseconds, ct);
 
     public void MarkInputCompleted(UiSnapshot before) =>
-        _inputFence = new(before.SourceStamp, TimeProvider.System.GetTimestamp());
+        _inputFence = new(before.SourceStamp, _io.Clock.GetTimestamp());
 
     public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
     {
@@ -92,9 +118,11 @@ internal sealed class NativeUiDriver(bool inspectWorld = false) : IUiDriver, IDi
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
         // 输入前恢复焦点；该托管等待同样受当前UI预算约束。
-        TaskControl.CheckAndSleep(0);
-        using var image = TaskControl.CaptureToRectArea();
-        var current = Read(image, inspectWorld);
+        _io.Focus();
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        using var image = _io.Capture();
+        var current = ReadCurrent(image);
         if (UiOperation.Current is { } operation && Enum.TryParse<UiTarget>(operation.Expected, out var target))
             operation.Observe(current, target, "pre-input");
         ct.ThrowIfCancellationRequested();
@@ -109,18 +137,29 @@ internal sealed class NativeUiDriver(bool inspectWorld = false) : IUiDriver, IDi
         }
         switch (action)
         {
-            case UiAction.OpenParty when observed.PartyEntryReadiness().CanProbe && current.PartyEntryReadiness().CanProbe:
-                Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+            case UiAction.DismissDomainTip when observed.CanDismissDomainTip && current.CanDismissDomainTip && current.IsAfter(observed) &&
+                observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge):
+                void AdmitTipInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) ||
+                        !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                        throw new InvalidOperationException("Domain tip source expired before native input.");
+                }
+                _io.Click(image, current.DomainTip.CloseBounds, AdmitTipInput);
                 return Task.FromResult(Completed(true));
+            case UiAction.OpenParty when observed.PartyEntryReadiness().CanProbe && current.PartyEntryReadiness().CanProbe:
+                return Task.FromResult(Completed(_io.OtherAction(action, image)));
             case UiAction.ReviveParty when observed.FullPartyDefeat && current.FullPartyDefeat:
-                return Task.FromResult(Completed(Bv.ClickIfInReviveModal(image)));
+                return Task.FromResult(Completed(_io.OtherAction(action, image)));
             case UiAction.Escape when observed.CanEscape && current.CanEscape:
             case UiAction.RequestDomainExit when observed.Matches(UiTarget.DomainMain) && current.Matches(UiTarget.DomainMain):
-                Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-                return Task.FromResult(Completed(true));
+                return Task.FromResult(Completed(_io.OtherAction(action, image)));
             case UiAction.ConfirmDomainExit when observed.Prompt && observed.BlackConfirm && !observed.Revive
                 && current.Prompt && current.BlackConfirm && !current.Revive:
-                return Task.FromResult(Completed(Bv.ClickBlackConfirmButton(image)));
+                return Task.FromResult(Completed(_io.OtherAction(action, image)));
             default:
                 return Task.FromResult(false);
         }
