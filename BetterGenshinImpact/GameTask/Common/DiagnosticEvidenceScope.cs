@@ -119,6 +119,33 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
         }
     }
 
+    // 终态之后可能不再有生产帧；只消费仍排队的这一请求，不重复已有retained证据。
+    internal void CapturePendingTerminal(string owner, string request, Func<ImageRegion?> capture)
+    {
+        (CaptureFrameStamp Source, string Detail, ILogger Logger) pending;
+        lock (_gate)
+        {
+            if (_closed || !_frameRequests.Remove((owner, request, "terminal"), out pending)) return;
+        }
+        try
+        {
+            using var frame = capture();
+            if (frame == null || !frame.FrameStamp.IsKnown ||
+                frame.FrameStamp.SessionId != pending.Source.SessionId || !frame.FrameStamp.IsAfter(pending.Source))
+            {
+                MissingFrame(request, "terminal", "terminal-source-unavailable-or-changed", pending.Logger);
+                return;
+            }
+            if (!TryCaptureWithReason(frame, request, "terminal", "terminal-single-capture; " + pending.Detail,
+                    out var reason, pending.Logger))
+                MissingFrame(request, "terminal", reason, pending.Logger);
+        }
+        catch (Exception)
+        {
+            MissingFrame(request, "terminal", "terminal-capture-failed", pending.Logger);
+        }
+    }
+
     internal void CaptureRequestedFrames(string owner, ImageRegion frame)
     {
         lock (_gate)

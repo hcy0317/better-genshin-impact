@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using BetterGenshinImpact.Core.Recognition;
+using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.GameTask.Model.Area;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
@@ -22,13 +23,14 @@ internal static class HandbookUiRecognition
             && contents.Select(Normalize).Any(text => CommissionLabels.Any(label => text.Contains(label, StringComparison.Ordinal)));
     }
 
-    internal static bool Read(ImageRegion image)
+    internal static bool Read(ImageRegion image, IOcrService? ocr = null)
     {
         var scale = image.Width / 1920d;
         IEnumerable<string> Texts(double x, double y, double width, double height)
         {
-            foreach (var region in image.FindMulti(RecognitionObject.Ocr(x * scale, y * scale, width * scale, height * scale)))
-                yield return region.Text;
+            var regions = image.FindMulti(RecognitionObject.Ocr(x * scale, y * scale, width * scale, height * scale), ocrService: ocr);
+            try { foreach (var region in regions) yield return region.Text; }
+            finally { foreach (var region in regions) region.Dispose(); }
         }
         return IsCommissionPage(Texts(200, 180, 190, 630), Texts(380, 180, 1220, 730));
     }

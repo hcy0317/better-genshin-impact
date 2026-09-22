@@ -829,7 +829,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             if (_selection is not { } goal || _selectionAction is not { } action) return;
             var source = goal.ObservedSource;
             var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} actual={goal.ObservedIndex?.ToString() ?? "unknown"} state={state} reason={goal.Reason} source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} originalDeadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}s " +
-                $"controlObserved={_selectionControl.IsObserved} motion={_selectionControl.Motion} keyboardBreakout={_selectionControl.KeyboardBreakoutRequested} controlSource={_selectionControlSource.SessionId}/{_selectionControlSource.Sequence}";
+                $"controlObserved={_selectionControl.IsObserved} motion={_selectionControl.Motion} keyboardBreakout={_selectionControl.KeyboardBreakoutRequested} controlSource={_selectionControlSource.SessionId}/{_selectionControlSource.Sequence} " +
+                $"purpose={Purpose} command={DescribeCommand(action.Command)} pathingPrimitive={PathingPrimitiveInput.Supports(action.Command)} atomic={action.InAtomicScope} observationOnly={_selectionObservationOnly}";
             action.Trace("selection", detail);
             var changed = state + ":" + goal.Reason + ":" + goal.ObservedIndex + ":" + _selectionControl;
             if (changed != _lastSelectionTrace && _selectionTraceCount++ < 16)

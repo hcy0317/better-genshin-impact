@@ -7,6 +7,52 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class DiagnosticEvidenceScopeTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PendingTerminalCapturesOnceButRetainedEvidenceNeedsNoNewFrame(bool retained)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        var before = source.Next();
+        var logger = new EvidenceLogger();
+        if (retained)
+        {
+            scope.RequestFrame("owner", "request", "search-start", before, "", logger);
+            using var old = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+            scope.CaptureRequestedFrames("owner", old);
+        }
+        scope.RequestFrame("owner", "request", "terminal", before, "original failure", logger);
+        var captures = 0;
+        ImageRegion? captured = null;
+        ImageRegion Capture()
+        {
+            captures++;
+            return captured = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        }
+        scope.CapturePendingTerminal("owner", "request", Capture);
+        scope.CapturePendingTerminal("owner", "request", Capture);
+        await scope.DisposeAsync();
+        Assert.Equal(retained ? 0 : 1, captures);
+        Assert.Single(saved.Where(item => item.Phase == "terminal"));
+        if (captured != null) Assert.True(captured.SrcMat.IsDisposed);
+    }
+
+    [Fact]
+    public async Task PendingTerminalCaptureFailureCannotEscapeOrRetry()
+    {
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        var logger = new EvidenceLogger();
+        scope.RequestFrame("owner", "request", "terminal", new CaptureFrameSource().Next(), "original failure", logger);
+        var calls = 0;
+        ImageRegion? Fail() { calls++; throw new IOException("capture unavailable"); }
+        scope.CapturePendingTerminal("owner", "request", Fail);
+        scope.CapturePendingTerminal("owner", "request", Fail);
+        Assert.Equal(1, calls);
+        Assert.Contains(logger.Messages, message => message.Contains("terminal-capture-failed"));
+    }
+
     [Fact]
     public async Task DedupeMetadataEvictionDoesNotLimitTotalCaptures()
     {

@@ -2228,6 +2228,91 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Equal(new[] { "party" }, device.Inputs);
     }
 
+    [Theory]
+    [InlineData(0, 100)]
+    [InlineData(100, 40)]
+    [InlineData(145, 0)]
+    public async Task HostApproachReservesReleaseTimeInsideOriginalBudget(int downDelay, int expectedHold)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 e");
+        using var physical = new PhysicalReplay(clock, false, 50, program);
+        using var flow = NativeCombatFlowRunner.Create(program, physical);
+        var device = new HostDevice(clock) { NativeReceipts = true, DownDelayMs = downDelay };
+        var native = new NativeCombatBattleHostIo(flow, device);
+        var source = new CaptureFrameSource(clock);
+        var result = await native.SendAsync(new(CombatBattleHostInputKind.Approach)
+        {
+            RequestId = Guid.NewGuid(), Source = source.Next(),
+            DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency
+        }, default);
+        Assert.Equal(CombatBattleHostInputStatus.Sent, result.Status);
+        Assert.Null(result.Error);
+        Assert.Equal(new[] { "forward-down", "forward-up" }, device.Inputs);
+        if (expectedHold == 0) Assert.Empty(device.Delays);
+        else Assert.Equal(expectedHold, Assert.Single(device.Delays));
+        Assert.Equal(2, result.NativeSubmitted);
+    }
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(200, false)]
+    [InlineData(0, true)]
+    public async Task HostApproachTimingLogCannotChangeCompletedInput(int logDelay, bool throws)
+    {
+        var clock = new FakeTimeProvider();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var device = new HostDevice(clock) { NativeReceipts = true, DownDelayMs = 100,
+            Logger = new HostTimingLogger(() => { clock.Advance(TimeSpan.FromMilliseconds(logDelay)); if (throws) throw new IOException("logger"); }) };
+        var native = new NativeCombatBattleHostIo(flow, device);
+        var source = new CaptureFrameSource(clock);
+        var started = clock.GetTimestamp();
+        var result = await native.SendAsync(new(CombatBattleHostInputKind.Approach)
+        { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = started + clock.TimestampFrequency }, default);
+        Assert.Equal(CombatBattleHostInputStatus.Sent, result.Status);
+        Assert.Null(result.Error);
+        Assert.Equal(140, clock.GetElapsedTime(started, result.CompletedTimestamp!.Value).TotalMilliseconds);
+    }
+
+    [Theory]
+    [InlineData("slow-up")]
+    [InlineData("reject-up")]
+    [InlineData("reject-down")]
+    [InlineData("cancel")]
+    public async Task HostApproachKeepsRealFailuresAndAlwaysAttemptsRelease(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var cancellation = new CancellationTokenSource();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var device = new HostDevice(clock) { NativeReceipts = true,
+            UpDelayMs = fault == "slow-up" ? 100 : 0,
+            RejectForward = down => fault == (down ? "reject-down" : "reject-up"),
+            AfterForward = down => { if (down && fault == "cancel") cancellation.Cancel(); } };
+        var native = new NativeCombatBattleHostIo(flow, device);
+        var source = new CaptureFrameSource(clock);
+        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Approach)
+        { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency };
+        if (fault == "cancel")
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await native.SendAsync(request, cancellation.Token));
+        else
+        {
+            var result = await native.SendAsync(request, default);
+            Assert.NotNull(result.Error);
+            Assert.Equal(fault == "slow-up" ? CombatBattleHostInputStatus.Sent : CombatBattleHostInputStatus.Unknown, result.Status);
+        }
+        Assert.Equal(new[] { "forward-down", "forward-up" }, device.Inputs);
+    }
+
+    private sealed class HostTimingLogger(Action log) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel level) => true;
+        public void Log<TState>(LogLevel level, EventId id, TState state, Exception? error, Func<TState, Exception?, string> format)
+        { if (format(state, error).StartsWith("HOST_APPROACH_TIMING")) log(); }
+    }
+
     private sealed class HostDevice(FakeTimeProvider clock) : ICombatHostInputDevice
     {
         public bool NativeReceipts { get; init; }
@@ -2243,7 +2328,19 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public Action<int>? AdvanceClock { get; init; }
         public void PrepareInput() => Preparations++;
         public void MoveCamera(int x, int y) { Inputs.Add("camera"); AfterCamera?.Invoke(); }
-        public void MoveForward(bool down) => Inputs.Add(down ? "forward-down" : "forward-up");
+        public int DownDelayMs { get; init; }
+        public int UpDelayMs { get; init; }
+        public Func<bool, bool>? RejectForward { get; init; }
+        public Action<bool>? AfterForward { get; init; }
+        public List<int> Delays { get; } = [];
+        public void MoveForward(bool down)
+        {
+            Inputs.Add(down ? "forward-down" : "forward-up");
+            clock.Advance(TimeSpan.FromMilliseconds(down ? DownDelayMs : UpDelayMs));
+            if (NativeReceipts) new WindowsInputMessageDispatcher(null, inputs => RejectForward?.Invoke(down) == true ? 0U : (uint)inputs.Length, () => 5)
+                .DispatchInput(new User32.INPUT[1]);
+            AfterForward?.Invoke(down);
+        }
         public void PressDrop()
         {
             Inputs.Add("drop");
@@ -2264,6 +2361,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public ValueTask DelayAsync(int milliseconds, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            Delays.Add(milliseconds);
             if (AdvanceClock != null) AdvanceClock(milliseconds);
             else clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
             return ValueTask.CompletedTask;
@@ -2555,6 +2653,31 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         for (var i = 0; i < 100 && !step.RoundCompleted; i++) step = await runner.StepAsync(default);
         Assert.Equal(CombatFlowResult.Succeeded, step.Result);
         Assert.Equal("琴", Assert.Single(io.Inputs).Actor);
+    }
+
+    [Theory]
+    [InlineData(";迪希雅 attack(0.25),e;attack(0.4),s(1)")]
+    [InlineData("keypress(f);芙宁娜 e,wait(0.2),e;迪希雅 e;")]
+    [InlineData("keypress(f);迪希雅 e;芙宁娜 e;")]
+    [InlineData("keypress(f),keypress(f);芙宁娜 e;")]
+    [InlineData("attack(0.3),keypress(f),attack(0.3),keypress(f),attack(0.5),keypress(f),s(0.2);迪希雅 e;")]
+    [InlineData("keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f);迪希雅 e,wait(0.1),e;芙宁娜 e;")]
+    [InlineData(";迪希雅 w(0.01);w(0.01),wait(0.2),w(0.01),wait(0.2),attack(0.4),wait(1),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),wait(0.2),keypress(f),s(0.2)")]
+    public async Task RecordedGatheringFragmentsExecuteWithoutOptionalNamedActors(string text)
+    {
+        var clock = new FakeTimeProvider();
+        var commands = CombatScriptParser.ParseContext(text, false).CombatCommands;
+        using var io = new PhysicalReplay(clock, false, 0, LoadProgram("琴 e"))
+        { Actors = [new("钟离", 1), new("娜维娅", 2), new("枫原万叶", 3), new("琴", 4)] };
+        io.SetFrontActor("钟离");
+        using var runner = NativeCombatFlowRunner.Create(commands, io, false,
+            CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing);
+        CombatFlowStep step = default;
+        for (var i = 0; i < 400 && !step.RoundCompleted; i++) step = await runner.StepAsync(default);
+        Assert.True(step.RoundCompleted);
+        Assert.Equal(CombatFlowResult.Succeeded, step.Result);
+        Assert.Empty(io.Inputs); // 缺席角色的E从未发送。
+        Assert.True(io.Primitives.Count + io.PathingPrimitives.Count > 0);
     }
 
     [Fact]

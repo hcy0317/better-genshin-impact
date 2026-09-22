@@ -99,7 +99,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         var evidence = DiagnosticEvidenceScope.Current;
         if (evidence == null)
             _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase={Phase} reason=no-run-scope", BattleId, phase);
-        else evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger);
+        else
+        {
+            evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger);
+            if (phase == "terminal")
+                evidence.CapturePendingTerminal(BattleId.ToString("N"), trace.Episode, () => _vision?.Capture());
+        }
     }
 
     internal ValueTask<CombatBattleHostInputResult> SendControlAsync(CombatBattleHostInput input, CancellationToken ct)
@@ -113,6 +118,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         var requestedAt = Clock.GetTimestamp();
         var inputAttempted = false;
         long? completedAt = null;
+        double? downMs = null, holdMs = null, upMs = null, remainingBeforeHold = null;
+        var holdMilliseconds = 0;
         InputDispatchCapture? nativeCapture = null;
         var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.NotSent);
         try
@@ -157,17 +164,32 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                     break;
                 case CombatBattleHostInputKind.Approach:
                     inputAttempted = true;
+                    var downStarted = Clock.GetTimestamp();
                     try
                     {
                         using (operation.Measure(UiOperationPhase.NativeInput))
                             _device.MoveForward(true);
+                        downMs = Clock.GetElapsedTime(downStarted).TotalMilliseconds;
+                        remainingBeforeHold = operation.Remaining.TotalMilliseconds;
+                        // 焦点/原生提交也占用同一150ms预算；为释放预留余量，不续期。
+                        holdMilliseconds = Math.Min(100, Math.Max(0, (int)Math.Floor(remainingBeforeHold.Value) - 10));
+                        var holdStarted = Clock.GetTimestamp();
                         using (operation.Measure(UiOperationPhase.ExplicitWait))
-                            await _device.DelayAsync(100, token);
+                            if (holdMilliseconds > 0) await _device.DelayAsync(holdMilliseconds, token);
+                        holdMs = Clock.GetElapsedTime(holdStarted).TotalMilliseconds;
                     }
                     finally
                     {
-                        using (operation.Measure(UiOperationPhase.NativeInput))
-                            _device.MoveForward(false);
+                        var upStarted = Clock.GetTimestamp();
+                        try
+                        {
+                            using (operation.Measure(UiOperationPhase.NativeInput))
+                                _device.MoveForward(false);
+                        }
+                        finally
+                        {
+                            upMs = Clock.GetElapsedTime(upStarted).TotalMilliseconds;
+                        }
                     }
                     break;
                 case CombatBattleHostInputKind.Detach:
@@ -252,11 +274,19 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             }
         }
         if (input.SelectionGoal != null) _flow.ObserveSelectionAssistance(input, result);
+        var elapsedMs = Clock.GetElapsedTime(requestedAt).TotalMilliseconds;
+        if (input.Kind == CombatBattleHostInputKind.Approach)
+        {
+            // 回执及完成时刻已经固定；同步日志即使很慢也不能改变输入判定。
+            try { _device.Logger.LogDebug("HOST_APPROACH_TIMING request={Request} downMs={DownMs} holdRequestedMs={HoldRequestedMs} holdMs={HoldMs} upMs={UpMs} remainingBeforeHoldMs={RemainingBeforeHoldMs}",
+                input.RequestId, downMs, holdMilliseconds, holdMs, upMs, remainingBeforeHold); }
+            catch { }
+        }
         try
         {
             _device.Logger.LogDebug("HOST_INPUT_RESULT request={Request} kind={Kind} status={Status} reason={Reason} sourceSequence={SourceSequence} completedAt={CompletedAt} elapsedMs={ElapsedMs:F3} errorType={ErrorType}",
                 input.RequestId, input.Kind, result.Status, result.Reason, input.Source.Sequence, completedAt,
-                Clock.GetElapsedTime(requestedAt).TotalMilliseconds, result.Error?.GetType().Name);
+                elapsedMs, result.Error?.GetType().Name);
         }
         catch { /* 诊断输出不能改变已判定的输入结果。 */ }
         return result;
