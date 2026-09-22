@@ -55,5 +55,11 @@ internal interface INativeCombatIo
         Action beforeFirstNative, CancellationToken ct, CannonUiObservation scene = default) =>
         throw new NotSupportedException("此输入端不支持路径匿名交互");
     void ReleaseInput();
+    // null means the actual mapping cannot safely own a held E span.
+    Vanara.PInvoke.User32.VK? HeldEPhysicalKey() => null;
+    CombatBattleHostInputResult SubmitHeldE(Vanara.PInvoke.User32.VK key, bool down,
+        CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken ct) =>
+        throw new NotSupportedException("此输入端不支持E持键归属");
+    void ReleaseHeldE(Vanara.PInvoke.User32.VK key) => ReleaseInput();
     Task DelayAsync(int milliseconds, CancellationToken ct);
 }

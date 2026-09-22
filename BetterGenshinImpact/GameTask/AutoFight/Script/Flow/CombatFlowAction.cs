@@ -51,7 +51,7 @@ public sealed class CombatFlowAction
     internal CombatFlowAction(CombatCommand command, CombatFlowContext context, Func<bool> validate, double deadline,
         Func<bool>? shouldYield = null, Func<bool>? continuation = null, bool canReuseConfirmedActor = false,
         CombatSkillAttempt? confirmationAttempt = null, IReadOnlyList<CombatCallContext>? callPath = null,
-        Guid? atomicObservationId = null)
+        Guid? atomicObservationId = null, bool inAtomicScope = false, Guid? heldESpanId = null)
     {
         Command = command;
         CommandId = CommandIdentities.GetValue(command, _ => new()).Value;
@@ -65,12 +65,18 @@ public sealed class CombatFlowAction
         PendingAttempt = confirmationAttempt;
         CallPath = callPath ?? Array.Empty<CombatCallContext>();
         AtomicObservationId = atomicObservationId;
+        InAtomicScope = inAtomicScope;
+        HeldESpanId = heldESpanId;
     }
 
     public CombatCommand Command { get; }
     public string CommandId { get; }
     internal IReadOnlyList<CombatCallContext> CallPath { get; }
     internal Guid? AtomicObservationId { get; }
+    internal bool InAtomicScope { get; }
+    internal Guid? HeldESpanId { get; }
+    internal string? ObservationOnlyActor { get; set; }
+    internal bool ObservationOnlyActorConfirmed { get; set; }
     internal CombatSkillAttempt? PendingAttempt { get; private set; }
     internal bool IsConfirmationOnly { get; }
     internal double AbsoluteDeadline => Math.Min(_deadline, _confirmationDeadline);

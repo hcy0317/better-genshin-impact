@@ -553,7 +553,8 @@ public sealed partial class CombatFlowExecution : IDisposable
                 command.Method == Method.Skill || command.Method == Method.Burst ? null : MaintenanceIsDue, CanContinue,
                 canReuseConfirmedActor: IsAtomic && (command.Method == Method.Wait || command.Method == Method.MoveBy || command.Method == Method.KeyUp),
                 confirmationAttempt: confirming ? frame.PendingAttempt : null, callPath: CurrentCallPath(),
-                atomicObservationId: frame.Block.RawAtomicPlan != null ? frame.Id : null);
+                atomicObservationId: frame.Block.RawAtomicPlan != null ? frame.Id : null, inAtomicScope: IsAtomic,
+                heldESpanId: frame.Block.HeldEPlan ? frame.Id : null);
             bool CanSkipUnsentOptionalBurstAtDeadline() => command.LegacyOutcomePolicy &&
                 command.Method == Method.Burst && !Required(command) && !confirming &&
                 action.AtomicObservationId == null && action.IsAwaitingUnsentBurstReadiness &&
@@ -644,7 +645,7 @@ public sealed partial class CombatFlowExecution : IDisposable
             if (action.InputAt != null && (command.Method == Method.Skill || command.Method == Method.Burst) &&
                 !_frames.Any(active => active.WatchFor != null))
                 foreach (var active in _frames) { active.HasSkillInput = true; active.SelectionNeedsRevalidation = false; }
-            if (frame.Block.RawAtomicPlan != null && actionResult != CombatFlowResult.Succeeded)
+            if ((frame.Block.RawAtomicPlan != null || frame.Block.HeldEPlan) && actionResult != CombatFlowResult.Succeeded)
                 frame.Result = CombatFlowResult.Failed;
             if (actionEpisode != null && actionResult is CombatFlowResult.Pending or CombatFlowResult.Deferred)
                 _episodes.Defer(actionEpisode);

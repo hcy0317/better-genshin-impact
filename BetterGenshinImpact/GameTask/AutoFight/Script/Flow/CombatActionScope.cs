@@ -89,6 +89,27 @@ public sealed class CombatActionScope : IDisposable
     {
         if (!_disposed) _action.Trace(phase, detail);
     }
+
+    internal async Task WaitHeldWithObservationAsync(int milliseconds, Action observe, Func<int, CancellationToken, Task> delay)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(milliseconds);
+        var end = _action.Now + milliseconds / 1000d;
+        Check();
+        observe();
+        Check();
+        while (_action.Now < end)
+        {
+            var remaining = Math.Min(end - _action.Now, _action.RemainingBudget);
+            if (remaining <= 0) break;
+            await delay(Math.Max(1, (int) Math.Ceiling(Math.Min(.05, remaining) * 1000)), _ct).ConfigureAwait(false);
+            Check();
+            // 期限内最后一片结束即交给配对up；不为松键等待下一帧而延长hold。
+            if (_action.Now >= end) break;
+            observe();
+            Check();
+        }
+    }
+
     public void Dispose()
     {
         _disposed = true;

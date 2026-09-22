@@ -19,7 +19,7 @@ internal static class PathingPrimitiveInput
     internal static bool Supports(CombatCommand command)
     {
         if (command.Name != CombatScriptParser.CurrentAvatarName) return false;
-        if (command.Method == Method.Wait || command.Method == Method.W || command.Method == Method.A ||
+        if (command.Method == Method.Jump || command.Method == Method.Wait || command.Method == Method.W || command.Method == Method.A ||
             command.Method == Method.S || command.Method == Method.D) return true;
         if (command.Method != Method.KeyPress || command.Args is not { Count: 1 }) return false;
         var key = User32Helper.ToVk(command.Args[0]);
@@ -42,6 +42,11 @@ internal static class PathingPrimitiveInput
         ct.ThrowIfCancellationRequested();
         if (!Supports(command, scene, source) || command.Method == Method.Wait)
             throw new ArgumentException("该命令不是可发送的匿名路径导航输入");
+        if (command.Method == Method.Jump)
+        {
+            Simulation.SendInput.SimulateAction(GIActions.Jump);
+            return;
+        }
         if (command.Method == Method.KeyPress)
         {
             Simulation.SendInput.Keyboard.KeyPress(KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(command.Args![0])));
