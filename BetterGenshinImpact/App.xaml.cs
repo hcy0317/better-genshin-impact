@@ -110,7 +110,15 @@ public partial class App : Application
     // https://docs.microsoft.com/dotnet/core/extensions/dependency-injection
     // https://docs.microsoft.com/dotnet/core/extensions/configuration
     // https://docs.microsoft.com/dotnet/core/extensions/logging
-    private static readonly IHost _host = Host.CreateDefaultBuilder()
+    private static readonly IHost _host;
+
+    // An explicit constructor prevents beforefieldinit from starting the host early.
+    static App() => _host = CreateHost();
+
+    private static IHost CreateHost()
+    {
+        ApplicationHostBootstrapGuard.EnsureAllowed();
+        return Host.CreateDefaultBuilder()
         .CheckIntegration()
         .UseElevated()
         .UseInstanceIpc()
@@ -294,6 +302,7 @@ public partial class App : Application
             }
         )
         .Build();
+    }
 
     public static IServiceProvider ServiceProvider => _host.Services;
 
