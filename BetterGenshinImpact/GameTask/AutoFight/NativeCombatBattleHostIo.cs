@@ -99,7 +99,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         var evidence = DiagnosticEvidenceScope.Current;
         if (evidence == null)
             _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase={Phase} reason=no-run-scope", BattleId, phase);
-        else evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger);
+        else
+        {
+            evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger);
+            if (phase == "terminal")
+                evidence.CapturePendingTerminal(BattleId.ToString("N"), trace.Episode, () => _vision?.Capture());
+        }
     }
 
     internal ValueTask<CombatBattleHostInputResult> SendControlAsync(CombatBattleHostInput input, CancellationToken ct)
