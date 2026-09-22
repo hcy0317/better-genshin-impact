@@ -11,7 +11,7 @@ namespace BetterGenshinImpact.GameTask.AutoPathing;
 
 public class CameraRotateTask(CancellationToken ct)
 {
-    private readonly double _dpi = TaskContext.Instance().DpiScale;
+    private double Dpi => TaskContext.Instance().DpiScale;
 
     /// <summary>
     /// 向目标角度旋转
@@ -20,8 +20,12 @@ public class CameraRotateTask(CancellationToken ct)
     /// <param name="imageRegion"></param>
     /// <returns></returns>
     public float RotateToApproach(float targetOrientation, ImageRegion imageRegion)
+        => RotateToApproach(targetOrientation, imageRegion, null);
+
+    private float RotateToApproach(float targetOrientation, ImageRegion imageRegion, PathRecoveryScope? scope)
     {
-        var cao = CameraOrientation.Compute(imageRegion.SrcMat);
+        var cao = scope?.Io.CameraOrientation(imageRegion) ?? CameraOrientation.Compute(imageRegion.SrcMat);
+        scope?.Check();
         var diff = (cao - targetOrientation + 180) % 360 - 180;
         diff += diff < -180 ? 360 : 0;
         if (diff == 0)
@@ -45,7 +49,10 @@ public class CameraRotateTask(CancellationToken ct)
             controlRatio = 2;
         }
 
-        Simulation.SendInput.Mouse.MoveMouseBy((int)Math.Round(-controlRatio * diff * _dpi), 0);
+        var movement = (int)Math.Round(-controlRatio * diff * (scope?.Io.Dpi() ?? Dpi));
+        scope?.Check();
+        if (scope != null) scope.Io.MouseMove(movement, 0);
+        else Simulation.SendInput.Mouse.MoveMouseBy(movement, 0);
         return diff;
     }
 
@@ -57,13 +64,19 @@ public class CameraRotateTask(CancellationToken ct)
     /// <param name="maxTryTimes">最大尝试次数（超时时间）</param>
     /// <returns></returns>
     public async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes = 50)
+        => await WaitUntilRotatedTo(targetOrientation, maxDiff, maxTryTimes, null);
+
+    internal async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes, PathRecoveryScope? scope)
     {
         bool isSuccessful = false;
         int count = 0;
         while (!ct.IsCancellationRequested)
         {
-            using var screen = CaptureToRectArea();
-            if (Math.Abs(RotateToApproach(targetOrientation, screen)) < maxDiff)
+            scope?.Check();
+            using var screen = scope?.Io.Capture() ?? CaptureToRectArea();
+            scope?.Check();
+            if (scope != null) await scope.BeforeInputAsync();
+            if (Math.Abs(RotateToApproach(targetOrientation, screen, scope)) < maxDiff)
             {
                 isSuccessful = true;
                 break;
@@ -71,11 +84,12 @@ public class CameraRotateTask(CancellationToken ct)
 
             if (count >= maxTryTimes)
             {
-                Logger.LogWarning("视角转动到目标角度超时，停止转动");
+                (scope?.Io.Logger ?? Logger).LogWarning("视角转动到目标角度超时，停止转动");
                 break;
             }
 
-            await Delay(50, ct);
+            if (scope != null) await scope.DelayAsync(50);
+            else await Delay(50, ct);
             count++;
         }
         return isSuccessful;

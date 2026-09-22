@@ -12,6 +12,16 @@ public class ApplicationHostBootstrapGuardTests
     }
 
     [Fact]
+    public void MissingReplayDependenciesCannotFallBackToNativeInput()
+    {
+        var io = new GameTask.AutoPathing.PathMoveToIo();
+        Assert.Throws<InvalidOperationException>(() => io.Capture());
+        Assert.Throws<InvalidOperationException>(() => io.CheckInput());
+        Assert.Throws<InvalidOperationException>(() => io.LoggerFactory());
+        Assert.Throws<InvalidOperationException>(() => new GameTask.AutoPathing.PathMoveToIo(native: true));
+    }
+
+    [Fact]
     public void TestModuleProhibitsHostBeforeAnyTestRuns()
     {
         Assert.True(ApplicationHostBootstrapGuard.IsProhibited);

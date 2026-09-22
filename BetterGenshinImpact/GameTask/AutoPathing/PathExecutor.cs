@@ -39,6 +39,8 @@ using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Map.Maps;
 using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
 using BetterGenshinImpact.GameTask.AutoFight;
+using Fischless.GameCapture;
+using BetterGenshinImpact.GameTask.Common.Ui;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
@@ -55,13 +57,30 @@ public partial class PathExecutor
     private PathingPartyConfig? _partyConfig;
     private CancellationToken ct;
     private PathExecutorSuspend pathExecutorSuspend;
+    private readonly PathMoveToIo _moveIo;
 
-    public PathExecutor(CancellationToken ct)
+    public PathExecutor(CancellationToken ct) : this(ct, null) { }
+
+    internal PathExecutor(CancellationToken ct, PathMoveToIo? io)
     {
         _trapEscaper = new(ct);
         _rotateTask = new(ct);
         this.ct = ct;
         pathExecutorSuspend = new PathExecutorSuspend(this);
+        _moveIo = io ?? new PathMoveToIo(native: true)
+        {
+            SwitchAvatar = async index => { await SwitchAvatar(index); },
+            Locate = GetDirectPositionAndTime,
+            LocateDirect = (screen, point) =>
+            {
+                var position = Navigation.GetPosition(screen, point.MapName, point.MapMatchMethod, point.MapLayerSelector);
+                return Task.FromResult(new PathPosition(position, 0,
+                    position != default && float.IsFinite(position.X) && float.IsFinite(position.Y)));
+            },
+            EndJudgment = EndJudgment,
+            RotateUntil = (target, diff) => WaitUntilRotatedTo(target, diff),
+            RotateStep = _rotateTask.RotateToApproach
+        };
     }
 
     public PathingPartyConfig PartyConfig
@@ -801,25 +820,29 @@ public partial class PathExecutor
     public async Task MoveTo(WaypointForTrack waypoint)
     {
         // 切人
-        await SwitchAvatar(PartyConfig.MainAvatarIndex);
+        await _moveIo.SwitchAvatar(PartyConfig.MainAvatarIndex);
         // 切人完成时刻：切人后有约1秒CD，期间无法切换到其他角色（用于生存位）
-        var switchAvatarTime = DateTime.UtcNow;
+        var switchAvatarTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
 
+        try
+        {
         Point2f position;
         int additionalTimeInMs;
-        using (var initialScreen = CaptureToRectArea())
+        using (var initialScreen = _moveIo.Capture())
         {
-            (position, additionalTimeInMs) = await GetPositionAndTime(initialScreen, waypoint);
+            var located = await _moveIo.Locate(initialScreen, waypoint);
+            position = located.Point;
+            additionalTimeInMs = located.AdditionalTimeInMs;
         }
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
-        Logger.LogDebug("粗略接近途经点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
-        await WaitUntilRotatedTo(targetOrientation, 5);
-        moveToStartTime = DateTime.UtcNow;
+        _moveIo.Logger.LogDebug("粗略接近途经点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
+        await _moveIo.RotateUntil(targetOrientation, 5);
+        moveToStartTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
         var progressHeartbeat = new PathProgressHeartbeat(moveToStartTime, TimeSpan.FromSeconds(15));
         var movementWatchdog = new PathMovementWatchdog(
             () => moveToStartTime,
             TimeSpan.FromSeconds(60));
-        var lastPositionRecord = DateTime.UtcNow;
+        var lastPositionRecord = _moveIo.Clock.GetUtcNow().UtcDateTime;
         var fastMode = false;
         var prevPositions = new List<Point2f>();
         var fastModeColdTime = DateTime.MinValue;
@@ -828,54 +851,76 @@ public partial class PathExecutor
         // 连续偏角>5°持续状态的起始时间（配合帧数下限使用，替代原纯帧计数）
         DateTime beyondAngleStartTime = DateTime.MinValue;
         var hurryOnState = new HurryOnState();
+        var flightObserved = false;
+        var climbWindow = new PathClimbProgressWindow();
+        CaptureFrameStamp lastMoveFrame = default;
 
         // 按下w，一直走
-        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+        _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
         // 赶路帧间隔：始终使用配置值（5-150 钳制），不依赖是否配置赶路角色（空选也可用）
         var hurryFrameInterval = Math.Clamp(PartyConfig.HurryOnFrameInterval, 5, 150);
-        while (!ct.IsCancellationRequested)
+        while (true)
         {
-            if (!Simulation.IsKeyDown(GIActions.MoveForward.ToActionKey().ToVK()))
-            {
-                Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-            }
-
+            ct.ThrowIfCancellationRequested();
             num++;
-            if ((DateTime.UtcNow - moveToStartTime).TotalSeconds > 240)
+            if ((_moveIo.Clock.GetUtcNow().UtcDateTime - moveToStartTime).TotalSeconds > 240)
             {
-                Logger.LogWarning("执行超时，放弃此次追踪");
+                _moveIo.Logger.LogWarning("执行超时，放弃此次追踪");
                 throw new RetryException("路径点执行超时，放弃整条路径");
             }
 
-            using var screen = CaptureToRectArea();
+            using var screen = _moveIo.Capture();
 
-            EndJudgment(screen);
+            _moveIo.EndJudgment(screen);
 
             // position = await GetPosition(screen, waypoint);
-             (position, additionalTimeInMs) = await GetPositionAndTime(screen, waypoint);
+             var located = await _moveIo.Locate(screen, waypoint);
+             position = located.Point;
+             additionalTimeInMs = located.AdditionalTimeInMs;
+             ct.ThrowIfCancellationRequested();
+             if (_moveIo.Clock.GetUtcNow().UtcDateTime >= moveToStartTime.AddSeconds(240))
+                 throw new RetryException("路径点执行超时，放弃整条路径");
              if (additionalTimeInMs>0)
              {
-                 if (!Simulation.IsKeyDown(GIActions.MoveForward.ToActionKey().ToVK()))
-                 {
-                     Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                 }
-
                  additionalTimeInMs = additionalTimeInMs + 1000;//当做起步补偿
             }
             var distance = Navigation.GetDistance(waypoint, position);
-            var progressObservedAt = DateTime.UtcNow;
+            var progressObservedAt = _moveIo.Clock.GetUtcNow().UtcDateTime;
+            if (waypoint.MoveMode == MoveModeEnum.Climb.Code && progressObservedAt >= moveToStartTime.AddSeconds(60))
+                throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
+            var observation = waypoint.MoveMode == MoveModeEnum.Fly.Code || waypoint.MoveMode == MoveModeEnum.Climb.Code
+                ? ReadMoveObservation(screen, located, lastMoveFrame) : default;
+            // Recognition is synchronous and may itself consume the remaining node budget.
+            ct.ThrowIfCancellationRequested();
+            progressObservedAt = _moveIo.Clock.GetUtcNow().UtcDateTime;
+            if (progressObservedAt >= moveToStartTime.AddSeconds(240))
+                throw new RetryException("路径点执行超时，放弃整条路径");
+            if (waypoint.MoveMode == MoveModeEnum.Climb.Code && progressObservedAt >= moveToStartTime.AddSeconds(60))
+                throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
+            lastMoveFrame = screen.FrameStamp;
+            if (waypoint.MoveMode == MoveModeEnum.Fly.Code && observation.Valid && observation.Motion == MotionStatus.Fly)
+                flightObserved = true;
             Debug.WriteLine($"接近目标点中，距离为{distance}");
-            if (distance < 4)
+            if (distance < 4 && (waypoint.MoveMode != MoveModeEnum.Fly.Code || flightObserved && observation.Valid))
             {
-                Logger.LogDebug("到达路径点附近");
+                _moveIo.Logger.LogDebug("到达路径点附近");
                 break;
             }
+
+            if (distance < 4 && waypoint.MoveMode == MoveModeEnum.Fly.Code)
+            {
+                _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                await AdvanceFlyAsync(observation.Valid && observation.Motion == MotionStatus.Normal, waypoint, observation.Stamp);
+                continue;
+            }
+            if (!_moveIo.IsDown(GIActions.MoveForward))
+                _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
 
             if (movementWatchdog.ShouldAbort(
                     waypoint.MoveMode == MoveModeEnum.Climb.Code,
                     progressObservedAt))
             {
-                Logger.LogWarning(
+                _moveIo.Logger.LogWarning(
                     "攀爬途经点等待超时：耗时={ElapsedSeconds:F1}s，当前位置=({CurrentX:F1},{CurrentY:F1})，目标位置=({TargetX:F1},{TargetY:F1})，剩余距离={Distance:F1}；保留路线并重试当前分段",
                     (progressObservedAt - moveToStartTime).TotalSeconds,
                     position.X,
@@ -888,7 +933,7 @@ public partial class PathExecutor
 
             if (progressHeartbeat.ShouldReport(progressObservedAt))
             {
-                Logger.LogDebug(
+                _moveIo.Logger.LogDebug(
                     "途经点仍在接近中：耗时={ElapsedSeconds:F1}s，移动模式={MoveMode}，当前位置=({CurrentX:F1},{CurrentY:F1})，目标位置=({TargetX:F1},{TargetY:F1})，剩余距离={Distance:F1}，帧数={FrameCount}",
                     (progressObservedAt - moveToStartTime).TotalSeconds,
                     waypoint.MoveMode,
@@ -917,7 +962,7 @@ public partial class PathExecutor
                         }
                         else
                         {
-                            Logger.LogWarning($"距离过远（{position.X},{position.Y}）->（{waypoint.X},{waypoint.Y}）={distance}，重试多次后仍然失败，放弃此路径点！");
+                            _moveIo.Logger.LogWarning($"距离过远（{position.X},{position.Y}）->（{waypoint.X},{waypoint.Y}）={distance}，重试多次后仍然失败，放弃此路径点！");
                             throw new HandledException("目标距离过远，可能是当前点位无法识别，放弃此路径！");
                         }
                     }
@@ -926,18 +971,18 @@ public partial class PathExecutor
                         // 取余减少日志输出频率
                         if (distanceTooFarRetryCount % 5 == 0)
                         {
-                            Logger.LogWarning($"距离过远（{position.X},{position.Y}）->（{waypoint.X},{waypoint.Y}）={distance}，重试");
+                            _moveIo.Logger.LogWarning($"距离过远（{position.X},{position.Y}）->（{waypoint.X},{waypoint.Y}）={distance}，重试");
                         }
                         // 取余减少判断频率
                         if (distanceTooFarRetryCount % 10 == 0)
                         {
                             await ResolveAnomalies(screen);
-                            Logger.LogInformation($"重置到上次正确识别的坐标 ({prevNotTooFarPosition.X},{prevNotTooFarPosition.Y})");
+                            _moveIo.Logger.LogInformation($"重置到上次正确识别的坐标 ({prevNotTooFarPosition.X},{prevNotTooFarPosition.Y})");
                             Navigation.SetPrevPosition(prevNotTooFarPosition.X, prevNotTooFarPosition.Y, waypoint.MapLayerSelector);
                             // 淡入淡出特效
-                            await Delay(500, ct);
+                            await _moveIo.Delay(500, ct);
                         }
-                        await Delay(50, ct);
+                        await _moveIo.Delay(50, ct);
                         continue;
                     }
                 }
@@ -949,9 +994,9 @@ public partial class PathExecutor
             // 非攀爬状态下，检测是否卡死（脱困触发器）
             if (waypoint.MoveMode != MoveModeEnum.Climb.Code)
             {
-                if ((DateTime.UtcNow - lastPositionRecord).TotalMilliseconds > 1000 + additionalTimeInMs)
+                if ((_moveIo.Clock.GetUtcNow().UtcDateTime - lastPositionRecord).TotalMilliseconds > 1000 + additionalTimeInMs)
                 {
-                    lastPositionRecord = DateTime.UtcNow;
+                    lastPositionRecord = _moveIo.Clock.GetUtcNow().UtcDateTime;
                     prevPositions.Add(position);
                     if (prevPositions.Count > 8)
                     {
@@ -964,32 +1009,41 @@ public partial class PathExecutor
                                 throw new RetryException("此路线出现3次卡死，重试一次路线或放弃此路线！");
                             }
 
-                            Logger.LogWarning("疑似卡死，尝试脱离...");
+                            _moveIo.Logger.LogWarning("疑似卡死，尝试脱离...");
 
                             //调用脱困代码，由TrapEscaper接管移动
+                            Helpers.ApplicationHostBootstrapGuard.EnsureAllowed();
                             await _trapEscaper.RotateAndMove();
                             await _trapEscaper.MoveTo(waypoint);
-                            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-                            Logger.LogInformation("卡死脱离结束");
+                            _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
+                            _moveIo.Logger.LogInformation("卡死脱离结束");
                             continue;
                         }
                     }
                 }
             }
 
+            if (waypoint.MoveMode == MoveModeEnum.Climb.Code &&
+                climbWindow.Observe(observation, progressObservedAt, additionalTimeInMs))
+            {
+                try { await RecoverNormalClimbAsync(waypoint, observation.Stamp); }
+                finally { climbWindow.Clear(); }
+                continue;
+            }
+
             // 旋转视角
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
             //执行旋转
-            var diff = _rotateTask.RotateToApproach(targetOrientation, screen);
+            var diff = _moveIo.RotateStep(targetOrientation, screen);
             // 进入MoveTo超过2秒且至少5帧后才启用旋转纠正（绕过起步阶段的抖动）
-            if ((DateTime.UtcNow - moveToStartTime).TotalSeconds > 2 && num >= 5)
+            if ((_moveIo.Clock.GetUtcNow().UtcDateTime - moveToStartTime).TotalSeconds > 2 && num >= 5)
             {
                 if (Math.Abs(diff) > 5)
                 {
                     consecutiveRotationCountBeyondAngle++;
                     if (beyondAngleStartTime == DateTime.MinValue)
                     {
-                        beyondAngleStartTime = DateTime.UtcNow;
+                        beyondAngleStartTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
                     }
                 }
                 else
@@ -1000,45 +1054,39 @@ public partial class PathExecutor
 
                 // 连续偏角>5°持续超过2秒（且至少3帧）时，说明边走边转不动，松W站定转向
                 if (consecutiveRotationCountBeyondAngle >= 3
-                    && (DateTime.UtcNow - beyondAngleStartTime).TotalSeconds > 2)
+                    && (_moveIo.Clock.GetUtcNow().UtcDateTime - beyondAngleStartTime).TotalSeconds > 2)
                 {
                     // 松W键，站定好转向，转完重新按下W继续走
-                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                    await WaitUntilRotatedTo(targetOrientation, 2);
-                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+                    _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                    await _moveIo.RotateUntil(targetOrientation, 2);
+                    _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
                 }
             }
 
             // 赶路逻辑（使用角色技能加速赶路）
-            var hurryOnResult = await TryHurryOnAsync(diff, waypoint, distance, screen, num, hurryOnState);
+            var hurryOnResult = await (_moveIo.HurryOn?.Invoke(diff, waypoint, distance, screen, num)
+                ?? TryHurryOnAsync(diff, waypoint, distance, screen, num, hurryOnState));
             if (hurryOnResult)
             {
-                // continue 会跳过底部 await Delay(...)，
+                // continue 会跳过底部 await _moveIo.Delay(...)，
                 // 导致 async state machine 的 MoveNext() 永不返回，调用栈逐轮叠加直到溢出。
                 // 在此处显式等待以展开栈。
-                await Delay(hurryFrameInterval, ct);
+                await _moveIo.Delay(hurryFrameInterval, ct);
                 continue;
             }
 
             // 根据指定方式进行移动
             if (waypoint.MoveMode == MoveModeEnum.Fly.Code)
             {
-                var isFlying = Bv.GetMotionStatus(screen) == MotionStatus.Fly;
-                if (!isFlying)
-                {
-                    Debug.WriteLine("未进入飞行状态，按下空格");
-                    Simulation.SendInput.SimulateAction(GIActions.Jump);
-                    await Delay(200, ct);
-                }
-
-                await Delay(100, ct);
+                var isFlying = _moveIo.Motion(screen) == MotionStatus.Fly;
+                await AdvanceFlyAsync(!isFlying);
                 continue;
             }
 
             if (waypoint.MoveMode == MoveModeEnum.Jump.Code)
             {
-                Simulation.SendInput.SimulateAction(GIActions.Jump);
-                await Delay(200, ct);
+                _moveIo.Send(GIActions.Jump, KeyType.KeyPress);
+                await _moveIo.Delay(200, ct);
                 continue;
             }
 
@@ -1049,11 +1097,11 @@ public partial class PathExecutor
                 {
                     if (fastMode)
                     {
-                        Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyUp);
+                        _moveIo.Send(GIActions.SprintMouse, KeyType.KeyUp);
                     }
                     else
                     {
-                        Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyDown);
+                        _moveIo.Send(GIActions.SprintMouse, KeyType.KeyDown);
                     }
 
                     fastMode = !fastMode;
@@ -1063,10 +1111,10 @@ public partial class PathExecutor
             {
                 if (distance > 20) // 距离大于25时可以使用疾跑
                 {
-                    if (Math.Abs((fastModeColdTime - DateTime.UtcNow).TotalMilliseconds) > 1000) //冷却一会
+                    if (Math.Abs((fastModeColdTime - _moveIo.Clock.GetUtcNow().UtcDateTime).TotalMilliseconds) > 1000) //冷却一会
                     {
-                        fastModeColdTime = DateTime.UtcNow;
-                        Simulation.SendInput.SimulateAction(GIActions.SprintMouse);
+                        fastModeColdTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
+                        _moveIo.Send(GIActions.SprintMouse, KeyType.KeyPress);
                     }
                 }
             }
@@ -1078,33 +1126,33 @@ public partial class PathExecutor
                 {
                     if (s < 1)
                     {
-                        Logger.LogWarning("元素战技冷却时间设置太短，不执行！");
+                        _moveIo.Logger.LogWarning("元素战技冷却时间设置太短，不执行！");
                         return;
                     }
 
                     var ms = s * 1000;
-                    if ((DateTime.UtcNow - _elementalSkillLastUseTime).TotalMilliseconds > ms)
+                    if ((_moveIo.Clock.GetUtcNow().UtcDateTime - _elementalSkillLastUseTime).TotalMilliseconds > ms)
                     {
                         // 可能刚切过人在冷却时间内
-                        if ((DateTime.UtcNow - switchAvatarTime).TotalSeconds < 1 &&
+                        if ((_moveIo.Clock.GetUtcNow().UtcDateTime - switchAvatarTime).TotalSeconds < 1 &&
                             (!string.IsNullOrEmpty(PartyConfig.MainAvatarIndex) &&
                              PartyConfig.GuardianAvatarIndex != PartyConfig.MainAvatarIndex))
                         {
-                            await Delay(800, ct); // 总共1s
+                            await _moveIo.Delay(800, ct); // 总共1s
                         }
 
                         await UseElementalSkill();
-                        _elementalSkillLastUseTime = DateTime.UtcNow;
+                        _elementalSkillLastUseTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
                     }
                 }
 
                 // 自动疾跑
                 if (distance > 20 && PartyConfig.AutoRunEnabled)
                 {
-                    if (Math.Abs((fastModeColdTime - DateTime.UtcNow).TotalMilliseconds) > 2500) //冷却时间2.5s，回复体力用
+                    if (Math.Abs((fastModeColdTime - _moveIo.Clock.GetUtcNow().UtcDateTime).TotalMilliseconds) > 2500) //冷却时间2.5s，回复体力用
                     {
-                        fastModeColdTime = DateTime.UtcNow;
-                        Simulation.SendInput.SimulateAction(GIActions.SprintMouse);
+                        fastModeColdTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
+                        _moveIo.Send(GIActions.SprintMouse, KeyType.KeyPress);
                     }
                 }
             }
@@ -1112,18 +1160,115 @@ public partial class PathExecutor
             // 使用小道具
             if (PartyConfig.UseGadgetIntervalMs > 0)
             {
-                if ((DateTime.UtcNow - _useGadgetLastUseTime).TotalMilliseconds > PartyConfig.UseGadgetIntervalMs)
+                if ((_moveIo.Clock.GetUtcNow().UtcDateTime - _useGadgetLastUseTime).TotalMilliseconds > PartyConfig.UseGadgetIntervalMs)
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.QuickUseGadget);
-                    _useGadgetLastUseTime = DateTime.UtcNow;
+                    _moveIo.Send(GIActions.QuickUseGadget, KeyType.KeyPress);
+                    _useGadgetLastUseTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
                 }
             }
 
-            await Delay(hurryFrameInterval, ct);
+            await _moveIo.Delay(hurryFrameInterval, ct);
         }
 
-        // 抬起w键
-        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+        }
+        finally
+        {
+            // Cleanup is permitted after cancellation/deadline; never leave this movement holding W.
+            _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+        }
+    }
+
+    private PathMoveObservation ReadMoveObservation(ImageRegion screen, PathPosition position, CaptureFrameStamp previous)
+    {
+        var stamp = screen.FrameStamp;
+        var sourceUsable = position.IsDirect && float.IsFinite(position.Point.X) && float.IsFinite(position.Point.Y)
+            && position.Point != default && stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2))
+            && _moveIo.CombatHud(screen);
+        var motion = sourceUsable ? _moveIo.Motion(screen) : MotionStatus.Normal;
+        // Keep the producer's timestamp: HUD/motion work must not refresh an aging source.
+        sourceUsable = sourceUsable && stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2));
+        var valid = sourceUsable && (!previous.IsKnown || stamp.IsAfter(previous));
+        return new(stamp, position.Point, valid, motion, sourceUsable);
+    }
+
+    private async Task RecoverNormalClimbAsync(WaypointForTrack waypoint, CaptureFrameStamp previous)
+    {
+        async Task<PathMoveObservation> Observe()
+        {
+            using var screen = _moveIo.Capture();
+            var position = await (_moveIo.LocateDirect ?? _moveIo.Locate)(screen, waypoint);
+            var observation = ReadMoveObservation(screen, position, previous);
+            previous = screen.FrameStamp;
+            return observation;
+        }
+        ct.ThrowIfCancellationRequested();
+        var remaining = moveToStartTime.AddSeconds(60) - _moveIo.Clock.GetUtcNow().UtcDateTime;
+        if (remaining <= TimeSpan.Zero) throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
+        try
+        {
+            await UiOperation.RunAsync("path-climb-recovery", remaining, ct, async operation =>
+            {
+                using var scope = new PathRecoveryScope(_moveIo, operation, ct, previous, Observe);
+                var confirmed = await scope.ObserveAsync();
+                if (Navigation.GetDistance(waypoint, confirmed.Position) < 4) return true;
+                if (++_inTrap > 2) throw new RetryException("此路线出现3次卡死，重试一次路线或放弃此路线！");
+                await _trapEscaper.RotateAndMove(scope);
+                await _trapEscaper.MoveTo(waypoint, scope);
+                return true;
+            }, clock: _moveIo.Clock);
+        }
+        catch (RecoveryObservationChanged) { /* Fresh Climb/Fly/unknown returns to this node, never means arrival. */ }
+        catch (TimeoutException) { throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段"); }
+    }
+
+    private async Task AdvanceFlyAsync(bool jump, WaypointForTrack? nearPoint = null, CaptureFrameStamp previous = default)
+    {
+        var near = nearPoint != null;
+        async Task<bool> Step(UiOperation? operation)
+        {
+            if (jump)
+            {
+                operation?.Check();
+                if (near)
+                {
+                    _moveIo.CheckInput();
+                    operation!.Check();
+                    while (true)
+                    {
+                        using var fresh = _moveIo.Capture();
+                        var position = await (_moveIo.LocateDirect ?? _moveIo.Locate)(fresh, nearPoint!);
+                        operation.Check();
+                        var observed = ReadMoveObservation(fresh, position, previous);
+                        operation.Check();
+                        if (observed.SourceUsable && observed.Stamp == previous && observed.Motion == MotionStatus.Normal)
+                        {
+                            // Non-blocking capture may return the same producer frame; wait, never sign a replacement.
+                            await _moveIo.Delay(50, ct);
+                            operation.Check();
+                            continue;
+                        }
+                        jump = observed.Valid && observed.Motion == MotionStatus.Normal && Navigation.GetDistance(nearPoint!, position.Point) < 4;
+                        break;
+                    }
+                }
+                operation?.Check();
+                ct.ThrowIfCancellationRequested();
+                if (jump)
+                {
+                    _moveIo.Send(GIActions.Jump, KeyType.KeyPress);
+                    await _moveIo.Delay(200, ct);
+                    operation?.Check();
+                }
+            }
+            await _moveIo.Delay(100, ct);
+            operation?.Check();
+            return true;
+        }
+        if (!near) { await Step(null); return; }
+        var remaining = moveToStartTime.AddSeconds(240) - _moveIo.Clock.GetUtcNow().UtcDateTime;
+        if (remaining <= TimeSpan.Zero) throw new RetryException("路径点执行超时，放弃整条路径");
+        try { await UiOperation.RunAsync("path-near-flight", remaining, ct, op => Step(op), clock: _moveIo.Clock); }
+        catch (TimeoutException) { throw new RetryException("路径点执行超时，放弃整条路径"); }
     }
 
     private async Task UseElementalSkill()
@@ -1388,6 +1533,12 @@ public partial class PathExecutor
     public bool GetPositionAndTimeSuspendFlag = false;
     private async Task<(Point2f point,int additionalTimeInMs)> GetPositionAndTime(ImageRegion imageRegion, WaypointForTrack waypoint)
     {
+        var result = await GetDirectPositionAndTime(imageRegion, waypoint);
+        return (result.Point, result.AdditionalTimeInMs);
+    }
+
+    private async Task<PathPosition> GetDirectPositionAndTime(ImageRegion imageRegion, WaypointForTrack waypoint)
+    {
         // 复用此次导航帧；诊断不取新截图、不更新角色共享状态、不把提示当作运动许可。
         (_movementDiagnostics ??= new(Logger)).Observe($"{CurWaypoints.Item1 + 1}/{CurWaypoint.Item1 + 1}", () =>
         {
@@ -1406,6 +1557,7 @@ public partial class PathExecutor
                 Bv.GetMotionStatus(imageRegion).ToString());
         }, imageRegion, waypoint.PathingTaskFileName);
         var position = Navigation.GetPosition(imageRegion, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector);
+        var isDirect = float.IsFinite(position.X) && float.IsFinite(position.Y) && position != default;
         int time = 0;
         if (position == new Point2f())
         {
@@ -1413,6 +1565,7 @@ public partial class PathExecutor
             {
                 Logger.LogDebug("小地图位置定位失败，且当前不是主界面，进入异常处理");
                 await ResolveAnomalies(imageRegion);
+                isDirect = false;
             }
         }
 
@@ -1431,9 +1584,11 @@ public partial class PathExecutor
                 if (prePosition != default)
                 {
                     position = prePosition;
+                    isDirect = false;
                     Logger.LogInformation(@$"未识别到具体路径，取上次点位");
                 }
             }else if (waypoint.Misidentification.HandlingMode == "mapRecognition"){
+                isDirect = false;
                 //大地图识别坐标
                 DateTime start = DateTime.Now;
                 TpTask tpTask = new TpTask(ct);
@@ -1473,7 +1628,7 @@ public partial class PathExecutor
         }
 
         //Logger.LogDebug("识别到路径："+position.X+","+position.Y);
-        return (position,time);
+        return new(position, time, isDirect);
     }
 
     private async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes = 50)

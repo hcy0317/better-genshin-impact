@@ -30,36 +30,54 @@ public class TrapEscaper(CancellationToken ct)
         _randomAngle += _random.Next(-45, -30);
     }
 
-    public async Task MoveTo(WaypointForTrack waypoint)
+    public Task MoveTo(WaypointForTrack waypoint) => MoveTo(waypoint, null);
+
+    internal async Task MoveTo(WaypointForTrack waypoint, PathRecoveryScope? scope)
     {
-        var startTime = DateTime.UtcNow;
+        if (scope == null) { await MoveToCore(waypoint, null); return; }
+        scope.BeginMovement();
+        try { await MoveToCore(waypoint, scope); }
+        catch (RecoveryMovementExpired)
+        {
+            // Only the original inner movement window ended. The caller still has to observe arrival.
+        }
+        finally { scope.EndMovement(); }
+    }
+
+    private async Task MoveToCore(WaypointForTrack waypoint, PathRecoveryScope? scope)
+    {
+        var startTime = Now(scope);
         bool left = false;
         OpenCvSharp.Point2f position;
-        using (var initialScreen = CaptureToRectArea())
+        using (var initialScreen = (scope?.Io.Capture() ?? CaptureToRectArea()))
         {
-            position = Navigation.GetPosition(initialScreen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector);
+            position = (scope == null ? Navigation.GetPosition(initialScreen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector) : (await (scope.Io.LocateDirect ?? scope.Io.Locate)(initialScreen, waypoint)).Point);
         }
-        LastActionTime = DateTime.UtcNow;
+        LastActionTime = Now(scope);
+        scope?.BeginMovementIdleWindow();
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
-        await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5);
+        await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5, 50, scope);
 
         // 按下w，一直走
-        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+        await Send(scope, GIActions.MoveForward, KeyType.KeyDown);
+        try
+        {
         while (!ct.IsCancellationRequested)
         {
-            var now = DateTime.UtcNow;
+            scope?.Check();
+            var now = Now(scope);
             if ((now - LastActionTime).TotalSeconds > 5)
             {
                 break;
             }
             if ((now - startTime).TotalSeconds > 25)
             {
-                Logger.LogError("卡死脱困超时！");
+                (scope?.Io.Logger ?? Logger).LogError("卡死脱困超时！");
                 break;
             }
 
-            using var screen = CaptureToRectArea();
-            position = Navigation.GetPosition(screen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector);
+            using var screen = (scope?.Io.Capture() ?? CaptureToRectArea());
+            position = (scope == null ? Navigation.GetPosition(screen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector) : (await (scope.Io.LocateDirect ?? scope.Io.Locate)(screen, waypoint)).Point);
 
             // 旋转视角
             /* 这里的角度增加了一个randomAngle角度，用来在原角度不适用的情况下修改角度以适应复杂环境
@@ -73,15 +91,15 @@ public class TrapEscaper(CancellationToken ct)
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position) + _randomAngle;
 
             //执行旋转
-            await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5);
-            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+            await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5, 50, scope);
+            await Send(scope, GIActions.MoveForward, KeyType.KeyDown);
             //
             //这里是随机角度的归零逻辑，在脱困执行一秒后将randomAngle设为0以将实际角度重置为正面向点位的角度
             //其实就是在一段时间内进行角度的修改以实现自动避障
             if (_randomAngle != 0)
             {
                 _randomAngle %= 360; //角度增加到360度时也会归零
-                if ((DateTime.UtcNow - LastActionTime).TotalSeconds > 1.5)
+                if ((Now(scope) - LastActionTime).TotalSeconds > 1.5)
                 {
                     _randomAngle = 0;
                 }
@@ -95,14 +113,14 @@ public class TrapEscaper(CancellationToken ct)
                 waypoint.MoveMode != MoveModeEnum.Fly.Code)
                 if (Bv.GetMotionStatus(screen) == MotionStatus.Climb)
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-                    Simulation.SendInput.SimulateAction(GIActions.Drop);
-                    Sleep(75);
-                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
-                    Sleep(700);
-                    Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
+                    await Send(scope, GIActions.MoveForward, KeyType.KeyUp);
+                    await Send(scope, GIActions.Drop);
+                    await Wait(scope, 75, synchronous: true);
+                    await Send(scope, GIActions.MoveBackward, KeyType.KeyDown);
+                    await Wait(scope, 700, synchronous: true);
+                    await Send(scope, GIActions.MoveBackward, KeyType.KeyUp);
 
-                    LastActionTime = DateTime.UtcNow;
+                    LastActionTime = Now(scope);
 
                     //！！！！！！！！这里修改了randomAngle的值，用于在脱困后随机旋转角度！！！！！！！！
                     if (!left)
@@ -117,31 +135,39 @@ public class TrapEscaper(CancellationToken ct)
                     continue;
                 }
 
-            await Delay(100, ct);
+            await Wait(scope, 100);
         }
 
-        // 抬起w键
-        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+        scope?.Check();
+        }
+        finally
+        {
+            // Releases are not conditional on a live deadline or a Normal observation.
+            await Send(scope, GIActions.MoveForward, KeyType.KeyUp);
+        }
     }
 
-    public async Task RotateAndMove()
+    public Task RotateAndMove() => RotateAndMove(null);
+
+    internal async Task RotateAndMove(PathRecoveryScope? scope)
     {
         IncreaseRandomAngle();
         // 脱离攀爬状态
-        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-        Simulation.SendInput.SimulateAction(GIActions.Drop);
-        await Delay(75, ct);
-        var attacked = LandingAttackGuard.TryAttack(() =>
+        await Send(scope, GIActions.MoveForward, KeyType.KeyUp);
+        await Send(scope, GIActions.Drop);
+        await Wait(scope, 75);
+        if (scope != null) await scope.ObserveAsync();
+        var attacked = scope == null && LandingAttackGuard.TryAttack(() =>
         {
-            using var screen = CaptureToRectArea();
-            return Bv.GetMotionStatus(screen);
+            using var screen = (scope?.Io.Capture() ?? CaptureToRectArea());
+            return scope?.Io.Motion(screen) ?? Bv.GetMotionStatus(screen);
         }, () => Simulation.SendInput.SimulateAction(GIActions.NormalAttack), ct);
-        Logger.LogDebug(attacked
+        (scope?.Io.Logger ?? Logger).LogDebug(attacked
             ? "脱困：确认飞行，执行一次下落攻击"
             : "脱困：未确认飞行，不发送普攻");
-        await Delay(500, ct);
+        await Wait(scope, 500);
 
-        TimeSpan timeSinceLastAction = DateTime.UtcNow - LastActionTime;
+        TimeSpan timeSinceLastAction = Now(scope) - LastActionTime;
 
         if (timeSinceLastAction.TotalSeconds >= 10)
         {
@@ -158,49 +184,73 @@ public class TrapEscaper(CancellationToken ct)
         {
             case 0:
                 // 向后移动
-                MoveBackward(1000 + difference);
+                await MoveBackward(1000 + difference, scope);
                 break;
 
             case 1:
                 // 向左移动
-                MoveLeft(700 + difference);
+                await MoveLeft(700 + difference, scope);
                 break;
 
             case 2:
                 // 向右移动
-                MoveRight(700 + difference);
+                await MoveRight(700 + difference, scope);
                 break;
         }
 
-        LastActionTime = DateTime.UtcNow;
+        LastActionTime = Now(scope);
     }
 
-    private void MoveBackward(int delay)
+    private async Task MoveBackward(int delay, PathRecoveryScope? scope)
     {
-        Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyDown);
-        Sleep(500);
-        Simulation.SendInput.SimulateAction(GIActions.Jump);
-        Sleep(delay);
-        Simulation.SendInput.SimulateAction(GIActions.MoveBackward, KeyType.KeyUp);
+        try
+        {
+        await Send(scope, GIActions.MoveBackward, KeyType.KeyDown);
+        await Wait(scope, 500, synchronous: true);
+        await Send(scope, GIActions.Jump);
+        await Wait(scope, delay, synchronous: true);
+        }
+        finally { await Send(scope, GIActions.MoveBackward, KeyType.KeyUp); }
     }
 
-    private void MoveLeft(int delay)
+    private async Task MoveLeft(int delay, PathRecoveryScope? scope)
     {
-        Simulation.SendInput.SimulateAction(GIActions.MoveLeft, KeyType.KeyDown);
-        Sleep(300);
-        Simulation.SendInput.SimulateAction(GIActions.Jump);
-        Sleep(delay);
-        Simulation.SendInput.SimulateAction(GIActions.MoveLeft, KeyType.KeyUp);
-        Simulation.SendInput.SimulateAction(GIActions.Drop);
+        try
+        {
+        await Send(scope, GIActions.MoveLeft, KeyType.KeyDown);
+        await Wait(scope, 300, synchronous: true);
+        await Send(scope, GIActions.Jump);
+        await Wait(scope, delay, synchronous: true);
+        }
+        finally { await Send(scope, GIActions.MoveLeft, KeyType.KeyUp); }
+        await Send(scope, GIActions.Drop);
     }
 
-    private void MoveRight(int delay)
+    private async Task MoveRight(int delay, PathRecoveryScope? scope)
     {
-        Simulation.SendInput.SimulateAction(GIActions.MoveRight, KeyType.KeyDown);
-        Sleep(300);
-        Simulation.SendInput.SimulateAction(GIActions.Jump);
-        Sleep(delay);
-        Simulation.SendInput.SimulateAction(GIActions.MoveRight, KeyType.KeyUp);
-        Simulation.SendInput.SimulateAction(GIActions.Drop);
+        try
+        {
+        await Send(scope, GIActions.MoveRight, KeyType.KeyDown);
+        await Wait(scope, 300, synchronous: true);
+        await Send(scope, GIActions.Jump);
+        await Wait(scope, delay, synchronous: true);
+        }
+        finally { await Send(scope, GIActions.MoveRight, KeyType.KeyUp); }
+        await Send(scope, GIActions.Drop);
+    }
+    private static DateTime Now(PathRecoveryScope? scope) => scope?.Io.Clock.GetUtcNow().UtcDateTime ?? DateTime.UtcNow;
+
+    private static Task Send(PathRecoveryScope? scope, GIActions action, KeyType type = KeyType.KeyPress)
+    {
+        if (scope != null) return scope.SendAsync(action, type);
+        Simulation.SendInput.SimulateAction(action, type);
+        return Task.CompletedTask;
+    }
+
+    private Task Wait(PathRecoveryScope? scope, int milliseconds, bool synchronous = false)
+    {
+        if (scope != null) return scope.DelayAsync(milliseconds);
+        if (synchronous) { Sleep(milliseconds); return Task.CompletedTask; }
+        return Delay(milliseconds, ct);
     }
 }
