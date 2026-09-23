@@ -96,8 +96,6 @@ internal sealed class NativeUiDriverIo
             case UiAction.RequestDomainExit:
                 Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
                 return true;
-            case UiAction.ConfirmDomainExit:
-                return Bv.ClickBlackConfirmButton(image);
             default:
                 throw new InvalidOperationException("Unsupported native UI action.");
         }

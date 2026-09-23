@@ -4,6 +4,8 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class DomainTipRecoveryTests
 {
+    private static UiSnapshot ExitPrompt() => new(1) { MainHud = true, InDomain = true, BlackConfirm = true,
+        DomainExit = new(default, true, new OpenCvSharp.Rect(990, 740, 35, 35)) };
     [Fact]
     public async Task ActualNativeDriverDismissesThenCompletesTheOriginalExitProtocol()
     {
@@ -16,6 +18,13 @@ public class DomainTipRecoveryTests
         fixture.BeforeCapture = () => { if (domainOpen) domainCaptures++; if (inWorld) worldCaptures++; };
         fixture.OnClick = () =>
         {
+            if (fixture.Scene.DomainExit.Visible)
+            {
+                ordered.Add(UiAction.ConfirmDomainExit);
+                inWorld = true;
+                fixture.Scene = new(1) { MainHud = true };
+                return;
+            }
             ordered.Add(UiAction.DismissDomainTip);
             fixture.Title = fixture.Footer = false;
             fixture.Scene = new(1) { MainHud = true, InDomain = true };
@@ -28,7 +37,7 @@ public class DomainTipRecoveryTests
             if (action == UiAction.ConfirmDomainExit) inWorld = true;
             fixture.Scene = action switch
             {
-                UiAction.RequestDomainExit => new(1) { Prompt = true, BlackConfirm = true, InDomain = true },
+                UiAction.RequestDomainExit => ExitPrompt(),
                 UiAction.ConfirmDomainExit => new(1) { MainHud = true },
                 _ => throw new InvalidOperationException("Unexpected action in isolated exit replay.")
             };
@@ -39,7 +48,7 @@ public class DomainTipRecoveryTests
 
         Assert.True(result.Matches(UiTarget.Overworld));
         Assert.Equal(new[] { UiAction.DismissDomainTip, UiAction.RequestDomainExit, UiAction.ConfirmDomainExit }, ordered);
-        Assert.Single(fixture.Clicks);
+        Assert.Equal(2, fixture.Clicks.Count);
         Assert.Equal(3, domainCaptures); // Two decision frames plus Native.Act's fresh recheck.
         Assert.Equal(2, worldCaptures);
         Assert.All(fixture.Frames, frame => Assert.True(frame.SrcMat.IsDisposed));
@@ -130,15 +139,16 @@ public class DomainTipRecoveryTests
             if (action == UiAction.RequestDomainExit)
             {
                 requestedAt = captures;
-                fixture.Scene = new(1) { Prompt = true, BlackConfirm = true };
+                fixture.Scene = ExitPrompt();
             }
             else if (action == UiAction.ConfirmDomainExit) fixture.Scene = new(1) { MainHud = true };
             else throw new InvalidOperationException("Unexpected isolated action.");
             return true;
         };
+        fixture.OnClick = () => fixture.Scene = new(1) { MainHud = true };
         Assert.True((await UiRecovery.ExitDomainAsync(fixture.Driver, default, clock: fixture.Clock)).Matches(UiTarget.Overworld));
         Assert.Equal(5, requestedAt);
-        Assert.Empty(fixture.Clicks);
+        Assert.Single(fixture.Clicks);
     }
 
     [Fact]
@@ -163,13 +173,21 @@ public class DomainTipRecoveryTests
         };
         fixture.OnClick = () =>
         {
+            if (fixture.Scene.DomainExit.Visible)
+            {
+                ordered.Add(UiAction.ConfirmDomainExit);
+                confirmed = true;
+                fixture.Title = fixture.Footer = true;
+                fixture.Scene = new(1);
+                return;
+            }
             ordered.Add(UiAction.DismissDomainTip);
-            fixture.Scene = new(1) { Prompt = true, BlackConfirm = true };
+            fixture.Scene = ExitPrompt();
             // Before confirmation the prompt wins even while tip words remain behind it.
             if (confirmed) { fixture.Title = fixture.Footer = false; lingeringPrompt = 3; }
         };
         Assert.True((await UiRecovery.ExitDomainAsync(fixture.Driver, default, clock: fixture.Clock)).Matches(UiTarget.Overworld));
         Assert.Equal(new[] { UiAction.RequestDomainExit, UiAction.DismissDomainTip, UiAction.ConfirmDomainExit, UiAction.DismissDomainTip }, ordered);
-        Assert.Equal(new[] { UiAction.RequestDomainExit, UiAction.ConfirmDomainExit }, fixture.Actions);
+        Assert.Equal(new[] { UiAction.RequestDomainExit }, fixture.Actions);
     }
 }
