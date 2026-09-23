@@ -1377,9 +1377,10 @@ public partial class PathExecutor
 
             EndJudgment(screen);
 
-            position = await GetPosition(screen, waypoint);
+            var location = await GetDirectPositionAndTime(screen, waypoint);
+            position = location.Point;
             var distance = Navigation.GetDistance(waypoint, position);
-            approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, Logger);
+            approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, Logger, location.IsDirect);
             if (distance < 2)
             {
                 Logger.LogDebug("已到达路径点");

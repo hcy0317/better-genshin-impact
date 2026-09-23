@@ -1139,6 +1139,23 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task UnavailableHudWithoutAnySwitchStillSavesTheOriginalRecoveryFrame()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 e(required)");
+        using var io = new PhysicalReplay(clock, false, 50, program) { CombatHudVisible = false };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        await Record.ExceptionAsync(async () => await runner.RunRoundAsync(default));
+        await evidence.DisposeAsync();
+        var frame = Assert.Single(saved.Where(item => item.Phase == "hud-unavailable-before-recovery"));
+        Assert.True(frame.Source.IsKnown);
+        Assert.Contains("submitted=False", frame.Detail);
+        Assert.Empty(io.Inputs);
+    }
+
+    [Fact]
     public async Task ChangedModelRequirementsAreRepreparedWithoutRenewingAnAwaitingActionsDeadline()
     {
         var clock = new FakeTimeProvider();

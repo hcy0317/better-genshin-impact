@@ -731,6 +731,15 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             {
                 if (result.NeedsRecovery)
                 {
+                    // 无物理切人时旧before-selection通道不会保存此帧；在恢复消费它之前补齐原始原因图。
+                    try
+                    {
+                        if (result.BorrowFrame is { } recoveryFrame)
+                            _evidence?.TryCapture(recoveryFrame, "selection:" + _selection.GoalId,
+                                "hud-unavailable-before-recovery",
+                                $"battle={action.BattleId} target={_selectionActor} submitted={_selection.HasSubmittedInput} reason={_selection.Reason} purpose={Purpose}; original frame before non-combat recovery; no input authorization", Logger);
+                    }
+                    catch { /* 诊断不能改变恢复结果。 */ }
                     using var nonCombat = CombatActionScope.Suspend();
                     using var recoveryRecognition = new RecognitionReadinessScope(nonBlocking: false);
                     io.ResolveSelectionRecovery(FindActor(_selectionActor!)!, result, ct);

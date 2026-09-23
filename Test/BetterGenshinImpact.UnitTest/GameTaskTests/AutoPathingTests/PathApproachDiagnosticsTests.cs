@@ -45,9 +45,11 @@ public class PathApproachDiagnosticsTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task StationaryApproachCapturesOneBorrowedFrameWithRealPulseCounts(bool staleDuplicate)
+    [InlineData(false, null)]
+    [InlineData(true, null)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public async Task StationaryApproachCapturesOneBorrowedFrameWithRealPulseCounts(bool staleDuplicate, bool? directPosition)
     {
         var records = new List<DiagnosticEvidence>();
         await using var evidence = new DiagnosticEvidenceScope((item, _) => { records.Add(item); return Task.CompletedTask; });
@@ -64,13 +66,15 @@ public class PathApproachDiagnosticsTests
                 () => dispatcher.DispatchInput(new User32.INPUT[1]), _ => { }));
             using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
             { FrameStamp = staleDuplicate ? duplicate : producer.Next() };
-            probe.Observe(frame, new(10, 10), new(12.24f, 10), 2.24, i + 1, NullLogger.Instance);
+            probe.Observe(frame, new(10, 10), new(12.24f, 10), 2.24, i + 1, NullLogger.Instance, directPosition);
             Assert.False(frame.SrcMat.IsDisposed);
         }
         await evidence.DisposeAsync();
         var saved = Assert.Single(records);
         Assert.Equal("precise-stall", saved.Phase);
         Assert.Contains("requested=2 submitted=2", saved.Detail);
+        Assert.Contains(directPosition == true ? "locationSource=direct" : directPosition == false
+            ? "locationSource=fallback-or-invalid" : "locationSource=unknown", saved.Detail);
         if (staleDuplicate) Assert.Contains("sourceAdvanced=False", saved.Detail);
     }
 }
