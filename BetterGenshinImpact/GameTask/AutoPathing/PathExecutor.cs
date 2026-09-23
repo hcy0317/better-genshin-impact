@@ -697,6 +697,8 @@ public partial class PathExecutor
         using var region = CaptureToRectArea();
         if (Bv.CurrentAvatarIsLowHp(region))
         {
+            CaptureLowHpRecoveryEvidence(region,
+                $"route={waypoint.PathingTaskFileName} segment={CurWaypoints.Item1 + 1} node={waypoint.Id} type={waypoint.Type} move={waypoint.MoveMode} action={waypoint.Action} skipOtherOperations={_skipOtherOperations}; before any healing or teleport", Logger);
             if (await TryPartyHealing())
             {
                 var fence = new Fischless.GameCapture.CaptureFrameFence(region.FrameStamp, TimeProvider.System.GetTimestamp());
@@ -725,6 +727,18 @@ public partial class PathExecutor
             await TpStatueOfTheSeven();
             throw new RetryException("回血完成后重试路线");
         }
+    }
+
+    internal static void CaptureLowHpRecoveryEvidence(ImageRegion frame, string detail, ILogger logger)
+    {
+        try
+        {
+            var source = frame.FrameStamp;
+            DiagnosticEvidenceScope.Current?.TryCapture(frame, $"path-low-hp:{source.SessionId}/{source.Sequence}",
+                "before-recovery", detail, logger);
+            logger.LogDebug("PATH_LOW_HP_RECOVERY source={Session}/{Sequence} {Detail}", source.SessionId, source.Sequence, detail);
+        }
+        catch { /* 取证借用当前帧，不影响恢复、重试或帧所有权。 */ }
     }
 
     private async Task TpStatueOfTheSeven()

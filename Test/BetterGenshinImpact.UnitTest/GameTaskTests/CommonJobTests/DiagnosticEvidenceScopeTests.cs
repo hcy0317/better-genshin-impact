@@ -7,6 +7,20 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class DiagnosticEvidenceScopeTests
 {
+    [Fact]
+    public async Task LowHealthRecoveryUsesTheBorrowedFrameOnceAndLeavesOwnershipWithCaller()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        for (var i = 0; i < 2; i++)
+            BetterGenshinImpact.GameTask.AutoPathing.PathExecutor.CaptureLowHpRecoveryEvidence(frame, "route=fixture node=6", Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.False(frame.SrcMat.IsDisposed);
+        await scope.DisposeAsync();
+        Assert.Equal("before-recovery", Assert.Single(saved).Phase);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
