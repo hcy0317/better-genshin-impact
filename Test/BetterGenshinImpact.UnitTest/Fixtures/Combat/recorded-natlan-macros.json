@@ -1,0 +1,192 @@
+[
+  {
+    "script": "keypress(f),s(0.1),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.7),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 2
+  },
+  {
+    "script": "moveby(0,4000),wait(0.3),keypress(t),wait(0.2),keypress(t),wait(0.3)",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 3
+  },
+  {
+    "script": "keydown(w),wait(0.3),keypress(e),wait(1.7),keypress(e)",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 4
+  },
+  {
+    "script": "keydown(w),moveby(0,1000),wait(0.1),keypress(e),wait(1.2),keypress(e)",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 7
+  },
+  {
+    "script": "keydown(VK_SPACE),wait(0.7),keyup(VK_SPACE),keydown(w),wait(0.1),keypress(e),wait(1.1),keypress(e)",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 10
+  },
+  {
+    "script": "keydown(w),wait(0.1),keypress(e),wait(1.3),keypress(e)",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 13
+  },
+  {
+    "script": "wait(0.5),keydown(Q),keypress(f),wait(0.8),keypress(f),keyup(Q),wait(0.1),j,keypress(f)",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 14
+  },
+  {
+    "script": "keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.48),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 15
+  },
+  {
+    "script": "keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.8),keyup(E),keydown(a),attack(0.2),keyup(a);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点1号线\\执行\\619纳塔-悠悠神像5.json",
+    "node": 17
+  },
+  {
+    "script": "keypress(t),wait(0.2),keypress(t)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 2
+  },
+  {
+    "script": "keydown(VK_SPACE),wait(0.7),keyup(VK_SPACE),moveby(0,-500),keydown(w),wait(0.2),keypress(e),wait(1.7),keypress(e),wait(1.83),keyup(w),keypress(e),wait(0.3),keypress(e),wait(0.5)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 6
+  },
+  {
+    "script": "wait(0.3),keydown(Q),keypress(f),wait(0.8),keypress(f),keyup(Q),wait(0.1),j,click(middle)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 7
+  },
+  {
+    "script": "w(0.1),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.48),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 9
+  },
+  {
+    "script": "keydown(w),wait(0.1),dash,wait(0.3),attack(0.22),j,wait(0.35),keyup(w),wait(0.25),j",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 11
+  },
+  {
+    "script": "keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.7),keyup(E),s(0.2),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 12
+  },
+  {
+    "script": "keydown(w),keypress(t),wait(0.1),keypress(t),wait(1.5),keypress(e),keyup(w)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 15
+  },
+  {
+    "script": "keydown(w),wait(0.3),keydown(VK_SPACE),wait(0.7),keyup(VK_SPACE),keypress(e),wait(1.4),keypress(e),moveby(0,-1000),wait(1.4),keypress(e),wait(0.3),moveby(-200,4000),keyup(w)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 20
+  },
+  {
+    "script": "keydown(w),wait(0.1),keypress(e),wait(1.4),keypress(e),keyup(w),click(middle)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 21
+  },
+  {
+    "script": "keypress(f),wait(0.2),keypress(f)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 23
+  },
+  {
+    "script": "keypress(x)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 24
+  },
+  {
+    "script": "keypress(f),wait(0.2),keypress(f),keydown(Q),keypress(f),wait(0.8),keypress(f),keyup(Q)",
+    "route": "普通98点2号线\\执行\\620纳塔-悠悠集市南8.json",
+    "node": 28
+  },
+  {
+    "script": "keypress(f),wait(0.2),keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.7),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\631纳塔-悠悠集市西北5.json",
+    "node": 3
+  },
+  {
+    "script": "keypress(t),wait(0.2),keypress(t),wait(0.4)",
+    "route": "普通98点2号线\\执行\\631纳塔-悠悠集市西北5.json",
+    "node": 4
+  },
+  {
+    "script": "moveby(0,-2500),keydown(VK_SPACE),wait(1),keyup(VK_SPACE),wait(0.2),keypress(e),wait(0.2),keypress(e),keypress(f),wait(0.2),keypress(f)",
+    "route": "普通98点2号线\\执行\\631纳塔-悠悠集市西北5.json",
+    "node": 5
+  },
+  {
+    "script": "w(0.3),keypress(e),wait(0.7),click(middle)",
+    "route": "普通98点2号线\\执行\\631纳塔-悠悠集市西北5.json",
+    "node": 6
+  },
+  {
+    "script": "keydown(VK_SPACE),wait(0.7),keyup(VK_SPACE),keydown(w),wait(0.2),keypress(e),wait(1.7),keypress(e),keyup(w),wait(0.01),keypress(e),click(middle)",
+    "route": "普通98点2号线\\执行\\631纳塔-悠悠集市西北5.json",
+    "node": 9
+  },
+  {
+    "script": "keypress(f),wait(0.2),keypress(f),wait(0.5)",
+    "route": "普通98点2号线\\执行\\631纳塔-悠悠集市西北5.json",
+    "node": 12
+  },
+  {
+    "script": "keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.7),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\631纳塔-悠悠集市西北5.json",
+    "node": 15
+  },
+  {
+    "script": "keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.7),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);芙宁娜 e;",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 4
+  },
+  {
+    "script": "keydown(w),",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 6
+  },
+  {
+    "script": "keypress(f),d(0.1),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.48),keyup(E),attack(0.2),wait(1.5);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 9
+  },
+  {
+    "script": "keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.7),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 10
+  },
+  {
+    "script": "w(0.3),keypress(t),w(0.2),keypress(t),w(0.2),keypress(t)",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 11
+  },
+  {
+    "script": "wait(0.3),keydown(Q),keypress(f),wait(0.8),keypress(f),keyup(Q),wait(0.1),j,keypress(f),wait(0.2),keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.7),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);wait(0.3),moveby(0,4000),wait(0.2),keypress(t),wait(0.2),keypress(t),wait(0.2),keypress(t),wait(0.8),click(middle)",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 13
+  },
+  {
+    "script": "keydown(w),j,wait(0.3),keypress(e),wait(1.7),keypress(e),wait(0.5),keyup(w)",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 14
+  },
+  {
+    "script": "keypress(x),wait(0.3),keydown(Q),keypress(f),wait(0.8),keypress(f),keyup(Q),wait(0.1),j,keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.48),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);wait(2)",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 16
+  },
+  {
+    "script": "keypress(f),wait(0.2),keypress(f),d(0.2),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.48),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 18
+  },
+  {
+    "script": "keypress(f),attack(0.03);万叶 attack(0.08),keydown(E),wait(0.8),keyup(E),attack(0.2);琴 attack(0.08),keydown(E),wait(0.4),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,0),wait(0.2),moveby(1000,-3500),wait(1.8),keyup(E),wait(0.3),click(middle);",
+    "route": "普通98点2号线\\执行\\638纳塔-浪浪湾8.json",
+    "node": 20
+  }
+]

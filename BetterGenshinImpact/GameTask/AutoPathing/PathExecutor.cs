@@ -39,6 +39,7 @@ using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Map.Maps;
 using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
 using BetterGenshinImpact.GameTask.AutoFight;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using Fischless.GameCapture;
 using BetterGenshinImpact.GameTask.Common.Ui;
 
@@ -58,14 +59,16 @@ public partial class PathExecutor
     private CancellationToken ct;
     private PathExecutorSuspend pathExecutorSuspend;
     private readonly PathMoveToIo _moveIo;
+    private PathingMacroSession? _pathingMacro;
 
     public PathExecutor(CancellationToken ct) : this(ct, null) { }
 
-    internal PathExecutor(CancellationToken ct, PathMoveToIo? io)
+    internal PathExecutor(CancellationToken ct, PathMoveToIo? io, PathingMacroSession? macro = null)
     {
         _trapEscaper = new(ct);
         _rotateTask = new(ct);
         this.ct = ct;
+        _pathingMacro = macro;
         pathExecutorSuspend = new PathExecutorSuspend(this);
         _moveIo = io ?? new PathMoveToIo(native: true)
         {
@@ -186,6 +189,9 @@ public partial class PathExecutor
         }
 
         InitializePathing(task);
+        using var macroOwner = new PathingMacroSession(new NativePathingMacroIo(() =>
+            $"route={task.FileName} segment={CurWaypoints.Item1} node={CurWaypoint.Item1}"));
+        _pathingMacro = macroOwner;
         // 转换、按传送点分割路径
         var waypointsList = ConvertWaypointsForTrack(task.Positions, task);
 
@@ -214,6 +220,7 @@ public partial class PathExecutor
 
                     if (waypoint.Type == WaypointType.Teleport.Code)
                     {
+                        _pathingMacro.Release();
                         if (CurWaypoints.Item1 > 0)
                         {
                             var prevWaypoints = waypointsList[CurWaypoints.Item1 - 1];
@@ -238,6 +245,7 @@ public partial class PathExecutor
                         // Path不用走得很近，Target需要接近，但都需要先移动到对应位置
                         if (waypoint.Type == WaypointType.Orientation.Code)
                         {
+                            _pathingMacro.Release();
                             // 方位点，只需要朝向
                             // 考虑到方位点大概率是作为执行action的最后一个点，所以放在此处处理，不和传送点一样单独处理
                             await FaceTo(waypoint);
@@ -281,6 +289,7 @@ public partial class PathExecutor
                     CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, exception.Message);
             }, () =>
             {
+                _pathingMacro.Release();
                 Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_W);
                 Simulation.SendInput.Mouse.RightButtonUp();
                 Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
@@ -695,8 +704,12 @@ public partial class PathExecutor
         }
 
         using var region = CaptureToRectArea();
+        if (IsKnownPathTransformation(region)) return;
         if (Bv.CurrentAvatarIsLowHp(region))
         {
+            _pathingMacro?.Release();
+            CaptureLowHpRecoveryEvidence(region,
+                $"route={waypoint.PathingTaskFileName} segment={CurWaypoints.Item1 + 1} node={waypoint.Id} type={waypoint.Type} move={waypoint.MoveMode} action={waypoint.Action} skipOtherOperations={_skipOtherOperations}; before any healing or teleport", Logger);
             if (await TryPartyHealing())
             {
                 var fence = new Fischless.GameCapture.CaptureFrameFence(region.FrameStamp, TimeProvider.System.GetTimestamp());
@@ -711,7 +724,7 @@ public partial class PathExecutor
             await TpStatueOfTheSeven();
             throw new RetryException("回血完成后重试路线");
         }
-        else if (Bv.ClickIfInReviveModal(region))
+        else if (ReleaseMacroBeforeRevive(region) && Bv.ClickIfInReviveModal(region))
         {
             var returnedToMainUi = await Bv.WaitForMainUi(ct);
             if (!Bv.IsReviveRecoveryConfirmed(clicked: true, returnedToMainUi))
@@ -725,6 +738,18 @@ public partial class PathExecutor
             await TpStatueOfTheSeven();
             throw new RetryException("回血完成后重试路线");
         }
+    }
+
+    internal static void CaptureLowHpRecoveryEvidence(ImageRegion frame, string detail, ILogger logger)
+    {
+        try
+        {
+            var source = frame.FrameStamp;
+            DiagnosticEvidenceScope.Current?.TryCapture(frame, $"path-low-hp:{source.SessionId}/{source.Sequence}",
+                "before-recovery", detail, logger);
+            logger.LogDebug("PATH_LOW_HP_RECOVERY source={Session}/{Sequence} {Detail}", source.SessionId, source.Sequence, detail);
+        }
+        catch { /* 取证借用当前帧，不影响恢复、重试或帧所有权。 */ }
     }
 
     private async Task TpStatueOfTheSeven()
@@ -819,13 +844,23 @@ public partial class PathExecutor
 
     public async Task MoveTo(WaypointForTrack waypoint)
     {
-        // 切人
-        await _moveIo.SwitchAvatar(PartyConfig.MainAvatarIndex);
+        try
+        {
+        // 已证实变身时只能导航，不切回不存在的人形活动位。
+        var transformed = false;
+        if (_pathingMacro != null)
+        {
+            using var scene = _moveIo.Capture();
+            transformed = IsKnownPathTransformation(scene);
+        }
+        if (!transformed)
+        {
+            _pathingMacro?.Release();
+            await _moveIo.SwitchAvatar(PartyConfig.MainAvatarIndex);
+        }
         // 切人完成时刻：切人后有约1秒CD，期间无法切换到其他角色（用于生存位）
         var switchAvatarTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
 
-        try
-        {
         Point2f position;
         int additionalTimeInMs;
         using (var initialScreen = _moveIo.Capture())
@@ -833,6 +868,10 @@ public partial class PathExecutor
             var located = await _moveIo.Locate(initialScreen, waypoint);
             position = located.Point;
             additionalTimeInMs = located.AdditionalTimeInMs;
+            if (_pathingMacro?.HasTail == true)
+                _pathingMacro.AdoptNavigation(new(IsKnownPathTransformation(initialScreen)
+                    ? PathingMacroScene.Transformed : _moveIo.CombatHud(initialScreen) ? PathingMacroScene.World : PathingMacroScene.Unknown,
+                    initialScreen.FrameStamp), located.IsDirect && position != default && float.IsFinite(position.X) && float.IsFinite(position.Y), ct);
         }
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
         _moveIo.Logger.LogDebug("粗略接近途经点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
@@ -852,16 +891,18 @@ public partial class PathExecutor
         DateTime beyondAngleStartTime = DateTime.MinValue;
         var hurryOnState = new HurryOnState();
         var flightObserved = false;
+        var plainFlightTransit = waypoint.Type == WaypointType.Path.Code && string.IsNullOrWhiteSpace(waypoint.Action);
         var climbWindow = new PathClimbProgressWindow();
         CaptureFrameStamp lastMoveFrame = default;
 
         // 按下w，一直走
-        _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
+        SendPathForward(KeyType.KeyDown);
         // 赶路帧间隔：始终使用配置值（5-150 钳制），不依赖是否配置赶路角色（空选也可用）
         var hurryFrameInterval = Math.Clamp(PartyConfig.HurryOnFrameInterval, 5, 150);
         while (true)
         {
             ct.ThrowIfCancellationRequested();
+            _pathingMacro?.CheckNavigation(ct);
             num++;
             if ((_moveIo.Clock.GetUtcNow().UtcDateTime - moveToStartTime).TotalSeconds > 240)
             {
@@ -870,6 +911,7 @@ public partial class PathExecutor
             }
 
             using var screen = _moveIo.Capture();
+            transformed = IsKnownPathTransformation(screen);
 
             _moveIo.EndJudgment(screen);
 
@@ -901,20 +943,25 @@ public partial class PathExecutor
             if (waypoint.MoveMode == MoveModeEnum.Fly.Code && observation.Valid && observation.Motion == MotionStatus.Fly)
                 flightObserved = true;
             Debug.WriteLine($"接近目标点中，距离为{distance}");
-            if (distance < 4 && (waypoint.MoveMode != MoveModeEnum.Fly.Code || flightObserved && observation.Valid))
+            if (distance < 4 && (waypoint.MoveMode != MoveModeEnum.Fly.Code ||
+                observation.Valid && (flightObserved || plainFlightTransit)))
             {
                 _moveIo.Logger.LogDebug("到达路径点附近");
+                if (waypoint.MoveMode == MoveModeEnum.Fly.Code)
+                    _moveIo.Logger.LogDebug("PATH_FLY_ARRIVAL node={Node} type={Type} action={Action} distance={Distance:F2} direct={Direct} source={Session}/{Sequence} observedFlight={Flight} plainTransit={PlainTransit}",
+                        waypoint.Id, waypoint.Type, waypoint.Action, distance, located.IsDirect,
+                        observation.Stamp.SessionId, observation.Stamp.Sequence, flightObserved, plainFlightTransit);
                 break;
             }
 
             if (distance < 4 && waypoint.MoveMode == MoveModeEnum.Fly.Code)
             {
-                _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                SendPathForward(KeyType.KeyUp);
                 await AdvanceFlyAsync(observation.Valid && observation.Motion == MotionStatus.Normal, waypoint, observation.Stamp);
                 continue;
             }
             if (!_moveIo.IsDown(GIActions.MoveForward))
-                _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
+                SendPathForward(KeyType.KeyDown);
 
             if (movementWatchdog.ShouldAbort(
                     waypoint.MoveMode == MoveModeEnum.Climb.Code,
@@ -1012,10 +1059,11 @@ public partial class PathExecutor
                             _moveIo.Logger.LogWarning("疑似卡死，尝试脱离...");
 
                             //调用脱困代码，由TrapEscaper接管移动
+                            _pathingMacro?.Release();
                             Helpers.ApplicationHostBootstrapGuard.EnsureAllowed();
                             await _trapEscaper.RotateAndMove();
                             await _trapEscaper.MoveTo(waypoint);
-                            _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
+                            SendPathForward(KeyType.KeyDown);
                             _moveIo.Logger.LogInformation("卡死脱离结束");
                             continue;
                         }
@@ -1057,14 +1105,15 @@ public partial class PathExecutor
                     && (_moveIo.Clock.GetUtcNow().UtcDateTime - beyondAngleStartTime).TotalSeconds > 2)
                 {
                     // 松W键，站定好转向，转完重新按下W继续走
-                    _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                    SendPathForward(KeyType.KeyUp);
                     await _moveIo.RotateUntil(targetOrientation, 2);
-                    _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
+                    SendPathForward(KeyType.KeyDown);
                 }
             }
 
             // 赶路逻辑（使用角色技能加速赶路）
-            var hurryOnResult = await (_moveIo.HurryOn?.Invoke(diff, waypoint, distance, screen, num)
+            if (!transformed) _pathingMacro?.Release();
+            var hurryOnResult = !transformed && await (_moveIo.HurryOn?.Invoke(diff, waypoint, distance, screen, num)
                 ?? TryHurryOnAsync(diff, waypoint, distance, screen, num, hurryOnState));
             if (hurryOnResult)
             {
@@ -1121,7 +1170,7 @@ public partial class PathExecutor
             else if (waypoint.MoveMode != MoveModeEnum.Climb.Code) //否则自动短疾跑
             {
                 // 使用 E 技能
-                if (distance > 10 && !string.IsNullOrEmpty(PartyConfig.GuardianAvatarIndex) &&
+                if (!transformed && distance > 10 && !string.IsNullOrEmpty(PartyConfig.GuardianAvatarIndex) &&
                     double.TryParse(PartyConfig.GuardianElementalSkillSecondInterval, out var s))
                 {
                     if (s < 1)
@@ -1174,7 +1223,7 @@ public partial class PathExecutor
         finally
         {
             // Cleanup is permitted after cancellation/deadline; never leave this movement holding W.
-            _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+            SendPathForward(KeyType.KeyUp);
         }
     }
 
@@ -1393,6 +1442,7 @@ public partial class PathExecutor
     {
         if (waypoint.Action == ActionEnum.UpDownGrabLeaf.Code)
         {
+            _pathingMacro?.Release();
             Simulation.SendInput.Mouse.MiddleButtonClick();
             await Delay(300, ct);
             using var screen = CaptureToRectArea();
@@ -1427,7 +1477,9 @@ public partial class PathExecutor
             || waypoint.Action == ActionEnum.UseGadget.Code
             || waypoint.Action == ActionEnum.PickUpCollect.Code)
         {
-            var handler = ActionFactory.GetAfterHandler(waypoint.Action);
+            if (waypoint.Action != ActionEnum.CombatScript.Code) _pathingMacro?.Release();
+            var handler = waypoint.Action == ActionEnum.CombatScript.Code && _pathingMacro != null
+                ? new CombatScriptHandler(_pathingMacro) : ActionFactory.GetAfterHandler(waypoint.Action);
             Logger.LogDebug("PATH_ACTION_HANDOFF action={Action} sinceArrivalMs={Milliseconds:F1} fixedSettleMs={Settle}",
                 waypoint.Action, _arrivalReachedAt == 0 ? -1 : Stopwatch.GetElapsedTime(_arrivalReachedAt).TotalMilliseconds,
                 waypoint.Action == ActionEnum.Fight.Code ? 0 : IsTargetPoint(waypoint) ? 1000 : 0);
@@ -1438,12 +1490,14 @@ public partial class PathExecutor
             {
                 SuccessFight++;
             }
-            await Delay(1000, ct);
+            if (_pathingMacro != null) await _pathingMacro.WaitAsync(1000, ct);
+            else await Delay(1000, ct);
         }
     }
 
     private async Task<Avatar?> SwitchAvatar(string index, bool needSkill = false)
     {
+        _pathingMacro?.Release();
         if (string.IsNullOrEmpty(index))
         {
             return null;
@@ -1647,6 +1701,8 @@ public partial class PathExecutor
      */
     private async Task ResolveAnomalies(ImageRegion? imageRegion = null)
     {
+        _pathingMacro?.Release();
+        if (_moveIo.RecoverUi != null) { await _moveIo.RecoverUi(imageRegion, ct); return; }
         using var ownedImageRegion = imageRegion == null ? CaptureToRectArea() : null;
         imageRegion ??= ownedImageRegion!;
 

@@ -29,6 +29,7 @@ internal sealed class PathMoveToIo
     internal Func<double> Dpi { get; init; } = () => Missing<double>(nameof(Dpi));
     internal Func<string, Task> SwitchAvatar { get; init; } = null!;
     internal Action<ImageRegion> EndJudgment { get; init; } = null!;
+    internal Func<ImageRegion?, CancellationToken, Task>? RecoverUi { get; init; }
     internal Func<int, int, Task<bool>> RotateUntil { get; init; } = null!;
     internal Func<float, ImageRegion, float> RotateStep { get; init; } = null!;
     internal Func<ImageRegion, MotionStatus> Motion { get; init; } = _ => Missing<MotionStatus>(nameof(Motion));

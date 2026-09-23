@@ -209,6 +209,7 @@ internal sealed class PathReplay
         };
         Executor = new PathExecutor(cancellation, Io) { PartyConfig = new PathingPartyConfig { MainAvatarIndex = "1" } };
     }
-    internal WaypointForTrack Point(string mode) => new(new Waypoint { X = 0, Y = 0, MoveMode = mode },
+    internal WaypointForTrack Point(string mode) => new(new Waypoint { X = 0, Y = 0, MoveMode = mode,
+        Type = mode == "fly" ? "target" : "path", Action = mode == "fly" ? "stop_flying" : null },
         new BetterGenshinImpact.GameTask.Common.Map.Maps.Base.RouteMapContext("Teyvat", "SIFT", null), point => point) { X = 100, Y = 100 };
 }
