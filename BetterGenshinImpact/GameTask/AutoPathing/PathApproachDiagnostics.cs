@@ -22,7 +22,7 @@ internal sealed class PathApproachDiagnostics(string route, string context)
 
     internal void RecordPulse(PathApproachPulse pulse) => _pulse = pulse;
 
-    internal void Observe(ImageRegion frame, Point2f position, Point2f target, double distance, int step, ILogger logger)
+    internal void Observe(ImageRegion frame, Point2f position, Point2f target, double distance, int step, ILogger logger, bool? directPosition = null)
     {
         try
         {
@@ -37,7 +37,7 @@ internal sealed class PathApproachDiagnostics(string route, string context)
             _captured = true;
             var age = frame.FrameStamp.TimestampFrequency == TimeProvider.System.TimestampFrequency
                 ? TimeProvider.System.GetElapsedTime(frame.FrameStamp.CapturedTimestamp).TotalMilliseconds : -1;
-            var detail = FormattableString.Invariant($"{context} step={step}/25 target=({target.X:F2},{target.Y:F2}) current=({position.X:F2},{position.Y:F2}) distance={distance:F2} stationary={_stationary} requested={_pulse.Requested} submitted={_pulse.Submitted} uncertain={_pulse.Uncertain} holdRequestedMs=60 pulseElapsedMs={_pulse.ElapsedMilliseconds:F2} sourceAdvanced={sourceAdvanced} sourceAgeMs={age:F2}; diagnostic only, stale/duplicate frames retained as such; existing GetPosition may contain fallback; no arrival-policy change");
+            var detail = FormattableString.Invariant($"{context} step={step}/25 target=({target.X:F2},{target.Y:F2}) current=({position.X:F2},{position.Y:F2}) distance={distance:F2} stationary={_stationary} locationSource={(directPosition == true ? "direct" : directPosition == false ? "fallback-or-invalid" : "unknown")} requested={_pulse.Requested} submitted={_pulse.Submitted} uncertain={_pulse.Uncertain} holdRequestedMs=60 pulseElapsedMs={_pulse.ElapsedMilliseconds:F2} sourceAdvanced={sourceAdvanced} sourceAgeMs={age:F2}; diagnostic only, stale/duplicate frames retained as such; no arrival-policy change");
             DiagnosticEvidenceScope.Current?.TryCapture(frame, "path-approach:" + route + ":" + context, "precise-stall", detail, logger);
             logger.LogWarning("PATH_APPROACH_STALL {Route} {Detail}", route, detail);
         }

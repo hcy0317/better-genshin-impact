@@ -21,6 +21,8 @@ internal static class AvatarSelectionProtocol
         internal bool AwaitingObservation { get; } = awaitingObservation;
         internal CaptureFrameStamp Source { get; } = source;
         internal CaptureFrameFence? InputFence { get; } = inputFence;
+        // 仅借用原帧取证；所有权仍由TakeFrame/Dispose移交或释放。
+        internal TFrame? BorrowFrame => _frame;
         internal TFrame? TakeFrame() => Interlocked.Exchange(ref _frame, null);
         internal TFrame? TakeBefore() => Interlocked.Exchange(ref _before, null);
         public void Dispose()

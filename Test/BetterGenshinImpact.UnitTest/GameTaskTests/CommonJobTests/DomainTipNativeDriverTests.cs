@@ -330,7 +330,8 @@ internal sealed class DomainTipNativeFixture : IDisposable
         {
             Capture = Capture,
             Focus = () => { Events.Add("focus"); OnFocus?.Invoke(); },
-            ReadScene = _ => { Events.Add("read"); return Scene; },
+            ReadScene = image => { Events.Add("read"); return Scene.DomainExit.Visible
+                ? Scene with { DomainExit = Scene.DomainExit with { Source = image.FrameStamp } } : Scene; },
             Ocr = () => _ocr,
             Texts = () => DomainTipUiReaderTests.Texts,
             Click = Click,

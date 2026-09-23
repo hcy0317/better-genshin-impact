@@ -109,12 +109,17 @@ internal static class UiRecovery
         bool requireOverworld = false, ILogger? logger = null, TimeProvider? clock = null,
         Action<Exception, string>? captureFailure = null)
     {
+        var domainPromptHandled = false;
         return UiTransition.WaitAsync("return-main", requireOverworld ? UiTarget.Overworld : UiTarget.Main,
             driver, ct, TimeSpan.FromSeconds(20),
             // 退出门图标只能证明菜单存在，不能证明点击会返回HUD；使用已知的关闭动作。
-            observed => observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape :
+            observed => observed.CanConfirmDomainExit
+                ? domainPromptHandled ? null : requireOverworld ? UiAction.ConfirmDomainExit : UiAction.Escape
+                : observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape :
                 observed.CanDismissDomainTip ? UiAction.DismissDomainTip : null,
-            logger: logger, clock: clock, captureFailure: captureFailure);
+            logger: logger, clock: clock, captureFailure: captureFailure,
+            actionCompleted: (_, applied, observed) =>
+            { if (applied && observed.CanConfirmDomainExit) domainPromptHandled = true; });
     }
 
     internal static Task<UiSnapshot> ExitDomainAsync(IUiDriver driver, CancellationToken ct,
@@ -128,9 +133,12 @@ internal static class UiRecovery
             observed =>
             {
                 if (observed.DomainTip.IsCandidate) domainFrames = 0;
+                if (observed.CanConfirmDomainExit)
+                    return !confirmed && (!requested || requestFrame != null && observed.IsAfter(requestFrame))
+                        ? UiAction.ConfirmDomainExit : null;
                 if (requested)
-                    return !confirmed && requestFrame != null && observed.IsAfter(requestFrame) && observed.Prompt && observed.BlackConfirm && !observed.Revive
-                        ? UiAction.ConfirmDomainExit : observed.CanDismissDomainTip ? UiAction.DismissDomainTip : null;
+                    return observed.CanDismissDomainTip ? UiAction.DismissDomainTip : null;
+                if (confirmed) return null;
                 domainFrames = observed.Matches(UiTarget.DomainMain) ? domainFrames + 1 : 0;
                 if (domainFrames >= 2) return UiAction.RequestDomainExit;
                 return observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape :

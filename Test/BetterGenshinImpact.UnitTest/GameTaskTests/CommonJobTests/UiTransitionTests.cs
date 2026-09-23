@@ -374,7 +374,7 @@ public class UiTransitionTests
             new(1) { Revive = true, InDomain = true },
             new(2) { MainHud = true, InDomain = true },
             new(3) { MainHud = true, InDomain = true },
-            new(4) { Prompt = true, BlackConfirm = true }, new(5),
+            ExitPrompt(4), new(5),
             new(6) { MainHud = true }, new(7) { MainHud = true });
         var result = await UiRecovery.ExitDomainAsync(driver, default, clock: clock);
         Assert.Equal(7, result.FrameId);
@@ -387,7 +387,7 @@ public class UiTransitionTests
         var clock = new FakeTimeProvider();
         var driver = new ReplayDriver(clock,
             new(1) { MainHud = true, InDomain = true }, new(2) { MainHud = true, InDomain = true },
-            new(3) { Prompt = true, BlackConfirm = true },
+            ExitPrompt(3),
             new(4) { MainHud = true, InDomain = true }, new(5) { MainHud = true, InDomain = true },
             new(6), new(7), new(8) { MainHud = true }, new(9) { MainHud = true });
         Assert.Equal(9, (await UiRecovery.ExitDomainAsync(driver, default, clock: clock)).FrameId);
@@ -417,7 +417,7 @@ public class UiTransitionTests
         var clock = new FakeTimeProvider();
         var driver = new ReplayDriver(clock, new(1) { MainHud = true, InDomain = true },
             new(2) { MainHud = true, InDomain = true }, new(3) { Revive = true, Prompt = true, BlackConfirm = true },
-            new(4) { Prompt = true, BlackConfirm = true }, new(5) { Prompt = true, BlackConfirm = true },
+            ExitPrompt(4), ExitPrompt(5),
             new(6) { MainHud = true }, new(7) { MainHud = true });
         Assert.Equal(7, (await UiRecovery.ExitDomainAsync(driver, default, clock: clock)).FrameId);
         Assert.Equal(new[] { UiAction.RequestDomainExit, UiAction.ConfirmDomainExit }, driver.Actions);
@@ -608,8 +608,12 @@ public class UiTransitionTests
         }
     }
 
+    private static UiSnapshot ExitPrompt(long id) => new(id) { MainHud = true, InDomain = true, BlackConfirm = true,
+        DomainExit = new(default, true, new OpenCvSharp.Rect(990, 740, 35, 35)) };
+
     private sealed class ReplayDriver(FakeTimeProvider clock, params UiSnapshot[] snapshots) : IUiDriver
     {
+        private readonly Guid _sourceSession = Guid.NewGuid();
         private int _index;
         public List<UiAction> Actions { get; } = [];
         public List<long> ActionFrames { get; } = [];
@@ -617,7 +621,12 @@ public class UiTransitionTests
         public UiSnapshot Capture()
         {
             var sample = snapshots[Math.Min(_index++, snapshots.Length - 1)];
-            return _index > snapshots.Length ? sample with { FrameId = sample.FrameId + _index - snapshots.Length } : sample;
+            sample = _index > snapshots.Length ? sample with { FrameId = sample.FrameId + _index - snapshots.Length } : sample;
+            if (!snapshots.Any(frame => frame.DomainExit.Visible)) return sample;
+            var stamp = new Fischless.GameCapture.CaptureFrameStamp(_sourceSession, sample.FrameId,
+                clock.GetTimestamp(), clock.TimestampFrequency, clock.GetUtcNow());
+            return (sample with { DomainExit = sample.DomainExit with { Source = stamp } })
+                .WithSource(stamp, clock, UiSnapshot.RecoveryMaximumAge);
         }
         public Task DelayAsync(int milliseconds, CancellationToken ct)
         {

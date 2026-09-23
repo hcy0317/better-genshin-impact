@@ -83,6 +83,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             BlackConfirm = Has("BtnBlackConfirm"),
             MenuBack = menuBack.IsExist()
         };
+        if (snapshot.MainHud && snapshot.InDomain && snapshot.BlackConfirm && !snapshot.Revive && !snapshot.FullPartyDefeat)
+            snapshot = snapshot with { DomainExit = DomainExitUiReader.Read(image, ocr ?? OcrFactory.Paddle) };
         if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
             snapshot = snapshot with { Cannon = CannonUiReader.Read(image, ocr ?? OcrFactory.Paddle).CanExit };
         if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
@@ -123,18 +125,21 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         _io.Focus();
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
-        // Escape的旧帧只提出关闭意图。二次识别耗时不能反过来使已准入的意图过期；
-        // 最终发送仍由下方同会话的后继新帧决定，其他动作保持原双帧约束。
+        // Escape和专用退出秘境的旧帧只提出意图，最终发送由同会话后继新帧决定。
+        // 二次识别不反过来使已准入的意图过期；其他动作保持原双帧约束。
         var escapeProposed = action == UiAction.Escape && observed.SourceBound && observed.HasUsableEvidence &&
             observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) && observed.CanEscape;
         if (action == UiAction.Escape && !escapeProposed) return Task.FromResult(false);
+        var domainExitProposed = action == UiAction.ConfirmDomainExit && observed.SourceBound &&
+            observed.CanConfirmDomainExit && observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge);
+        if (action == UiAction.ConfirmDomainExit && !domainExitProposed) return Task.FromResult(false);
         using var image = _io.Capture();
         var current = ReadCurrent(image);
         if (UiOperation.Current is { } operation && Enum.TryParse<UiTarget>(operation.Expected, out var target))
             operation.Observe(current, target, "pre-input");
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
-        if (!observed.SourceBound || (action == UiAction.Escape ? !escapeProposed : !observed.HasUsableEvidence) || !current.HasUsableEvidence ||
+        if (!observed.SourceBound || (!escapeProposed && !domainExitProposed && !observed.HasUsableEvidence) || !current.HasUsableEvidence ||
             observed.SourceStamp.SessionId != current.SourceStamp.SessionId ||
             (_inputFence is { } fence && !fence.Accepts(current.SourceStamp))) return Task.FromResult(false);
         bool Completed(bool applied)
@@ -172,9 +177,16 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                 return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitEscapeInput)));
             case UiAction.RequestDomainExit when observed.Matches(UiTarget.DomainMain) && current.Matches(UiTarget.DomainMain):
                 return Task.FromResult(Completed(_io.OtherAction(action, image, () => { })));
-            case UiAction.ConfirmDomainExit when observed.Prompt && observed.BlackConfirm && !observed.Revive
-                && current.Prompt && current.BlackConfirm && !current.Revive:
-                return Task.FromResult(Completed(_io.OtherAction(action, image, () => { })));
+            case UiAction.ConfirmDomainExit when domainExitProposed && current.IsAfter(observed) && current.CanConfirmDomainExit:
+                void AdmitDomainExitInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!current.CanConfirmDomainExit || !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                        throw new InvalidOperationException("Domain exit source expired before native input.");
+                }
+                _io.Click(image, current.DomainExit.ConfirmBounds, AdmitDomainExitInput);
+                return Task.FromResult(Completed(true));
             default:
                 return Task.FromResult(false);
         }
