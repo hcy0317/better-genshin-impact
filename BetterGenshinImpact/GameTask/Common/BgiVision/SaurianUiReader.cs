@@ -24,8 +24,11 @@ internal static class SaurianUiReader
         if (Cv2.CountNonZero(orange) < bar.Width * bar.Height * .28) return false;
         if (!BrightAnchor(frame, "PaimonMenu", 235) && !BrightAnchor(frame, "FriendChat", 220)) return false;
         // 只匹配退出图标本体，避免灰态图标周围的大块世界背景主导相关度。
-        return Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianUiTemplates.Exit, binary: false) >= .85 &&
-            Match(pixels, new Rect(1275, 970, 75, 55), scale, SaurianUiTemplates.Aim, binary: true) >= .88;
+        if (Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianUiTemplates.Exit, binary: false) < .85) return false;
+        // S55两种独立布局各自还需对应的Space技能本体，不能仅凭通用退出图标放行。
+        return Match(pixels, new Rect(1275, 970, 75, 55), scale, SaurianUiTemplates.Aim, binary: true) >= .88 ||
+            Match(pixels, new Rect(1586, 963, 50, 58), scale, SaurianUiTemplates.Burrow, binary: false) >= .85 ||
+            Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.Spirit, binary: false) >= .85;
     }
 
     private static bool BrightAnchor(ImageRegion frame, string name, int minimum)
