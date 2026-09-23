@@ -279,6 +279,12 @@ namespace BetterGenshinImpact.GameTask
             return _failureScreenshotFrameCache.TryClone(DateTimeOffset.UtcNow, out age);
         }
 
+        internal GameCaptureFrame? TryCloneLatestCaptureFrame(out TimeSpan age)
+        {
+            var pixels = _failureScreenshotFrameCache.TryClone(DateTimeOffset.UtcNow, out age, out var stamp);
+            return pixels == null ? null : new GameCaptureFrame(pixels, stamp);
+        }
+
         public void Dispose()
         {
             var disposed = DisposeAsync().AsTask();
@@ -466,7 +472,7 @@ namespace BetterGenshinImpact.GameTask
 
                 try
                 {
-                    _failureScreenshotFrameCache.TryUpdate(bitmap, DateTimeOffset.UtcNow);
+                    _failureScreenshotFrameCache.TryUpdate(bitmap, DateTimeOffset.UtcNow, captureFrame!.Stamp);
                 }
                 catch (Exception cacheException)
                 {

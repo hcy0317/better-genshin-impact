@@ -1,10 +1,30 @@
 using BetterGenshinImpact.GameTask;
 using OpenCvSharp;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests;
 
 public class FailureScreenshotFrameCacheTests
 {
+    [Fact]
+    public void ThrottledCacheKeepsPixelsAndProducerStampTogetherWithoutRefreshingTime()
+    {
+        using var cache = new FailureScreenshotFrameCache(TimeSpan.FromSeconds(1));
+        using var pixels = new Mat(2, 2, MatType.CV_8UC3, new Scalar(1, 2, 3));
+        var producer = new CaptureFrameSource();
+        var first = producer.Next();
+        var updated = DateTimeOffset.UtcNow;
+        Assert.True(cache.TryUpdate(pixels, updated, first));
+        Assert.False(cache.TryUpdate(pixels, updated.AddMilliseconds(100), producer.Next()));
+        using var clone = cache.TryClone(updated.AddSeconds(4), out var age, out var stamp);
+        Assert.NotNull(clone);
+        Assert.Equal(first, stamp);
+        Assert.Equal(TimeSpan.FromSeconds(4), age);
+        cache.Clear();
+        Assert.Null(cache.TryClone(updated.AddSeconds(5), out _, out var cleared));
+        Assert.False(cleared.IsKnown);
+    }
+
     [Fact]
     public void CacheReturnsIndependentCloneOfLastAcceptedFrame()
     {

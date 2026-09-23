@@ -661,6 +661,7 @@ public partial class ScriptService : IScriptService
             {
                 await Task.Run(async () =>
                 {
+                    await using var startupEvidence = GameStartupWaitEvidence.Begin(TaskControl.Logger);
                     await Task.Delay(200);
                     var first = true;
                     var sw = Stopwatch.StartNew();
@@ -673,6 +674,12 @@ public partial class ScriptService : IScriptService
                     {
                         if (sw.Elapsed >= TimeSpan.FromMinutes(5))
                         {
+                            startupEvidence?.CaptureTimeout(() =>
+                            {
+                                var cached = TaskTriggerDispatcher.Instance().TryCloneLatestCaptureFrame(out var age);
+                                // CaptureRectArea接管克隆像素，诊断辅助负责释放；不签发新采集时间。
+                                return (cached == null ? null : new CaptureContent(cached, 0, 0).CaptureRectArea, age);
+                            }, sw.Elapsed, lastObservedUi);
                             throw new TimeoutException(
                                 "自动进入游戏超时：5 分钟内未到达原神主界面，请检查开门页、登录弹窗或网络状态。");
                         }
@@ -702,7 +709,7 @@ public partial class ScriptService : IScriptService
                             continue;
                         }
 
-                        var latestFrame = TaskTriggerDispatcher.Instance().TryCloneLatestFrame(out lastCachedFrameAge);
+                        var latestFrame = TaskTriggerDispatcher.Instance().TryCloneLatestCaptureFrame(out lastCachedFrameAge);
                         if (latestFrame == null)
                         {
                             lastObservedUi = "无可用缓存帧";
@@ -722,6 +729,8 @@ public partial class ScriptService : IScriptService
                                 : isDomain
                                     ? "秘境界面"
                                     : "未识别启动界面";
+                        startupEvidence?.Observe(imageRegion, isMainUi || isClosableUi || isDomain,
+                            sw.Elapsed, lastCachedFrameAge, lastObservedUi);
                         if (isMainUi || isClosableUi || isDomain)
                         {
                             return;
