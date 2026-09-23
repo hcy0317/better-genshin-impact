@@ -457,22 +457,30 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         {
             var held = _heldE;
             var previous = _heldESource;
+            CombatActionInterruptedException Rejected(string reason)
+            {
+                action.DiagnosticReason = $"held-e:{reason} actor={actor.Name} previous={previous.SessionId}/{previous.Sequence} source={_capture?.FrameStamp.SessionId}/{_capture?.FrameStamp.Sequence} allowSame={allowSameSource} releasing={release}";
+                return new CombatActionInterruptedException();
+            }
             // 松键先行，即使随后的身份/控制核验失败也不能继续持有。
             if (release) ReleaseHeldEOwner();
             if (held == null || held.Battle != action.BattleId || held.Span != action.HeldESpanId ||
-                held.Actor != actor.Name || io.HeldEPhysicalKey() != held.Key) throw new CombatActionInterruptedException();
+                held.Actor != actor.Name) throw Rejected("owner-mismatch");
+            if (io.HeldEPhysicalKey() != held.Key) throw Rejected("mapping-changed");
             ClearCapture();
             var frame = CurrentFrame();
-            if (frame == null || !previous.IsKnown ||
-                !(allowSameSource && frame.FrameStamp == previous) && !frame.FrameStamp.IsAfter(previous) ||
-                frame.FrameStamp.SessionId != previous.SessionId ||
-                !frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) || !io.IsCombatHud(frame) ||
-                ReadActive(frame) != actor.Index) throw new CombatActionInterruptedException();
+            if (frame == null || !previous.IsKnown) throw Rejected("source-missing");
+            if (!(allowSameSource && frame.FrameStamp == previous) && !frame.FrameStamp.IsAfter(previous))
+                throw Rejected("source-not-advanced");
+            if (frame.FrameStamp.SessionId != previous.SessionId) throw Rejected("source-session-changed");
+            if (!frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge)) throw Rejected("source-stale");
+            if (!io.IsCombatHud(frame)) throw Rejected("hud-unavailable");
+            if (ReadActive(frame) != actor.Index) throw Rejected("actor-unconfirmed");
             var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
             if (!control.IsObserved || control.KeyboardBreakoutRequested || control.Motion is MotionStatus.Climb or MotionStatus.Fly)
-                throw new CombatActionInterruptedException();
+                throw Rejected("control-unavailable");
             if (!frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge))
-                throw new CombatActionInterruptedException();
+                throw Rejected("recognition-stale");
             CombatActionScope.Current?.Check();
             if (!release) _heldESource = frame.FrameStamp;
             _confirmedSource = frame.FrameStamp;
@@ -1724,7 +1732,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             catch (CombatActionInterruptedException)
             {
                 ReleaseHeldEOwner();
-                action.DiagnosticReason = _captureFailureReason ?? $"动作被维护/条件/预算边界中断，剩余预算 {action.RemainingBudget:F3}s";
+                if (action.DiagnosticReason?.StartsWith("held-e:", StringComparison.Ordinal) != true)
+                    action.DiagnosticReason = _captureFailureReason ?? $"动作被维护/条件/预算边界中断，剩余预算 {action.RemainingBudget:F3}s";
                 // 先在本场仍拥有输入时结束持续键/宏，再让调度器转移；不伪造动作完成。
                 io.ReleaseInput();
                 if (action.HeldESpanId != null) return CombatFlowResult.Failed;

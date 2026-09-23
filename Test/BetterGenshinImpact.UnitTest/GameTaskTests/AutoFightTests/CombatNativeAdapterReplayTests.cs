@@ -306,8 +306,9 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     public async Task PairedRawERejectsInvalidHeldFrames(string fault)
     {
         var clock = new FakeTimeProvider();
+        var logger = new SourceIdentityLogger();
         using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(0.1)"))
-            { Actors = [new("枫原万叶", 1)], HeldFrameFault = fault };
+            { Actors = [new("枫原万叶", 1)], HeldFrameFault = fault, Logger = logger };
         io.SetFrontActor("枫原万叶");
         using var runner = NativeCombatFlowRunner.Create(
             CombatScriptParser.ParseLineCommands("keydown(E),wait(1.5),keyup(E)", "枫原万叶"), io, false);
@@ -316,6 +317,8 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Contains(io.KeyEvents, x => x.Up);
         Assert.Empty(io.Selections);
         Assert.False(io.HoldingInput);
+        runner.Dispose();
+        Assert.Contains(logger.Messages, message => message.Contains("held-e:"));
     }
 
     [Theory]

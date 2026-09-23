@@ -502,7 +502,7 @@ public static class AvatarRecognition
                     // 只消费宿主按事件登记的有界取证请求，复用本次已有帧；正常帧不复制/落盘。
                     DiagnosticEvidenceScope.Current?.CaptureRequestedFrames(battleId.ToString("N"), capture);
 
-                    // 不在主界面时跳过本轮（避免菜单/地图/对话等界面下误操作）
+                    // 使用现有LivingHud识别大世界/秘境；不恢复上游被动线程中的输入操作
                     if (!Bv.IsCombatHud(capture))
                     {
                         lastControl = default;
