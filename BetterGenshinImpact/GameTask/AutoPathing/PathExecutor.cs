@@ -852,6 +852,7 @@ public partial class PathExecutor
         DateTime beyondAngleStartTime = DateTime.MinValue;
         var hurryOnState = new HurryOnState();
         var flightObserved = false;
+        var plainFlightTransit = waypoint.Type == WaypointType.Path.Code && string.IsNullOrWhiteSpace(waypoint.Action);
         var climbWindow = new PathClimbProgressWindow();
         CaptureFrameStamp lastMoveFrame = default;
 
@@ -901,9 +902,14 @@ public partial class PathExecutor
             if (waypoint.MoveMode == MoveModeEnum.Fly.Code && observation.Valid && observation.Motion == MotionStatus.Fly)
                 flightObserved = true;
             Debug.WriteLine($"接近目标点中，距离为{distance}");
-            if (distance < 4 && (waypoint.MoveMode != MoveModeEnum.Fly.Code || flightObserved && observation.Valid))
+            if (distance < 4 && (waypoint.MoveMode != MoveModeEnum.Fly.Code ||
+                observation.Valid && (flightObserved || plainFlightTransit)))
             {
                 _moveIo.Logger.LogDebug("到达路径点附近");
+                if (waypoint.MoveMode == MoveModeEnum.Fly.Code)
+                    _moveIo.Logger.LogDebug("PATH_FLY_ARRIVAL node={Node} type={Type} action={Action} distance={Distance:F2} direct={Direct} source={Session}/{Sequence} observedFlight={Flight} plainTransit={PlainTransit}",
+                        waypoint.Id, waypoint.Type, waypoint.Action, distance, located.IsDirect,
+                        observation.Stamp.SessionId, observation.Stamp.Sequence, flightObserved, plainFlightTransit);
                 break;
             }
 
