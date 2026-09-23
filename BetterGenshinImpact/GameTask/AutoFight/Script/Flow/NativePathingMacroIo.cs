@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Script.Dependence;
@@ -16,13 +17,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingMacroInput>? transport = null) : IPathingMacroIo
 {
     private static readonly InputSimulator CleanupInput = new();
+    private readonly HashSet<string> _unknownReported = new(StringComparer.Ordinal);
     public TimeProvider Clock => TimeProvider.System;
     public CombatInputCoordinator Coordinator => NativeCombatIo.Coordinator;
     public User32.VK Map(User32.VK key) => KeyBindingsSettingsPageViewModel.MappingKey(key);
     public Task Delay(int milliseconds, CancellationToken ct) => TaskControl.Delay(milliseconds, ct);
     public IDisposable BeginExclusive() => AvatarRecognition.BeginExclusiveOperation(allowPassiveObservation: false);
 
-    public PathingMacroObservation Observe()
+    public PathingMacroObservation Observe(string phase = "boundary")
     {
         using var frame = TaskControl.CaptureToRectArea();
         var scene = SaurianUiReader.IsKnownTransformation(frame) ? PathingMacroScene.Transformed :
@@ -31,10 +33,15 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
         {
             try
             {
-                DiagnosticEvidenceScope.Current?.TryCapture(frame, "pathing-macro:" + context(), "unknown-scene",
-                    "原帧场景未准入匿名物理宏；" + context(), TaskControl.Logger);
-                TaskControl.Logger.LogWarning("PATH_RAW_SCENE_UNKNOWN {Context} source={Session}/{Sequence}",
-                    context(), frame.FrameStamp.SessionId, frame.FrameStamp.Sequence);
+                var identity = context();
+                if (_unknownReported.Add(identity + ":" + phase))
+                {
+                    DiagnosticEvidenceScope.Current?.TryCapture(frame, "pathing-macro:" + identity, phase + "-unknown-scene",
+                        "原帧场景未准入匿名物理宏；" + identity, TaskControl.Logger);
+                    TaskControl.Logger.LogWarning("PATH_RAW_SCENE_UNKNOWN {Context} phase={Phase} source={Session}/{Sequence} sourceAgeMs={Age:F1}",
+                        identity, phase, frame.FrameStamp.SessionId, frame.FrameStamp.Sequence,
+                        frame.FrameStamp.IsKnown ? Clock.GetElapsedTime(frame.FrameStamp.CapturedTimestamp).TotalMilliseconds : -1);
+                }
             }
             catch { /* 诊断不能改变准入。 */ }
         }
