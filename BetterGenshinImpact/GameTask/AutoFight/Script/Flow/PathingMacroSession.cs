@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Helpers;
@@ -19,7 +20,7 @@ internal interface IPathingMacroIo
 {
     TimeProvider Clock { get; }
     CombatInputCoordinator Coordinator { get; }
-    PathingMacroObservation Observe();
+    PathingMacroObservation Observe(string phase = "boundary");
     User32.VK Map(User32.VK key);
     CombatBattleHostInputResult Send(PathingMacroInput input, Action admit);
     CombatBattleHostInputResult Release(PathingMacroInput input) => Send(input, () => { });
@@ -36,6 +37,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
     private CaptureFrameStamp _entry;
     private long _fence;
     private bool _disposed, _poisoned;
+    private ExceptionDispatchInfo? _releaseFailure;
     private bool _middleHeld;
     internal bool HasTail => _held.Count != 0;
     private bool _navigation;
@@ -67,7 +69,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
     {
         if (!HasTail) return;
         try { Check(_deadline, ct); }
-        catch { Release(); throw; }
+        catch { if (!_poisoned) Release(); throw; }
     }
 
     internal async Task<CombatExecutionResult> ExecuteAsync(LegacyPathingMacroPlan plan,
@@ -100,7 +102,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             return new(completed ? CombatExecutionKind.Completed : CombatExecutionKind.Skipped,
                 completed ? "PATHING_MACRO_INPUT_COMPLETED" : "ALL_OPTIONAL_ACTIONS_SKIPPED");
         }
-        catch { Release(); throw; }
+        catch { if (!_poisoned) Release(); throw; }
     }
 
     private async Task<CombatExecutionResult> ExecuteRawAsync(LegacyPathingMacroPlan.Segment segment,
@@ -110,10 +112,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         _lease = io.Coordinator.TryAcquire(Guid.NewGuid(), ReleasePhysical)
             ?? throw new InvalidOperationException("路径宏无法取得输入所有权");
         using var exclusive = io.BeginExclusive();
-        var observation = io.Observe();
-        Check(_deadline, ct);
-        if (observation.Scene == PathingMacroScene.Unknown || !observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)))
-            throw new InvalidOperationException("路径宏入口场景未知或帧过期");
+        var observation = await WaitForSceneAsync("entry", null, ct);
         _entry = observation.Source;
         _fence = io.Clock.GetTimestamp();
         foreach (var command in segment.Commands)
@@ -144,25 +143,63 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             else Key(User32Helper.ToVk(command.Args![0]), command.Method == Method.KeyDown ? PathingMacroInputKind.KeyDown :
                 PathingMacroInputKind.KeyUp, ct);
         }
+        // 旧NativeRunner在片段完成时释放X。保留这一既有语义，不声称跨挖矿节点持X。
+        if (_held.TryGetValue(User32.VK.VK_X, out var heldX))
+        {
+            try
+            {
+                if (!_lease.TryReleaseInput(() =>
+                {
+                    Exception? failure = null;
+                    try
+                    {
+                        var released = io.Release(new(PathingMacroInputKind.KeyUp, heldX));
+                        _fence = Math.Max(_fence, released.ObservableAfterTimestamp ?? io.Clock.GetTimestamp());
+                        if (released.Status != CombatBattleHostInputStatus.Sent || released.Error != null)
+                            failure = new InvalidOperationException("路径宏尾X释放未确认", released.Error);
+                    }
+                    catch (Exception error) { failure = error; }
+                    _held.Remove(User32.VK.VK_X); // 不重放不确定的X-up；仍须清理其他键。
+                    if (failure != null)
+                    {
+                        try { ReleasePhysical(); }
+                        catch (Exception cleanup) { failure = new AggregateException(failure, cleanup); }
+                        throw failure; // Coordinator保留失败所有权，禁止交接。
+                    }
+                })) throw new InvalidOperationException("尾X清理未取得输入所有权");
+            }
+            catch (Exception error) { _poisoned = true; _releaseFailure = ExceptionDispatchInfo.Capture(error); throw; }
+        }
         if (_held.Keys.Any(key => key != User32.VK.VK_W))
             throw new InvalidOperationException("路径宏只允许未配对的尾W交给导航");
         var fence = new CaptureFrameFence(_entry, _fence);
         // 用户指定游戏有30~60ms响应延迟；已有显式wait可覆盖，不每键加识图等待。
         var responseDelay = 60 - io.Clock.GetElapsedTime(_fence).TotalMilliseconds;
         if (responseDelay > 0) await WaitAsync((int)Math.Ceiling(responseDelay), ct);
+        await WaitForSceneAsync("post", fence, ct);
+        if (!HasTail) Release();
+        return new(CombatExecutionKind.Completed, "RAW_INPUT_COMPLETED_NOT_SKILL_CONFIRMATION");
+    }
+
+    private async Task<PathingMacroObservation> WaitForSceneAsync(string phase, CaptureFrameFence? fence, CancellationToken ct)
+    {
+        var session = fence?.Before.SessionId ?? Guid.Empty;
         while (true)
         {
             Check(_deadline, ct);
-            var after = io.Observe();
-            if (fence.Accepts(after.Source) && after.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)))
+            var observation = io.Observe(phase);
+            Check(_deadline, ct);
+            if (observation.Source.IsKnown)
             {
-                if (after.Scene == PathingMacroScene.Unknown) throw new InvalidOperationException("路径宏后场景未知，不重放输入");
-                break;
+                if (session != Guid.Empty && observation.Source.SessionId != session)
+                    throw new InvalidOperationException("路径宏待稳期间采集源改变，不继续输入");
+                session = observation.Source.SessionId;
             }
-            await WaitAsync(10, ct);
+            if (observation.Scene != PathingMacroScene.Unknown && observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
+                (fence == null || fence.Value.Accepts(observation.Source))) return observation;
+            // 只等稳定新画面；不延长期限，也不重发已经执行的原宏。
+            await WaitAsync(100, ct);
         }
-        if (!HasTail) Release();
-        return new(CombatExecutionKind.Completed, "RAW_INPUT_COMPLETED_NOT_SKILL_CONFIRMATION");
     }
 
     private static int Milliseconds(string value)
@@ -215,7 +252,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         }
         else await io.Delay(milliseconds, ct);
         }
-        catch { Release(); throw; }
+        catch { if (!_poisoned) Release(); throw; }
     }
 
     private long Deadline(double seconds) => checked(io.Clock.GetTimestamp() + (long)(seconds * io.Clock.TimestampFrequency));
@@ -223,15 +260,20 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
     {
         ct.ThrowIfCancellationRequested();
         TaskExecutionScope.ThrowIfFailed();
+        if (_poisoned) _releaseFailure?.Throw();
         if (_poisoned || io.Clock.GetTimestamp() >= deadline) throw new InvalidOperationException("路径宏输入失效或原期限耗尽，不重放");
     }
 
     internal void Release()
     {
-        if (_poisoned) throw new InvalidOperationException("路径宏释放结果不确定，输入所有权仍被阻断");
+        if (_poisoned)
+        {
+            _releaseFailure?.Throw();
+            throw new InvalidOperationException("路径宏释放结果不确定，输入所有权仍被阻断");
+        }
         if (_lease == null) return;
         try { _lease.Dispose(); _lease = null; _navigation = false; }
-        catch { _poisoned = true; throw; }
+        catch (Exception error) { _poisoned = true; _releaseFailure = ExceptionDispatchInfo.Capture(error); throw; }
     }
 
     private void ReleasePhysical()

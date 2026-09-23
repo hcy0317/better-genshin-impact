@@ -21,7 +21,8 @@ internal sealed record LegacyPathingMacroPlan(IReadOnlyList<LegacyPathingMacroPl
         if (script.HasFlowCommands) throw new InvalidOperationException("增强策略不能分段为旧路径宏");
         var available = LegacyCombatFlowAdapter.ValidateParty(script.CombatCommands, party,
             CombatScriptExecutionMode.LegacyPartyTemplate);
-        var commands = script.CombatCommands.Where(command => command.Name == CombatScriptParser.CurrentAvatarName ||
+        var preferred = LootGatheringPreference.Select(script.CombatCommands, available);
+        var commands = preferred.Where(command => command.Name == CombatScriptParser.CurrentAvatarName ||
             available.Contains(command.Name)).ToArray();
         var segments = new List<Segment>();
         for (var index = 0; index < commands.Length;)

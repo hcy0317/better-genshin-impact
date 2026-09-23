@@ -17,6 +17,19 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class RecordedSaurianSceneTests
 {
     [OfflineNativeDecisionFact]
+    public void RecordedS54GreyExitGlyphIsKnownButAirborneMissingReticleIsNot()
+    {
+        var paths = Environment.GetEnvironmentVariable("BGI_S54_SAURIAN_FRAMES")?.Split('|') ?? [];
+        Assert.Equal(3, paths.Length);
+        for (var i = 0; i < paths.Length; i++)
+        {
+            using var frame = new ImageRegion(Cv2.ImRead(paths[i]), 0, 0);
+            Assert.False(frame.SrcMat.Empty());
+            Assert.Equal(i < 2, SaurianUiReader.IsKnownTransformation(frame));
+        }
+    }
+
+    [OfflineNativeDecisionFact]
     public async Task FarLocationRecoveryReleasesTailBeforeAnyRecoveryUiInput()
     {
         using var pixels = Cv2.ImRead(Environment.GetEnvironmentVariable("BGI_SAURIAN_PROBE_FRAMES")!.Split('|')[0]);

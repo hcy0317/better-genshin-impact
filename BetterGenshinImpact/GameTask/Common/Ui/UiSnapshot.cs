@@ -54,11 +54,12 @@ internal sealed record UiSnapshot(long FrameId)
     public bool MenuBack { get; init; }
     public bool Crafting { get; init; }
     public bool Handbook { get; init; }
+    public bool TimeSetting { get; init; }
     public bool Cannon { get; init; }
     public DomainTipObservation DomainTip { get; init; }
     public bool CanDismissDomainTip => HasUsableEvidence && DomainTip.IsFor(SourceStamp) && DomainTip.CanDismiss &&
         !BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive && !FullPartyDefeat && !BlackConfirm &&
-        !MenuBack && !Crafting && !Handbook && !Cannon && !ExitDoor && !Closable;
+        !MenuBack && !Crafting && !Handbook && !TimeSetting && !Cannon && !ExitDoor && !Closable;
     public UiWorldObservation? World { get; init; }
 
     public UiReadiness PartyEntryReadiness()
@@ -76,12 +77,12 @@ internal sealed record UiSnapshot(long FrameId)
     }
 
     public bool MainReady => HasUsableEvidence && MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
-        && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook && !Cannon && !DomainTip.IsCandidate;
+        && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook && !TimeSetting && !Cannon && !DomainTip.IsCandidate;
     public bool MapReady => HasUsableEvidence && BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
-        && !FullPartyDefeat && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook;
+        && !FullPartyDefeat && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook && !TimeSetting;
     // Candidate text alone never adds an escape permission. Existing positive
     // page evidence still retains its original closing action over background text.
-    public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || Cannon);
+    public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || TimeSetting || Cannon);
     public bool Matches(UiTarget target) => HasUsableEvidence && !FullPartyDefeat && target switch
     {
         UiTarget.Main => MainReady,
@@ -99,6 +100,6 @@ internal sealed record UiSnapshot(long FrameId)
     public int Signature => (MainHud ? 1 : 0) | (BigMap ? 2 : 0) | (Party ? 4 : 0)
         | (PartyList ? 8 : 0) | (Talk ? 16 : 0) | (Prompt ? 32 : 0) | (Revive ? 64 : 0)
         | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0) | (Cannon ? 32768 : 0)
-        | (DomainTip.IsCandidate ? 65536 : 0) | (DomainTip.CanDismiss ? 131072 : 0);
-    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},cannon={Cannon},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason}";
+        | (DomainTip.IsCandidate ? 65536 : 0) | (DomainTip.CanDismiss ? 131072 : 0) | (TimeSetting ? 262144 : 0);
+    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},timeSetting={TimeSetting},cannon={Cannon},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason}";
 }

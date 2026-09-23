@@ -12,6 +12,50 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class LegacyPathingMacroTests
 {
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task TransientUnknownAtBoundaryWaitsWithoutReplayingMacro(int unknownAt)
+    {
+        var io = new MacroReplay { UnknownAt = unknownAt, UnknownCount = 2 };
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("keypress(e)", false), ["钟离"]), (_, _) => throw new Exception(), default);
+        Assert.Equal(CombatExecutionKind.Completed, result.Kind);
+        Assert.Equal(new[] { "KeyDown:VK_E", "KeyUp:VK_E" }, io.Inputs);
+        Assert.True(io.Observations >= 4);
+        Assert.InRange((io.Time.GetUtcNow() - io.Start).TotalSeconds, .29, 1);
+    }
+
+    [Fact]
+    public async Task TrailingXCleanupFailureBlocksOwnerWithoutRepeatingUnknownRelease()
+    {
+        var original = new IOException("original X-up failure");
+        var io = new MacroReplay { FaultAt = 2, Fault = CombatBattleHostInputStatus.Unknown, FaultError = original };
+        var session = new PathingMacroSession(io);
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("keydown(x)", false), ["钟离"]), (_, _) => throw new Exception(), default));
+        Assert.Same(original, failure.InnerException);
+        Assert.Equal(new[] { "KeyDown:VK_X", "KeyUp:VK_X" }, io.Inputs);
+        Assert.Null(io.Coordinator.TryAcquire(Guid.NewGuid(), () => { }));
+        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => session.Release()));
+        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => session.Dispose()));
+    }
+
+    [Fact]
+    public async Task Recorded07TrailingXUsesLegacyFragmentCleanupInsteadOfAbortingRoute()
+    {
+        var io = new MacroReplay();
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("keydown(x)", false), ["钟离"]), (_, _) => throw new Exception(), default);
+        Assert.Equal(CombatExecutionKind.Completed, result.Kind);
+        Assert.Equal(new[] { "KeyDown:VK_X", "KeyUp:VK_X" }, io.Inputs);
+        Assert.False(session.HasTail);
+        using var next = io.Coordinator.TryAcquire(Guid.NewGuid(), () => { });
+        Assert.NotNull(next);
+    }
+
     [Fact]
     public void NativeCleanupStillSubmitsOnlyUpAfterRealTaskScopeFailure()
     {
@@ -97,7 +141,10 @@ public class LegacyPathingMacroTests
         {
             var script = CombatScriptParser.ParseContext(item.GetProperty("script").GetString()!, false);
             var plan = LegacyPathingMacroPlan.Create(script, ["枫原万叶", "琴", "芙宁娜"]);
-            Assert.Equal(script.CombatCommands, plan.Segments.SelectMany(segment => segment.Commands));
+            var planned = plan.Segments.SelectMany(segment => segment.Commands).ToArray();
+            // 用户新规则只抑制相邻的琴聚物替代块，匿名/万叶及其他角色顺序保持。
+            Assert.Equal(script.CombatCommands.Where(command => command.Name != "琴"), planned.Where(command => command.Name != "琴"));
+            if (script.CombatCommands.Any(command => command.Name == "枫原万叶")) Assert.DoesNotContain(planned, command => command.Name == "琴");
             var io = new MacroReplay();
             using var session = new PathingMacroSession(io);
             var result = await session.ExecuteAsync(plan, (commands, _) =>
@@ -209,23 +256,26 @@ public class LegacyPathingMacroTests
         internal Func<User32.VK, User32.VK> Mapping = key => key;
         internal int FaultAt;
         internal CombatBattleHostInputStatus Fault;
+        internal Exception? FaultError;
         internal Action? AfterDelay;
         internal int UnknownAt;
+        internal int UnknownCount = int.MaxValue;
         private readonly CaptureFrameSource _source;
         internal CaptureFrameStamp NextFrame() { Time.Advance(TimeSpan.FromMilliseconds(1)); return _source.Next(); }
         public MacroReplay() { _source = new(Time); Start = Time.GetUtcNow(); }
-        public PathingMacroObservation Observe()
+        public PathingMacroObservation Observe(string phase = "boundary")
         {
             Observations++;
             Time.Advance(TimeSpan.FromMilliseconds(1));
-            return new(Observations == UnknownAt ? PathingMacroScene.Unknown : PathingMacroScene.Transformed, _source.Next());
+            var unknown = UnknownAt > 0 && Observations >= UnknownAt && Observations - UnknownAt < UnknownCount;
+            return new(unknown ? PathingMacroScene.Unknown : PathingMacroScene.Transformed, _source.Next());
         }
         public User32.VK Map(User32.VK key) => Mapping(key);
         public CombatBattleHostInputResult Send(PathingMacroInput input, Action admit)
         {
             admit();
             Inputs.Add($"{input.Kind}:{input.Key}");
-            if (Inputs.Count == FaultAt) return new(Fault, Reason: "simulated-native-failure");
+            if (Inputs.Count == FaultAt) return new(Fault, Reason: "simulated-native-failure", Error: FaultError);
             return new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp())
             { NativeRequested = 1, NativeSubmitted = 1, ObservableAfterTimestamp = Clock.GetTimestamp() };
         }

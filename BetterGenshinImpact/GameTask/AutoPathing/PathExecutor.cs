@@ -1363,6 +1363,8 @@ public partial class PathExecutor
 
         var stepsTaken = 0;
         var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
+        var approachDiagnostics = new PathApproachDiagnostics(waypoint.PathingTaskFileName,
+            $"segment={CurWaypoints.Item1 + 1} node={waypoint.Id} move={waypoint.MoveMode} action={waypoint.Action}");
         while (!ct.IsCancellationRequested)
         {
             stepsTaken++;
@@ -1377,6 +1379,7 @@ public partial class PathExecutor
 
             position = await GetPosition(screen, waypoint);
             var distance = Navigation.GetDistance(waypoint, position);
+            approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, Logger);
             if (distance < 2)
             {
                 Logger.LogDebug("已到达路径点");
@@ -1402,9 +1405,9 @@ public partial class PathExecutor
                 continue;
             }
             // 小碎步接近
-            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
-            Thread.Sleep(60);
-            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+            approachDiagnostics.RecordPulse(PathApproachDiagnostics.RunPulse(
+                () => Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown),
+                () => Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp), Thread.Sleep));
             // Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_W).Sleep(60).KeyUp(User32.VK.VK_W);
             await Delay(20, ct);
         }

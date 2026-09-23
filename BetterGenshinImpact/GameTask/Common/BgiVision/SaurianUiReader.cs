@@ -23,7 +23,8 @@ internal static class SaurianUiReader
         Cv2.InRange(bar, new Scalar(40, 194, 245, 0), new Scalar(60, 214, 255, 255), orange);
         if (Cv2.CountNonZero(orange) < bar.Width * bar.Height * .28) return false;
         if (!BrightAnchor(frame, "PaimonMenu", 235) && !BrightAnchor(frame, "FriendChat", 220)) return false;
-        return Match(pixels, new Rect(1800, 925, 110, 85), scale, SaurianUiTemplates.Exit, binary: false) >= .85 &&
+        // 只匹配退出图标本体，避免灰态图标周围的大块世界背景主导相关度。
+        return Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianUiTemplates.Exit, binary: false) >= .85 &&
             Match(pixels, new Rect(1275, 970, 75, 55), scale, SaurianUiTemplates.Aim, binary: true) >= .88;
     }
 
