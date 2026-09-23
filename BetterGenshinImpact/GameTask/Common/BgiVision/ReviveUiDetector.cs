@@ -94,15 +94,17 @@ internal sealed class ReviveUiDetector(
         using var paimon = image.Find(ElementRecognition.Get("PaimonMenu", image));
         if (HasBrightAnchor(image, paimon)) return true;
         using var chat = image.Find(ElementRecognition.Get("FriendChat", image));
-        return HasBrightAnchor(image, chat);
+        // 正常聊天图标的白色前景可为约230；维护公告遮住派蒙时仍须可作备用锚点。
+        // 只调整已匹配的聊天图标，保留血条、确认弹窗和像素数量检查。
+        return HasBrightAnchor(image, chat, 220);
     }
 
-    private static bool HasBrightAnchor(ImageRegion image, Region anchor)
+    private static bool HasBrightAnchor(ImageRegion image, Region anchor, int minimumBrightness = 235)
     {
         if (!anchor.IsExist()) return false;
         using var area = image.DeriveCrop(new Rect(anchor.X, anchor.Y, anchor.Width, anchor.Height));
         using var white = new Mat();
-        Cv2.InRange(area.SrcMat, new Scalar(235, 235, 235, 0), Scalar.All(255), white);
+        Cv2.InRange(area.SrcMat, new Scalar(minimumBrightness, minimumBrightness, minimumBrightness, 0), Scalar.All(255), white);
         // 归一化模板匹配可能命中弹窗后的暗化图标；只有实际白色前景仍可见才授予HUD证据。
         return Cv2.CountNonZero(white) >= Math.Max(4, anchor.Width * anchor.Height / 20);
     }
