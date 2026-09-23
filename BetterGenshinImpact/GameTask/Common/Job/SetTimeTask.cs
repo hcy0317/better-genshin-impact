@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Simulator;
@@ -7,6 +8,8 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.View.Drawable;
+using BetterGenshinImpact.GameTask.Common.Ui;
+using Fischless.WindowsInput;
 using Microsoft.Extensions.Logging;
 using Vanara.PInvoke;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
@@ -20,84 +23,56 @@ public class SetTimeTask
     private const double CenterY = 501.6;
 
     private readonly ReturnMainUiTask _returnMainUiTask = new();
+    private readonly SetTimeFlowIo? _io;
+    public SetTimeTask() { }
+    internal SetTimeTask(SetTimeFlowIo io) => _io = io;
 
     public async Task Start(int hour, int minute, CancellationToken ct, bool skipTimeAdjustmentAnimation = false)
     {
         try
         {
-            await _returnMainUiTask.Start(ct);
             await DoOnce(hour, minute, ct, skipTimeAdjustmentAnimation);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception e)
         {
-            Logger.LogDebug(e, "设置时间异常");
-            Logger.LogError("设置时间异常: {Msg}", e.Message);
+            try { (_io?.Logger ?? Logger).LogError(e, "设置时间异常，保留失败：{Msg}", e.Message); } catch { }
+            throw;
         }
         finally
         {
-            VisionContext.Instance().DrawContent.ClearAll();
+            if (_io == null) { try { VisionContext.Instance().DrawContent.ClearAll(); } catch { } }
         }
     }
 
     public async Task DoOnce(int hour, int minute, CancellationToken ct, bool skipTimeAdjustmentAnimation = false)
     {
-        // 半径
-        const int r1 = 30;
-        const int r2 = 150;
-        const int r3 = 300;
-        const int stepDuration = 50;
-        int h = (int)Math.Floor(hour + minute / 60.0);
-        int m = hour * 60 + minute - h * 60;
-        h = ((h % 24) + 24) % 24;
-        Logger.LogInformation($"设置时间到 {h} 点 {m} 分");
-        Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-        await Delay(800, ct);
-        GameCaptureRegion.GameRegion1080PPosClick(50, 700);
-        await Delay(900, ct);
-        await SetTime(h, m, r1, r2, r3, stepDuration, ct);
-        await Delay(100, ct);
-        GameCaptureRegion.GameRegion1080PPosMove(1500, 1000);
-        await Delay(300, ct);
-        Simulation.SendInput.Mouse.LeftButtonClick();
-        await Delay(7, ct);
-        
-        if (skipTimeAdjustmentAnimation)
-        {
-            // 跳过调整动画
-            await Delay(10, ct);
-            await CancelAnimation(ct);
-            await Delay(1010, ct);
-            GameCaptureRegion.GameRegion1080PPosClick(45, 715);
-            await Delay(100, ct);
-            GameCaptureRegion.GameRegion1080PPosClick(45, 715);
-            await Delay(200, ct);
-            await _returnMainUiTask.Start(ct);
-            // 跳过动画不总能成功
-            using var capture = CaptureToRectArea();
-            if (Bv.IsInMainUi(capture))
-            {
-                return;
-            }
-        }
-        await Delay(3000, ct);
-        // 出现X的时候代表时间切换成功
-        await NewRetry.WaitForAction(() =>
-        {
-            using var ra = CaptureToRectArea();
-            using var closeButton = ra.Find(ElementRecognition.Get("PageCloseWhite", ra));
-            return closeButton.IsExist();
-        }, ct, 25);
-        await _returnMainUiTask.Start(ct);
+        await SetTimeFlow.ExecuteAsync(hour, minute, skipTimeAdjustmentAnimation, _io ?? CreateNativeIo(), ct);
     }
 
-    // 取消动画函数
-    private async Task CancelAnimation(CancellationToken ct)
+    private SetTimeFlowIo CreateNativeIo() => new()
     {
-        GameCaptureRegion.GameRegion1080PPosMove(200, 200);
-        Simulation.SendInput.Mouse.LeftButtonDown();
-        await Delay(10, ct);
-        Simulation.SendInput.Mouse.LeftButtonUp();
-    }
+        Logger = Logger,
+        ReturnMain = token => _returnMainUiTask.Start(token),
+        Open = async token =>
+        {
+            UiEscapeInput.Run(() => { token.ThrowIfCancellationRequested(); UiOperation.Current?.Check(); },
+                () => Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_ESCAPE),
+                () => Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_ESCAPE), Thread.Sleep);
+            await Delay(800, token);
+            await MouseClick(50, 700, 900, token);
+        },
+        Observe = () =>
+        {
+            using var frame = CaptureToRectArea();
+            var observation = TimeSettingUiReader.Read(frame);
+            return Bv.IsInPromptDialog(frame) ? observation with { Visible = false } : observation;
+        },
+        SetDial = (h, m, token) => SetTime(h, m, 30, 150, 300, 50, token),
+        Confirm = (admission, token) => MouseClick(1500, 1000, 0, token, admission),
+        SkipAnimation = token => MouseClick(200, 200, 100, token),
+        Delay = (ms, token) => TaskControl.Delay(ms, token)
+    };
 
     double[] GetPosition(double r, double index)
     {
@@ -105,13 +80,11 @@ public class SetTimeTask
         return [CenterX + r * Math.Cos(angle), CenterY + r * Math.Sin(angle)];
     }
 
-    async Task MouseClick(double x, double y, int stepDuration, CancellationToken ct)
+    async Task MouseClick(double x, double y, int stepDuration, CancellationToken ct, Action? admission = null)
     {
         GameCaptureRegion.GameRegion1080PPosMove(x, y);
         await Delay(50, ct);
-        Simulation.SendInput.Mouse.LeftButtonDown();
-        await Delay(50, ct);
-        Simulation.SendInput.Mouse.LeftButtonUp();
+        await HoldMouseAsync(() => Delay(50, ct), ct, admission);
         await Delay(stepDuration, ct);
     }
 
@@ -119,12 +92,50 @@ public class SetTimeTask
     {
         GameCaptureRegion.GameRegion1080PPosMove(x1, y1);
         await Delay(50, ct);
-        Simulation.SendInput.Mouse.LeftButtonDown();
-        await Delay(50, ct);
-        GameCaptureRegion.GameRegion1080PPosMove(x2, y2);
-        await Delay(50, ct);
-        Simulation.SendInput.Mouse.LeftButtonUp();
+        await HoldMouseAsync(async () =>
+        {
+            await Delay(50, ct);
+            GameCaptureRegion.GameRegion1080PPosMove(x2, y2);
+            await Delay(50, ct);
+        }, ct);
         await Delay(stepDuration, ct);
+    }
+
+    private static async Task HoldMouseAsync(Func<Task> body, CancellationToken ct, Action? admission = null)
+        => await HoldMouseAsync(body, () => Simulation.SendInput.Mouse.LeftButtonDown(),
+            () => Simulation.SendInput.Mouse.LeftButtonUp(), ct, admission);
+
+    internal static async Task HoldMouseAsync(Func<Task> body, Action down, Action up, CancellationToken ct, Action? admission = null)
+    {
+        var entered = false;
+        Exception? failure = null;
+        try
+        {
+            using (var capture = new InputDispatchCapture(() =>
+                { ct.ThrowIfCancellationRequested(); UiOperation.Current?.Check(); admission?.Invoke(); entered = true; }))
+            {
+                down();
+                if (capture.NativeCalls == 0 || capture.Requested <= 0 || capture.Submitted != capture.Requested || capture.Uncertain)
+                    throw new InvalidOperationException("调时按下缺少完整原生回执");
+            }
+            await body();
+        }
+        catch (Exception error) { failure = error; }
+        finally
+        {
+            if (entered)
+            {
+                try
+                {
+                    using var capture = new InputDispatchCapture();
+                    up();
+                    if (capture.NativeCalls == 0 || capture.Requested <= 0 || capture.Submitted != capture.Requested || capture.Uncertain)
+                        throw new InvalidOperationException("调时松键缺少完整原生回执");
+                }
+                catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }
+            }
+        }
+        if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
     async Task SetTime(int hour, int minute, int r1, int r2, int r3, int stepDuration, CancellationToken ct)

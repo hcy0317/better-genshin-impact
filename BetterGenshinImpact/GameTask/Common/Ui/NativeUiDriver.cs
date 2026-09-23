@@ -87,6 +87,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             snapshot = snapshot with { Cannon = CannonUiReader.Read(image, ocr ?? OcrFactory.Paddle).CanExit };
         if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
             snapshot = snapshot with { Handbook = HandbookUiRecognition.Read(image, ocr) };
+        if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
+            snapshot = snapshot with { TimeSetting = TimeSettingUiReader.Read(image, ocr).Visible };
         if (inspectWorld && snapshot.MainReady && image.Width * 9 == image.Height * 16)
         {
             var reader = ocr ?? OcrFactory.Paddle;
