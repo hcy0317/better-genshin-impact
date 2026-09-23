@@ -26,7 +26,7 @@ internal sealed class NativeUiDriverIo
     internal Func<IOcrService> Ocr { get; init; } = null!;
     internal Func<DomainTipTexts> Texts { get; init; } = null!;
     internal Action<ImageRegion, Rect, Action> Click { get; init; } = null!;
-    internal Func<UiAction, ImageRegion, bool> OtherAction { get; init; } = null!;
+    internal Func<UiAction, ImageRegion, Action, bool> OtherAction { get; init; } = null!;
     internal Func<int, CancellationToken, Task> Delay { get; init; } = null!;
     internal TimeProvider Clock { get; init; } = null!;
     internal Func<IDisposable> BeginExclusive { get; init; } = null!;
@@ -79,7 +79,7 @@ internal sealed class NativeUiDriverIo
             localizer.WithCultureGet(culture, "点击任意位置关闭"));
     }
 
-    private static bool SendNativeAction(UiAction action, ImageRegion image)
+    private static bool SendNativeAction(UiAction action, ImageRegion image, Action admission)
     {
         switch (action)
         {
@@ -89,6 +89,10 @@ internal sealed class NativeUiDriverIo
             case UiAction.ReviveParty:
                 return Bv.ClickIfInReviveModal(image);
             case UiAction.Escape:
+                UiEscapeInput.Run(admission,
+                    () => Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_ESCAPE),
+                    () => Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_ESCAPE), Thread.Sleep);
+                return true;
             case UiAction.RequestDomainExit:
                 Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
                 return true;
