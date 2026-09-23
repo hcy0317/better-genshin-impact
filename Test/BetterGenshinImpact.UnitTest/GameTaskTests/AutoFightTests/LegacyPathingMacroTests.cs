@@ -97,7 +97,10 @@ public class LegacyPathingMacroTests
         {
             var script = CombatScriptParser.ParseContext(item.GetProperty("script").GetString()!, false);
             var plan = LegacyPathingMacroPlan.Create(script, ["枫原万叶", "琴", "芙宁娜"]);
-            Assert.Equal(script.CombatCommands, plan.Segments.SelectMany(segment => segment.Commands));
+            var planned = plan.Segments.SelectMany(segment => segment.Commands).ToArray();
+            // 用户新规则只抑制相邻的琴聚物替代块，匿名/万叶及其他角色顺序保持。
+            Assert.Equal(script.CombatCommands.Where(command => command.Name != "琴"), planned.Where(command => command.Name != "琴"));
+            if (script.CombatCommands.Any(command => command.Name == "枫原万叶")) Assert.DoesNotContain(planned, command => command.Name == "琴");
             var io = new MacroReplay();
             using var session = new PathingMacroSession(io);
             var result = await session.ExecuteAsync(plan, (commands, _) =>

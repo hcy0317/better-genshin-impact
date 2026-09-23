@@ -53,6 +53,7 @@ public class PickUpCollectHandler : IActionHandler
                 io.Actors.Any(actor => actor.Name == GetBaseCharacterName(header)))
                 ?? throw new InvalidOperationException("队伍没有可执行聚物动作的角色，路线未完成") }
             : requested.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        names = SelectAlternativeNames(names, io.Actors.Select(actor => actor.Name));
         if (names.Length == 0) throw new InvalidOperationException("聚物动作参数为空，路线未完成");
         foreach (var raw in names)
         {
@@ -76,6 +77,15 @@ public class PickUpCollectHandler : IActionHandler
     {
         var dash = fullActionName.IndexOf('-');
         return dash > 0 ? fullActionName[..dash] : fullActionName;
+    }
+
+    internal static string[] SelectAlternativeNames(string[] names, IEnumerable<string> party)
+    {
+        string Actor(string name) => DefaultAutoFightConfig.AvatarAliasToStandardName(GetBaseCharacterName(name));
+        if (!names.Any(name => Actor(name) == "枫原万叶") || !names.Any(name => Actor(name) == "琴")) return names;
+        var available = party.ToHashSet(StringComparer.Ordinal);
+        var excluded = available.Contains("枫原万叶") ? "琴" : available.Contains("琴") ? "枫原万叶" : null;
+        return excluded == null ? names : names.Where(name => Actor(name) != excluded).ToArray();
     }
 
     internal static async Task RunAfterBattleAsync(Avatar picker, bool doublePickup, CancellationToken ct)
