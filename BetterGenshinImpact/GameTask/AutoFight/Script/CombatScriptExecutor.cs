@@ -1,4 +1,5 @@
 using BetterGenshinImpact.GameTask.AutoFight.Model;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using Microsoft.Extensions.Logging;
 using System;
@@ -12,6 +13,25 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 
 public static class CombatScriptExecutor
 {
+    internal static async Task<CombatExecutionResult> ExecutePathingAsync(CombatScript script, CombatScenes scenes,
+        PathingMacroSession macro, CancellationToken ct)
+    {
+        if (script.HasFlowCommands)
+        {
+            macro.Release();
+            using var full = Flow.NativeCombatFlowRunner.Create(script.CombatCommands, scenes, false,
+                CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing);
+            return FromFlowResult(await full.RunRoundAsync(ct));
+        }
+        return await macro.ExecuteAsync(Flow.LegacyPathingMacroPlan.Create(script, scenes.GetAvatars().Select(avatar => avatar.Name)),
+            async (commands, token) =>
+            {
+                using var flow = Flow.NativeCombatFlowRunner.Create(commands, scenes, false,
+                    CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing);
+                return FromFlowResult(await flow.RunRoundAsync(token));
+            }, ct);
+    }
+
     /// <summary>
     /// 执行简易战斗策略脚本。
     /// </summary>

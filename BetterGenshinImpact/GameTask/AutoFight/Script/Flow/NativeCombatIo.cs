@@ -20,7 +20,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 /// <summary>唯一连接截图/视觉/键鼠及原有角色状态的生产实现，不拥有战斗调度。</summary>
 internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
 {
-    private static readonly CombatInputCoordinator Coordinator = new();
+    internal static readonly CombatInputCoordinator Coordinator = new();
     private bool _visionRequested, _burstRequested;
     private int _burstWidth, _burstHeight;
     public bool IsVisionPrepared => _visionRequested && OcrFactory.IsPaddlePrepared &&
