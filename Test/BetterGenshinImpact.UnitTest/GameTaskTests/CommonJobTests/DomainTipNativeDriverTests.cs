@@ -317,6 +317,7 @@ internal sealed class DomainTipNativeFixture : IDisposable
     internal Action? OnFocus, BeforeCapture, AfterCapture, OnOcr, OnClick;
     internal Func<CaptureFrameStamp, CaptureFrameStamp>? SourceOverride;
     internal Func<UiAction, bool>? OnAction;
+    internal Action? BeforeActionTransport;
     internal Action<string>? BeforeTransport;
     private readonly IOcrService _ocr;
 
@@ -333,7 +334,7 @@ internal sealed class DomainTipNativeFixture : IDisposable
             Ocr = () => _ocr,
             Texts = () => DomainTipUiReaderTests.Texts,
             Click = Click,
-            OtherAction = (action, _) => { Actions.Add(action); return OnAction?.Invoke(action) ?? throw new InvalidOperationException("No fake action was supplied."); },
+            OtherAction = (action, _, admission) => { BeforeActionTransport?.Invoke(); admission(); Actions.Add(action); return OnAction?.Invoke(action) ?? throw new InvalidOperationException("No fake action was supplied."); },
             Delay = (milliseconds, ct) => { ct.ThrowIfCancellationRequested(); Clock.Advance(TimeSpan.FromMilliseconds(milliseconds)); return Task.CompletedTask; },
             Clock = Clock,
             BeginExclusive = () => new NoopLease()
