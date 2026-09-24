@@ -2655,7 +2655,8 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         using var runner = NativeCombatFlowRunner.Create(commands, io, false);
         CombatFlowStep step = default;
         for (var i = 0; i < 100 && !step.RoundCompleted; i++) step = await runner.StepAsync(default);
-        Assert.Equal(CombatFlowResult.Deferred, step.Result);
+        Assert.Equal(CombatFlowResult.AwaitingObservation, step.Result);
+        Assert.False(step.RoundCompleted);
         Assert.Single(io.Primitives);
         Assert.Empty(io.Inputs);
     }
@@ -3321,6 +3322,40 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             }
             _completionGeneration = generation;
         }
+    }
+
+    [Fact]
+    public async Task FiniteRequiredLegacySkillWaitsForShortCooldownAndSubmitsOnlyOnce()
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("那维莱特 e(required)"));
+        io.PrimeSkillCooldown("那维莱特", .8);
+        using var runner = NativeCombatFlowRunner.Create([new CombatCommand("那维莱特", "e")], io,
+            loop: false, CombatScriptExecutionMode.RequiredSequence);
+        await runner.RunRoundAsync(default);
+        var input = Assert.Single(io.Inputs);
+        Assert.Equal(Method.Skill, input.Skill);
+        Assert.InRange(input.At, .8, 4);
+        Assert.False(io.HoldingInput);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FiniteRequiredSkillNeverSendsBeforeReadinessOrRenewsItsDeadline(bool cancel)
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("那维莱特 e(required)"));
+        io.PrimeSkillCooldown("那维莱特", 99);
+        using var cancellation = new CancellationTokenSource();
+        using var runner = NativeCombatFlowRunner.Create([new CombatCommand("那维莱特", "e")], io,
+            loop: false, CombatScriptExecutionMode.RequiredSequence);
+        if (cancel) io.AfterCapture = () => { if (runner.Context.Now > .5) cancellation.Cancel(); };
+        var error = await Record.ExceptionAsync(async () => await runner.RunRoundAsync(cancellation.Token));
+        if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(error);
+        Assert.Empty(io.Inputs);
+        Assert.InRange(runner.Context.Now, .5, 12);
+        Assert.False(io.HoldingInput);
     }
 
     private sealed class PhysicalReplay : INativeCombatIo, IDisposable

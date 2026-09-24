@@ -96,8 +96,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     }
 
     private NativeCombatFlowRunner(CombatFlowProgram program, CombatScenes scenes,
-        CombatScriptExecutionPurpose purpose = CombatScriptExecutionPurpose.Combat)
-        : this(program, new NativeGame(new NativeCombatIo(scenes)) { Purpose = purpose }, null) { }
+        CombatScriptExecutionPurpose purpose = CombatScriptExecutionPurpose.Combat, bool waitRequiredSkill = false)
+        : this(program, new NativeGame(new NativeCombatIo(scenes))
+            { Purpose = purpose, WaitRequiredSkill = waitRequiredSkill }, null) { }
 
     private NativeCombatFlowRunner(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock, ILogger? logger = null)
     {
@@ -124,7 +125,9 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         if (program.Loop && !loop) throw new InvalidOperationException("单次路径策略没有战斗结束宿主，不能运行 loop=battle");
         program.AllowHostLoop(loop);
         if (loop && purpose == CombatScriptExecutionPurpose.Pathing) throw new InvalidOperationException("正式战斗不能使用路径交互目的");
-        return new(program, new NativeGame(io) { Purpose = purpose }, io.Clock);
+        return new(program, new NativeGame(io) { Purpose = purpose,
+            WaitRequiredSkill = !loop && mode == CombatScriptExecutionMode.RequiredSequence &&
+                commands.All(command => !command.RequiresFlow) }, io.Clock);
     }
 
     internal static ICombatFlowGame CreateAdapter(INativeCombatIo io) => new NativeGame(io);
@@ -193,7 +196,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         if (program.Loop && !loop) throw new InvalidOperationException("单次路径策略没有战斗结束宿主，不能运行 loop=battle");
         program.AllowHostLoop(loop);
         if (loop && purpose == CombatScriptExecutionPurpose.Pathing) throw new InvalidOperationException("正式战斗不能使用路径交互目的");
-        return new(program, scenes, purpose);
+        return new(program, scenes, purpose, !loop && mode == CombatScriptExecutionMode.RequiredSequence &&
+            commands.All(command => !command.RequiresFlow));
     }
 
     private static SkillCatalogSnapshot? ReadSnapshot() =>
@@ -486,6 +490,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _confirmedSource = frame.FrameStamp;
         }
         internal CombatScriptExecutionPurpose Purpose { get; init; }
+        internal bool WaitRequiredSkill { get; init; }
         private CaptureFrameFence? _pathingInputFence;
         public bool ReportsInputReceipts => true;
         private Guid? _lastAtomicInputId;
@@ -1571,7 +1576,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 {
                     if (cooldownResult == CombatFlowResult.Deferred && command.LegacyOutcomePolicy &&
                         command.Method == Method.Skill && command.HasFlag("fast")) return CombatFlowResult.Skipped;
-                    if (cooldownResult == CombatFlowResult.Deferred && command.Method == Method.Skill && command.HasFlag("wait"))
+                    if (cooldownResult == CombatFlowResult.Deferred && command.Method == Method.Skill &&
+                        (command.HasFlag("wait") || WaitRequiredSkill && !command.HasFlag("fast")))
                     {
                         action.DiagnosticReason = "显式等待原E冷却结束，保留原命令和截止时间，不内联等待或重复记账";
                         return CombatFlowResult.AwaitingObservation;
@@ -1616,7 +1622,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                         if (command.LegacyOutcomePolicy && command.Method == Method.Skill && command.HasFlag("fast") && knownUnavailable)
                             return CombatFlowResult.Skipped;
                         if (command.Method == Method.Skill && !command.HasFlag("fast") &&
-                            (command.HasFlag("wait") || Purpose == CombatScriptExecutionPurpose.Pathing && command.LegacyOutcomePolicy))
+                            (command.HasFlag("wait") || WaitRequiredSkill ||
+                                Purpose == CombatScriptExecutionPurpose.Pathing && command.LegacyOutcomePolicy))
                         {
                             action.DiagnosticReason = "E尚未取得就绪证据，保留路径/显式等待的原命令与截止时间，下帧复核；不重放已完成位移";
                             _readinessAction = action;
