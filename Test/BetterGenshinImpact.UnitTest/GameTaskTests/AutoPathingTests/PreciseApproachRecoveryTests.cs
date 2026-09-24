@@ -9,18 +9,25 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PreciseApproachRecoveryTests
 {
-    [Fact]
-    public async Task ConfirmedGroundStallRecoversOnceThenRequiresActualTwoPixelArrival()
+    [Theory]
+    [InlineData(100, 100, 103.94f, 100)]
+    // S56 20260924.log:29801，07-跳崖点东x18.json segment=1 node=79。
+    [InlineData(1871.02f, 1256.85f, 1870.55f, 1252.94f)]
+    public async Task ConfirmedGroundStallRecoversOnceThenRequiresActualTwoPixelArrival(
+        float targetX, float targetY, float stalledX, float stalledY)
     {
         var replay = new PathReplay { EmitReceipts = true };
         var escaped = false;
-        replay.PositionAt = _ => new Point2f(escaped ? 100 : 103.94f, 100);
+        replay.PositionAt = _ => escaped ? new Point2f(targetX, targetY) : new Point2f(stalledX, stalledY);
         replay.OnInput = (action, type) =>
         {
             if (type == KeyType.KeyDown && action is GIActions.MoveBackward or GIActions.MoveLeft or GIActions.MoveRight)
                 escaped = true;
         };
-        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        var target = replay.Point("walk");
+        target.X = targetX;
+        target.Y = targetY;
+        await replay.Executor.MoveCloseTo(target);
         Assert.True(escaped);
         Assert.NotEmpty(replay.RecoveryInputs);
         Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
@@ -71,8 +78,11 @@ public class PreciseApproachRecoveryTests
     [Fact]
     public async Task RecoveryWithoutPositionProgressStillFailsRatherThanCreditingTheWaypoint()
     {
-        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(103.94f, 100) };
-        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(1870.55f, 1252.94f) };
+        var target = replay.Point("walk");
+        target.X = 1871.02f;
+        target.Y = 1256.85f;
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
         Assert.NotEmpty(replay.RecoveryInputs);
         Assert.Single(replay.RecoveryInputs.Where(input => input.Type == KeyType.KeyDown &&
             input.Action is GIActions.MoveBackward or GIActions.MoveLeft or GIActions.MoveRight));
