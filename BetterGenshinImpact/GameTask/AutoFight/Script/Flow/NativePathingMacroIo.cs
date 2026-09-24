@@ -2,11 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Script.Dependence;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
+using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.ViewModel.Pages;
 using Fischless.WindowsInput;
 using Microsoft.Extensions.Logging;
@@ -27,8 +29,8 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
     public PathingMacroObservation Observe(string phase = "boundary")
     {
         using var frame = TaskControl.CaptureToRectArea();
-        var scene = SaurianUiReader.IsKnownTransformation(frame) ? PathingMacroScene.Transformed :
-            Bv.IsCombatHud(frame) ? PathingMacroScene.World : PathingMacroScene.Unknown;
+        var observation = ReadScene(frame, OcrFactory.Paddle);
+        var scene = observation.Scene;
         if (scene == PathingMacroScene.Unknown)
         {
             try
@@ -45,7 +47,16 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
             }
             catch { /* 诊断不能改变准入。 */ }
         }
-        return new(scene, frame.FrameStamp);
+        return observation;
+    }
+
+    internal static PathingMacroObservation ReadScene(ImageRegion frame, IOcrService ocr, ReviveUiDetector? revive = null)
+    {
+        var scene = SaurianUiReader.IsKnownTransformation(frame) ? PathingMacroScene.Transformed :
+            (revive?.IsCombatHud(frame) ?? Bv.IsCombatHud(frame)) ? PathingMacroScene.World : PathingMacroScene.Unknown;
+        var cannon = scene == PathingMacroScene.Unknown ? CannonUiReader.Read(frame, ocr) : default;
+        if (cannon.IsFor(frame.FrameStamp) && cannon.CanExit) scene = PathingMacroScene.Cannon;
+        return new(scene, frame.FrameStamp, cannon.IsFor(frame.FrameStamp) && cannon.CanFire);
     }
 
     // raw段已经做过场景准入。每个真正SendInput只查原期限/取消/lease；不伪造150ms源帧。

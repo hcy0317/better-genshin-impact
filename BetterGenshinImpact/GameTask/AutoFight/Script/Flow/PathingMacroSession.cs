@@ -11,8 +11,8 @@ using Vanara.PInvoke;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
-internal enum PathingMacroScene { Unknown, World, Transformed }
-internal readonly record struct PathingMacroObservation(PathingMacroScene Scene, CaptureFrameStamp Source);
+internal enum PathingMacroScene { Unknown, World, Transformed, Cannon }
+internal readonly record struct PathingMacroObservation(PathingMacroScene Scene, CaptureFrameStamp Source, bool CanFire = false);
 internal enum PathingMacroInputKind { KeyDown, KeyUp, MoveBy, MiddleDown, MiddleUp }
 internal readonly record struct PathingMacroInput(PathingMacroInputKind Kind, User32.VK Key = default, int X = 0, int Y = 0);
 
@@ -47,7 +47,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         if (!HasTail) return;
         Check(_deadline, ct);
         if (_navigation) throw new InvalidOperationException("尾W已经交给导航，不得重复续期");
-        if (!validPosition || observation.Scene == PathingMacroScene.Unknown ||
+        if (!validPosition || observation.Scene is PathingMacroScene.Unknown or PathingMacroScene.Cannon ||
             observation.Source.SessionId != _entry.SessionId ||
             !observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)))
         { Release(); throw new InvalidOperationException("尾W导航接管缺少新鲜场景或有效定位"); }
@@ -118,14 +118,30 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         foreach (var command in segment.Commands)
         {
             Check(_deadline, ct);
+            var key = command.Method == Method.KeyPress ? User32Helper.ToVk(command.Args![0]) : default;
+            if (segment.CannonProgram && key == User32.VK.VK_RETURN)
+                observation = await ObserveBoundaryAsync("before-fire", ct);
+            if (observation.Scene == PathingMacroScene.Cannon)
+            {
+                if (!LegacyPathingMacroPlan.IsCannonCommand(command) ||
+                    key == User32.VK.VK_RETURN && !observation.CanFire)
+                    throw new InvalidOperationException("炮台宏未取得当前动作能力，禁止发送技能或其他未授权输入");
+                // 炮台提示是固定物理键，不能把自定义战斗键映射成炮台外的操作。
+                var direction = command.Method == Method.W ? User32.VK.VK_W : command.Method == Method.A ? User32.VK.VK_A :
+                    command.Method == Method.S ? User32.VK.VK_S : command.Method == Method.D ? User32.VK.VK_D : key;
+                if (direction != default && io.Map(direction) != direction)
+                    throw new InvalidOperationException("炮台按键映射与已确认提示不一致");
+            }
+            else if (segment.CannonProgram && key is User32.VK.VK_RETURN or User32.VK.VK_ESCAPE)
+                throw new InvalidOperationException("未确认炮台，不发送炮台发射或退出键");
             if (command.Method == Method.Wait) await WaitAsync(Milliseconds(command.Args![0]), ct);
             else if (command.Method == Method.W || command.Method == Method.A || command.Method == Method.S || command.Method == Method.D)
             {
-                var key = command.Method == Method.W ? User32.VK.VK_W : command.Method == Method.A ? User32.VK.VK_A :
+                var moveKey = command.Method == Method.W ? User32.VK.VK_W : command.Method == Method.A ? User32.VK.VK_A :
                     command.Method == Method.S ? User32.VK.VK_S : User32.VK.VK_D;
-                Key(key, PathingMacroInputKind.KeyDown, ct);
+                Key(moveKey, PathingMacroInputKind.KeyDown, ct);
                 await WaitAsync(Milliseconds(command.Args![0]), ct);
-                Key(key, PathingMacroInputKind.KeyUp, ct);
+                Key(moveKey, PathingMacroInputKind.KeyUp, ct);
             }
             else if (command.Method == Method.Jump) await PressAsync(User32.VK.VK_SPACE, ct);
             else if (command.Method == Method.MoveBy)
@@ -142,6 +158,9 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             else if (command.Method == Method.KeyPress) await PressAsync(User32Helper.ToVk(command.Args![0]), ct);
             else Key(User32Helper.ToVk(command.Args![0]), command.Method == Method.KeyDown ? PathingMacroInputKind.KeyDown :
                 PathingMacroInputKind.KeyUp, ct);
+            if (key is User32.VK.VK_F or User32.VK.VK_ESCAPE &&
+                (segment.CannonProgram || observation.Scene is PathingMacroScene.Cannon or PathingMacroScene.World))
+                observation = await ObserveBoundaryAsync("scene-transition", ct);
         }
         // 旧NativeRunner在片段完成时释放X。保留这一既有语义，不声称跨挖矿节点持X。
         if (_held.TryGetValue(User32.VK.VK_X, out var heldX))
@@ -176,9 +195,18 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         // 用户指定游戏有30~60ms响应延迟；已有显式wait可覆盖，不每键加识图等待。
         var responseDelay = 60 - io.Clock.GetElapsedTime(_fence).TotalMilliseconds;
         if (responseDelay > 0) await WaitAsync((int)Math.Ceiling(responseDelay), ct);
-        await WaitForSceneAsync("post", fence, ct);
+        var after = await WaitForSceneAsync("post", fence, ct);
+        if (after.Scene == PathingMacroScene.Cannon && HasTail)
+            throw new InvalidOperationException("炮台持键不能交给普通导航");
         if (!HasTail) Release();
         return new(CombatExecutionKind.Completed, "RAW_INPUT_COMPLETED_NOT_SKILL_CONFIRMATION");
+    }
+
+    private async Task<PathingMacroObservation> ObserveBoundaryAsync(string phase, CancellationToken ct)
+    {
+        var remaining = 60 - io.Clock.GetElapsedTime(_fence).TotalMilliseconds;
+        if (remaining > 0) await WaitAsync((int)Math.Ceiling(remaining), ct);
+        return await WaitForSceneAsync(phase, new CaptureFrameFence(_entry, _fence), ct);
     }
 
     private async Task<PathingMacroObservation> WaitForSceneAsync(string phase, CaptureFrameFence? fence, CancellationToken ct)

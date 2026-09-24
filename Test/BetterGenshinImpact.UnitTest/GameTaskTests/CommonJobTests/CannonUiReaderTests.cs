@@ -6,6 +6,7 @@ using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.AutoTrackPath;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
+using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using System.Diagnostics;
 using BetterGenshinImpact.GameTask.Model.Area;
 using Fischless.GameCapture;
@@ -18,6 +19,34 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 [Collection("OfflineNativeDecision")]
 public class CannonUiReaderTests(ITestOutputHelper output)
 {
+    [OfflineNativeDecisionFact]
+    public void S56CannonOriginalFramesReachTheMacroSceneWithinTheFreshnessBudget()
+    {
+        var files = Environment.GetEnvironmentVariable("BGI_S56_CANNON_FILES");
+        if (string.IsNullOrWhiteSpace(files)) return;
+        using var factory = new BgiOnnxFactory(NullLogger<BgiOnnxFactory>.Instance, forceCpuOcr: true);
+        using var ocr = new PaddleOcrService(factory, PaddleOcrService.PaddleOcrModelType.V6);
+        var producer = new CaptureFrameSource();
+        foreach (var file in files.Split('|'))
+        {
+            using var pixels = Cv2.ImRead(file);
+            Assert.False(pixels.Empty());
+            for (var i = 0; i < 4; i++)
+            {
+                using var frame = new ImageRegion(pixels.Clone(), 0, 0) { FrameStamp = producer.Next() };
+                var watch = Stopwatch.StartNew();
+                var revive = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", frame), ocr,
+                    "复苏", "使用道具复苏角色");
+                var result = NativePathingMacroIo.ReadScene(frame, ocr, revive);
+                Assert.Equal(PathingMacroScene.Cannon, result.Scene);
+                Assert.True(result.CanFire);
+                Assert.Equal(frame.FrameStamp, result.Source);
+                if (i > 0) Assert.True(watch.ElapsedMilliseconds < 150, $"cannon-read-ms={watch.ElapsedMilliseconds}");
+                output.WriteLine($"{Path.GetFileName(file)} pass={i} ms={watch.Elapsed.TotalMilliseconds:F1}");
+            }
+        }
+    }
+
     [OfflineNativeDecisionFact]
     public async Task BurstPreparationExecutesTheRealClassifierOnceWithoutReusingItsResultAsLiveEvidence()
     {
