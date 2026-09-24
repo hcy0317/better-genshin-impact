@@ -64,4 +64,25 @@ internal sealed class PathApproachDiagnostics(string route, string context)
         if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
         return new(capture.Requested, capture.Submitted, capture.Uncertain, clock.GetElapsedTime(started).TotalMilliseconds);
     }
+
+    internal static async System.Threading.Tasks.Task<PathApproachPulse> RunPulseAsync(Action down, Action up,
+        Func<int, System.Threading.Tasks.Task> wait, TimeProvider clock)
+    {
+        var started = clock.GetTimestamp();
+        var entered = false;
+        Exception? failure = null;
+        using var capture = new InputDispatchCapture(() => entered = true);
+        try { down(); await wait(60); }
+        catch (Exception error) { failure = error; }
+        finally
+        {
+            if (entered)
+            {
+                try { up(); }
+                catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }
+            }
+        }
+        if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
+        return new(capture.Requested, capture.Submitted, capture.Uncertain, clock.GetElapsedTime(started).TotalMilliseconds);
+    }
 }

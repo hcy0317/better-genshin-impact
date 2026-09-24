@@ -1355,48 +1355,111 @@ public partial class PathExecutor
         }
     }
 
-    private async Task MoveCloseTo(WaypointForTrack waypoint)
+    internal async Task MoveCloseTo(WaypointForTrack waypoint)
+    {
+        try
+        {
+            await UiOperation.RunAsync("path-precise-approach", TimeSpan.FromSeconds(60), ct, async operation =>
+            {
+                await MoveCloseToCore(waypoint, operation);
+                return true;
+            }, clock: _moveIo.Clock);
+        }
+        catch (TimeoutException) { throw new RetryException("精确接近已到原期限，重试当前路线分段"); }
+        finally { _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp); }
+    }
+
+    private async Task MoveCloseToCore(WaypointForTrack waypoint, UiOperation operation)
     {
         Point2f position;
         int targetOrientation;
-        Logger.LogDebug("精确接近目标点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
+        _moveIo.Logger.LogDebug("精确接近目标点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
 
         var stepsTaken = 0;
+        var stationary = 0;
+        var recoveryUsed = false;
+        CaptureFrameStamp previous = default;
+        Point2f? previousPosition = null;
+        PathApproachPulse lastPulse = default;
         var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
         var approachDiagnostics = new PathApproachDiagnostics(waypoint.PathingTaskFileName,
             $"segment={CurWaypoints.Item1 + 1} node={waypoint.Id} move={waypoint.MoveMode} action={waypoint.Action}");
-        while (!ct.IsCancellationRequested)
+        while (true)
         {
+            operation.Check();
             stepsTaken++;
             if (stepsTaken > 25)
             {
                 throw new RetryException("精确接近目标点超时，重试当前路线分段");
             }
 
-            using var screen = CaptureToRectArea();
+            using var screen = _moveIo.Capture();
 
-            EndJudgment(screen);
+            _moveIo.EndJudgment(screen);
 
-            var location = await GetDirectPositionAndTime(screen, waypoint);
+            var location = await (_moveIo.LocateDirect ?? _moveIo.Locate)(screen, waypoint);
+            operation.Check();
+            var observation = ReadMoveObservation(screen, location, previous);
+            operation.Check();
+            if (!observation.Valid)
+            {
+                stationary = 0;
+                await _moveIo.Delay(100, operation.Token);
+                continue;
+            }
             position = location.Point;
             var distance = Navigation.GetDistance(waypoint, position);
-            approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, Logger, location.IsDirect);
+            approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, _moveIo.Logger, location.IsDirect);
             if (distance < 2)
             {
-                Logger.LogDebug("已到达路径点");
+                _moveIo.Logger.LogDebug("已到达路径点");
                 break;
             }
 
+            stationary = previousPosition is { } old && lastPulse.Requested > 0 &&
+                lastPulse.Requested == lastPulse.Submitted && !lastPulse.Uncertain &&
+                Math.Abs(position.X - old.X) + Math.Abs(position.Y - old.Y) < .1 ? stationary + 1 : 0;
+            previous = observation.Stamp;
+            previousPosition = position;
+            if (!recoveryUsed && stationary >= 5 && observation.Motion == MotionStatus.Normal &&
+                waypoint.MoveMode is "walk" or "run" && !_moveIo.Transformed(screen))
+            {
+                recoveryUsed = true;
+                _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                async Task<PathMoveObservation> ObserveRecovery()
+                {
+                    using var fresh = _moveIo.Capture();
+                    var current = await (_moveIo.LocateDirect ?? _moveIo.Locate)(fresh, waypoint);
+                    var observed = ReadMoveObservation(fresh, current, previous);
+                    if (_moveIo.Transformed(fresh)) observed = observed with { Valid = false, SourceUsable = false };
+                    previous = fresh.FrameStamp;
+                    return observed;
+                }
+                try
+                {
+                    await UiOperation.RunAsync("path-precise-recovery", TimeSpan.FromSeconds(10), operation.Token, async recovery =>
+                    {
+                        using var scope = new PathRecoveryScope(_moveIo, recovery, recovery.Token, previous, ObserveRecovery);
+                        await _trapEscaper.RotateAndMove(scope);
+                        return true;
+                    }, clock: _moveIo.Clock);
+                }
+                catch (RecoveryObservationChanged) { /* 只返回原节点重观测，不能把恢复当到达。 */ }
+                stationary = 0;
+                continue;
+            }
+
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
-            var rotated = await WaitUntilRotatedTo(targetOrientation, 2, maxTryTimes: 20);
+            var rotated = await _moveIo.RotateUntil(targetOrientation, 2);
+            operation.Check();
             var rotationFailed = rotationPolicy.Observe(rotated);
             if (stepsTaken == 1 || stepsTaken % 5 == 0 || !rotated)
-                Logger.LogDebug("PATH_APPROACH segment={Segment} waypoint={Waypoint} step={Step}/25 targetImage=({TargetX:F1},{TargetY:F1}) currentImage=({X:F1},{Y:F1}) distance={Distance:F2} targetAngle={Angle} rotated={Rotated} consecutiveFailures={Failures}",
+                _moveIo.Logger.LogDebug("PATH_APPROACH segment={Segment} waypoint={Waypoint} step={Step}/25 targetImage=({TargetX:F1},{TargetY:F1}) currentImage=({X:F1},{Y:F1}) distance={Distance:F2} targetAngle={Angle} rotated={Rotated} consecutiveFailures={Failures}",
                     CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, stepsTaken, waypoint.X, waypoint.Y,
                     position.X, position.Y, distance, targetOrientation, rotated, rotationPolicy.ConsecutiveFailures);
             if (rotationFailed)
             {
-                Logger.LogWarning(
+                _moveIo.Logger.LogWarning(
                     "精确接近连续 {Failures} 次无法完成视角转向，停止小碎步接近，避免在错误方向空转",
                     rotationPolicy.ConsecutiveFailures);
                 throw new RetryException("精确接近连续转向失败，重试当前路线分段");
@@ -1406,17 +1469,20 @@ public partial class PathExecutor
                 continue;
             }
             // 小碎步接近
-            approachDiagnostics.RecordPulse(PathApproachDiagnostics.RunPulse(
-                () => Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown),
-                () => Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp), Thread.Sleep));
+            _moveIo.CheckInput();
+            operation.Check();
+            lastPulse = await PathApproachDiagnostics.RunPulseAsync(
+                () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
+                () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock);
+            approachDiagnostics.RecordPulse(lastPulse);
             // Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_W).Sleep(60).KeyUp(User32.VK.VK_W);
-            await Delay(20, ct);
+            await _moveIo.Delay(20, operation.Token);
         }
 
         _arrivalReachedAt = Stopwatch.GetTimestamp();
         await SettleArrivalAsync(waypoint.Action,
-            () => Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp),
-            (milliseconds, token) => Delay(milliseconds, token), ct);
+            () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp),
+            _moveIo.Delay, ct);
     }
 
     internal static async Task SettleArrivalAsync(string? action, Action releaseMovement,

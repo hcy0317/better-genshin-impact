@@ -34,6 +34,7 @@ internal sealed class PathMoveToIo
     internal Func<float, ImageRegion, float> RotateStep { get; init; } = null!;
     internal Func<ImageRegion, MotionStatus> Motion { get; init; } = _ => Missing<MotionStatus>(nameof(Motion));
     internal Func<ImageRegion, bool> CombatHud { get; init; } = _ => Missing<bool>(nameof(CombatHud));
+    internal Func<ImageRegion, bool> Transformed { get; init; } = _ => Missing<bool>(nameof(Transformed));
     internal Action<GIActions, KeyType> Send { get; init; } = (_, _) => Missing<bool>(nameof(Send));
     internal Func<GIActions, bool> IsDown { get; init; } = _ => Missing<bool>(nameof(IsDown));
     internal Func<int, CancellationToken, Task> Delay { get; init; } = (_, _) => Missing<Task>(nameof(Delay));
@@ -52,6 +53,7 @@ internal sealed class PathMoveToIo
         Dpi = () => TaskContext.Instance().DpiScale;
         Motion = Bv.GetMotionStatus;
         CombatHud = Bv.IsCombatHud;
+        Transformed = SaurianUiReader.IsKnownTransformation;
         Send = (action, type) => Simulation.SendInput.SimulateAction(action, type);
         IsDown = action => Simulation.IsKeyDown(action.ToActionKey().ToVK());
         Delay = Common.TaskControl.Delay;
