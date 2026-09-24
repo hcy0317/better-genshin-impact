@@ -379,7 +379,8 @@ public partial class ScriptService : IScriptService
                                 {
                                     taskProgress.CurrentScriptGroupProjectInfo.Outcome = outcome.Kind.ToString();
                                     taskProgress.CurrentScriptGroupProjectInfo.OutcomeReason = outcome.Reason;
-                                    if (step.RecoveredFailure != null) taskProgress.CurrentScriptGroupProjectInfo.Status = 2;
+                                    if (step.RecoveredFailure != null && outcome.Kind != ScriptOutcomeKind.Skipped)
+                                        taskProgress.CurrentScriptGroupProjectInfo.Status = 2;
                                 }
                                 // 未闭合/合法跳过均不能在RunNum内重复；完成CD同样终止剩余次数。
                                 if (outcome.Kind != ScriptOutcomeKind.Completed || (exeProject.RunNum > 1 && ShouldSkipTask(exeProject))) break;
