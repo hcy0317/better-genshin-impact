@@ -245,6 +245,68 @@ public class LegacyPathingMacroTests
         Assert.InRange(io.Time.GetUtcNow() - io.Start, TimeSpan.FromSeconds(1.6), TimeSpan.FromSeconds(1.61));
     }
 
+    [Fact]
+    public async Task CannonProgramKeepsFireAndExitWithinItsOwnedPhysicalSequence()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.Cannon };
+        using var session = new PathingMacroSession(io);
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(
+            "keypress(f),wait(.1),keypress(w),keypress(RETURN),wait(.1),keypress(ESCAPE)", false), ["琴"]);
+        var result = await session.ExecuteAsync(plan,
+            (_, _) => throw new InvalidOperationException("Cannon program must not enter the humanoid skill runner"), default);
+        Assert.True(result.CanContinue);
+        Assert.Contains("KeyDown:VK_RETURN", io.Inputs);
+        Assert.Contains("KeyDown:VK_ESCAPE", io.Inputs);
+        Assert.False(session.HasTail);
+    }
+
+    [Theory]
+    [InlineData("keypress(e)")]
+    [InlineData("keypress(q)")]
+    [InlineData("keydown(w)")]
+    [InlineData("moveby(10,0)")]
+    public async Task CannonDoesNotGrantSkillMouseOrNavigationTail(string text)
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.Cannon };
+        using var session = new PathingMacroSession(io);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(
+            LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(text, false), ["琴"]),
+            (_, _) => throw new InvalidOperationException("not admitted"), default));
+        Assert.Empty(io.Inputs);
+    }
+
+    [Fact]
+    public async Task CannonWithoutFirePromptCannotSendReturn()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.Cannon, FirePrompt = false };
+        using var session = new PathingMacroSession(io);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(
+            LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext("keypress(f),keypress(RETURN),keypress(ESCAPE)", false), ["琴"]),
+            (_, _) => throw new Exception(), default));
+        Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
+    }
+
+    [Fact]
+    public async Task ThreeRecordedCannonProgramsCrossWorldBoundariesWithoutReplayingInput()
+    {
+        using var programs = System.Text.Json.JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "Fixtures", "Combat", "s56-cannon-programs.json")));
+        Assert.Equal(3, programs.RootElement.GetArrayLength());
+        foreach (var item in programs.RootElement.EnumerateArray())
+        {
+            var text = item.GetProperty("script").GetString()!;
+            var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true };
+            using var session = new PathingMacroSession(io);
+            var result = await session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+                CombatScriptParser.ParseContext(text, false), ["琴"]), (_, _) => throw new Exception("unexpected humanoid runner"), default);
+            Assert.True(result.CanContinue);
+            Assert.Equal(PathingMacroScene.World, io.Scene);
+            Assert.False(session.HasTail);
+            Assert.Equal(text.Split("keypress(RETURN)").Length - 1, io.Inputs.Count(x => x == "KeyDown:VK_RETURN"));
+            Assert.Equal(text.Split("keypress(ESCAPE)").Length - 1, io.Inputs.Count(x => x == "KeyDown:VK_ESCAPE"));
+        }
+    }
+
     internal sealed class MacroReplay : IPathingMacroIo
     {
         internal FakeTimeProvider Time { get; } = new();
@@ -260,6 +322,8 @@ public class LegacyPathingMacroTests
         internal Action? AfterDelay;
         internal int UnknownAt;
         internal int UnknownCount = int.MaxValue;
+        internal PathingMacroScene Scene = PathingMacroScene.Transformed;
+        internal bool FirePrompt = true, CrossCannonScenes;
         private readonly CaptureFrameSource _source;
         internal CaptureFrameStamp NextFrame() { Time.Advance(TimeSpan.FromMilliseconds(1)); return _source.Next(); }
         public MacroReplay() { _source = new(Time); Start = Time.GetUtcNow(); }
@@ -268,13 +332,18 @@ public class LegacyPathingMacroTests
             Observations++;
             Time.Advance(TimeSpan.FromMilliseconds(1));
             var unknown = UnknownAt > 0 && Observations >= UnknownAt && Observations - UnknownAt < UnknownCount;
-            return new(unknown ? PathingMacroScene.Unknown : PathingMacroScene.Transformed, _source.Next());
+            return new(unknown ? PathingMacroScene.Unknown : Scene, _source.Next(), Scene == PathingMacroScene.Cannon && FirePrompt);
         }
         public User32.VK Map(User32.VK key) => Mapping(key);
         public CombatBattleHostInputResult Send(PathingMacroInput input, Action admit)
         {
             admit();
             Inputs.Add($"{input.Kind}:{input.Key}");
+            if (CrossCannonScenes && input.Kind == PathingMacroInputKind.KeyUp)
+            {
+                if (input.Key == User32.VK.VK_ESCAPE) Scene = PathingMacroScene.World;
+                if (input.Key == User32.VK.VK_F) Scene = PathingMacroScene.Cannon;
+            }
             if (Inputs.Count == FaultAt) return new(Fault, Reason: "simulated-native-failure", Error: FaultError);
             return new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp())
             { NativeRequested = 1, NativeSubmitted = 1, ObservableAfterTimestamp = Clock.GetTimestamp() };

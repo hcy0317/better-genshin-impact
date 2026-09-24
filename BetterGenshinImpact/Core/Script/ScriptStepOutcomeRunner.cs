@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask.AutoTrackPath;
 using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.Core.Script;
@@ -39,6 +40,8 @@ internal static class ScriptStepOutcomeRunner
                 captureFailure: captureFailure);
             ct.ThrowIfCancellationRequested();
             TaskExecutionScope.ThrowIfFailed();
+            if (recoveredFailure != null && PathingTargetUnavailableException.IsUnavailableTarget(recoveredFailure))
+                outcome = new(ScriptOutcomeKind.Skipped, "TARGET_UNAVAILABLE: " + recoveredFailure.Message);
         }
         return new(outcome, recoveredFailure);
     }

@@ -57,6 +57,48 @@ public class SwitchPartyTask
             operation => StartVerifiedCore(partyName, matches, stayInPartyViewOnFailure, operation.Token, deferApplyToCaller),
             Logger, captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
 
+    internal static async Task<ImageRegion> CapturePartyFrameAsync(Func<ImageRegion> capture,
+        Func<ImageRegion, UiSnapshot> read, Func<int, CancellationToken, Task> delay,
+        CancellationToken ct, TimeProvider? clock = null, Func<CancellationToken, Task>? prepare = null)
+    {
+        clock ??= TimeProvider.System;
+        ImageRegion? accepted = null;
+        try
+        {
+            await UiOperation.RunAsync("party-readable-frame", TimeSpan.FromSeconds(10), ct, async operation =>
+            {
+                if (prepare != null) await prepare(operation.Token);
+                var requestedAt = clock.GetTimestamp();
+                Fischless.GameCapture.CaptureFrameStamp previous = default;
+                while (true)
+                {
+                    operation.Check();
+                    var image = capture();
+                    try
+                    {
+                        var observed = read(image);
+                        operation.Check();
+                        var source = image.FrameStamp;
+                        if (previous.IsKnown && source.IsKnown && source.SessionId != previous.SessionId)
+                            throw new PartySetupFailedException("编队读取期间截图来源改变，不能继续读取队伍名称");
+                        operation.Observe("编队名称可读新帧", observed.HasUsableEvidence ? observed.Describe() : "source-stale", source.Sequence);
+                        if (observed.SourceBound && observed.SourceStamp == source && source.CapturedTimestamp >= requestedAt &&
+                            (!previous.IsKnown || source.IsAfter(previous)) && observed.Matches(UiTarget.Party))
+                        {
+                            accepted = image;
+                            return true;
+                        }
+                        if (source.IsKnown) previous = source;
+                    }
+                    finally { if (!ReferenceEquals(accepted, image)) image.Dispose(); }
+                    await delay(100, operation.Token);
+                }
+            }, clock: clock);
+            return accepted!;
+        }
+        catch { accepted?.Dispose(); throw; }
+    }
+
     private async Task<bool> StartVerifiedCore(string partyName, Func<string, bool> matches,
         bool stayInPartyViewOnFailure, CancellationToken ct, bool deferApplyToCaller)
     {
@@ -77,12 +119,12 @@ public class SwitchPartyTask
             await UiTransition.EnterPartyAsync(driver, ct, Logger);
         }
 
-        await UiTransition.WaitAsync("party-ready", UiTarget.Party, driver, ct, TimeSpan.FromSeconds(10), logger: Logger);
-        await Delay(500, ct);
-
-        using var ra = CaptureToRectArea();
-        if (!NativeUiDriver.Read(ra).Matches(UiTarget.Party))
-            throw new PartySetupFailedException("编队页面出现遮挡，不能读取队伍名称");
+        using var ra = await CapturePartyFrameAsync(() => CaptureToRectArea(), image => NativeUiDriver.Read(image),
+            (milliseconds, token) => Delay(milliseconds, token), ct, prepare: async token =>
+            {
+                await UiTransition.WaitAsync("party-ready", UiTarget.Party, driver, token, TimeSpan.FromSeconds(10), logger: Logger);
+                await Delay(500, token);
+            });
         using var partyViewBtn = ra.Find(ElementRecognition.Get("PartyBtnChooseView", ra));
         if (!partyViewBtn.IsExist()) throw new PartySetupFailedException("编队页面已变化，不能读取队伍名称");
 

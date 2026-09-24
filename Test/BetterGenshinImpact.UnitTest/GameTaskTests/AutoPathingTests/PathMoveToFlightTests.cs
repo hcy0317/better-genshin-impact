@@ -170,7 +170,7 @@ internal sealed class PathReplay
     internal readonly PathExecutor Executor;
     internal readonly PathMoveToIo Io;
     internal DateTimeOffset Started => new(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
-    internal bool Hud = true, Direct = true, Duplicate;
+    internal bool Hud = true, Direct = true, Duplicate, EmitReceipts, Transformed;
     internal Func<int, bool>? HudAt;
     internal Func<int, Point2f> PositionAt = _ => new Point2f(100, 100);
     internal int MinimumWait;
@@ -200,10 +200,11 @@ internal sealed class PathReplay
             Capture = () => { Frames++; BeforeCapture?.Invoke(Frames); if (!_stamp.IsKnown || !Duplicate && (ProducerIntervalMilliseconds == 0 || Clock.GetElapsedTime(_stamp.CapturedTimestamp).TotalMilliseconds >= ProducerIntervalMilliseconds)) _stamp = _source.Next(); var image = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3), 0, 0) { FrameStamp = StampTransform?.Invoke(_stamp) ?? _stamp }; Images.Add(image); return image; },
             Locate = (_, _) => Task.FromResult(new PathPosition(PositionAt(Frames), 0, Direct)),
             Motion = _ => MotionAt(Frames), CombatHud = _ => HudAt?.Invoke(Frames) ?? Hud,
+            Transformed = _ => Transformed,
             SwitchAvatar = _ => Task.CompletedTask, EndJudgment = _ => { },
             RotateUntil = (_, _) => Task.FromResult(true), RotateStep = (_, _) => 0,
             HurryOn = (_, _, _, _, _) => Task.FromResult(false),
-            Send = (action, type) => { Inputs.Add((action, type, Clock.GetUtcNow())); if (UiOperation.Current?.Name == "path-climb-recovery") RecoveryInputs.Add((action, type, Clock.GetUtcNow())); if (type == KeyType.KeyDown) _held.Add(action); else if (type == KeyType.KeyUp) _held.Remove(action); OnInput?.Invoke(action, type); },
+            Send = (action, type) => { Inputs.Add((action, type, Clock.GetUtcNow())); if (EmitReceipts) new Fischless.WindowsInput.WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0).DispatchInput(new Vanara.PInvoke.User32.INPUT[1]); if (UiOperation.Current?.Name is "path-climb-recovery" or "path-precise-recovery") RecoveryInputs.Add((action, type, Clock.GetUtcNow())); if (type == KeyType.KeyDown) _held.Add(action); else if (type == KeyType.KeyUp) _held.Remove(action); OnInput?.Invoke(action, type); },
             IsDown = action => _held.Contains(action),
             Delay = (ms, ct) => { ct.ThrowIfCancellationRequested(); Delays.Add(ms); Clock.Advance(TimeSpan.FromMilliseconds(Math.Max(ms, MinimumWait))); AfterDelay?.Invoke(ms); return Task.CompletedTask; }
         };

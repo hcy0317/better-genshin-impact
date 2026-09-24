@@ -1,5 +1,6 @@
 using System;
 using BetterGenshinImpact.GameTask.AutoPathing;
+using BetterGenshinImpact.GameTask.AutoTrackPath;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Config;
@@ -86,6 +87,8 @@ public class AutoPathingScript
                 : $"地图追踪执行失败-{System.IO.Path.GetFileName(sourcePath)}";
             _captureFailure(e, context);
             _logFailure("执行地图追踪时候发生错误", e);
+            if (e is not PathingTargetUnavailableException && PathingTargetUnavailableException.IsUnavailableTarget(e))
+                throw new PathingTargetUnavailableException(e);
             throw;
         }
     }

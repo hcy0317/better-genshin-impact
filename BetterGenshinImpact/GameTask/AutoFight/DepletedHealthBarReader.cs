@@ -29,9 +29,50 @@ internal static class DepletedHealthBarReader
                 ColorDistance(center, source.At<Vec3b>(red.Y + red.Height + 1, x)) < 22) break;
         }
         reason = x == limit ? "right-edge-unconfirmed" : "short-or-discontinuous-track";
-        if (x == limit || x - start < Math.Max(8, red.Height * 3) || x - red.X < minimumWidth) return 0;
+        if (x == limit || x - start < Math.Max(8, red.Height * 3) || x - red.X < minimumWidth)
+        {
+            // 红色分量不包括抗锯齿边框；暗槽又会透出背景渐变，不能要求全长与首列同色。
+            // 只在原红段紧邻的小ROI内找有上下边界和右端的槽，不扩大红色/几何准入。
+            var padding = Math.Max(1, (int)Math.Round(source.Height * 2 / 1080d));
+            for (var topPad = 0; topPad <= padding; topPad++)
+            for (var bottomPad = 0; bottomPad <= padding; bottomPad++)
+            {
+                var width = ReadAntialiasedTrack(source, red, minimumWidth, limit, topPad, bottomPad);
+                if (width > 0) { reason = "accepted-bounded-antialias-track"; return width; }
+            }
+            return 0;
+        }
         reason = "accepted";
         return x - red.X;
+    }
+
+    private static int ReadAntialiasedTrack(Mat source, EnemySeekVisual red, int minimumWidth,
+        int limit, int topPad, int bottomPad)
+    {
+        var top = red.Y - topPad;
+        var bottom = red.Y + red.Height + bottomPad;
+        if (top < 1 || bottom >= source.Height) return 0;
+        var start = red.X + red.Width;
+        var middle = red.Y + red.Height / 2;
+        var previous = source.At<Vec3b>(middle, start);
+        var supported = 0;
+        var gaps = 0;
+        for (var x = start; x < limit; x++)
+        {
+            var center = source.At<Vec3b>(middle, x);
+            var end = !IsDark(center) || MaximumDifference(center, previous) > 24;
+            if (end)
+                return supported >= Math.Max(8, red.Height * 3) && x - red.X >= minimumWidth &&
+                    supported * 100 >= (x - start) * 85 ? x - red.X : 0;
+            var bounded = MaximumDifference(center, source.At<Vec3b>(top + 1, x)) <= 32 &&
+                MaximumDifference(center, source.At<Vec3b>(bottom - 2, x)) <= 32 &&
+                ColorDistance(center, source.At<Vec3b>(top - 1, x)) >= 22 &&
+                ColorDistance(center, source.At<Vec3b>(bottom, x)) >= 22;
+            if (bounded) { supported++; gaps = 0; }
+            else if (++gaps > 2) return 0;
+            previous = center;
+        }
+        return 0; // 达到搜索边界不证明存在槽的右端。
     }
 
     private static bool IsDark(Vec3b bgr) => bgr.Item0 <= 128 && bgr.Item1 <= 104 && bgr.Item2 <= 104 &&

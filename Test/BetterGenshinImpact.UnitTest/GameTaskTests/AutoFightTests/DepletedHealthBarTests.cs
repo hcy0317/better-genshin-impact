@@ -6,6 +6,24 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class DepletedHealthBarTests(ITestOutputHelper output)
 {
+    [Fact]
+    public void TranslucentTrackWithAntialiasedBorderRetainsTheNarrowRedEnemyCue()
+    {
+        using var source = new Mat(1080, 1920, MatType.CV_8UC3, new Scalar(95, 100, 45));
+        var red = new EnemySeekVisual(840, 451, 10, 8, 75);
+        for (var x = red.X; x < 945; x++)
+        {
+            var r = Math.Max(27, 59 - (x - red.X) / 2);
+            Cv2.Line(source, new Point(x, 450), new Point(x, 459), new Scalar(59, 63, r));
+        }
+        Cv2.Rectangle(source, new Rect(red.X, red.Y, red.Width, red.Height), new Scalar(90, 90, 255), -1);
+        using var mask = AutoFightSeek.CreateSeekColorMask(source, new Scalar(255, 90, 90), null);
+        var actual = AutoFightSeek.ClassifySeekVisual(mask, source, red, 1920, 1080);
+        Assert.NotNull(actual);
+        Assert.InRange(actual.Value.HealthBarTrackWidth, 100, 108);
+        Assert.Equal(SeekCueKind.HealthBar, AutoFightSeek.SelectSeekDecision([actual.Value], 1920, 1080, false).Cue);
+    }
+
     [Theory]
     [InlineData(11)]
     [InlineData(14)]
@@ -26,6 +44,40 @@ public class DepletedHealthBarTests(ITestOutputHelper output)
             AssertHealthBar(recorded, redWidth == 14 ? new(741, 147, 14, 6, 79) : new(1511, 397, 11, 6, 62));
             output.WriteLine($"Recorded original frame verified: {Path.GetFileName(path)}, redWidth={redWidth}");
             if (redWidth == 14) ReplayRecordedDirectory(Path.GetDirectoryName(path)!);
+        }
+    }
+
+    [Fact]
+    public void RecordedS56PixelsAreReclassifiedWithoutBorrowingAnotherFramesCoordinates()
+    {
+        var paths = Environment.GetEnvironmentVariable("BGI_S56_HEALTHBAR_FILES");
+        if (string.IsNullOrWhiteSpace(paths)) return;
+        foreach (var path in paths.Split('|'))
+        {
+            using var source = Cv2.ImRead(path);
+            Assert.False(source.Empty());
+            using var mask = AutoFightSeek.CreateSeekColorMask(source, new Scalar(255, 90, 90), null);
+            using var labels = new Mat();
+            using var stats = new Mat();
+            using var centers = new Mat();
+            var count = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centers);
+            var accepted = new List<EnemySeekVisual>();
+            for (var i = 1; i < count; i++)
+            {
+                var red = new EnemySeekVisual(stats.At<int>(i, 0), stats.At<int>(i, 1),
+                    stats.At<int>(i, 2), stats.At<int>(i, 3), stats.At<int>(i, 4));
+                var found = AutoFightSeek.ClassifySeekVisual(mask, source, red, source.Width, source.Height);
+                if (found is { HealthBarTrackWidth: > 0 } bar) accepted.Add(bar);
+                if (red.Width is >= 5 and <= 20 && red.Height is >= 4 and <= 15)
+                {
+                    var track = DepletedHealthBarReader.ReadTrackWidth(source, red, 24, out var reason);
+                    output.WriteLine($"red={red.X},{red.Y},{red.Width},{red.Height} track={track} reason={reason}");
+                }
+            }
+            output.WriteLine($"S56 {Path.GetFileName(path)} accepted={accepted.Count}");
+            // 大于12px的近景条仍沿用既有几何上限；本修复验证被暗槽规则拒绝的细残血条。
+            Assert.Contains(accepted, bar => bar.X > source.Width / 3 && bar.X < source.Width * 2 / 3 &&
+                bar.Y > source.Height / 4 && bar.Y < source.Height / 2 && bar.Width <= 12);
         }
     }
 

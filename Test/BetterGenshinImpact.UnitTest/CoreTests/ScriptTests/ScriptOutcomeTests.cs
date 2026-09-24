@@ -10,6 +10,71 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.ScriptTests;
 public class ScriptOutcomeTests
 {
     [Fact]
+    public async Task UnavailableTeleportIsSkippedOnlyAfterRecoveryAndNeverCreditsCompletion()
+    {
+        var recovered = false;
+        var step = await ScriptStepOutcomeRunner.RunAsync(
+            () => Task.FromException<ScriptExecutionResult>(new BetterGenshinImpact.GameTask.AutoTrackPath.TeleportSelectionMismatchException()),
+            _ => { recovered = true; return Task.CompletedTask; }, default);
+        Assert.True(recovered);
+        Assert.Equal(ScriptOutcomeKind.Skipped, step.Outcome.Kind);
+        Assert.Contains("TARGET_UNAVAILABLE", step.Outcome.Reason);
+        var record = new ExecutionRecord();
+        step.Outcome.ApplyTo(record);
+        Assert.False(record.IsSuccessful);
+    }
+
+    [Fact]
+    public async Task TypedTargetFailureSurvivesTheRealV8BoundaryWithoutPublishingPathSuccess()
+    {
+        var api = new BetterGenshinImpact.Core.Script.Dependence.AutoPathingScript(Path.GetTempPath(), null,
+            new BetterGenshinImpact.Core.Script.Dependence.LimitedFile(Path.GetTempPath()), (_, _) => { },
+            (_, _) => Task.FromException<bool>(new BetterGenshinImpact.GameTask.AutoTrackPath.TeleportSelectionMismatchException()),
+            (_, _) => { });
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        string? message = null;
+        engine.AddHostObject("pathing", api);
+        engine.AddHostObject("report", (Action<string>)(text => message = text));
+        await (Task)engine.Evaluate("(async()=>{try{await pathing.Run('{}');report('unexpected-success');}catch(error){report(error.message);}})()");
+        Assert.StartsWith("[BGI_PATH_TARGET_UNAVAILABLE]", message);
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("cancel")]
+    [InlineData("combat")]
+    [InlineData("recovery")]
+    public async Task TargetFailureCannotHideAnotherCauseOrOverrideTerminalSafety(string kind)
+    {
+        var target = new BetterGenshinImpact.GameTask.AutoTrackPath.TeleportSelectionMismatchException();
+        Exception other = kind switch
+        {
+            "cancel" => new OperationCanceledException(),
+            "combat" => new CombatNotFinishedException("not confirmed"),
+            "recovery" => new TaskFailureRecoveryException(target, new TimeoutException()),
+            _ => new IOException("unknown failure")
+        };
+        var recovered = false;
+        var failure = new AggregateException(target, other);
+        ScriptStepOutcome? result = null;
+        var error = await Record.ExceptionAsync(async () => result = await ScriptStepOutcomeRunner.RunAsync(
+            () => Task.FromException<ScriptExecutionResult>(failure),
+            _ => { recovered = true; return Task.CompletedTask; }, default));
+        if (kind == "unknown")
+        {
+            Assert.Null(error);
+            Assert.True(recovered);
+            Assert.Equal(ScriptOutcomeKind.Failed, result!.Value.Outcome.Kind);
+        }
+        else
+        {
+            Assert.Same(failure, error);
+            Assert.False(recovered);
+        }
+    }
+
+
+    [Fact]
     public async Task ManifestOutcomeContractAppliesBeforeTheFirstJavaScriptStatement()
     {
         using var engine = new V8ScriptEngine(V8ScriptEngineFlags.UseCaseInsensitiveMemberBinding);

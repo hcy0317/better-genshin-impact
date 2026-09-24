@@ -351,6 +351,7 @@ public partial class ScriptService : IScriptService
 
                         for (var i = 0; i < exeProject.RunNum; i++)
                         {
+                            var attemptOutcome = ScriptOutcomeKind.Failed;
                             try
                             {
                                 _logger.LogInformation("------------------------------");
@@ -374,18 +375,21 @@ public partial class ScriptService : IScriptService
                                     (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
                                         $"{context} 配置组 {groupName} / 脚本 {exeProject.Name}"));
                                 var outcome = step.Outcome;
+                                attemptOutcome = outcome.Kind;
                                 outcomes.Add(exeProject.Name, outcome);
                                 if (!RunnerContext.Instance.IsPreExecution && taskProgress?.CurrentScriptGroupProjectInfo != null)
                                 {
                                     taskProgress.CurrentScriptGroupProjectInfo.Outcome = outcome.Kind.ToString();
                                     taskProgress.CurrentScriptGroupProjectInfo.OutcomeReason = outcome.Reason;
-                                    if (step.RecoveredFailure != null) taskProgress.CurrentScriptGroupProjectInfo.Status = 2;
+                                    if (step.RecoveredFailure != null && outcome.Kind != ScriptOutcomeKind.Skipped)
+                                        taskProgress.CurrentScriptGroupProjectInfo.Status = 2;
                                 }
                                 // 未闭合/合法跳过均不能在RunNum内重复；完成CD同样终止剩余次数。
                                 if (outcome.Kind != ScriptOutcomeKind.Completed || (exeProject.RunNum > 1 && ShouldSkipTask(exeProject))) break;
                             }
                             catch (OperationCanceledException e)
                             {
+                                attemptOutcome = ScriptOutcomeKind.Cancelled;
                                 outcomes.Add(exeProject.Name, new(ScriptOutcomeKind.Cancelled, "GROUP_CANCELLED"));
                                 _logger.LogInformation("取消执行配置组: {Msg}", e.Message);
                                 throw;
@@ -406,11 +410,7 @@ public partial class ScriptService : IScriptService
                             finally
                             {
                                 stopwatch.Stop();
-                                var elapsedTime = TimeSpan.FromMilliseconds(stopwatch.ElapsedMilliseconds);
-                                // _logger.LogDebug("→ 脚本执行结束: {Name}, 耗时: {ElapsedMilliseconds} 毫秒", project.Name, stopwatch.ElapsedMilliseconds);
-                                _logger.LogInformation("→ 脚本执行结束: {Name}, 耗时: {Minutes}分{Seconds:0.000}秒", exeProject.Name,
-                                    elapsedTime.Hours * 60 + elapsedTime.Minutes, elapsedTime.TotalSeconds % 60);
-                                _logger.LogInformation("------------------------------");
+                                LogRunEnd(_logger, exeProject.Name, attemptOutcome, stopwatch.Elapsed);
                             }
 
                             await Task.Delay(1000, CancellationContext.Instance.GetTokenOrNone());
@@ -643,6 +643,17 @@ public partial class ScriptService : IScriptService
     [GeneratedRegex(@"^(?!\s*\/\/)\s*dispatcher\.\s*addTimer", RegexOptions.Multiline)]
     private static partial Regex DispatcherAddTimerRegex();
 
+
+    internal static void LogRunEnd(ILogger logger, string name, ScriptOutcomeKind outcome, TimeSpan elapsed)
+    {
+        try
+        {
+            logger.LogInformation("→ 脚本执行结束: {Name}, 结果: {Outcome}, 耗时: {Minutes}分{Seconds:0.000}秒", name,
+                outcome, (int)elapsed.TotalMinutes, elapsed.TotalSeconds % 60);
+            logger.LogInformation("------------------------------");
+        }
+        catch { /* 结束日志故障不能替换原始执行结果或异常。 */ }
+    }
 
     public static async Task StartGameTask(bool waitForMainUi = true)
     {
