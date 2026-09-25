@@ -143,7 +143,7 @@ public partial class PathExecutor
 
         if (_skipOtherOperations)
         {
-            Logger.LogWarning("已到达上次点位，地图追踪功能恢复");
+            _moveIo.Logger.LogWarning("已到达上次点位，地图追踪功能恢复");
         }
 
         _skipOtherOperations = false;
@@ -152,7 +152,9 @@ public partial class PathExecutor
     //记录点位，方便后面恢复
     public void StartSkipOtherOperations()
     {
-        Logger.LogWarning("记录恢复点位，地图追踪将到达上次点位之前将跳过走路之外的操作");
+        if (_skipOtherOperations && RecordWaypoints == CurWaypoints && RecordWaypoint.Item1 >= CurWaypoint.Item1)
+            return;
+        _moveIo.Logger.LogWarning("记录恢复点位，地图追踪将到达上次点位之前将跳过走路之外的操作");
         _skipOtherOperations = true;
         RecordWaypoints = CurWaypoints;
         RecordWaypoint = CurWaypoint;
@@ -264,8 +266,7 @@ public partial class PathExecutor
                         }
 
                         //skipOtherOperations如果重试，则跳过相关操作，
-                        if ((!string.IsNullOrEmpty(waypoint.Action) && !_skipOtherOperations) ||
-                            waypoint.Action == ActionEnum.CombatScript.Code)
+                        if (ShouldExecuteWaypointAction(waypoint))
                         {
                             //战斗前的节点记录，用于游泳检测回到战斗节点
                             AutoFightTask.FightWaypoint = waypoint.Action == ActionEnum.Fight.Code ? waypoint : null;
@@ -304,14 +305,19 @@ public partial class PathExecutor
     }
 
     internal sealed class EndConditionSatisfiedException() : Exception("达成结束条件，结束地图追踪");
+    internal sealed class HealingRecoveryCompletedException() : RetryException("已验证回血，返回原传送分段入口");
 
     /// <summary>正常完成返回 false；仅显式结束条件返回 true；失败或取消始终向调用方传播。</summary>
     internal static async Task<bool> ExecuteSegmentWithRetriesAsync(Func<Task> execute,
         Action<Exception> onRetry, Action releaseInput, CancellationToken ct)
     {
+        var healingRestarts = 0;
+        var relocationRestarts = 0;
         for (var attempt = 0; attempt < RetryTimes; attempt++)
         {
             ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            UiOperation.Current?.Check();
             try
             {
                 await execute();
@@ -328,9 +334,21 @@ public partial class PathExecutor
             {
                 throw new InvalidOperationException("地图追踪未完整完成：" + exception.Message, exception);
             }
+            catch (HealingRecoveryCompletedException exception)
+            {
+                ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                UiOperation.Current?.Check();
+                if (++healingRestarts > 2)
+                    throw new InvalidOperationException("当前分段已使用两次已验证回血重启，停止而不扩大重试", exception);
+                onRetry(exception);
+                attempt--;
+            }
             catch (RetryException exception)
             {
                 ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                UiOperation.Current?.Check();
                 if (attempt == RetryTimes - 1)
                     throw new InvalidOperationException($"地图追踪重试 {RetryTimes} 次仍未完成；停止当前路线：{exception.Message}", exception);
                 onRetry(exception);
@@ -338,6 +356,10 @@ public partial class PathExecutor
             catch (RetryNoCountException exception)
             {
                 ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                UiOperation.Current?.Check();
+                if (++relocationRestarts > 1)
+                    throw new InvalidOperationException("当前分段重定位重启已使用一次，停止无进展回放", exception);
                 attempt--;
                 onRetry(exception);
             }
@@ -721,8 +743,7 @@ public partial class PathExecutor
                 if (healed) return;
             }
             Logger.LogInformation("当前角色血量过低，去七天神像恢复");
-            await TpStatueOfTheSeven();
-            throw new RetryException("回血完成后重试路线");
+            await RecoverAtStatueAndRestartAsync(region.FrameStamp);
         }
         else if (ReleaseMacroBeforeRevive(region) && Bv.ClickIfInReviveModal(region))
         {
@@ -735,8 +756,7 @@ public partial class PathExecutor
             Logger.LogInformation("已确认全队复苏并返回主界面");
             await Delay(4000, ct);
             // 血量肯定不满，直接去七天神像回血
-            await TpStatueOfTheSeven();
-            throw new RetryException("回血完成后重试路线");
+            await RecoverAtStatueAndRestartAsync(region.FrameStamp);
         }
     }
 
