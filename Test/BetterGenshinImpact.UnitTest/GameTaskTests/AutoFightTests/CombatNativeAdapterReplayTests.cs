@@ -23,7 +23,7 @@ using LogLevel = Microsoft.Extensions.Logging.LogLevel;
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 // B层：真实解析/调度/在途协议与选角策略，帧到达和游戏物理效果是可控外部边界。
-public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
+public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
     [Theory]
     [InlineData(MotionStatus.Fly, "wait(.35),j,wait(2),j", 2.35)]
@@ -2319,7 +2319,12 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         else
         {
             var result = await native.SendAsync(request, default);
-            Assert.NotNull(result.Error);
+            if (fault == "slow-up")
+            {
+                Assert.Null(result.Error);
+                Assert.NotNull(result.PerformanceRecheck);
+            }
+            else Assert.NotNull(result.Error);
             Assert.Equal(fault == "slow-up" ? CombatBattleHostInputStatus.Sent : CombatBattleHostInputStatus.Unknown, result.Status);
         }
         Assert.Equal(new[] { "forward-down", "forward-up" }, device.Inputs);
@@ -2346,10 +2351,12 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public Action? AfterParty { get; init; }
         public Action? AfterCamera { get; init; }
         public Action<int>? AdvanceClock { get; init; }
-        public void PrepareInput() => Preparations++;
+        public double PreparationDelayMs { get; init; }
+        public double HoldOverheadMs { get; init; }
+        public void PrepareInput() { Preparations++; clock.Advance(TimeSpan.FromMilliseconds(PreparationDelayMs)); }
         public void MoveCamera(int x, int y) { Inputs.Add("camera"); AfterCamera?.Invoke(); }
-        public int DownDelayMs { get; init; }
-        public int UpDelayMs { get; init; }
+        public double DownDelayMs { get; init; }
+        public double UpDelayMs { get; init; }
         public Func<bool, bool>? RejectForward { get; init; }
         public Action<bool>? AfterForward { get; init; }
         public List<int> Delays { get; } = [];
@@ -2383,7 +2390,7 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             ct.ThrowIfCancellationRequested();
             Delays.Add(milliseconds);
             if (AdvanceClock != null) AdvanceClock(milliseconds);
-            else clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            else clock.Advance(TimeSpan.FromMilliseconds(milliseconds + HoldOverheadMs));
             return ValueTask.CompletedTask;
         }
     }
@@ -3490,6 +3497,12 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 
         private void Advance(double milliseconds)
         {
+            // 组合回放中OS输入/宿主也推进同一时钟；丢弃错过的采集时隙，不倒退时钟或补签旧帧。
+            if (ExternalClockAdvance)
+            {
+                _nextFrameTimestamp = Math.Max(_nextFrameTimestamp, _clock.GetTimestamp());
+                milliseconds = Math.Max(0, milliseconds);
+            }
             var target = _clock.GetTimestamp() + (long)Math.Round(milliseconds * _clock.TimestampFrequency / 1000);
             while (_clock.GetTimestamp() < target)
             {
@@ -3779,8 +3792,10 @@ public class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public Task PrepareVisionAsync(CancellationToken ct) => PrepareVisionAsync(true, ct);
         public Task PrepareVisionAsync(bool needsBurst, CancellationToken ct)
         { ct.ThrowIfCancellationRequested(); _visionInvalidated = false; VisionPreparations.Add(needsBurst); return VisionReadiness ?? Task.CompletedTask; }
-        public IDisposable BeginExclusive(bool allowPassiveObservation) => new Lease();
-        private sealed class Lease : IDisposable { public void Dispose() { } }
+        internal Action? OnExclusiveEnd { get; init; }
+        internal bool ExternalClockAdvance { get; init; }
+        public IDisposable BeginExclusive(bool allowPassiveObservation) => new Lease(allowPassiveObservation ? null : OnExclusiveEnd);
+        private sealed class Lease(Action? end) : IDisposable { public void Dispose() => end?.Invoke(); }
         public void ReleaseInput()
         {
             if (InputReleaseError != null) throw InputReleaseError;

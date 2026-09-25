@@ -43,6 +43,8 @@ internal readonly record struct CombatBattleHostInput(CombatBattleHostInputKind 
     public Guid? SelectionGoal { get; init; }
 }
 internal enum CombatBattleHostInputStatus { NotSent, Sent, Unknown, Failed }
+internal readonly record struct CombatInputPerformanceRecheck(Guid RequestId, CaptureFrameStamp Source,
+    long DeadlineTimestamp, Guid? SelectionGoal);
 internal readonly record struct CombatBattleHostInputResult(CombatBattleHostInputStatus Status,
     long? CompletedTimestamp = null, string? Reason = null, Exception? Error = null)
 {
@@ -50,6 +52,7 @@ internal readonly record struct CombatBattleHostInputResult(CombatBattleHostInpu
     public int? NativeSubmitted { get; init; }
     public long? StartedTimestamp { get; init; }
     public long? ObservableAfterTimestamp { get; init; }
+    public CombatInputPerformanceRecheck? PerformanceRecheck { get; init; }
 }
 
 /// <summary>游戏/时钟边界；生产与回放共同驱动宿主，不在回放重写退出循环。</summary>
@@ -109,6 +112,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private int _detachPulses;
     private Guid _inputRequestId;
     private long _inputRequestDeadline;
+    private long? _performanceRecheckDeadline;
     private bool UsesPartyFinish => options.FinishDetectionEnabled && !options.ExternalCompletionAuthority;
     private CombatBattleHostResult _result;
     private CombatBattleObservation _diagnosticObservation;
@@ -151,9 +155,30 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             var now = Now;
             if (options.TimeoutSeconds > 0 && now >= options.TimeoutSeconds)
                 return Stop("configured-timeout");
+            if (_performanceRecheckDeadline is { } beforeRead && io.Clock.GetTimestamp() >= beforeRead)
+                return Stop("host-input-performance-recheck-deadline");
             var observation = ReadObservation(io.ObserveTarget);
             _diagnosticObservation = observation;
             var fresh = Accept(observation, out var newEvidence, out _traceObservationGate);
+            if (_performanceRecheckDeadline is { } recheckDeadline)
+            {
+                // 先于控制/busy分支：已完整送达的辅助不能用旧画面继续切人或发第二次脉冲。
+                Common.Ui.UiOperation.Current?.Check();
+                if (io.Clock.GetTimestamp() >= recheckDeadline)
+                    return Stop("host-input-performance-recheck-deadline");
+                if (!fresh || !newEvidence)
+                {
+                    Reason = "host-input-performance-awaiting-fresh-evidence";
+                    await io.DelayAsync(50, ct);
+                    return _result;
+                }
+                _performanceRecheckDeadline = null;
+                _lastValidAt = Now;
+                LastMotion = observation.Motion;
+                LastControl = observation.Control;
+                Reason = "host-input-performance-rechecked";
+                return _result; // 只解除屏障，不记进展、不报完成；下一Step再按原策略决策。
+            }
             if (newEvidence)
             {
                 _lastValidAt = now;
@@ -733,6 +758,20 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 {
                     Stop("host-input-invalid-completion-evidence");
                     return new(CombatBattleHostInputStatus.Unknown, Reason: Reason);
+                }
+                if (result.PerformanceRecheck is { } recheck)
+                {
+                    if (input.Kind != CombatBattleHostInputKind.Approach || result.Error != null ||
+                        result.NativeRequested is not >= 2 || result.NativeSubmitted != result.NativeRequested ||
+                        recheck.RequestId != input.RequestId || recheck.Source != source ||
+                        recheck.SelectionGoal != input.SelectionGoal || recheck.DeadlineTimestamp > _inputRequestDeadline ||
+                        recheck.DeadlineTimestamp <= io.Clock.GetTimestamp())
+                    {
+                        Stop("host-input-invalid-performance-recheck");
+                        return result;
+                    }
+                    _performanceRecheckDeadline = recheck.DeadlineTimestamp;
+                    Reason = "host-input-performance-awaiting-fresh-evidence";
                 }
                 _inputRequestId = Guid.Empty;
                 if (result.Error != null) Stop("host-input-submitted-but-operation-interrupted: " + result.Error.GetType().Name);
