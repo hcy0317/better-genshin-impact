@@ -1387,12 +1387,6 @@ public partial class PathExecutor
         while (true)
         {
             operation.Check();
-            stepsTaken++;
-            if (stepsTaken > 25)
-            {
-                throw new RetryException("精确接近目标点超时，重试当前路线分段");
-            }
-
             using var screen = _moveIo.Capture();
 
             _moveIo.EndJudgment(screen);
@@ -1407,6 +1401,8 @@ public partial class PathExecutor
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
+            if (++stepsTaken > 25)
+                throw new RetryException("精确接近目标点超时，重试当前路线分段");
             position = location.Point;
             var distance = Navigation.GetDistance(waypoint, position);
             approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, _moveIo.Logger, location.IsDirect);
@@ -1422,7 +1418,7 @@ public partial class PathExecutor
             previous = observation.Stamp;
             previousPosition = position;
             if (!recoveryUsed && stationary >= 5 && observation.Motion == MotionStatus.Normal &&
-                waypoint.MoveMode is "walk" or "run" && !_moveIo.Transformed(screen))
+                waypoint.MoveMode is "walk" or "run" or "climb" or "dash" && !_moveIo.Transformed(screen))
             {
                 recoveryUsed = true;
                 _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);

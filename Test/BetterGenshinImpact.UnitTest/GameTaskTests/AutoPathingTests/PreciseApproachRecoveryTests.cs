@@ -9,6 +9,48 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PreciseApproachRecoveryTests
 {
+    [Fact]
+    public async Task WaitingForValidFramesDoesNotSpendTheMovementAttemptBudget()
+    {
+        var replay = new PathReplay { HudAt = count => count > 30 };
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        Assert.True(replay.Frames > 30);
+        Assert.Empty(replay.Inputs.Where(input => input.Type == KeyType.KeyDown));
+    }
+
+    [Theory]
+    [InlineData("climb", MotionStatus.Climb, false)]
+    [InlineData("dash", MotionStatus.Fly, false)]
+    [InlineData("climb", MotionStatus.Normal, true)]
+    [InlineData("dash", MotionStatus.Unknown, false)]
+    public async Task AuthoredGroundRecoveryModesNeverOverrideActualUnsafePosture(string mode, MotionStatus motion, bool transformed)
+    {
+        var replay = new PathReplay { EmitReceipts = true, Transformed = transformed,
+            PositionAt = _ => new Point2f(104, 100), MotionAt = _ => motion };
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point(mode)));
+        Assert.Empty(replay.RecoveryInputs);
+    }
+
+    [Theory]
+    [InlineData("climb")]
+    [InlineData("dash")]
+    public async Task RecordedGroundStallUsesObservedPostureNotAuthoredTransitMode(string mode)
+    {
+        var replay = new PathReplay { EmitReceipts = true };
+        var escaped = false;
+        replay.PositionAt = _ => escaped ? new Point2f(39055.75f, 32238.62f) : new Point2f(39058.55f, 32238.57f);
+        replay.OnInput = (action, type) =>
+        {
+            if (type == KeyType.KeyDown && action is GIActions.MoveBackward or GIActions.MoveLeft or GIActions.MoveRight)
+                escaped = true;
+        };
+        var target = replay.Point(mode);
+        target.X = 39055.75; target.Y = 32238.62;
+        await replay.Executor.MoveCloseTo(target);
+        Assert.True(escaped);
+        Assert.NotEmpty(replay.RecoveryInputs);
+    }
+
     [Theory]
     [InlineData(100, 100, 103.94f, 100)]
     // S56 20260924.log:29801，07-跳崖点东x18.json segment=1 node=79。
