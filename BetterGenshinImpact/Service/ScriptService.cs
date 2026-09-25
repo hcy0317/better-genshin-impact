@@ -368,12 +368,13 @@ public partial class ScriptService : IScriptService
                                     var recoveryStarted = Stopwatch.GetTimestamp();
                                     try { _logger.LogWarning("脚本 {Name} 尚未完成，保持任务锁并恢复主界面: {Reason}", exeProject.Name, failure.Message); }
                                     catch { /* 日志不能阻止恢复。 */ }
-                                    await new ReturnMainUiTask().Start(projectCancellationToken, requireOverworld: true);
-                                    try { _logger.LogInformation("脚本 {Name} 已验证回到大世界主界面，恢复耗时 {Milliseconds:F1} ms", exeProject.Name, Stopwatch.GetElapsedTime(recoveryStarted).TotalMilliseconds); }
+                                    await new ReturnMainUiTask().RecoverForNextScript(projectCancellationToken);
+                                    try { _logger.LogInformation("脚本 {Name} 已验证恢复普通角色大世界交接状态，原任务结果不变，恢复耗时 {Milliseconds:F1} ms", exeProject.Name, Stopwatch.GetElapsedTime(recoveryStarted).TotalMilliseconds); }
                                     catch { /* 诊断不能改变已验证的恢复结果。 */ }
                                 }, projectCancellationToken, _logger,
                                     (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
-                                        $"{context} 配置组 {groupName} / 脚本 {exeProject.Name}"));
+                                        $"{context} 配置组 {groupName} / 脚本 {exeProject.Name}"),
+                                    recoveryBudget: TimeSpan.FromSeconds(90));
                                 var outcome = step.Outcome;
                                 attemptOutcome = outcome.Kind;
                                 outcomes.Add(exeProject.Name, outcome);

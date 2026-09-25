@@ -14,7 +14,7 @@ internal static class ScriptStepOutcomeRunner
 {
     internal static async Task<ScriptStepOutcome> RunAsync(Func<Task<ScriptExecutionResult>> execute,
         Func<Exception, Task> recover, CancellationToken ct, ILogger? logger = null,
-        Action<Exception, string>? captureFailure = null)
+        Action<Exception, string>? captureFailure = null, TimeSpan? recoveryBudget = null)
     {
         ct.ThrowIfCancellationRequested();
         TaskExecutionScope.ThrowIfFailed();
@@ -37,7 +37,7 @@ internal static class ScriptStepOutcomeRunner
         {
             var failure = recoveredFailure ?? new InvalidOperationException($"[BGI_SCRIPT_INCOMPLETE] {outcome.Kind}: {outcome.Reason}");
             await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(failure, () => recover(failure), ct, logger,
-                captureFailure: captureFailure);
+                budget: recoveryBudget, captureFailure: captureFailure);
             ct.ThrowIfCancellationRequested();
             TaskExecutionScope.ThrowIfFailed();
             if (recoveredFailure != null && PathingTargetUnavailableException.IsUnavailableTarget(recoveredFailure))

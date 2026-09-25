@@ -95,6 +95,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         {
             var reader = ocr ?? OcrFactory.Paddle;
             var control = CombatMotionReader.ReadControl(image, true, reader);
+            var transformed = SaurianUiReader.IsKnownTransformation(image);
+            var ordinary = !transformed && (reviveDetector?.IsCombatHud(image) ?? Bv.IsCombatHud(image));
             var messages = image.FindMulti(RecognitionObject.Ocr(image.Width * .15, image.Height * .2,
                 image.Width * .7, image.Height * .5), ocrService: reader);
             try
@@ -104,7 +106,10 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                     message.Text.Contains("战斗中无法", StringComparison.Ordinal));
                 snapshot = snapshot with { World = new(control.KeyboardBreakoutRequested ||
                     control.Motion is MotionStatus.Fly or MotionStatus.Climb,
-                    Bv.CurrentAvatarIsLowHp(image, image.Height / 1080d), rejected) };
+                    Bv.CurrentAvatarIsLowHp(image, image.Height / 1080d), rejected)
+                    { OrdinaryAvatarHud = ordinary, Transformed = transformed,
+                        ControlObserved = control.IsObserved, KeyboardBreakout = control.KeyboardBreakoutRequested,
+                        Motion = control.Motion } };
             }
             finally { foreach (var message in messages) message.Dispose(); }
         }

@@ -11,6 +11,7 @@ using Vanara.PInvoke;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
+using BetterGenshinImpact.GameTask.AutoTrackPath;
 
 namespace BetterGenshinImpact.GameTask.Common.Job;
 
@@ -19,6 +20,13 @@ public class ReturnMainUiTask
     public string Name => "返回主界面";
 
     public Task Start(CancellationToken ct) => Start(ct, requireOverworld: false);
+
+    internal async Task RecoverForNextScript(CancellationToken ct)
+    {
+        using var suspendedCombatBudget = CombatActionScope.Suspend();
+        using var driver = new NativeUiDriver(inspectWorld: true);
+        await UiHandoffRecovery.RecoverAsync(driver, token => new TpTask(token).TpToStatueOfTheSeven(), ct);
+    }
 
     internal async Task Start(CancellationToken ct, bool requireOverworld)
     {
