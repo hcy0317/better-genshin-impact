@@ -121,6 +121,10 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         double? downMs = null, holdMs = null, upMs = null, remainingBeforeHold = null;
         var holdMilliseconds = 0;
         InputDispatchCapture? nativeCapture = null;
+        UiOperation? businessParent = null;
+        var businessDeadline = input.DeadlineTimestamp;
+        var releasedCompletely = false;
+        var performanceOverrun = false;
         var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.NotSent);
         try
         {
@@ -135,6 +139,11 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 result = new(CombatBattleHostInputStatus.NotSent, Reason: "host-input-preparation-late-or-expired");
                 return;
             }
+            businessParent = UiOperation.Current;
+            var parentObservedAt = Clock.GetTimestamp();
+            if (businessParent != null)
+                businessDeadline = Math.Min(businessDeadline, parentObservedAt +
+                    (long)Math.Floor(businessParent.Remaining.TotalSeconds * Clock.TimestampFrequency));
             using var operation = UiOperation.Begin("combat-host-input", TimeSpan.FromMilliseconds(Math.Min(150, remaining)), token, _device.Logger, Clock);
             operation.RecordDispatch(dispatch);
             operation.Check();
@@ -181,10 +190,15 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                     finally
                     {
                         var upStarted = Clock.GetTimestamp();
+                        var beforeUpRequested = nativeScope?.Requested ?? 0;
+                        var beforeUpSubmitted = nativeScope?.Submitted ?? 0;
                         try
                         {
                             using (operation.Measure(UiOperationPhase.NativeInput))
                                 _device.MoveForward(false);
+                            releasedCompletely = nativeScope != null && !nativeScope.Uncertain &&
+                                nativeScope.Requested > beforeUpRequested &&
+                                nativeScope.Submitted - beforeUpSubmitted == nativeScope.Requested - beforeUpRequested;
                         }
                         finally
                         {
@@ -222,6 +236,21 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             }
             completedAt = Clock.GetTimestamp();
             result = new(CombatBattleHostInputStatus.Sent, completedAt);
+            // 完整执行块后的局部性能超标不是输入未知。先重验业务/父期限，
+            // 且只有真实down/up回执完整时才可转入新帧复核；不豁免任何执行异常。
+            if (input.Kind == CombatBattleHostInputKind.Approach && releasedCompletely &&
+                nativeScope is { Uncertain: false, Requested: >= 2 } && nativeScope.Requested == nativeScope.Submitted &&
+                operation.Remaining <= TimeSpan.Zero)
+            {
+                token.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                businessParent?.Check();
+                if (Clock.GetTimestamp() < businessDeadline)
+                {
+                    performanceOverrun = true;
+                    return;
+                }
+            }
             operation.Check();
         }
         if (input.SelectionGoal != null)
@@ -231,6 +260,15 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         }
         else await (controlRecovery ? _flow.RunControlOperationAsync(input.RequestId, Dispatch, ct)
             : _flow.RunHostOperationAsync(Dispatch, ct));
+        if (performanceOverrun)
+        {
+            // 包含owner/观察scope释放后的边界；任何释放异常仍走原失败处理。
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            businessParent?.Check();
+            if (Clock.GetTimestamp() >= businessDeadline)
+                throw new TimeoutException("辅助输入完成后业务期限已到，不能继续复核");
+        }
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception error)
@@ -257,6 +295,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 Reason = actual.Reason ?? result.Reason
             };
         }
+        if (performanceOverrun && result.Status == CombatBattleHostInputStatus.Sent && result.Error == null)
+            result = result with
+            {
+                Reason = "host-input-complete-after-performance-budget",
+                PerformanceRecheck = new(input.RequestId, input.Source, businessDeadline, input.SelectionGoal)
+            };
         if (result.Status == CombatBattleHostInputStatus.Sent)
         {
             if (input.Kind == CombatBattleHostInputKind.OpenParty)
