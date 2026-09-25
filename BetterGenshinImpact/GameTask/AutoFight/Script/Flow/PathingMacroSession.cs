@@ -115,9 +115,27 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         var observation = await WaitForSceneAsync("entry", null, ct);
         _entry = observation.Source;
         _fence = io.Clock.GetTimestamp();
-        foreach (var command in segment.Commands)
+        for (var commandIndex = 0; commandIndex < segment.Commands.Count; commandIndex++)
         {
+            var command = segment.Commands[commandIndex];
             Check(_deadline, ct);
+            // 两个原定F是一次交互握手；第一F可能只隐藏HUD，不能在两者之间等待炮台UI。
+            // 仅保留已识别炮台程序中的原短等待，不新增重试或扩大Unknown入口准入。
+            if (segment.CannonProgram && observation.Scene == PathingMacroScene.World &&
+                IsCannonHandshake(segment.Commands, commandIndex))
+            {
+                observation = await ObserveBoundaryAsync("before-cannon-handshake", ct, PathingMacroScene.World);
+                if (io.Map(User32.VK.VK_F) != User32.VK.VK_F)
+                    throw new InvalidOperationException("炮台交互按键映射与原握手不一致");
+                await PressAsync(User32.VK.VK_F, ct);
+                await WaitAsync(Milliseconds(segment.Commands[commandIndex + 1].Args![0]), ct);
+                if (io.Map(User32.VK.VK_F) != User32.VK.VK_F)
+                    throw new InvalidOperationException("炮台交互期间按键映射改变");
+                await PressAsync(User32.VK.VK_F, ct);
+                observation = await ObserveBoundaryAsync("cannon-handshake-complete", ct, PathingMacroScene.Cannon);
+                commandIndex += 2;
+                continue;
+            }
             var key = command.Method == Method.KeyPress ? User32Helper.ToVk(command.Args![0]) : default;
             if (segment.CannonProgram && key == User32.VK.VK_RETURN)
                 observation = await ObserveBoundaryAsync("before-fire", ct);
@@ -160,7 +178,8 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 PathingMacroInputKind.KeyUp, ct);
             if (key is User32.VK.VK_F or User32.VK.VK_ESCAPE &&
                 (segment.CannonProgram || observation.Scene is PathingMacroScene.Cannon or PathingMacroScene.World))
-                observation = await ObserveBoundaryAsync("scene-transition", ct);
+                observation = await ObserveBoundaryAsync("scene-transition", ct,
+                    segment.CannonProgram && key == User32.VK.VK_ESCAPE ? PathingMacroScene.World : null);
         }
         // 旧NativeRunner在片段完成时释放X。保留这一既有语义，不声称跨挖矿节点持X。
         if (_held.TryGetValue(User32.VK.VK_X, out var heldX))
@@ -202,14 +221,26 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         return new(CombatExecutionKind.Completed, "RAW_INPUT_COMPLETED_NOT_SKILL_CONFIRMATION");
     }
 
-    private async Task<PathingMacroObservation> ObserveBoundaryAsync(string phase, CancellationToken ct)
+    private static bool IsCannonHandshake(IReadOnlyList<CombatCommand> commands, int index)
+    {
+        static bool IsF(CombatCommand command) => command.Method == Method.KeyPress &&
+            command.Args is { Count: 1 } && User32Helper.ToVk(command.Args[0]) == User32.VK.VK_F;
+        return index + 2 < commands.Count && IsF(commands[index]) && IsF(commands[index + 2]) &&
+            commands[index + 1].Method == Method.Wait && commands[index + 1].Args is { Count: 1 } args &&
+            double.TryParse(args[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var wait) &&
+            wait is > 0 and <= .5 && (index + 3 >= commands.Count || !IsF(commands[index + 3]));
+    }
+
+    private async Task<PathingMacroObservation> ObserveBoundaryAsync(string phase, CancellationToken ct,
+        PathingMacroScene? expected = null)
     {
         var remaining = 60 - io.Clock.GetElapsedTime(_fence).TotalMilliseconds;
         if (remaining > 0) await WaitAsync((int)Math.Ceiling(remaining), ct);
-        return await WaitForSceneAsync(phase, new CaptureFrameFence(_entry, _fence), ct);
+        return await WaitForSceneAsync(phase, new CaptureFrameFence(_entry, _fence), ct, expected);
     }
 
-    private async Task<PathingMacroObservation> WaitForSceneAsync(string phase, CaptureFrameFence? fence, CancellationToken ct)
+    private async Task<PathingMacroObservation> WaitForSceneAsync(string phase, CaptureFrameFence? fence, CancellationToken ct,
+        PathingMacroScene? expected = null)
     {
         var session = fence?.Before.SessionId ?? Guid.Empty;
         while (true)
@@ -223,7 +254,8 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                     throw new InvalidOperationException("路径宏待稳期间采集源改变，不继续输入");
                 session = observation.Source.SessionId;
             }
-            if (observation.Scene != PathingMacroScene.Unknown && observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
+            if (observation.Scene != PathingMacroScene.Unknown && (expected == null || observation.Scene == expected) &&
+                observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
                 (fence == null || fence.Value.Accepts(observation.Source))) return observation;
             // 只等稳定新画面；不延长期限，也不重发已经执行的原宏。
             await WaitAsync(100, ct);
