@@ -1,5 +1,6 @@
 using System;
 using Fischless.GameCapture;
+using BetterGenshinImpact.GameTask.Common.BgiVision;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
@@ -8,7 +9,14 @@ internal enum UiAction { Escape, RequestDomainExit, ConfirmDomainExit, SelectPar
 
 internal enum UiReadinessKind { Ready, TemporarilyUnavailable, Unknown, Terminal }
 internal readonly record struct UiReadiness(UiReadinessKind Kind, string Reason, bool CanProbe = false);
-internal readonly record struct UiWorldObservation(bool Controlled, bool LowHp, bool PartyRejected);
+internal readonly record struct UiWorldObservation(bool Controlled, bool LowHp, bool PartyRejected)
+{
+    public bool OrdinaryAvatarHud { get; init; }
+    public bool Transformed { get; init; }
+    public bool ControlObserved { get; init; }
+    public bool KeyboardBreakout { get; init; }
+    public MotionStatus Motion { get; init; }
+}
 
 /// <summary>同一次截图的特征证据；主HUD与秘境上下文是不同维度。</summary>
 internal sealed record UiSnapshot(long FrameId)
@@ -104,5 +112,5 @@ internal sealed record UiSnapshot(long FrameId)
         | (PartyList ? 8 : 0) | (Talk ? 16 : 0) | (Prompt ? 32 : 0) | (Revive ? 64 : 0)
         | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0) | (Cannon ? 32768 : 0)
         | (DomainTip.IsCandidate ? 65536 : 0) | (DomainTip.CanDismiss ? 131072 : 0) | (TimeSetting ? 262144 : 0) | (DomainExit.Visible ? 524288 : 0);
-    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},timeSetting={TimeSetting},cannon={Cannon},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},domainExit={DomainExit.Visible},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason}";
+    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},timeSetting={TimeSetting},cannon={Cannon},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},domainExit={DomainExit.Visible},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason},ordinaryAvatar={World?.OrdinaryAvatarHud},transformed={World?.Transformed},controlObserved={World?.ControlObserved},motion={World?.Motion}";
 }
