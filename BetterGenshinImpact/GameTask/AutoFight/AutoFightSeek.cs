@@ -1929,7 +1929,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         internal static EnemySeekDecision RecognizeSeekDecision(
             ImageRegion image, Scalar bloodLower, Scalar? bloodHigher,
             out int imageWidth, out int imageHeight, bool indicatorOnly = false,
-            bool saveDiagnostics = true, SeekRecognitionDiagnostics? diagnostics = null)
+            bool saveDiagnostics = true, SeekRecognitionDiagnostics? diagnostics = null,
+            Action<EnemySeekVisual>? unconfirmedDirection = null)
         {
             var detectionRegion = GetSeekDetectionRegion(image.Width, image.Height);
             using var imageCrop = image.DeriveCrop(
@@ -1998,14 +1999,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     imageCrop.SrcMat,
                     visual,
                     imageCrop.Width,
-                    imageCrop.Height, diagnostics))
+                    imageCrop.Height, diagnostics, unconfirmedDirection))
                 .Where(visual => visual.HasValue)
                 .Select(visual => visual!.Value)
                 .ToList();
 
             if (visuals.Count == 0 || indicatorOnly && !visuals.Any(v => v.IndicatorBearingDegrees.HasValue))
             {
-                var recovered = RecoverFragmentedDirectionIndicators(mask, imageCrop.SrcMat, rawVisuals);
+                var recovered = RecoverFragmentedDirectionIndicators(mask, imageCrop.SrcMat, rawVisuals, unconfirmedDirection);
                 visuals.AddRange(recovered);
                 if (diagnostics != null) diagnostics.Accepted += recovered.Count;
             }
@@ -2048,7 +2049,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         }
 
         private static IReadOnlyList<EnemySeekVisual> RecoverFragmentedDirectionIndicators(
-            Mat mask, Mat source, IReadOnlyList<EnemySeekVisual> rawVisuals)
+            Mat mask, Mat source, IReadOnlyList<EnemySeekVisual> rawVisuals,
+            Action<EnemySeekVisual>? unconfirmedDirection = null)
         {
             var recovered = new List<EnemySeekVisual>();
             var seen = new HashSet<Rect>();
@@ -2077,7 +2079,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         stats.At<int>(i, 2), stats.At<int>(i, 3), stats.At<int>(i, 4));
                     var rect = new Rect(visual.X, visual.Y, visual.Width, visual.Height);
                     var accepted = ClassifyDirectionIndicator(closed, source, visual, source.Width, source.Height,
-                        out _, new Point(left, top));
+                        out var reason, new Point(left, top));
+                    if (reason == "bearing") unconfirmedDirection?.Invoke(visual);
                     if (accepted is { IndicatorBearingDegrees: not null } && seen.Add(rect))
                         recovered.Add(accepted.Value);
                 }
@@ -2205,7 +2208,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             EnemySeekVisual visual,
             int imageWidth,
             int imageHeight,
-            SeekRecognitionDiagnostics? diagnostics = null)
+            SeekRecognitionDiagnostics? diagnostics = null, Action<EnemySeekVisual>? unconfirmedDirection = null)
         {
             var healthFailure = HealthBarGeometryFailure(visual, imageHeight, out var minimumWidth);
             EnemySeekVisual? Finish(EnemySeekVisual? accepted, string indicatorResult)
@@ -2236,6 +2239,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             }
 
             var indicator = ClassifyDirectionIndicator(mask, source, visual, imageWidth, imageHeight, out var indicatorReason);
+            if (source != null && indicatorReason == "bearing") unconfirmedDirection?.Invoke(visual);
             return Finish(indicator, indicatorReason);
         }
 

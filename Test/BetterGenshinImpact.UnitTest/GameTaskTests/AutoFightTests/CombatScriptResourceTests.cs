@@ -757,6 +757,7 @@ public class CombatScriptResourceTests
         using var source = Mat.Zeros(1080, 1920, MatType.CV_8UC3).ToMat();
         using var mask = Mat.Zeros(1080, 1920, MatType.CV_8UC1).ToMat();
         var targetRect = new Rect(944, 100, template.Width, template.Height);
+        var hints = new List<EnemySeekVisual>();
         using (var sourceTarget = new Mat(source, targetRect))
         using (var maskTarget = new Mat(mask, targetRect))
         {
@@ -774,7 +775,8 @@ public class CombatScriptResourceTests
                 targetRect.Height,
                 Cv2.CountNonZero(alpha)),
             imageWidth: 1920,
-            imageHeight: 1080));
+            imageHeight: 1080, unconfirmedDirection: hints.Add));
+        Assert.Empty(hints);
     }
 
     [Fact]
