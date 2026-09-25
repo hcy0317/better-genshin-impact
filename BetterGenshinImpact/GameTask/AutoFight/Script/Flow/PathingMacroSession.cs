@@ -13,7 +13,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 internal enum PathingMacroScene { Unknown, World, Transformed, Cannon }
 internal readonly record struct PathingMacroObservation(PathingMacroScene Scene, CaptureFrameStamp Source, bool CanFire = false);
-internal enum PathingMacroInputKind { KeyDown, KeyUp, MoveBy, MiddleDown, MiddleUp }
+internal enum PathingMacroInputKind { KeyDown, KeyUp, MoveBy, MiddleDown, MiddleUp, LeftDown, LeftUp }
 internal readonly record struct PathingMacroInput(PathingMacroInputKind Kind, User32.VK Key = default, int X = 0, int Y = 0);
 
 internal interface IPathingMacroIo
@@ -39,6 +39,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
     private bool _disposed, _poisoned;
     private ExceptionDispatchInfo? _releaseFailure;
     private bool _middleHeld;
+    private bool _leftHeld;
     internal bool HasTail => _held.Count != 0;
     private bool _navigation;
 
@@ -173,6 +174,12 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 Send(new(PathingMacroInputKind.MiddleUp), ct);
                 _middleHeld = false;
             }
+            else if (command.Method == Method.MouseDown)
+            {
+                _leftHeld = true;
+                Send(new(PathingMacroInputKind.LeftDown), ct);
+            }
+            else if (command.Method == Method.MouseUp) ReleaseLeftForHandoff();
             else if (command.Method == Method.KeyPress) await PressAsync(User32Helper.ToVk(command.Args![0]), ct);
             else Key(User32Helper.ToVk(command.Args![0]), command.Method == Method.KeyDown ? PathingMacroInputKind.KeyDown :
                 PathingMacroInputKind.KeyUp, ct);
@@ -181,6 +188,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 observation = await ObserveBoundaryAsync("scene-transition", ct,
                     segment.CannonProgram && key == User32.VK.VK_ESCAPE ? PathingMacroScene.World : null);
         }
+        ReleaseLeftForHandoff(); // 原匿名mousedown只在本片段持有，不把射击状态交给下一节点。
         // 旧NativeRunner在片段完成时释放X。保留这一既有语义，不声称跨挖矿节点持X。
         if (_held.TryGetValue(User32.VK.VK_X, out var heldX))
         {
@@ -219,6 +227,34 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             throw new InvalidOperationException("炮台持键不能交给普通导航");
         if (!HasTail) Release();
         return new(CombatExecutionKind.Completed, "RAW_INPUT_COMPLETED_NOT_SKILL_CONFIRMATION");
+    }
+
+    private void ReleaseLeftForHandoff()
+    {
+        if (!_leftHeld) return;
+        try
+        {
+            if (!_lease!.TryReleaseInput(() =>
+            {
+                Exception? failure = null;
+                try
+                {
+                    var result = io.Release(new(PathingMacroInputKind.LeftUp));
+                    _fence = Math.Max(_fence, result.ObservableAfterTimestamp ?? io.Clock.GetTimestamp());
+                    if (result.Status != CombatBattleHostInputStatus.Sent || result.Error != null)
+                        failure = new InvalidOperationException("路径宏左键释放未确认", result.Error);
+                }
+                catch (Exception error) { failure = error; }
+                _leftHeld = false; // 不重复未知的up；其它已持键仍须尝试清理。
+                if (failure != null)
+                {
+                    try { ReleasePhysical(); }
+                    catch (Exception cleanup) { failure = new AggregateException(failure, cleanup); }
+                    throw failure;
+                }
+            })) throw new InvalidOperationException("左键清理未取得原输入所有权");
+        }
+        catch (Exception error) { _poisoned = true; _releaseFailure = ExceptionDispatchInfo.Capture(error); throw; }
     }
 
     private static bool IsCannonHandshake(IReadOnlyList<CombatCommand> commands, int index)
@@ -353,9 +389,12 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             Attempt(new(PathingMacroInputKind.KeyUp, physical));
         if (_middleHeld)
             Attempt(new(PathingMacroInputKind.MiddleUp));
+        if (_leftHeld)
+            Attempt(new(PathingMacroInputKind.LeftUp));
         if (failure != null) throw new InvalidOperationException("路径宏释放失败，禁止交接", failure);
         _held.Clear();
         _middleHeld = false;
+        _leftHeld = false;
     }
 
     public void Dispose()

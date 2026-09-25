@@ -40,17 +40,24 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         if (_targetObservation != null) return _targetObservation();
         var observation = AvatarRecognition.LatestPassiveObservation;
         var current = AvatarRecognition.PassiveCaptureGate;
+        return ProjectObservation(observation, current.Epoch, current.CanCapture, Clock.GetUtcNow().UtcDateTime);
+    }
+
+    internal static CombatBattleObservation ProjectObservation(PassiveTargetObservation observation,
+        long currentEpoch, bool canCapture, DateTime now)
+    {
         var quality = observation.Quality;
-        if (observation.CaptureEpoch != current.Epoch || !current.CanCapture)
+        if (observation.CaptureEpoch != currentEpoch || !canCapture)
             quality = CombatObservationQuality.Unavailable;
-        EnemySeekDecision? target = AutoFightSeek.TryCreatePassiveDecision(observation, Clock.GetUtcNow().UtcDateTime,
+        EnemySeekDecision? target = AutoFightSeek.TryCreatePassiveDecision(observation, now,
             out var decision, out _, out _, out var passiveGate) ? decision : null;
-        if (observation.CaptureEpoch != current.Epoch) passiveGate = "capture-epoch-mismatch";
-        else if (!current.CanCapture) passiveGate = "capture-exclusive";
+        if (observation.CaptureEpoch != currentEpoch) passiveGate = "capture-epoch-mismatch";
+        else if (!canCapture) passiveGate = "capture-exclusive";
         return new(observation.Source, observation.BattleId, quality, target,
             observation.ImageWidth, observation.ImageHeight, observation.CueFingerprint)
         { Motion = observation.Motion, Control = observation.Control, Recognition = observation.Recognition,
-            PassiveGate = passiveGate, DamageFallback = observation.DamageFallback };
+            PassiveGate = passiveGate, DamageFallback = observation.DamageFallback,
+            SearchHint = observation.SearchHint };
     }
 
     public PartySetupFinishObservation ObservePartyBar()

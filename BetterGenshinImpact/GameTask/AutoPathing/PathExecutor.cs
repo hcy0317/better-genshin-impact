@@ -1059,7 +1059,7 @@ public partial class PathExecutor
             }
 
             // 非攀爬状态下，检测是否卡死（脱困触发器）
-            if (waypoint.MoveMode != MoveModeEnum.Climb.Code)
+            if (!transformed && waypoint.MoveMode != MoveModeEnum.Climb.Code)
             {
                 if ((_moveIo.Clock.GetUtcNow().UtcDateTime - lastPositionRecord).TotalMilliseconds > 1000 + additionalTimeInMs)
                 {
@@ -1252,7 +1252,7 @@ public partial class PathExecutor
         var stamp = screen.FrameStamp;
         var sourceUsable = position.IsDirect && float.IsFinite(position.Point.X) && float.IsFinite(position.Point.Y)
             && position.Point != default && stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2))
-            && _moveIo.CombatHud(screen);
+            && (_moveIo.CombatHud(screen) || _moveIo.Transformed(screen));
         var motion = sourceUsable ? _moveIo.Motion(screen) : MotionStatus.Normal;
         // Keep the producer's timestamp: HUD/motion work must not refresh an aging source.
         sourceUsable = sourceUsable && stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2));

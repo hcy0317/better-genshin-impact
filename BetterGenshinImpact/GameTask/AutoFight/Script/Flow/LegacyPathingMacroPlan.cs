@@ -78,6 +78,9 @@ internal sealed record LegacyPathingMacroPlan(IReadOnlyList<LegacyPathingMacroPl
             return true;
         if (command.Method == Method.Click)
             return command.Args is { Count: 1 } && string.Equals(command.Args[0], "middle", StringComparison.OrdinalIgnoreCase);
+        if (command.Method == Method.MouseDown || command.Method == Method.MouseUp)
+            return command.Args is null or { Count: 0 } || command.Args is { Count: 1 } &&
+                string.Equals(command.Args[0], "left", StringComparison.OrdinalIgnoreCase);
         if (command.Method != Method.KeyDown && command.Method != Method.KeyUp && command.Method != Method.KeyPress)
             return false;
         return command.Args is { Count: 1 } && User32Helper.ToVk(command.Args[0]) is

@@ -65,7 +65,7 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
 
     public CombatBattleHostInputResult Release(PathingMacroInput input)
     {
-        if (input.Kind is not (PathingMacroInputKind.KeyUp or PathingMacroInputKind.MiddleUp))
+        if (input.Kind is not (PathingMacroInputKind.KeyUp or PathingMacroInputKind.MiddleUp or PathingMacroInputKind.LeftUp))
             throw new ArgumentException("清理通道只允许松开已记录输入", nameof(input));
         return Submit(input, () => { }, cleanup: true);
     }
@@ -97,6 +97,8 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
                 case PathingMacroInputKind.MoveBy: GlobalMethod.MoveMouseBy(input.X, input.Y); break;
                 case PathingMacroInputKind.MiddleDown: simulator.Mouse.MiddleButtonDown(); break;
                 case PathingMacroInputKind.MiddleUp: simulator.Mouse.MiddleButtonUp(); break;
+                case PathingMacroInputKind.LeftDown: simulator.Mouse.LeftButtonDown(); break;
+                case PathingMacroInputKind.LeftUp: simulator.Mouse.LeftButtonUp(); break;
                 default: throw new ArgumentOutOfRangeException(nameof(input));
             }
     }

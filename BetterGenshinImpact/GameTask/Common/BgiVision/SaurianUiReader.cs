@@ -28,7 +28,8 @@ internal static class SaurianUiReader
         // S55两种独立布局各自还需对应的Space技能本体，不能仅凭通用退出图标放行。
         return Match(pixels, new Rect(1275, 970, 75, 55), scale, SaurianUiTemplates.Aim, binary: true) >= .88 ||
             Match(pixels, new Rect(1586, 963, 50, 58), scale, SaurianUiTemplates.Burrow, binary: false) >= .85 ||
-            Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.Spirit, binary: false) >= .85;
+            Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.Spirit, binary: false) >= .85 ||
+            Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.Flight, binary: false) >= .85;
     }
 
     private static bool BrightAnchor(ImageRegion frame, string name, int minimum)

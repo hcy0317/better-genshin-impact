@@ -16,6 +16,7 @@ internal readonly record struct CombatBattleObservation(CaptureFrameStamp Source
     public MotionStatus Motion { get; init; } = MotionStatus.Unknown;
     public CombatControlObservation Control { get; init; }
     public SeekRecognitionDiagnostics? Recognition { get; init; }
+    public UnconfirmedSearchHint? SearchHint { get; init; }
     public string? PassiveGate { get; init; }
     public string? DamageFallback { get; init; }
 }
@@ -542,6 +543,18 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         }
         else if (_scanPulses < MaximumSearchPulses)
         {
+            if (observation.SearchHint is { } hint && hint.Source.IsKnown &&
+                hint.Source == observation.Source && hint.Width == observation.Width && hint.Height == observation.Height)
+            {
+                // 未确认箭头朝向只能提供屏幕位置线索，不能成为目标或进展证据。
+                var hintOffset = AutoFightSeek.GetIndicatorCameraOffset(EnemyIndicatorDirection.None,
+                    hint.Visual with { IndicatorBearingDegrees = null }, observation.Width, observation.Height);
+                if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(hintOffset, -120, 120)), ct))
+                    return _result;
+                _scanPulses++;
+                Reason = "scan-unconfirmed-direction-hint";
+                return _result;
+            }
             var offset = AutoFightSeek.GetSeekCameraOffset(observation.Width, observation.Height,
                 _scanPulses / 4, _scanPulses % 4);
             // 旧寻敌入口会先定位轨道中心；宿主没有该步骤，不能只累加轨道内的波浪差值。

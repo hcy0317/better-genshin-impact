@@ -7,7 +7,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
-public class CombatBattleHostTests
+public partial class CombatBattleHostTests
 {
     [Theory]
     [InlineData(false)]

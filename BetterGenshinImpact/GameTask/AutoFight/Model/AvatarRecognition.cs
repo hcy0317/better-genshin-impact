@@ -614,7 +614,8 @@ public static class AvatarRecognition
                                 absenceReason: confirmedIndicator != null ? null : indicatorCandidate != null ? "indicator-awaiting-stability" :
                                     targetRead.Diagnostics.RawComponents == 0 ? "no-color-components" :
                                     targetRead.Diagnostics.Accepted == 0 ? "all-visual-candidates-filtered" : "target-selection-empty",
-                                damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, false)));
+                                damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, false),
+                                searchHint: confirmedIndicator == null ? targetRead.Hint : null));
                         }
                     }
 
@@ -648,13 +649,17 @@ public static class AvatarRecognition
 
     internal static EnemySeekDecision ReadPassiveTarget(ImageRegion frame) => ReadPassiveTargetEvidence(frame).Decision;
 
-    internal static (EnemySeekDecision Decision, SeekRecognitionDiagnostics Diagnostics) ReadPassiveTargetEvidence(ImageRegion frame) =>
+    internal static (EnemySeekDecision Decision, SeekRecognitionDiagnostics Diagnostics, UnconfirmedSearchHint? Hint) ReadPassiveTargetEvidence(ImageRegion frame) =>
         frame.ReadOnce((typeof(AvatarRecognition), "target"), () =>
         {
             var diagnostics = new SeekRecognitionDiagnostics();
+            var hints = new Dictionary<(int X, int Y, int Width, int Height), EnemySeekVisual>();
             var decision = AutoFightSeek.RecognizeSeekDecision(frame,
-                new Scalar(255, 90, 90), null, out _, out _, saveDiagnostics: false, diagnostics: diagnostics);
-            return (decision, diagnostics);
+                new Scalar(255, 90, 90), null, out var width, out var height, saveDiagnostics: false, diagnostics: diagnostics,
+                unconfirmedDirection: visual => hints[(visual.X, visual.Y, visual.Width, visual.Height)] = visual);
+            UnconfirmedSearchHint? hint = hints.Count == 1 && frame.FrameStamp.IsKnown
+                ? new(frame.FrameStamp, hints.Values.Single(), width, height) : null;
+            return (decision, diagnostics, hint);
         });
 
     private static bool PublishPassiveObservation(
@@ -669,7 +674,7 @@ public static class AvatarRecognition
         CaptureFrameStamp source = default, Guid battleId = default,
         CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0, MotionStatus motion = MotionStatus.Unknown,
         CombatControlObservation control = default, SeekRecognitionDiagnostics? recognition = null,
-        string? absenceReason = null, string? damageFallback = null)
+        string? absenceReason = null, string? damageFallback = null, UnconfirmedSearchHint? searchHint = null)
     {
         lock (_seekLock)
         {
@@ -692,7 +697,8 @@ public static class AvatarRecognition
                     indicatorDecision)
                 { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
                     CueFingerprint = cueFingerprint, Motion = motion, Control = control,
-                    Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback };
+                    Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback,
+                    SearchHint = searchHint };
             }
             return true;
         }
@@ -754,5 +760,6 @@ internal readonly record struct PassiveTargetObservation(
     public CombatControlObservation Control { get; init; }
     public SeekRecognitionDiagnostics? Recognition { get; init; }
     public string? TargetAbsenceReason { get; init; }
+    public UnconfirmedSearchHint? SearchHint { get; init; }
     public string? DamageFallback { get; init; }
 }
