@@ -10,6 +10,15 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PreciseApproachRecoveryTests
 {
     [Fact]
+    public async Task KnownTransformationCanConfirmItsDirectPositionWithoutOrdinaryAvatarHud()
+    {
+        var replay = new PathReplay { Transformed = true, Hud = false };
+        await replay.Executor.MoveCloseTo(replay.Point("climb"));
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.Empty(replay.Inputs.Where(input => input.Type == KeyType.KeyDown));
+    }
+
+    [Fact]
     public async Task WaitingForValidFramesDoesNotSpendTheMovementAttemptBudget()
     {
         var replay = new PathReplay { HudAt = count => count > 30 };

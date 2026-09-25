@@ -13,6 +13,20 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class LegacyPathingMacroTests
 {
     [Fact]
+    public async Task RecordedFlightPhysicalMouseSequenceNeverEntersHumanoidRunner()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.Transformed };
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(
+            "j,wait(4.5),j,wait(0.3),mousedown,wait(1.2),moveby(-2100,0),wait(0.25),moveby(-2200,0)", false), ["钟离"]),
+            (_, _) => throw new InvalidOperationException("飞行形态的物理鼠标宏不能变成人形技能"), default);
+        Assert.True(result.CanContinue);
+        Assert.Single(io.Inputs.Where(x => x.StartsWith("LeftDown:")));
+        Assert.Single(io.Inputs.Where(x => x.StartsWith("LeftUp:")));
+        Assert.True(io.Inputs[^1].StartsWith("LeftUp:"));
+    }
+
+    [Fact]
     public async Task CannonHandshakeCanFinishItsOriginalSecondInteractionBeforeObservingStableScene()
     {
         var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true, TwoStepCannonEntry = true };
@@ -375,6 +389,62 @@ public class LegacyPathingMacroTests
             (_, _) => throw new Exception(), cancellation.Token)));
         if (failure != "never-exit") Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
         if (failure == "mapping") Assert.Empty(io.Inputs);
+    }
+
+    [Theory]
+    [InlineData("cancel")]
+    [InlineData("down-unknown")]
+    [InlineData("down-failed")]
+    public async Task FlightMouseFailureReleasesHeldPhysicalInput(string failure)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var io = new MacroReplay();
+        if (failure == "cancel") io.AfterDelay = () =>
+        {
+            if (io.Inputs.Any(x => x.StartsWith("LeftDown:"))) cancellation.Cancel();
+        };
+        else
+        {
+            io.FaultAt = 1;
+            io.Fault = failure == "down-unknown" ? CombatBattleHostInputStatus.Unknown : CombatBattleHostInputStatus.Failed;
+        }
+        using var session = new PathingMacroSession(io);
+        Assert.NotNull(await Record.ExceptionAsync(() => session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("mousedown,wait(.2),moveby(100,0)", false), ["琴"]),
+            (_, _) => throw new Exception("unexpected humanoid runner"), cancellation.Token)));
+        Assert.Single(io.Inputs.Where(x => x.StartsWith("LeftDown:")));
+        Assert.Single(io.Inputs.Where(x => x.StartsWith("LeftUp:")));
+        Assert.DoesNotContain(io.Inputs, x => x.StartsWith("MoveBy:"));
+        using var next = io.Coordinator.TryAcquire(Guid.NewGuid(), () => { });
+        Assert.NotNull(next);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UncertainFlightMouseReleaseCleansOtherKeysAndBlocksHandoff(bool explicitUp)
+    {
+        var io = new MacroReplay { FaultAt = 3, Fault = CombatBattleHostInputStatus.Unknown };
+        var session = new PathingMacroSession(io);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("keydown(w),mousedown" + (explicitUp ? ",mouseup" : ""), false), ["琴"]),
+            (_, _) => throw new Exception("unexpected humanoid runner"), default));
+        Assert.Single(io.Inputs.Where(x => x.StartsWith("LeftUp:")));
+        Assert.Contains("KeyUp:VK_W", io.Inputs);
+        Assert.Null(io.Coordinator.TryAcquire(Guid.NewGuid(), () => { }));
+        Assert.ThrowsAny<Exception>(() => session.Dispose());
+        Assert.Single(io.Inputs.Where(x => x.StartsWith("LeftUp:")));
+    }
+
+    [Fact]
+    public async Task CannonSceneDoesNotPermitFlightMouseInput()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.Cannon };
+        using var session = new PathingMacroSession(io);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("mousedown,mouseup", false), ["琴"]),
+            (_, _) => throw new Exception(), default));
+        Assert.Empty(io.Inputs);
     }
 
     internal sealed class MacroReplay : IPathingMacroIo
