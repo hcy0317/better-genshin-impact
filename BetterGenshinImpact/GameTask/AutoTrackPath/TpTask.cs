@@ -682,7 +682,7 @@ public class TpTask
         {
             bigMapInAllMapRect = GetBigMapRect(mapName);
         }
-        catch
+        catch (Exception error) when (error is not OperationCanceledException and not TimeoutException)
         {
             return new TeleportClickViewEvaluation
             {
@@ -1179,7 +1179,7 @@ public class TpTask
 
             return true;
         }
-        catch (Exception)
+        catch (Exception error) when (error is not OperationCanceledException and not TimeoutException)
         {
             return false;
         }
@@ -1967,6 +1967,7 @@ public class TpTask
         {
             if (!Bv.IsInBigMapUi(beforeDrag))
                 throw new InvalidOperationException("拖动前已不在地图界面，禁止发送鼠标按下");
+            MapContentReadiness.Match(beforeDrag, _ => true, ct, "before-drag", Logger);
         }
         var context = TaskContext.Instance();
         var capture = context.SystemInfo.CaptureAreaRect;
@@ -2202,7 +2203,7 @@ public class TpTask
         {
             return GetBigMapCenterPoint(mapName);
         }
-        catch
+        catch (Exception error) when (error is not OperationCanceledException and not TimeoutException)
         {
             return null;
         }
@@ -2213,6 +2214,8 @@ public class TpTask
         var rect = new Rect();
         NewRetry.Do(() =>
         {
+            ct.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
             // 判断是否在地图界面
             using var ra = CaptureToRectArea();
             using var mapScaleButtonRa = ra.Find(GetQuickTeleportRecognitionObject("MapScaleButton", ra));
@@ -2220,9 +2223,10 @@ public class TpTask
             {
                 try
                 {
-                    rect = GetRouteMap(mapName).GetBigMapRect(ra.CacheGreyMat);
+                    rect = MapContentReadiness.Match(ra, grey => GetRouteMap(mapName).GetBigMapRect(grey),
+                        ct, "map-rect", Logger);
                 }
-                catch (Exception)
+                catch (Exception error) when (error is not OperationCanceledException and not TimeoutException)
                 {
                     rect = default; // 发生异常视为识别失败
                 }
@@ -2260,12 +2264,15 @@ public class TpTask
 
     private Point2f GetBigMapCenterPoint(string mapName, Point2f? expectedCenterPoint)
     {
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
         // 判断是否在地图界面
         using var ra = CaptureToRectArea();
         using var mapScaleButtonRa = ra.Find(GetQuickTeleportRecognitionObject("MapScaleButton", ra));
         if (mapScaleButtonRa.IsExist())
         {
-            var p = RecognizeBigMapCenterPoint(mapName, ra.CacheGreyMat, expectedCenterPoint);
+            var p = MapContentReadiness.Match(ra, grey => RecognizeBigMapCenterPoint(mapName, grey, expectedCenterPoint),
+                ct, "map-center", Logger);
 
             if (p.IsEmpty())
             {
@@ -2498,11 +2505,16 @@ public class TpTask
             var applied = await AreaSelectionClickController.TryApplyAsync(() =>
             {
                 using var capture = CaptureAreaFrame();
+                MapContentReadiness.Record(capture, "area-observe", $"area={areaName}; before OCR", Logger);
                 var list = FindSwitchAreaCandidates(capture);
                 candidatesText = FormatSwitchAreaCandidateTexts(list);
                 var snapshot = NativeUiDriver.Read(capture);
-                return new AreaSelectionObservation(snapshot.FrameId, snapshot.MapReady,
-                    SelectorVisible(list, capture.Height), FindCandidate(list, capture.Height) != null);
+                var selectorOpen = SelectorVisible(list, capture.Height);
+                var contentReady = MapContentReadiness.IsReady(snapshot.MapReady, capture.CacheGreyMat);
+                MapContentReadiness.Record(capture, selectorOpen ? "area-selector" : contentReady ? "area-ready" : "area-waiting",
+                    $"area={areaName}; mapReady={snapshot.MapReady}; contentReady={contentReady}; selectorOpen={selectorOpen}", Logger);
+                return new AreaSelectionObservation(snapshot.FrameId, contentReady,
+                    selectorOpen, FindCandidate(list, capture.Height) != null);
             }, (attempt, token) =>
             {
                 CheckAndSleep(0);
@@ -2512,6 +2524,7 @@ public class TpTask
                 var list = FindSwitchAreaCandidates(capture);
                 var candidate = FindCandidate(list, capture.Height);
                 if (candidate == null || !SelectorVisible(list, capture.Height)) return Task.FromResult(false);
+                MapContentReadiness.Record(capture, "area-before-click", $"area={areaName}; attempt={attempt}; candidates={candidatesText}", Logger);
                 operation.Check();
                 candidate.Click();
                 Logger.LogDebug("区域选择新帧点击：{Country}，attempt={Attempt}，候选={Candidates}",

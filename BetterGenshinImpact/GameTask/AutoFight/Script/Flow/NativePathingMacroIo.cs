@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition.OCR;
@@ -20,6 +21,14 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
 {
     private static readonly InputSimulator CleanupInput = new();
     private readonly HashSet<string> _unknownReported = new(StringComparer.Ordinal);
+    private PathingMacroEvidence? _evidence;
+    public void BeginEvidence(IReadOnlyList<CombatCommand> commands)
+    {
+        _evidence = null;
+        if (DiagnosticEvidenceScope.Current == null) return;
+        _evidence = new PathingMacroEvidence(context(), string.Join(",", commands.Select(command =>
+            $"{command.Method}({string.Join(",", command.Args ?? [])})")));
+    }
     public TimeProvider Clock => TimeProvider.System;
     public CombatInputCoordinator Coordinator => NativeCombatIo.Coordinator;
     public User32.VK Map(User32.VK key) => KeyBindingsSettingsPageViewModel.MappingKey(key);
@@ -30,6 +39,7 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
     {
         using var frame = TaskControl.CaptureToRectArea();
         var observation = ReadScene(frame, OcrFactory.Paddle);
+        _evidence?.Capture(frame, phase, observation, TaskControl.Logger);
         var scene = observation.Scene;
         if (scene == PathingMacroScene.Unknown)
         {
