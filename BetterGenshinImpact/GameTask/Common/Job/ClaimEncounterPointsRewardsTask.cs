@@ -93,22 +93,18 @@ public class ClaimEncounterPointsRewardsTask
 
         if (earlyClaim)
         {
-            // 已经领取过
+            // 奖励弹窗仍需关闭；不能把点击领取当成主界面交接完成。
             await Delay(1000, ct);
-
-            // TODO 截图并通知
-            return;
         }
-
-        await Delay(1000, ct);
-
-        // 领取
-        var claimed = CaptureScope.Use(CaptureToRectArea(), ClickClaimBtn);
-        if (claimed)
+        else
         {
             await Delay(1000, ct);
-
-            // TODO 截图并通知
+            var claimed = CaptureScope.Use(CaptureToRectArea(), ClickClaimBtn);
+            if (claimed)
+            {
+                await Delay(1000, ct);
+                // TODO 截图并通知
+            }
         }
 
         // 关闭
