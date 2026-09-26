@@ -156,12 +156,7 @@ public class SwitchPartyTask
         if (matches(currTeamName))
         {
             Logger.LogInformation("当前队伍[{Name}]即为目标队伍，无需切换", currTeamName);
-            if (isInPartyViewUi)
-            {
-                Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
-                await Delay(500, ct);
-                await _returnMainUiTask.Start(ct);
-            }
+            await UiRecovery.CompletePartyHandoffAsync(driver, deferApplyToCaller, ct, Logger);
 
             return true;
         }
@@ -225,7 +220,7 @@ public class SwitchPartyTask
                     {
                         page.ClickTo(textRegion.Right + 100 * _assetScale, textRegion.Bottom);
                         await Delay(200, ct);
-                        await ConfirmParty(driver, ct, isInPartyViewUi, deferApplyToCaller);
+                        await ConfirmParty(driver, ct, deferApplyToCaller);
                         Logger.LogInformation(deferApplyToCaller ? "队伍选择已确认，等待调用方开始挑战: {Text}" : "切换队伍成功: {Text}", textRegion.Text);
 
                         RunnerContext.Instance.ClearCombatScenes();
@@ -279,7 +274,7 @@ public class SwitchPartyTask
         return false;
     }
 
-    private async Task ConfirmParty(IUiDriver driver, CancellationToken ct, bool openedHere, bool deferApplyToCaller)
+    private async Task ConfirmParty(IUiDriver driver, CancellationToken ct, bool deferApplyToCaller)
     {
         Task<bool> ClickConfirm(CancellationToken token, bool left)
         {
@@ -300,6 +295,6 @@ public class SwitchPartyTask
 
         await UiRecovery.ConfirmPartyAsync(driver, token => ClickConfirm(token, true),
             token => ClickConfirm(token, false), ct, deferApplyToCaller, Logger);
-        if (openedHere) await _returnMainUiTask.Start(ct);
+        await UiRecovery.CompletePartyHandoffAsync(driver, deferApplyToCaller, ct, Logger);
     }
 }

@@ -9,6 +9,18 @@ namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal static class UiRecovery
 {
+    internal static Task<UiSnapshot> CompletePartyHandoffAsync(IUiDriver driver,
+        bool deferApplyToCaller, CancellationToken ct, ILogger? logger = null, TimeProvider? clock = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        // 普通调用的成功交接不取决于编队页由谁打开；秘境的开始挑战仍由调用方拥有。
+        return deferApplyToCaller
+            ? UiTransition.WaitAsync("party-handoff", UiTarget.Party, driver, ct,
+                TimeSpan.FromSeconds(20), logger: logger, clock: clock)
+            : ToMainAsync(driver, ct, logger: logger, clock: clock);
+    }
+
     internal static async Task RecoverDefeatedAsync(IUiDriver driver,
         Func<CancellationToken, Task> recoverAtStatue, CancellationToken ct,
         ILogger? logger = null, TimeProvider? clock = null)
