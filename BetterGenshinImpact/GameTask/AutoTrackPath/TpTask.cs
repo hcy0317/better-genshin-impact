@@ -2483,6 +2483,11 @@ public class TpTask
                 .SelectMany(name => new[] { name, stringLocalizer.WithCultureGet(cultureInfo, name) })
                 .Select(NormalizeSwitchAreaCandidateText).ToHashSet();
             string candidatesText = "";
+            ImageRegion CaptureAreaFrame()
+            {
+                using var measured = UiOperation.Current?.Measure(UiOperationPhase.Capture);
+                return CaptureToRectArea(forceNew: true);
+            }
             Region? FindCandidate(List<Region> list, int height) => list
                 .Where(candidate => candidate.Y < height - 100d * height / 1080d)
                 .OrderByDescending(candidate => candidate.Y)
@@ -2492,7 +2497,7 @@ public class TpTask
 
             var applied = await AreaSelectionClickController.TryApplyAsync(() =>
             {
-                using var capture = CaptureToRectArea(forceNew: true);
+                using var capture = CaptureAreaFrame();
                 var list = FindSwitchAreaCandidates(capture);
                 candidatesText = FormatSwitchAreaCandidateTexts(list);
                 var snapshot = NativeUiDriver.Read(capture);
@@ -2503,7 +2508,7 @@ public class TpTask
                 CheckAndSleep(0);
                 token.ThrowIfCancellationRequested();
                 operation.Check();
-                using var capture = CaptureToRectArea(forceNew: true);
+                using var capture = CaptureAreaFrame();
                 var list = FindSwitchAreaCandidates(capture);
                 var candidate = FindCandidate(list, capture.Height);
                 if (candidate == null || !SelectorVisible(list, capture.Height)) return Task.FromResult(false);
@@ -2523,6 +2528,7 @@ public class TpTask
 
     private List<Region> FindSwitchAreaCandidates(ImageRegion imageRegion)
     {
+        using var measured = UiOperation.Current?.Measure(UiOperationPhase.AreaOcr);
         return imageRegion.FindMulti(new RecognitionObject
         {
             RecognitionType = RecognitionTypes.Ocr,
