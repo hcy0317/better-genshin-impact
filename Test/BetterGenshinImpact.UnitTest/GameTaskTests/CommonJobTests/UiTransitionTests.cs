@@ -10,6 +10,89 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiTransitionTests
 {
     [Fact]
+    public async Task OrdinaryPartyHandoffLeavesAnAlreadyOpenPartyPageBeforeSuccess()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new(1) { Party = true },
+            new(2) { MainHud = true }, new(3) { MainHud = true });
+        var result = await UiRecovery.CompletePartyHandoffAsync(driver, false, default, clock: clock);
+        Assert.True(result.Matches(UiTarget.Main));
+        Assert.Equal(3, result.FrameId);
+        Assert.Equal(new[] { UiAction.Escape }, driver.Actions);
+    }
+
+    [Fact]
+    public async Task OrdinaryPartyHandoffClosesListAndRequiresTwoFreshMainFrames()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new(1) { PartyList = true }, new(2) { Party = true },
+            new(3) { MainHud = true }, new(3) { MainHud = true }, new(4) { MainHud = true });
+        var result = await UiRecovery.CompletePartyHandoffAsync(driver, false, default, clock: clock);
+        Assert.Equal(4, result.FrameId);
+        Assert.All(driver.Actions, action => Assert.Equal(UiAction.Escape, action));
+        Assert.NotEmpty(driver.Actions);
+    }
+
+    [Fact]
+    public async Task OrdinaryPartyHandoffDoesNotSendInputWhenAlreadyAtMain()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new(1) { MainHud = true }, new(2) { MainHud = true });
+        Assert.True((await UiRecovery.CompletePartyHandoffAsync(driver, false, default, clock: clock)).MainReady);
+        Assert.Empty(driver.Actions);
+    }
+
+    [Fact]
+    public async Task DomainPartyHandoffKeepsStartChallengeWithCaller()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new(1) { Party = true }, new(2) { Party = true });
+        Assert.True((await UiRecovery.CompletePartyHandoffAsync(driver, true, default, clock: clock)).Party);
+        Assert.Empty(driver.Actions);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PartyHandoffDoesNotConvertAnUnknownOrStuckPageToSuccess(bool partyVisible)
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { Party = partyVisible });
+        await Assert.ThrowsAsync<TimeoutException>(() =>
+            UiRecovery.CompletePartyHandoffAsync(driver, false, default, clock: clock));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PartyHandoffPreservesCancellationWithoutInput(bool deferToDomain)
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { Party = true });
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            UiRecovery.CompletePartyHandoffAsync(driver, deferToDomain, cancellation.Token, clock: clock));
+        Assert.Empty(driver.Actions);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PartyHandoffCannotOutliveTheParentBudget(bool deferToDomain)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetUtcNow();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1));
+        await Assert.ThrowsAsync<TimeoutException>(() => UiOperation.RunAsync("party-setup",
+            TimeSpan.FromMilliseconds(500), default,
+            operation => UiRecovery.CompletePartyHandoffAsync(driver, deferToDomain, operation.Token, clock: clock),
+            clock: clock));
+        Assert.True(clock.GetUtcNow() - started < TimeSpan.FromSeconds(2));
+        Assert.Empty(driver.Actions);
+    }
+
+    [Fact]
     public async Task CannonExitWaitsForNewStableHudInsteadOfClaimingTheCannonIsTheMainScreen()
     {
         var clock = new FakeTimeProvider();
