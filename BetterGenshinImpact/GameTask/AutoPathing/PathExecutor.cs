@@ -742,7 +742,7 @@ public partial class PathExecutor
                 }, ms => Delay(ms, ct), ct);
                 if (healed) return;
             }
-            Logger.LogInformation("当前角色血量过低，去七天神像恢复");
+            Logger.LogInformation("当前角色血量过低，尝试七天神像恢复；回血确认后再判定能否安全重启路线");
             await RecoverAtStatueAndRestartAsync(region.FrameStamp);
         }
         else if (ReleaseMacroBeforeRevive(region) && Bv.ClickIfInReviveModal(region))

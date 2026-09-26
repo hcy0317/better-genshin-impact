@@ -48,7 +48,8 @@ internal static class UiHandoffRecovery
                         world is { ControlObserved: true, KeyboardBreakout: false, PartyRejected: false } &&
                         world.Value.Motion != MotionStatus.Climb &&
                         (!world.Value.Controlled || world.Value.Motion == MotionStatus.Fly) &&
-                        (world.Value.Transformed || world.Value.Motion == MotionStatus.Fly);
+                        (world.Value.Transformed || world.Value.Motion == MotionStatus.Fly ||
+                         world is { OrdinaryAvatarHud: true, Transformed: false, LowHp: true });
                     recoveryFrames = canRecover ? recoveryFrames + 1 : 0;
                     if (recoveryFrames >= 2)
                     {

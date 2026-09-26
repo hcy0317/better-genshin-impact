@@ -10,6 +10,26 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiHandoffRecoveryTests
 {
     [Fact]
+    public async Task OrdinaryLowHpRecoversBeforeHandoffWithoutChangingFailedOutcome()
+    {
+        var driver = new Replay { Ordinary = true, LowHp = true };
+        using var parent = UiOperation.Begin("caller", TimeSpan.FromSeconds(5), clock: driver.Time);
+        var calls = 0;
+        var result = await ScriptStepOutcomeRunner.RunAsync(
+            () => Task.FromResult(new ScriptExecutionResult(ScriptOutcomeKind.Failed, "unsafe route replay")),
+            _ => UiHandoffRecovery.RecoverAsync(driver, _ =>
+            {
+                calls++;
+                driver.LowHp = false;
+                driver.OrdinaryFrames = 0;
+                return Task.CompletedTask;
+            }, default, driver.Time), default, recoveryBudget: UiHandoffRecovery.Budget);
+        Assert.Equal(1, calls);
+        Assert.True(driver.OrdinaryFrames >= 2);
+        Assert.Equal(ScriptOutcomeKind.Failed, result.Outcome.Kind);
+    }
+
+    [Fact]
     public async Task FailedScriptNeedsStatueAndFreshOrdinaryFramesBeforeNextTask()
     {
         var driver = new Replay();
@@ -109,13 +129,12 @@ public class UiHandoffRecoveryTests
     [InlineData("control-unobserved")]
     [InlineData("climb")]
     [InlineData("party-rejected")]
-    [InlineData("low-hp")]
     [InlineData("old-source")]
     public async Task IncompleteWorldEvidenceDoesNotAuthorizeTeleportOrHandoff(string failure)
     {
         var driver = new Replay { Ordinary = true, UnknownIdentity = failure == "unknown",
             ControlMissing = failure == "control-unobserved", Climbing = failure == "climb",
-            Rejected = failure == "party-rejected", LowHp = failure == "low-hp", RepeatFrame = failure == "old-source" };
+            Rejected = failure == "party-rejected", LowHp = true, RepeatFrame = failure == "old-source" };
         using var parent = UiOperation.Begin("caller", TimeSpan.FromSeconds(3), clock: driver.Time);
         var calls = 0;
         await Assert.ThrowsAsync<TimeoutException>(() => UiHandoffRecovery.RecoverAsync(driver,
@@ -129,6 +148,7 @@ public class UiHandoffRecoveryTests
     [InlineData("old-frame")]
     [InlineData("changed-source")]
     [InlineData("map-failed")]
+    [InlineData("still-low-hp")]
     public async Task RecoveryCallbackReturningIsNotProofOfHandoff(string failure)
     {
         var driver = new Replay();
@@ -140,12 +160,26 @@ public class UiHandoffRecoveryTests
             if (failure == "map-failed") throw new InvalidOperationException("map not confirmed");
             driver.Ordinary = failure != "still-transformed";
             driver.Flying = failure == "still-flying";
+            driver.LowHp = failure == "still-low-hp";
             driver.RepeatFrame = failure == "old-frame";
             if (failure == "changed-source") driver.ChangeSource();
             return Task.CompletedTask;
         }, default, driver.Time));
         Assert.NotNull(error);
         Assert.Equal(1, calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LowHpCannotOverrideControlOrBreakout(bool breakout)
+    {
+        var driver = new Replay { Ordinary = true, LowHp = true, Controlled = true, Breakout = breakout };
+        using var parent = UiOperation.Begin("caller", TimeSpan.FromSeconds(3), clock: driver.Time);
+        var calls = 0;
+        await Assert.ThrowsAsync<TimeoutException>(() => UiHandoffRecovery.RecoverAsync(driver,
+            _ => { calls++; return Task.CompletedTask; }, default, driver.Time));
+        Assert.Equal(0, calls);
     }
 
     [Theory]
@@ -170,7 +204,7 @@ public class UiHandoffRecoveryTests
         private CaptureFrameSource _source;
         private CaptureFrameStamp _last;
         internal bool Ordinary;
-        internal bool UnknownIdentity, ControlMissing, Climbing, Flying, Rejected, LowHp, RepeatFrame, Breakout;
+        internal bool UnknownIdentity, ControlMissing, Climbing, Flying, Rejected, LowHp, RepeatFrame, Breakout, Controlled;
         internal int OrdinaryFrames;
         public Replay() => _source = new(Time);
         internal void ChangeSource() => _source = new(Time);
@@ -179,7 +213,7 @@ public class UiHandoffRecoveryTests
             Time.Advance(TimeSpan.FromMilliseconds(1));
             if (Ordinary) OrdinaryFrames++;
             if (!RepeatFrame || !_last.IsKnown) _last = _source.Next();
-            return new UiSnapshot(1) { MainHud = true, World = new(Climbing || Flying || Breakout, LowHp, Rejected)
+            return new UiSnapshot(1) { MainHud = true, World = new(Climbing || Flying || Breakout || Controlled, LowHp, Rejected)
                 { OrdinaryAvatarHud = Ordinary && !UnknownIdentity, Transformed = !Ordinary && !UnknownIdentity,
                     ControlObserved = !ControlMissing, KeyboardBreakout = Breakout,
                     Motion = Climbing ? MotionStatus.Climb : Flying ? MotionStatus.Fly : MotionStatus.Unknown } }
