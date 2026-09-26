@@ -11,10 +11,47 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PathExecutionFailureTests
 {
+    [Fact]
+    public async Task UnsafeMacroPrefixStillHealsButCannotRetryOrCompleteTheRoute()
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 4).Select(_ => replay.Point("walk")).ToList();
+        points[0].Type = "teleport";
+        points[1].Action = "combat_script";
+        points[2].Action = points[3].Action = "mining";
+        replay.Executor.CurWaypoints = (0, points);
+        replay.Executor.CurWaypoint = (3, points[3]);
+        replay.Executor.StartSkipOtherOperations();
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var recovered = 0;
+        var retries = 0;
+        var releases = 0;
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => PathExecutor.ExecuteSegmentWithRetriesAsync(
+            () => PathExecutor.ConfirmHealingRestartAsync(source.Next(),
+                () => { recovered++; clock.Advance(TimeSpan.FromSeconds(1)); return Task.CompletedTask; },
+                () => { clock.Advance(TimeSpan.FromMilliseconds(1)); return new(source.Next(), true, false); },
+                ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, default, clock,
+                canRestart: PathExecutor.CanRestartAfterHealing(points, 3)),
+            _ => retries++, () => releases++, default));
+        Assert.Equal(1, recovered);
+        Assert.Equal(0, retries);
+        Assert.Equal(1, releases);
+        replay.Executor.CurWaypoint = (2, points[2]);
+        replay.Executor.TryCloseSkipOtherOperations();
+        Assert.False(replay.Executor.ShouldExecuteWaypointAction(points[2]));
+        replay.Executor.CurWaypoint = (3, points[3]);
+        replay.Executor.TryCloseSkipOtherOperations();
+        Assert.True(replay.Executor.ShouldExecuteWaypointAction(points[3]));
+        Assert.Contains("路线未完成", error.Message);
+    }
+
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ParentDeadlineDuringHealingOrObservationCannotAuthorizeRestart(bool inObservation)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task ParentDeadlineDuringHealingOrObservationCannotAuthorizeRestart(bool inObservation, bool canRestart)
     {
         var clock = new FakeTimeProvider();
         var source = new CaptureFrameSource(clock);
@@ -25,9 +62,45 @@ public class PathExecutionFailureTests
             () => PathExecutor.ConfirmHealingRestartAsync(before,
                 () => { if (!inObservation) clock.Advance(TimeSpan.FromSeconds(2)); return Task.CompletedTask; },
                 () => { clock.Advance(inObservation ? TimeSpan.FromMilliseconds(1100) : TimeSpan.FromMilliseconds(1)); return new(source.Next(), true, false); },
-                ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, default, clock),
+                ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, default, clock, canRestart),
             _ => retries++, () => { }, default));
         Assert.Equal(0, retries);
+    }
+
+    [Theory]
+    [InlineData("unknown-source")]
+    [InlineData("cancelled")]
+    [InlineData("statue-failed")]
+    [InlineData("still-low")]
+    [InlineData("old-frame")]
+    public async Task UnsafeRouteCannotClaimHealingWithoutRecoveryEvidence(string failure)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = failure == "unknown-source" ? default : source.Next();
+        using var cancellation = new CancellationTokenSource();
+        if (failure == "cancelled") cancellation.Cancel();
+        var calls = 0;
+        var expected = new InvalidOperationException("statue failed");
+        var error = await Record.ExceptionAsync(() => PathExecutor.ConfirmHealingRestartAsync(before,
+            () =>
+            {
+                calls++;
+                if (failure == "statue-failed") throw expected;
+                clock.Advance(TimeSpan.FromSeconds(1));
+                return Task.CompletedTask;
+            }, () =>
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(1));
+                return new HealingFrame(failure == "old-frame" ? before : source.Next(), true, failure == "still-low");
+            }, ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, cancellation.Token, clock,
+            canRestart: false));
+        Assert.NotNull(error);
+        Assert.IsNotType<PathExecutor.HealingRecoveryCompletedException>(error);
+        Assert.DoesNotContain("已确认神像回血", error.Message);
+        Assert.Equal(failure is "unknown-source" or "cancelled" ? 0 : 1, calls);
+        if (failure == "statue-failed") Assert.Same(expected, error);
+        if (failure == "cancelled") Assert.IsAssignableFrom<OperationCanceledException>(error);
     }
 
     [Theory]
