@@ -26,6 +26,7 @@ internal interface IPathingMacroIo
     CombatBattleHostInputResult Release(PathingMacroInput input) => Send(input, () => { });
     Task Delay(int milliseconds, CancellationToken ct);
     IDisposable? BeginExclusive() => null;
+    void BeginEvidence(System.Collections.Generic.IReadOnlyList<CombatCommand> commands) { }
 }
 
 /// <summary>路径实例拥有物理键和回执，绝不从NativeGame窃取租约或持有截图。</summary>
@@ -109,6 +110,8 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
     private async Task<CombatExecutionResult> ExecuteRawAsync(LegacyPathingMacroPlan.Segment segment,
         long overallDeadline, CancellationToken ct)
     {
+        try { io.BeginEvidence(segment.Commands); }
+        catch { /* 取证初始化失败不改变业务执行。 */ }
         _deadline = Math.Min(overallDeadline, Deadline(segment.RawBudgetSeconds));
         _lease = io.Coordinator.TryAcquire(Guid.NewGuid(), ReleasePhysical)
             ?? throw new InvalidOperationException("路径宏无法取得输入所有权");
