@@ -34,7 +34,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     }
 
     private UiSnapshot ReadCurrent(ImageRegion image) => Read(image, ocr: _io.Ocr(),
-        domainTipTexts: _io.Texts(), clock: _io.Clock, readScene: _io.ReadScene);
+        domainTipTexts: _io.Texts(), clock: _io.Clock, readScene: _io.ReadScene,
+        inspectReward: UiOperation.Current?.Name == "return-main");
 
     public UiSnapshot Capture()
     {
@@ -52,10 +53,14 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
 
     internal static UiSnapshot Read(ImageRegion image, bool inspectWorld = false, IOcrService? ocr = null,
         ReviveUiDetector? reviveDetector = null, DomainTipTexts? domainTipTexts = null,
-        TimeProvider? clock = null, Func<ImageRegion, UiSnapshot>? readScene = null)
+        TimeProvider? clock = null, Func<ImageRegion, UiSnapshot>? readScene = null, bool inspectReward = false)
     {
         using var measured = UiOperation.Current?.Measure(UiOperationPhase.SceneRecognition);
         var snapshot = readScene == null ? ReadNativeScene(image, inspectWorld, ocr, reviveDetector) : readScene(image);
+        // A reward overlay can leave background HUD/map/handbook features visible.
+        // Check it before recovery chooses a target or input, regardless of those features.
+        if (inspectReward)
+            snapshot = snapshot with { Reward = RewardUiReader.Read(image, ocr ?? OcrFactory.Paddle) };
         // Legacy static callers need not initialize localization services. Native
         // driver instances always supply the existing game-culture text pair.
         if (domainTipTexts is { } texts)
@@ -160,6 +165,19 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         switch (action)
         {
+            case UiAction.DismissReward when observed.CanDismissReward && current.CanDismissReward && current.IsAfter(observed) &&
+                observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge):
+                void AdmitRewardInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) ||
+                        !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                        throw new InvalidOperationException("Reward source expired before native input.");
+                }
+                _io.Click(image, current.Reward.CloseBounds, AdmitRewardInput);
+                return Task.FromResult(Completed(true));
             case UiAction.DismissDomainTip when observed.CanDismissDomainTip && current.CanDismissDomainTip && current.IsAfter(observed) &&
                 observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
                 current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge):
