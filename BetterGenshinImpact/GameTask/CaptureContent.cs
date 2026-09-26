@@ -42,6 +42,8 @@ public class CaptureContent : IDisposable
             gameCaptureRegion = systemInfo.DesktopRectArea.Derive(image, systemInfo.CaptureAreaRect.X, systemInfo.CaptureAreaRect.Y);
             gameCaptureRegion.FrameStamp = stamp;
             CaptureRectArea = gameCaptureRegion.DeriveTo1080P();
+            // 仅借用已有规范化帧；诊断故障不得改变截图/感知结果。
+            try { Common.DiagnosticEvidenceScope.Current?.ObserveExistingFrame(CaptureRectArea); } catch { }
         }
         catch
         {

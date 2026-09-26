@@ -815,8 +815,13 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     {
                         if (_selectionObservationOnly) throw new CombatActionInterruptedException();
                         if (_selection is { HasSubmittedInput: false } goal)
+                        {
                             _evidence?.RememberBefore(frame, "selection", goal.GoalId.ToString("N"),
                                 $"battle={action.BattleId} goal={goal.GoalId} pulse={request.Id} target={actor.Name}/{actor.Index} originalDeadline={goal.DeadlineTimestamp}; before native submission");
+                            _evidence?.ObserveExistingFrame(frame);
+                            _evidence?.RequestWindow("selection:" + goal.GoalId, "selection-before-submit", frame.FrameStamp,
+                                $"target={actor.Name}/{actor.Index}", Logger);
+                        }
                     });
             }
             return new(false, false, default, null, null, null, awaitingObservation: true);
@@ -839,6 +844,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                         $"controlObserved={control.IsObserved} motion={control.Motion} keyboardBreakout={control.KeyboardBreakoutRequested} " +
                         $"purpose={Purpose} command={DescribeCommand(action.Command)} deadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}";
                     _evidence?.TryCapture(frame, "selection:" + goal.GoalId, phase, detail, Logger);
+                    _evidence?.RequestWindow("selection:" + goal.GoalId, phase, frame.FrameStamp, detail, Logger);
                     if (phase == "deadline") _selectionDeadlineCaptured = true;
                     else _selectionBlockedCaptured = true;
                 }
@@ -867,6 +873,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 if (phase != null)
                 {
                     _evidence?.CaptureFault(_capture, "selection", goal.GoalId.ToString("N"), phase, detail, Logger);
+                    _evidence?.RequestWindow("selection:" + goal.GoalId, phase, _capture.FrameStamp, detail, Logger);
                     if (phase == "deadline") _selectionDeadlineCaptured = true;
                     else _selectionUnconfirmedCaptured = true;
                 }

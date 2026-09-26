@@ -8,6 +8,182 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceScopeTests
 {
     [Fact]
+    public async Task AnEvictedAnchorCannotRelabelLaterHistoryAsItsImmediateAfterFrames()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        var anchor = source.Next();
+        frame.FrameStamp = anchor;
+        scope.ObserveExistingFrame(frame);
+        for (var i = 0; i < 22; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        Assert.False(scope.RequestWindow("late-anchor", "decision", anchor, "", logger));
+        await scope.DisposeAsync();
+        Assert.Empty(saved);
+        Assert.Contains(logger.Messages, message => message.StartsWith("EVIDENCE_DRAINED ") && message.Contains("dropped=21"));
+    }
+
+    [Fact]
+    public async Task BudgetRejectedRememberedBeforeFrameCountsAsMissingBefore()
+    {
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask, maxImages: 1);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        Assert.True(scope.RememberBefore(frame, "skill", "attempt", "before"));
+        Assert.True(scope.TryCapture(frame, "other", "terminal", "", logger));
+        scope.CaptureFault(frame, "skill", "attempt", "failed", "", logger);
+        await scope.DisposeAsync();
+        var drained = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
+        Assert.Contains("dropped=2", drained);
+        Assert.Contains("missingBefore=1", drained);
+    }
+
+    [Fact]
+    public async Task MissingOnlyWindowStillPublishesOneFinalSummaryAndLateCallsDoNotExtendIt()
+    {
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => throw new InvalidOperationException("no image"));
+        Assert.False(scope.RequestWindow("missing", "decision", default, "", logger));
+        await scope.DisposeAsync();
+        var drained = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
+        Assert.Contains("dropped=21", drained);
+        Assert.Contains("missingBefore=10", drained);
+        Assert.Contains("capture:source-unknown\":21", drained);
+        var count = logger.Messages.Count;
+        Assert.False(scope.RequestWindow("late", "decision", default, "", logger));
+        Assert.Equal(count, logger.Messages.Count);
+    }
+
+    [Fact]
+    public async Task DelayedOldSourceFrameCannotInterruptTheCurrentSourceWindow()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        var old = new CaptureFrameStamp(Guid.NewGuid(), 1, 100, 1000, DateTimeOffset.UtcNow);
+        var current = new CaptureFrameStamp(Guid.NewGuid(), 1, 200, 1000, DateTimeOffset.UtcNow);
+        frame.FrameStamp = old;
+        scope.ObserveExistingFrame(frame);
+        frame.FrameStamp = current;
+        scope.ObserveExistingFrame(frame);
+        Assert.True(scope.RequestWindow("current", "decision", current, "", logger));
+        frame.FrameStamp = old with { Sequence = 2, CapturedTimestamp = 150 };
+        scope.ObserveExistingFrame(frame);
+        frame.FrameStamp = current with { Sequence = 2, CapturedTimestamp = 201 };
+        scope.ObserveExistingFrame(frame);
+        await scope.DisposeAsync();
+        Assert.Equal(new[] { 0, 1 }, saved.Select(item => item.Window!.RelativeIndex));
+        Assert.All(saved, item => Assert.Equal(current.SessionId, item.Source.SessionId));
+        Assert.DoesNotContain(logger.Messages, message => message.Contains("capture-source-changed"));
+    }
+
+    [Fact]
+    public async Task SourceChangeSettlesMissingAfterFramesAndWindowLimitCannotBeEvaded()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }, maxWindows: 1);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        scope.ObserveExistingFrame(frame);
+        Assert.True(scope.RequestWindow("one", "decision", frame.FrameStamp, "", logger));
+        scope.ObserveExistingFrame(frame); // 同一帧不能填后窗口。
+        frame.FrameStamp = new CaptureFrameSource().Next();
+        scope.ObserveExistingFrame(frame);
+        Assert.False(scope.RequestWindow("two", "decision", frame.FrameStamp, "", logger));
+        await scope.DisposeAsync();
+        Assert.Single(saved);
+        var drained = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
+        Assert.Contains("dropped=41", drained); // 10前缺 + 10切源后缺 + 拒绝的21槽。
+        Assert.Contains("capture:capture-source-changed\":10", drained);
+        Assert.Contains("capture:window-budget\":21", drained);
+    }
+
+    [Fact]
+    public async Task MemoryPressureReportsHolesWithoutBorrowingOrDisposingCallerPixels()
+    {
+        var logger = new EvidenceLogger();
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }, maximumMemoryBytes: 24);
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 0; i < 4; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        Assert.True(scope.RequestWindow("memory", "decision", frame.FrameStamp, "", logger));
+        await scope.DisposeAsync();
+        Assert.Empty(saved);
+        Assert.False(frame.SrcMat.IsDisposed);
+        Assert.Contains(logger.Messages, message => message.Contains("memory-budget"));
+    }
+
+    [Theory]
+    [InlineData("map-area-selection")]
+    [InlineData("return-main")]
+    public async Task UiHandoffEndTriggersAWindowFromExistingFrames(string name)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        using (BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin(name, TimeSpan.FromSeconds(10)))
+            for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        await scope.DisposeAsync();
+        Assert.Equal(11, saved.Count);
+        Assert.All(saved, item => Assert.Contains(name, item.Phase));
+        Assert.Equal(frame.FrameStamp, saved.Last().Window!.Anchor);
+    }
+
+    [Fact]
+    public async Task WindowUsesTenExistingFramesOnEachSideWithoutChangingTheirSource()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        var anchor = frame.FrameStamp;
+        Assert.True(scope.RequestWindow("decision", "handoff", anchor, "fixture"));
+        for (var i = 0; i < 10; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        await scope.DisposeAsync();
+        Assert.Equal(Enumerable.Range(1, 21).Select(i => (long)i), saved.Select(item => item.Source.Sequence));
+        Assert.Equal(Enumerable.Range(-10, 21), saved.Select(item => item.Window!.RelativeIndex));
+        Assert.All(saved, item => { Assert.Equal(anchor, item.Window!.Anchor); Assert.Equal(anchor.SessionId, item.Source.SessionId); });
+        Assert.Single(saved.Select(item => item.Window!.WindowId).Distinct());
+        Assert.False(frame.SrcMat.IsDisposed);
+    }
+
+    [Fact]
+    public async Task DrainReportsFormattedCountsAndEveryMissingReasonExactlyOnce()
+    {
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => throw new IOException("offline disk failure"), maxImages: 1);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        scope.CaptureFault(frame, "skill", "attempt", "failed", "", logger);
+        Assert.False(scope.TryCapture(frame, "attempt", "failed", "duplicate", logger));
+        using var unknown = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        Assert.False(scope.TryCapture(unknown, "unknown", "failed", "", logger));
+        Assert.False(scope.RequestFrame("owner", "over-budget", "terminal", frame.FrameStamp, "", logger));
+        await scope.DisposeAsync();
+        var drained = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
+        Assert.Contains("accepted=1", drained);
+        Assert.Contains("dropped=3", drained);
+        Assert.Contains("missingBefore=1", drained);
+        Assert.Contains("writeFailures=1", drained);
+        Assert.Contains("duplicateSuppressed=1", drained);
+        Assert.DoesNotContain("{Accepted}", drained);
+        const string marker = " missingReasons=";
+        Assert.Contains(marker, drained);
+        var reasons = Newtonsoft.Json.Linq.JObject.Parse(drained[(drained.IndexOf(marker, StringComparison.Ordinal) + marker.Length)..]);
+        Assert.Equal(4, reasons.Properties().Sum(property => (int)property.Value));
+        Assert.Equal(1, (int)reasons["capture:before-unavailable"]!);
+        Assert.Equal(1, (int)reasons["write:failed"]!);
+    }
+
+    [Fact]
     public async Task LowHealthRecoveryUsesTheBorrowedFrameOnceAndLeavesOwnershipWithCaller()
     {
         var saved = new List<DiagnosticEvidence>();
@@ -86,7 +262,7 @@ public class DiagnosticEvidenceScopeTests
         var last = await saved.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(1026, last.Sequence);
         await scope.DisposeAsync();
-        Assert.Contains(logger.Messages, message => message.Contains("imageLimit=unlimited") && message.Contains("byteLimit=unlimited"));
+        Assert.Contains(logger.Messages, message => message.Contains("imageLimit=8192") && message.Contains("byteLimit=unlimited"));
     }
 
     [Fact]
@@ -100,7 +276,7 @@ public class DiagnosticEvidenceScopeTests
             images.Add(image);
             entered.TrySetResult();
             await release.Task;
-        });
+        }, queueCapacity: 4);
         using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
         { FrameStamp = new CaptureFrameSource().Next() };
         var logger = new EvidenceLogger();
@@ -201,7 +377,7 @@ public class DiagnosticEvidenceScopeTests
         await scope.DisposeAsync();
         Assert.Empty(saved);
         Assert.Contains(logger.Messages, text => text.Contains("request-queue-full"));
-        Assert.Equal(4, logger.Messages.Count(text => text.Contains("capture-source-changed")));
+        Assert.Equal(4, logger.Messages.Count(text => text.StartsWith("EVIDENCE_CAPTURE_MISSING ") && text.Contains("capture-source-changed")));
     }
 
     [Fact]

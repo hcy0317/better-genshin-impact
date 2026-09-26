@@ -108,6 +108,9 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase={Phase} reason=no-run-scope", BattleId, phase);
         else
         {
+            if (phase == "terminal")
+                evidence.RequestWindow("battle:" + BattleId.ToString("N") + ":" + trace.Episode,
+                    "combat-terminal", frame.Source, detail, _device.Logger);
             evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger);
             if (phase == "terminal")
                 evidence.CapturePendingTerminal(BattleId.ToString("N"), trace.Episode, () => _vision?.Capture());

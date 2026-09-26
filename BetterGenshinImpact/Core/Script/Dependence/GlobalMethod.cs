@@ -261,6 +261,12 @@ public class GlobalMethod
         return region;
     }
 
+    public static void RequestEvidenceWindow(string request, string phase, string detail)
+    {
+        // 纯诊断bridge：不截图、不读取App服务、不改变脚本结果或取消传播。
+        try { DiagnosticEvidenceScope.Current?.RequestLatestWindow(request, phase, detail); } catch { }
+    }
+
     public static string[] GetAvatars()
     {
         var combatScenes = new CombatScenes().InitializeTeam(CaptureGameRegion());
