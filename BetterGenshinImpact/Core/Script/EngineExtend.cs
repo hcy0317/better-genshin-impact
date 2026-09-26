@@ -170,6 +170,7 @@ public class EngineExtend
         engine.AddHostObject("middleButtonUp", taskGuard.Bind((Action)GlobalMethod.MiddleButtonUp));
         engine.AddHostObject("verticalScroll", taskGuard.Bind((Action<int>)GlobalMethod.VerticalScroll));
         engine.AddHostObject("captureGameRegion", taskGuard.Bind((Func<ImageRegion>)GlobalMethod.CaptureGameRegion));
+        engine.AddHostObject("requestEvidenceWindow", taskGuard.Bind((Action<string, string, string>)GlobalMethod.RequestEvidenceWindow));
         engine.AddHostObject("getAvatars", taskGuard.Bind((Func<string[]>)GlobalMethod.GetAvatars));
         engine.AddHostObject("inputText", taskGuard.Bind((Action<string>)GlobalMethod.InputText));
 #pragma warning restore CS8974 // Converting method group to non-delegate type

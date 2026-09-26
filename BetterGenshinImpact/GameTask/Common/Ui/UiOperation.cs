@@ -189,6 +189,9 @@ internal sealed class UiOperation : IDisposable
     {
         if (_ended) return;
         _ended = true;
+        if (Name is "map-area-selection" or "return-main")
+            SafeLog(() => DiagnosticEvidenceScope.Current?.RequestLatestWindow("ui:" + Id, Name,
+                $"outcome={outcome}; expected={Expected}; observed={_latestDescription}", _logger));
         SafeLog(() => _logger.Log(error == null || outcome == "cancelled" ? LogLevel.Debug : LogLevel.Warning,
             error, "UI_END root={RootId} op={OpId} operation={Operation} outcome={Outcome} expected={Expected} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0} suppressed={Suppressed} constructionMs={ConstructionMs:F3} dispatchMs={DispatchMs:F3} firstCheckAtMs={FirstCheckAtMs:F3} checksMs={ChecksMs:F3} pauseMs={PauseMs:F3} focusMs={FocusMs:F3} admissionMs={AdmissionMs:F3} nativeInputMs={NativeInputMs:F3} explicitWaitMs={ExplicitWaitMs:F3} logProducerBeforeEndMs={LogProducerBeforeEndMs:F3} captureMs={CaptureMs:F3} sceneMs={SceneMs:F3} areaOcrMs={AreaOcrMs:F3}",
             RootId, Id, Name, outcome, Expected, _latestDescription ?? "未取得观察", Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds, _suppressed,

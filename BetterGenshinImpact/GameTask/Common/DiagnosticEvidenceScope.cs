@@ -16,17 +16,17 @@ using Newtonsoft.Json;
 namespace BetterGenshinImpact.GameTask.Common;
 
 internal sealed record DiagnosticEvidence(Guid RunId, int Sequence, string Request, string Phase,
-    CaptureFrameStamp Source, string Detail, string? SourceRequest = null);
+    CaptureFrameStamp Source, string Detail, string? SourceRequest = null, DiagnosticWindowFrame? Window = null);
 
-internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
+internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
 {
     private static readonly AsyncLocal<DiagnosticEvidenceScope?> Active = new();
     private readonly DiagnosticEvidenceScope? _previous;
     private readonly object _gate = new();
     private readonly Guid _runId = Guid.NewGuid();
-    private readonly Channel<(DiagnosticEvidence Evidence, Mat Image)> _queue = Channel.CreateBounded<(DiagnosticEvidence, Mat)>(
-        new BoundedChannelOptions(4) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+    private readonly Channel<(DiagnosticEvidence Evidence, Mat Image, long Bytes)> _queue;
     private readonly Func<DiagnosticEvidence, Mat, Task> _sink;
+    private readonly DiagnosticEvidenceStorage? _storage;
     private readonly Task _writer;
     private readonly int? _maxImages;
     private readonly long? _maximumBytes;
@@ -38,9 +38,16 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
     private readonly Dictionary<(string Channel, string Request), (ImageRegion Frame, string Request, string Detail, long Bytes)> _before = new();
     private ILogger _logger = NullLogger.Instance;
     private int _accepted, _dropped, _writeFailures, _missingBefore;
+    private int _written, _duplicateSuppressed;
+    private readonly Dictionary<string, int> _missingReasons = new(StringComparer.Ordinal);
     private long _bytes;
     private long _stagedBytes;
+    private long _queuedBytes;
+    private readonly long _maximumMemoryBytes;
     private bool _closed;
+    private bool _accountingCompleted;
+    private sealed record DrainSummary(Guid RunId, int Accepted, long Bytes, int Dropped, int MissingBefore,
+        int WriteFailures, int Written, int DuplicateSuppressed, Dictionary<string, int> MissingReasons);
     private string? _retainedOwner;
     private ImageRegion? _retainedFrame;
     private long _retainedBytes;
@@ -57,14 +64,27 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
     }
 
     internal DiagnosticEvidenceScope(Func<DiagnosticEvidence, Mat, Task>? sink = null, int? maxImages = null,
-        long? maximumBytes = null)
+        long? maximumBytes = null, int queueCapacity = 64, long maximumMemoryBytes = 256L * 1024 * 1024,
+        int maxWindows = 256, int maxPendingWindows = 8)
     {
         if (maxImages.HasValue) ArgumentOutOfRangeException.ThrowIfLessThan(maxImages.Value, 1, nameof(maxImages));
         if (maximumBytes.HasValue) ArgumentOutOfRangeException.ThrowIfLessThan(maximumBytes.Value, 1, nameof(maximumBytes));
+        ArgumentOutOfRangeException.ThrowIfLessThan(queueCapacity, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumMemoryBytes, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxWindows, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxPendingWindows, 1);
         _previous = Active.Value;
         if (_previous != null) throw new InvalidOperationException("已有证据作用域，子任务不能重建它");
-        _maxImages = maxImages;
+        _maxImages = maxImages ?? 8192;
         _maximumBytes = maximumBytes;
+        _maximumMemoryBytes = maximumMemoryBytes;
+        _maxWindows = maxWindows;
+        _maxPendingWindows = maxPendingWindows;
+        _queue = Channel.CreateBounded<(DiagnosticEvidence, Mat, long)>(
+            new BoundedChannelOptions(queueCapacity) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+        if (sink == null)
+            _storage = new DiagnosticEvidenceStorage(Global.Absolute(Path.Combine("log", "evidence")), _runId,
+                diagnostic: message => _logger.LogDebug("{Diagnostic}", message));
         _sink = sink ?? WriteFileAsync;
         Active.Value = this;
         // 文件输出不得继承短命run/脚本/Input owner的AsyncLocal。
@@ -77,6 +97,7 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
     private bool ImageLimitReached => _maxImages is { } limit && _accepted >= limit;
     private bool FitsByteLimit(long bytes, long replacing = 0) =>
         _maximumBytes is not { } limit || bytes <= limit - _bytes - _stagedBytes + replacing;
+    private bool FitsMemory(long bytes, long replacing = 0) => bytes <= _maximumMemoryBytes - _queuedBytes - _stagedBytes + replacing;
 
     internal bool RequestFrame(string owner, string request, string phase, CaptureFrameStamp requestedSource,
         string detail, ILogger logger)
@@ -148,6 +169,7 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
 
     internal void CaptureRequestedFrames(string owner, ImageRegion frame)
     {
+        ObserveExistingFrame(frame);
         lock (_gate)
         {
             // 仅在宿主已经请求搜索取证后保留一张已有帧，终态无需再等生产者。
@@ -159,13 +181,13 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
                 try
                 {
                     var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
-                    if (FitsByteLimit(bytes, _retainedBytes))
+                    if (FitsByteLimit(bytes, _retainedBytes) && FitsMemory(bytes, _retainedBytes))
                     {
-                        var copy = new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp };
                         var episode = _retainedEpisode;
                         ClearRetainedFrame();
                         _retainedOwner = owner;
                         _retainedEpisode = episode;
+                        var copy = new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp };
                         _retainedFrame = copy;
                         _retainedBytes = bytes;
                         _stagedBytes += bytes;
@@ -191,13 +213,24 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
         }
     }
 
-    private void MissingFrame(string request, string phase, string reason, ILogger logger)
+    private void MissingFrame(string request, string phase, string reason, ILogger logger, int count = 1)
     {
-        if (reason == "duplicate-phase") return; // 已保存的同事件不重复刷屏。
-        Interlocked.Increment(ref _dropped);
+        lock (_gate)
+        {
+            if (_accountingCompleted) return;
+            if (ReferenceEquals(_logger, NullLogger.Instance)) _logger = logger;
+            if (reason == "duplicate-phase") { _duplicateSuppressed++; return; }
+            // 异常类型不是原因维度，避免任意文本让计数元数据无界增长。
+            if (reason.StartsWith("capture-error:", StringComparison.Ordinal)) reason = "capture-error";
+            _dropped += count;
+            CountReason("capture:" + reason, count);
+        }
         try { logger.LogDebug("EVIDENCE_CAPTURE_MISSING run={Run} request={Request} phase={Phase} reason={Reason}",
             _runId, request, phase, reason); } catch { }
     }
+
+    // 调用者持有_gate；写盘失败与采集缺失分桶，accepted不冒充已落盘。
+    private void CountReason(string reason, int count = 1) => _missingReasons[reason] = _missingReasons.GetValueOrDefault(reason) + count;
 
     private void ClearRetainedFrame()
     {
@@ -218,7 +251,7 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
     }
 
     private bool TryCaptureWithReason(ImageRegion frame, string request, string phase, string detail, out string reason,
-        ILogger? logger = null, string? sourceRequest = null)
+        ILogger? logger = null, string? sourceRequest = null, DiagnosticWindowFrame? window = null)
     {
         reason = "accepted";
         Mat? owned = null;
@@ -227,23 +260,28 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
             lock (_gate)
             {
                 if (_closed) { reason = "scope-closed"; return false; }
+                if (_storage?.BudgetExhausted == true) { reason = "run-disk-budget"; return false; }
                 if (!frame.FrameStamp.IsKnown) { reason = "source-unknown"; return false; }
                 if (frame.SrcMat.Empty()) { reason = "empty-frame"; return false; }
                 if (logger != null && ReferenceEquals(_logger, NullLogger.Instance)) _logger = logger;
                 request = request.Length > 256 ? request[..256] : request;
                 phase = phase.Length > 64 ? phase[..64] : phase;
-                if (_phases.TryGetValue(request, out var seen) && seen.Contains(phase))
+                _phases.TryGetValue(request, out var seen);
+                if (window == null && seen != null && seen.Contains(phase))
                 { reason = "duplicate-phase"; return false; }
                 var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
                 if (ImageLimitReached || !FitsByteLimit(bytes))
                 { reason = "run-image-or-byte-budget"; return false; }
+                if (!FitsMemory(bytes)) { reason = "memory-budget"; return false; }
                 owned = frame.SrcMat.Clone();
                 var evidence = new DiagnosticEvidence(_runId, _accepted + 1, request, phase, frame.FrameStamp,
-                    detail.Length > 2048 ? detail[..2048] : detail, sourceRequest);
-                if (!_queue.Writer.TryWrite((evidence, owned))) { reason = "writer-queue-full"; return false; }
+                    detail.Length > 2048 ? detail[..2048] : detail, sourceRequest, window);
+                if (!_queue.Writer.TryWrite((evidence, owned, bytes))) { reason = "writer-queue-full"; return false; }
                 owned = null; // 从这里起只有writer拥有并释放图像。
                 _accepted++;
                 _bytes += bytes;
+                _queuedBytes += bytes;
+                if (window != null) return true;
                 if (!_phases.TryGetValue(request, out seen))
                 {
                     if (_phaseRequestOrder.Count >= MaximumRememberedRequests)
@@ -269,22 +307,25 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
         {
             lock (_gate)
             {
-                if (_closed || !frame.FrameStamp.IsKnown) return false;
+                if (_closed || !frame.FrameStamp.IsKnown)
+                { MissingFrame(request, "before-" + channel, _closed ? "scope-closed" : "source-unknown", _logger); return false; }
                 var key = BeforeKey(channel, request);
                 if (ImageLimitReached || !_before.ContainsKey(key) && _before.Count >= 2)
-                { Interlocked.Increment(ref _dropped); return false; }
+                { MissingFrame(request, "before-" + channel, ImageLimitReached ? "run-budget" : "before-slots-full", _logger); return false; }
                 var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
                 if (!FitsByteLimit(bytes, _before.GetValueOrDefault(key).Bytes))
-                { Interlocked.Increment(ref _dropped); return false; }
-                owned = new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp };
+                { MissingFrame(request, "before-" + channel, "run-byte-budget", _logger); return false; }
+                if (!FitsMemory(bytes, _before.GetValueOrDefault(key).Bytes))
+                { MissingFrame(request, "before-" + channel, "memory-budget", _logger); return false; }
                 RemoveBefore(key);
+                owned = new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp };
                 _before[key] = (owned, request, detail, bytes);
                 _stagedBytes += bytes;
                 owned = null;
                 return true;
             }
         }
-        catch { return false; /* 保留输入/导航既有结果。 */ }
+        catch { MissingFrame(request, "before-" + channel, "capture-error", _logger); return false; }
         finally { owned?.Dispose(); }
     }
 
@@ -297,10 +338,18 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
             var key = BeforeKey(channel, request);
             if (_before.TryGetValue(key, out var before) && (before.Request == request || allowPreviousRequest))
             {
-                TryCapture(before.Frame, request, "before-" + channel, before.Detail, logger, before.Request);
+                if (!TryCaptureWithReason(before.Frame, request, "before-" + channel, before.Detail, out var reason, logger, before.Request))
+                {
+                    if (reason != "duplicate-phase") _missingBefore++;
+                    MissingFrame(request, "before-" + channel, reason, logger ?? _logger);
+                }
                 RemoveBefore(key);
             }
-            else _missingBefore++;
+            else
+            {
+                _missingBefore++;
+                MissingFrame(request, "before-" + channel, "before-unavailable", logger ?? _logger);
+            }
             TryCapture(frame, request, phase, detail, logger);
         }
     }
@@ -323,28 +372,45 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
 
     private async Task WriteAsync()
     {
+        try { _storage?.Initialize(); }
+        catch (Exception error) { try { _logger.LogWarning(error, "EVIDENCE_STORAGE_UNAVAILABLE run={Run}", _runId); } catch { } }
         await foreach (var item in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
         {
-            try { await _sink(item.Evidence, item.Image).ConfigureAwait(false); }
+            try { await _sink(item.Evidence, item.Image).ConfigureAwait(false); Interlocked.Increment(ref _written); }
             catch (Exception error)
             {
-                Interlocked.Increment(ref _writeFailures);
+                lock (_gate) { _writeFailures++; CountReason(error is DiagnosticEvidenceBudgetException ? "write:run-disk-budget" : "write:failed"); }
                 try { _logger.LogWarning(error, "EVIDENCE_WRITE_FAILED run={Run} sequence={Sequence}", _runId, item.Evidence.Sequence); } catch { }
             }
-            finally { item.Image.Dispose(); }
+            finally { item.Image.Dispose(); lock (_gate) _queuedBytes -= item.Bytes; }
         }
-        try { _logger.LogDebug("EVIDENCE_DRAINED run={Run} accepted={Accepted} bytes={Bytes} dropped={Dropped} missingBefore={MissingBefore} writeFailures={Failures} imageLimit={ImageLimit} byteLimit={ByteLimit}",
-            _runId, _accepted, _bytes, _dropped, _missingBefore, _writeFailures,
-            _maxImages?.ToString() ?? "unlimited", _maximumBytes?.ToString() ?? "unlimited"); } catch { }
+        DrainSummary summary;
+        lock (_gate)
+        {
+            _accountingCompleted = true;
+            summary = new(_runId, _accepted, _bytes, _dropped, _missingBefore, _writeFailures, _written,
+                _duplicateSuppressed, new(_missingReasons, StringComparer.Ordinal));
+        }
+        try
+        {
+            if (_storage != null)
+                await _storage.CompleteAsync(new { summary.RunId, accepted = summary.Accepted, written = summary.Written,
+                    dropped = summary.Dropped, missingBefore = summary.MissingBefore, writeFailures = summary.WriteFailures,
+                    duplicateSuppressed = summary.DuplicateSuppressed, missingReasons = summary.MissingReasons }).ConfigureAwait(false);
+        }
+        catch (Exception error) { try { _logger.LogWarning(error, "EVIDENCE_SUMMARY_FAILED run={Run}", _runId); } catch { } }
+        finally { _storage?.Dispose(); }
+        try { _logger.LogDebug("EVIDENCE_DRAINED run={Run} accepted={Accepted} bytes={Bytes} dropped={Dropped} missingBefore={MissingBefore} writeFailures={Failures} imageLimit={ImageLimit} byteLimit={ByteLimit} written={Written} duplicateSuppressed={DuplicateSuppressed} missingReasons={MissingReasons}",
+            summary.RunId, summary.Accepted, summary.Bytes, summary.Dropped, summary.MissingBefore, summary.WriteFailures,
+            _maxImages?.ToString() ?? "unlimited", _maximumBytes?.ToString() ?? "unlimited", summary.Written, summary.DuplicateSuppressed,
+            JsonConvert.SerializeObject(summary.MissingReasons)); } catch { }
     }
 
     private async Task WriteFileAsync(DiagnosticEvidence evidence, Mat image)
     {
         var directory = Global.Absolute(Path.Combine("log", "evidence", _runId.ToString("N")));
-        Directory.CreateDirectory(directory);
         var name = Path.Combine(directory, $"evidence-{evidence.Sequence:D4}");
-        image.SaveImage(name + ".png");
-        await File.WriteAllTextAsync(name + ".json", JsonConvert.SerializeObject(evidence, Formatting.Indented)).ConfigureAwait(false);
+        await _storage!.WriteAsync(evidence, image).ConfigureAwait(false);
         try { _logger.LogDebug("EVIDENCE_SAVED run={Run} request={Request} phase={Phase} source={Session}/{Sequence} file={File}",
             _runId, evidence.Request, evidence.Phase, evidence.Source.SessionId, evidence.Source.Sequence, name); } catch { }
     }
@@ -360,6 +426,8 @@ internal sealed class DiagnosticEvidenceScope : IAsyncDisposable
                 foreach (var pending in _frameRequests)
                     MissingFrame(pending.Key.Request, pending.Key.Phase, "no-next-frame-before-run-end", pending.Value.Logger);
                 _frameRequests.Clear();
+                CloseWindows("no-next-frame-before-run-end");
+                ClearHistory();
                 ClearRetainedFrame();
                 foreach (var before in _before.Values) before.Frame.Dispose();
                 _before.Clear();
