@@ -40,7 +40,12 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         UiOperation.Current?.Check();
-        using var image = _io.Capture();
+        ImageRegion CaptureMeasured()
+        {
+            using var measured = UiOperation.Current?.Measure(UiOperationPhase.Capture);
+            return _io.Capture();
+        }
+        using var image = CaptureMeasured();
         var snapshot = ReadCurrent(image);
         return _inputFence is { } fence ? snapshot.AfterInput(fence) : snapshot;
     }
@@ -49,6 +54,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         ReviveUiDetector? reviveDetector = null, DomainTipTexts? domainTipTexts = null,
         TimeProvider? clock = null, Func<ImageRegion, UiSnapshot>? readScene = null)
     {
+        using var measured = UiOperation.Current?.Measure(UiOperationPhase.SceneRecognition);
         var snapshot = readScene == null ? ReadNativeScene(image, inspectWorld, ocr, reviveDetector) : readScene(image);
         // Legacy static callers need not initialize localization services. Native
         // driver instances always supply the existing game-culture text pair.

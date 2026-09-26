@@ -63,6 +63,7 @@ public class Rec(
 
     private OcrRecognizerResult[] RunMulti(Mat[] srcs)
     {
+        RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
         if (srcs.Length == 0) return [];
 
         for (var i = 0; i < srcs.Length; ++i)
@@ -85,6 +86,7 @@ public class Rec(
             resultTensors = srcs
                 .Select(src =>
                 {
+                    RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
                     Mat? channel3 = default;
                     try
                     {
@@ -115,18 +117,22 @@ public class Rec(
                 })
                 .Select(inputTensor =>
                 {
-                    lock (_session)
+                    using (RecognitionExecutionScope.Enter(_session))
                     {
-                        using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([
-                            NamedOnnxValue.CreateFromTensor(_session.InputNames[0], inputTensor)
-                        ]);
-                        var output = results[0];
-                        if (output.ElementType is not TensorElementType.Float)
-                            throw new Exception($"Unexpected output tensor type: {output.ElementType}");
-                        if (output.ValueType is not OnnxValueType.ONNX_TYPE_TENSOR)
-                            throw new Exception($"Unexpected output tensor value type: {output.ValueType}");
-                        var tensor = output.AsTensor<float>();
-                        return (tensor.Dimensions.ToArray(), tensor.ToArray());
+                        return OcrInference.Run(options =>
+                        {
+                            using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([
+                                NamedOnnxValue.CreateFromTensor(_session.InputNames[0], inputTensor)
+                            ], _session.OutputNames, options);
+                            RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
+                            var output = results[0];
+                            if (output.ElementType is not TensorElementType.Float)
+                                throw new Exception($"Unexpected output tensor type: {output.ElementType}");
+                            if (output.ValueType is not OnnxValueType.ONNX_TYPE_TENSOR)
+                                throw new Exception($"Unexpected output tensor value type: {output.ValueType}");
+                            var tensor = output.AsTensor<float>();
+                            return (tensor.Dimensions.ToArray(), tensor.ToArray());
+                        });
                     }
                 })
                 .ToArray();
@@ -138,6 +144,7 @@ public class Rec(
 
         return resultTensors.SelectMany(resultTensor =>
         {
+            RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
             var resultArray = resultTensor.Item2;
             var resultShape = resultTensor.Item1;
             var labelCount = resultShape[2];

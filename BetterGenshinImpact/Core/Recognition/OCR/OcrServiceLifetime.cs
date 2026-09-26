@@ -51,6 +51,8 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
             var generation = ++_generation;
             _initialization = Task.Run(() =>
             {
+                // 共享构造与预热不属于首个等待者的UI预算。
+                using var execution = new RecognitionExecutionScope(CancellationToken.None);
                 using var preparation = new RecognitionReadinessScope(nonBlocking: false);
                 var started = Stopwatch.GetTimestamp();
                 Observe(generation, OcrServiceState.Preparing, started);
@@ -94,6 +96,7 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
 
     private T Use<T>(Func<IOcrService, T> recognize)
     {
+        RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
         Task<IOcrService> initialization;
         if (RecognitionReadinessScope.IsNonBlocking)
         {
@@ -105,7 +108,9 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
             }
         }
         else initialization = GetInitialization();
-        var instance = initialization.GetAwaiter().GetResult(); // 实时分支只可能读取已完成的Task。
+        var token = RecognitionExecutionScope.Token;
+        token.ThrowIfCancellationRequested();
+        var instance = initialization.WaitAsync(token).GetAwaiter().GetResult(); // 只取消等待，不取消共享初始化。
         var entered = false;
         try
         {
@@ -114,7 +119,12 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
                 if (!System.Threading.Monitor.TryEnter(_recognitionGate)) throw new RecognitionNotReadyException("OCR正在被借用，当前观察不等待预测锁");
                 entered = true;
             }
-            else System.Threading.Monitor.Enter(_recognitionGate, ref entered);
+            else
+            {
+                while (!System.Threading.Monitor.TryEnter(_recognitionGate, 25)) token.ThrowIfCancellationRequested();
+                entered = true;
+            }
+            token.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 CheckAdmission();

@@ -5,10 +5,11 @@ using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using BetterGenshinImpact.Core.Recognition;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
-internal enum UiOperationPhase { Check, Pause, Focus, Admission, NativeInput, ExplicitWait }
+internal enum UiOperationPhase { Check, Pause, Focus, Admission, NativeInput, ExplicitWait, Capture, SceneRecognition, AreaOcr }
 
 /// <summary>仅在当前UI调用链生效的预算与关联诊断，不建立后台观察/输入线程。</summary>
 internal sealed class UiOperation : IDisposable
@@ -23,12 +24,13 @@ internal sealed class UiOperation : IDisposable
     private readonly long _started;
     private readonly TimeSpan _budget;
     private readonly ILogger _logger;
+    private readonly RecognitionExecutionScope _recognition;
     private int? _lastSignature;
     private double _lastStateLog = double.NegativeInfinity;
     private int _debugEvents, _suppressed;
     private bool _ended, _disposed;
     private string? _latestDescription;
-    private readonly double?[] _phaseMilliseconds = new double?[6];
+    private readonly double?[] _phaseMilliseconds = new double?[Enum.GetValues<UiOperationPhase>().Length];
     private double _constructionMilliseconds, _logProducerMilliseconds;
     private double? _firstCheckAtMilliseconds, _dispatchMilliseconds;
 
@@ -54,6 +56,7 @@ internal sealed class UiOperation : IDisposable
         _budget = _parent == null || budget <= _parent.Remaining ? budget : _parent.Remaining;
         _deadline = new CancellationTokenSource(_budget, _clock);
         _linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _deadline.Token, _parent?.Token ?? default);
+        _recognition = new RecognitionExecutionScope(_linked.Token);
         _logger = logger ?? _parent?._logger ?? NullLogger.Instance;
         Name = name;
         RootId = _parent?.RootId ?? Id;
@@ -187,13 +190,14 @@ internal sealed class UiOperation : IDisposable
         if (_ended) return;
         _ended = true;
         SafeLog(() => _logger.Log(error == null || outcome == "cancelled" ? LogLevel.Debug : LogLevel.Warning,
-            error, "UI_END root={RootId} op={OpId} operation={Operation} outcome={Outcome} expected={Expected} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0} suppressed={Suppressed} constructionMs={ConstructionMs:F3} dispatchMs={DispatchMs:F3} firstCheckAtMs={FirstCheckAtMs:F3} checksMs={ChecksMs:F3} pauseMs={PauseMs:F3} focusMs={FocusMs:F3} admissionMs={AdmissionMs:F3} nativeInputMs={NativeInputMs:F3} explicitWaitMs={ExplicitWaitMs:F3} logProducerBeforeEndMs={LogProducerBeforeEndMs:F3}",
+            error, "UI_END root={RootId} op={OpId} operation={Operation} outcome={Outcome} expected={Expected} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0} suppressed={Suppressed} constructionMs={ConstructionMs:F3} dispatchMs={DispatchMs:F3} firstCheckAtMs={FirstCheckAtMs:F3} checksMs={ChecksMs:F3} pauseMs={PauseMs:F3} focusMs={FocusMs:F3} admissionMs={AdmissionMs:F3} nativeInputMs={NativeInputMs:F3} explicitWaitMs={ExplicitWaitMs:F3} logProducerBeforeEndMs={LogProducerBeforeEndMs:F3} captureMs={CaptureMs:F3} sceneMs={SceneMs:F3} areaOcrMs={AreaOcrMs:F3}",
             RootId, Id, Name, outcome, Expected, _latestDescription ?? "未取得观察", Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds, _suppressed,
             _constructionMilliseconds, _dispatchMilliseconds, _firstCheckAtMilliseconds,
             _phaseMilliseconds[(int)UiOperationPhase.Check], _phaseMilliseconds[(int)UiOperationPhase.Pause],
             _phaseMilliseconds[(int)UiOperationPhase.Focus], _phaseMilliseconds[(int)UiOperationPhase.Admission],
             _phaseMilliseconds[(int)UiOperationPhase.NativeInput], _phaseMilliseconds[(int)UiOperationPhase.ExplicitWait],
-            _logProducerMilliseconds));
+            _logProducerMilliseconds, _phaseMilliseconds[(int)UiOperationPhase.Capture],
+            _phaseMilliseconds[(int)UiOperationPhase.SceneRecognition], _phaseMilliseconds[(int)UiOperationPhase.AreaOcr]));
     }
 
     public void RecordDispatch(TimeSpan elapsed) => _dispatchMilliseconds = elapsed.TotalMilliseconds;
@@ -228,6 +232,7 @@ internal sealed class UiOperation : IDisposable
         End("scope-closed");
         _disposed = true;
         if (ReferenceEquals(Current, this)) Active.Value = _parent;
+        _recognition.Dispose();
         _linked.Dispose();
         _deadline.Dispose();
     }

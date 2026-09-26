@@ -57,6 +57,7 @@ public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgi
     internal PaddleOcrDetectionBox[] RunBoxes(Mat src)
     {
         using var pred = RunRaw(src, out var resizedSize);
+        RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
         //OpenCvSharp.OpenCVException: 0 <= _colRange.start && _colRange.start <= _colRange.end && _colRange.end <= m.cols
         using var roi = pred[0, resizedSize.Height, 0, resizedSize.Width];
         var postProcessor = new DbPostProcessor(
@@ -71,6 +72,7 @@ public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgi
 
     public Mat RunRaw(Mat src, out Size resizedSize)
     {
+        RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
         Mat? converted = null;
         var input = src.Channels() switch
         {
@@ -90,20 +92,24 @@ public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgi
                 config.NormalizeImage.Mean, config.NormalizeImage.Std, out var owner);
             using (owner)
             {
-                lock (_session)
+                using (RecognitionExecutionScope.Enter(_session))
                 {
-                    using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([
-                        NamedOnnxValue.CreateFromTensor(_session.InputNames[0], inputTensor)
-                    ]);
-                    var output = results[0];
-                    if (output.ElementType is not TensorElementType.Float)
-                        throw new Exception($"Unexpected output tensor type: {output.ElementType}");
+                    return OcrInference.Run(options =>
+                    {
+                        using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([
+                            NamedOnnxValue.CreateFromTensor(_session.InputNames[0], inputTensor)
+                        ], _session.OutputNames, options);
+                        RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
+                        var output = results[0];
+                        if (output.ElementType is not TensorElementType.Float)
+                            throw new Exception($"Unexpected output tensor type: {output.ElementType}");
 
-                    if (output.ValueType is not OnnxValueType.ONNX_TYPE_TENSOR)
-                        throw new Exception($"Unexpected output tensor value type: {output.ValueType}");
-                    var outputTensor = output.AsTensor<float>();
-                    return OcrUtils.Tensor2Mat(outputTensor);
-                    // 因为一个已知bug,tensor中内存在dml下使用完后会被释放掉,锁之外的代码会报错
+                        if (output.ValueType is not OnnxValueType.ONNX_TYPE_TENSOR)
+                            throw new Exception($"Unexpected output tensor value type: {output.ValueType}");
+                        var outputTensor = output.AsTensor<float>();
+                        return OcrUtils.Tensor2Mat(outputTensor);
+                        // 因为一个已知bug,tensor中内存在dml下使用完后会被释放掉,锁之外的代码会报错
+                    });
                 }
             }
         }
