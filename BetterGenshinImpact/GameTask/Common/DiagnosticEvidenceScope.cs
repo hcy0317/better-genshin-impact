@@ -25,6 +25,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     private readonly object _gate = new();
     private readonly Guid _runId = Guid.NewGuid();
     private readonly Channel<(DiagnosticEvidence Evidence, Mat Image, long Bytes)> _queue;
+    private readonly int _queueCapacity;
     private readonly Func<DiagnosticEvidence, Mat, Task> _sink;
     private readonly DiagnosticEvidenceStorage? _storage;
     private readonly Task _writer;
@@ -80,6 +81,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
         _maximumMemoryBytes = maximumMemoryBytes;
         _maxWindows = maxWindows;
         _maxPendingWindows = maxPendingWindows;
+        _queueCapacity = queueCapacity;
         _queue = Channel.CreateBounded<(DiagnosticEvidence, Mat, long)>(
             new BoundedChannelOptions(queueCapacity) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
         if (sink == null)
@@ -95,9 +97,14 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     internal static DiagnosticEvidenceScope? Current => Active.Value;
     internal static DiagnosticEvidenceScope? CreateOwned() => Active.Value == null ? new() : null;
     private bool ImageLimitReached => _maxImages is { } limit && _accepted >= limit;
-    private bool FitsByteLimit(long bytes, long replacing = 0) =>
-        _maximumBytes is not { } limit || bytes <= limit - _bytes - _stagedBytes + replacing;
-    private bool FitsMemory(long bytes, long replacing = 0) => bytes <= _maximumMemoryBytes - _queuedBytes - _stagedBytes + replacing;
+    private bool OrdinaryImageLimitReached => _maxImages is { } limit &&
+        _accepted >= limit - Math.Min(16, limit / 4);
+    private bool FitsByteLimit(long bytes, long replacing = 0, bool terminal = false) =>
+        _maximumBytes is not { } limit || bytes <= limit - _bytes - _stagedBytes + replacing -
+            (terminal ? 0 : Math.Min(32L * 1024 * 1024, limit / 4));
+    private bool FitsMemory(long bytes, long replacing = 0, bool terminal = false) =>
+        bytes <= _maximumMemoryBytes - _queuedBytes - _stagedBytes + replacing -
+            (terminal ? 0 : Math.Min(32L * 1024 * 1024, _maximumMemoryBytes / 4));
 
     internal bool RequestFrame(string owner, string request, string phase, CaptureFrameStamp requestedSource,
         string detail, ILogger logger)
@@ -118,7 +125,8 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 }
                 finally { ClearRetainedFrame(); }
             }
-            if (_closed || !requestedSource.IsKnown || _frameRequests.Count >= 4 || ImageLimitReached)
+            var requestLimit = DiagnosticEvidenceStorage.IsTerminalPhase(phase) ? 4 : 3;
+            if (_closed || !requestedSource.IsKnown || _frameRequests.Count >= requestLimit || ImageLimitReached)
             {
                 MissingFrame(request, phase, _closed ? "scope-closed" : !requestedSource.IsKnown ? "source-unknown" :
                     ImageLimitReached ? "run-budget" : "request-queue-full", logger);
@@ -260,7 +268,8 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
             lock (_gate)
             {
                 if (_closed) { reason = "scope-closed"; return false; }
-                if (_storage?.BudgetExhausted == true) { reason = "run-disk-budget"; return false; }
+                var terminal = DiagnosticEvidenceStorage.IsTerminalPhase(phase);
+                if (_storage?.BudgetExhausted == true && !terminal) { reason = "run-disk-budget"; return false; }
                 if (!frame.FrameStamp.IsKnown) { reason = "source-unknown"; return false; }
                 if (frame.SrcMat.Empty()) { reason = "empty-frame"; return false; }
                 if (logger != null && ReferenceEquals(_logger, NullLogger.Instance)) _logger = logger;
@@ -270,9 +279,11 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 if (window == null && seen != null && seen.Contains(phase))
                 { reason = "duplicate-phase"; return false; }
                 var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
-                if (ImageLimitReached || !FitsByteLimit(bytes))
+                if ((terminal ? ImageLimitReached : OrdinaryImageLimitReached) || !FitsByteLimit(bytes, terminal: terminal))
                 { reason = "run-image-or-byte-budget"; return false; }
-                if (!FitsMemory(bytes)) { reason = "memory-budget"; return false; }
+                if (!FitsMemory(bytes, terminal: terminal)) { reason = "memory-budget"; return false; }
+                if (!terminal && _queue.Reader.Count >= _queueCapacity - (_queueCapacity > 1 ? 1 : 0))
+                { reason = "writer-queue-full"; return false; }
                 owned = frame.SrcMat.Clone();
                 var evidence = new DiagnosticEvidence(_runId, _accepted + 1, request, phase, frame.FrameStamp,
                     detail.Length > 2048 ? detail[..2048] : detail, sourceRequest, window);
@@ -335,6 +346,13 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
         lock (_gate)
         {
             if (_closed) return;
+            var normalizedRequest = request.Length > 256 ? request[..256] : request;
+            var normalizedPhase = phase.Length > 64 ? phase[..64] : phase;
+            if (_phases.TryGetValue(normalizedRequest, out var seen) && seen.Contains(normalizedPhase))
+            {
+                _duplicateSuppressed++;
+                return;
+            }
             var key = BeforeKey(channel, request);
             if (_before.TryGetValue(key, out var before) && (before.Request == request || allowPreviousRequest))
             {

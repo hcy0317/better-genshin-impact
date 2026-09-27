@@ -2,6 +2,7 @@ using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area;
+using BetterGenshinImpact.GameTask.Model.Area.Converter;
 using Fischless.WindowsInput;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
@@ -23,6 +24,7 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         private readonly ILogger logger;
         private readonly InputSimulator input = Simulation.SendInput;
         internal Action? OnBeforeScroll { get; set; }
+        internal Action<ImageRegion>? OnPageCaptured { get; set; }
         internal Action<Tuple<ImageRegion, IEnumerable<Tuple<Rect, bool>>>>? OnAfterTurnToNewPage { get; set; }
 
         /// <summary>
@@ -557,12 +559,18 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
                             }
 
                             using ImageRegion ra = TaskControl.CaptureToRectArea();
-                            imageRegion = ra.DeriveCrop(this.roi);
+                            owner.OnPageCaptured?.Invoke(ra);
+                            imageRegion = owner.OnPageCaptured is null
+                                ? ra.DeriveCrop(this.roi)
+                                : CreateOwnedPage(ra, this.roi);
                         }
                         else
                         {
                             using ImageRegion ra = TaskControl.CaptureToRectArea();
-                            imageRegion = ra.DeriveCrop(this.roi);
+                            owner.OnPageCaptured?.Invoke(ra);
+                            imageRegion = owner.OnPageCaptured is null
+                                ? ra.DeriveCrop(this.roi)
+                                : CreateOwnedPage(ra, this.roi);
                         }
 
                         var cells = owner.@params.FastScroll
@@ -624,6 +632,14 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
 
                 this.current = Tuple.Create(this.currentPage.PageRegion, this.currentPage.ItemRects.Dequeue());
                 return true;
+            }
+
+            internal static ImageRegion CreateOwnedPage(ImageRegion frame, Rect roi)
+            {
+                // Capture buffers can return to the pool before page enumeration finishes.
+                using var crop = frame.DeriveCrop(roi);
+                return new ImageRegion(crop.SrcMat.Clone(), crop.X, crop.Y, frame,
+                    new TranslationConverter(crop.X, crop.Y));
             }
 
             internal static IReadOnlyList<Rect> SelectFastScrollItems(

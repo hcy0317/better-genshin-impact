@@ -2747,7 +2747,7 @@ public class TpTask
 
     private async Task PressTeleportConfirmKey()
     {
-        Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_F);
+        Simulation.SendInput.SimulateKeyPulse(Core.Config.KeyId.F, ct);
         await Delay(30, ct);
     }
 

@@ -189,7 +189,7 @@ internal sealed class UiOperation : IDisposable
     {
         if (_ended) return;
         _ended = true;
-        if (Name is "map-area-selection" or "return-main")
+        if (outcome != "completed" && (Name is "map-area-selection" or "return-main"))
             SafeLog(() => DiagnosticEvidenceScope.Current?.RequestLatestWindow("ui:" + Id, Name,
                 $"outcome={outcome}; expected={Expected}; observed={_latestDescription}", _logger));
         SafeLog(() => _logger.Log(error == null || outcome == "cancelled" ? LogLevel.Debug : LogLevel.Warning,

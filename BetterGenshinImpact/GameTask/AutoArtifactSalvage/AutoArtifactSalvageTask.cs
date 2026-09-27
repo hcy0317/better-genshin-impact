@@ -88,7 +88,15 @@ public class AutoArtifactSalvageTask : ISoloTask
         artifactAffixStrDic = ArtifactAffix.DefaultStrDic.Select(kvp => new KeyValuePair<ArtifactAffixType, string>(kvp.Key, stringLocalizer.WithCultureGet(cultureInfo, kvp.Value))).ToFrozenDictionary();
     }
 
-    public static async Task OpenInventory(
+    public static Task OpenInventory(
+        GridScreenName gridScreenName,
+        InputSimulator input,
+        ILogger logger,
+        CancellationToken ct,
+        bool allowRetryOpenAction = true) =>
+        TryOpenInventory(gridScreenName, input, logger, ct, allowRetryOpenAction);
+
+    internal static async Task<bool> TryOpenInventory(
         GridScreenName gridScreenName,
         InputSimulator input,
         ILogger logger,
@@ -164,7 +172,8 @@ public class AutoArtifactSalvageTask : ISoloTask
                 if (artifactBtn2.IsExist())
                 {
                     artifactBtn2.Click();
-                    return true;
+                    // 点击不是页面确认；等待下一帧的选中标签。
+                    return false;
                 }
             }
             else
@@ -187,11 +196,12 @@ public class AutoArtifactSalvageTask : ISoloTask
         if (!openBagSuccess)
         {
             logger.LogError("未找到背包中{name}菜单按钮,打开背包失败", gridScreenName.GetDescription());
-            return;
+            return false;
         }
 
 
         await Delay(800, ct);
+        return true;
     }
 
     public async Task Start(CancellationToken ct)

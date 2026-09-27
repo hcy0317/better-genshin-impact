@@ -444,13 +444,13 @@ public partial class Avatar
         var rects = CombatScenes.GetAvatarIndexRectSnapshot();
         var index = Index;
         var cancellationToken = Ct;
-        ESkillCdTracker.TriggerECheck(() =>
+        ESkillCdTracker.TriggerEObservation(() =>
         {
             cancellationToken.ThrowIfCancellationRequested();
             using var region = CaptureToRectArea();
             var observed = PartyAvatarSideIndexHelper.GetAvatarIndexIsActiveWithContext(
                 region, rects, new AvatarActiveCheckContext());
-            return observed == index ? ReadSkillCurrentCd(region) : 0;
+            return observed == index ? ReadSkillCurrentCd(region) : (double?)null;
         }, Name, cancellationToken);
     }
 
@@ -499,19 +499,19 @@ public partial class Avatar
         switch (index)
         {
             case 1:
-                Simulation.SendInput.SimulateAction(GIActions.SwitchMember1);
+                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember1);
                 break;
             case 2:
-                Simulation.SendInput.SimulateAction(GIActions.SwitchMember2);
+                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember2);
                 break;
             case 3:
-                Simulation.SendInput.SimulateAction(GIActions.SwitchMember3);
+                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember3);
                 break;
             case 4:
-                Simulation.SendInput.SimulateAction(GIActions.SwitchMember4);
+                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember4);
                 break;
             case 5:
-                Simulation.SendInput.SimulateAction(GIActions.SwitchMember5);
+                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember5);
                 break;
             default:
                 break;
@@ -686,7 +686,7 @@ public partial class Avatar
             }
             else
             {
-                Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+                Simulation.SendInput.SimulateActionPulse(GIActions.ElementalSkill);
             }
             CombatActionScope.Current?.Trace("e-input-return", $"actor={Name}");
 
@@ -745,14 +745,14 @@ public partial class Avatar
         if (!AvatarSpecialAction.ExecuteSpecializedAction(this, "UseSkill", Name, new ActionArgs(Hold: hold)))
         {
             if (hold) Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
-            else Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+            else Simulation.SendInput.SimulateActionPulse(GIActions.ElementalSkill);
         }
     }
 
     internal void SendBurstInput()
     {
         Ct.ThrowIfCancellationRequested();
-        Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
+        Simulation.SendInput.SimulateActionPulse(GIActions.ElementalBurst);
     }
 
     /// <summary>
@@ -819,7 +819,7 @@ public partial class Avatar
                 }, () =>
                 {
                     CombatActionScope.Current?.Trace("q-input-call", $"actor={Name}");
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
+                    Simulation.SendInput.SimulateActionPulse(GIActions.ElementalBurst);
                     CombatActionScope.Current?.Trace("q-input-return", $"actor={Name}");
                 },
                 milliseconds => Sleep(milliseconds, Ct), Ct, timeoutSeconds: timeoutSeconds, maxSamples: maxSamples,

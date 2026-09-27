@@ -118,6 +118,29 @@ public class DiagnosticEvidenceStorageTests
         Assert.Contains(files, file => file.EndsWith("summary.json"));
     }
 
+    [Fact]
+    public async Task OrdinaryBudgetExhaustionStillAllowsTerminalEvidenceWithinTheSameHardLimit()
+    {
+        using var fixture = new EvidenceDirectory();
+        var run = Guid.NewGuid();
+        const long maximumBytes = 16384;
+        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run, maximumBytes);
+        using var image = new Mat(2, 2, MatType.CV_8UC3, Scalar.Black);
+        var source = new CaptureFrameSource();
+        var sequence = 1;
+        for (; sequence < 100; sequence++)
+        {
+            try { await storage.WriteAsync(new(run, sequence, "ordinary", "return-main", source.Next(), "completed"), image); }
+            catch (DiagnosticEvidenceBudgetException) { break; }
+        }
+        Assert.InRange(sequence, 2, 99);
+        await storage.WriteAsync(new(run, sequence + 1, "battle", "combat-terminal", source.Next(), "unconfirmed"), image);
+        await storage.CompleteAsync(new { terminal = sequence + 1 });
+        var directory = System.IO.Path.Combine(fixture.Path, run.ToString("N"));
+        Assert.True(File.Exists(System.IO.Path.Combine(directory, $"evidence-{sequence + 1:D4}.png")));
+        Assert.InRange(Directory.GetFiles(directory).Sum(file => new FileInfo(file).Length), 1, maximumBytes);
+    }
+
     private sealed class EvidenceDirectory : IDisposable
     {
         internal string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "bettergi-evidence-test-" + Guid.NewGuid().ToString("N"));

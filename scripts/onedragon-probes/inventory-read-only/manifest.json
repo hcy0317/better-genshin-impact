@@ -1,0 +1,10 @@
+{
+  "manifest_version": 1,
+  "name": "Codex Inventory Read Only Probe",
+  "version": "1.0.0",
+  "bgi_version": "0.64.2",
+  "description": "Read-only inventory page evidence. Does not use any item.",
+  "main": "main.js",
+  "authors": [{ "name": "Local verification" }],
+  "saved_files": ["evidence/*.png", "evidence/result.json"]
+}

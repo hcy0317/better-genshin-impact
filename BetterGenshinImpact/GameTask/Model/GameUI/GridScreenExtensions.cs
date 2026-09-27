@@ -2,6 +2,7 @@ using BetterGenshinImpact.Core.Recognition.OCR;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Text;
 
 namespace BetterGenshinImpact.GameTask.Model.GameUI
@@ -17,7 +18,12 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         {
             using Mat subMat = mat.SubMat(mat.Height * 128 / 153, mat.Height * 150 / 153, mat.Width * 5 / 125, mat.Width * 120 / 125);
             using Mat resize = subMat.Resize(new Size(subMat.Width * 2, subMat.Height * 2));
-            return ocrService.Ocr(resize);
+            var text = ocrService.Ocr(resize);
+            if (!string.IsNullOrWhiteSpace(text)) return text;
+
+            // Small quantity glyphs can be missed by text detection despite a valid crop.
+            using var count = GridItemCountRecognizer.RecognizeCropped(mat, ocrService);
+            return count.Count >= 0 ? count.Count.ToString(CultureInfo.InvariantCulture) : string.Empty;
         }
 
         /// <summary>

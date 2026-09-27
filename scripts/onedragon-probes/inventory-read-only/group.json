@@ -1,0 +1,30 @@
+{
+  "index": 9999,
+  "name": "Codex-Inventory-Probe-20260927",
+  "config": {
+    "pathingConfig": {
+      "enabled": true,
+      "partyName": "",
+      "autoPickEnabled": false,
+      "autoSkipEnabled": false,
+      "autoRunEnabled": false,
+      "autoEatEnabled": false,
+      "autoFightEnabled": false,
+      "jsScriptUseEnabled": true,
+      "soloTaskUseFightEnabled": false
+    },
+    "enableShellConfig": false
+  },
+  "projects": [{
+    "name": "Read Only Inventory Evidence",
+    "folderName": "Codex-Inventory-Probe-20260927",
+    "jsScriptSettingsObject": {},
+    "index": 1,
+    "type": "Javascript",
+    "status": "Enabled",
+    "schedule": "None",
+    "runNum": 1,
+    "allowJsNotification": false,
+    "allowJsHTTPHash": ""
+  }]
+}

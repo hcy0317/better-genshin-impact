@@ -22,6 +22,9 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
         internal int FastScrollRows { get; private set; }
         internal Size CaptureSize { get; private set; }
 
+        internal GridParams WithConservativePaging() => new(Roi, Columns, 1, 80, 0, S3Scale,
+            true, false, PreScrollDelayMilliseconds, captureSize: CaptureSize);
+
         public GridParams(Rect roi1080p, int columns, int s1Round, int roundMilliseconds, int s2Round, double s3Scale)
             : this(
                 roi1080p.Multiply(TaskContext.Instance().SystemInfo.AssetScale),

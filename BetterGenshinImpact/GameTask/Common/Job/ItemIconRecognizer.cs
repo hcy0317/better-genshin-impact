@@ -29,6 +29,7 @@ internal sealed record ItemIconCandidate(string Name, double Score, int QualityL
 internal interface IItemIconRecognizer : IDisposable
 {
     string? Recognize(Mat icon);
+    bool SupportsName(string name) => false;
 }
 
 internal static class ItemIconRecognizerFactory
@@ -67,6 +68,7 @@ internal sealed class GridIconRecognizer : IItemIconRecognizer
 
 internal sealed class ItemRecognizer : IItemIconRecognizer
 {
+    public bool SupportsName(string name) => _prototypes.Any(prototype => prototype.Name == name);
     private const int InputSize = 125;
     internal const double MatchThreshold = 0.70;
 

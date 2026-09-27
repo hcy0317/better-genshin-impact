@@ -11,6 +11,32 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.ScriptTests;
 public class DispatcherScriptResultTests
 {
     [Fact]
+    public void VerifiedInventorySnapshotPreservesKnownUnknownAndConfirmedAbsentCounts()
+    {
+        var snapshot = new InventoryCountSnapshot(new Dictionary<string, int>
+        { ["脆弱树脂"] = 38, ["须臾树脂"] = 0 }, true, "verified-top-to-bottom", 3, 0);
+        var value = Assert.IsAssignableFrom<IDictionary<string, object>>(Dispatcher.ToScriptInventoryResult(snapshot));
+        Assert.Equal("bgi.inventory-count.v1", value["schema"]);
+        Assert.Equal(true, value["coverageComplete"]);
+        var counts = Assert.IsAssignableFrom<IDictionary<string, object>>(value["counts"]);
+        Assert.Equal(0, counts["须臾树脂"]);
+        Assert.Equal(38, counts["脆弱树脂"]);
+    }
+
+    [Fact]
+    public void InventoryEvidenceMustBeExplicitAndIsRestrictedToTheVerifiedPage()
+    {
+        using var engine = new V8ScriptEngine();
+        var config = Assert.IsAssignableFrom<ScriptObject>(engine.Evaluate(
+            "({gridScreenName:'PreciousItems',itemNames:['须臾树脂','脆弱树脂'],iconRecognitionMode:'Item',includeScanEvidence:true})"));
+        var param = Dispatcher.ParseCountInventoryItemParam(config);
+        Assert.True(param.IncludeScanEvidence);
+        param.Validate();
+        param.GridScreenName = GridScreenName.Food;
+        Assert.Throws<ArgumentException>(param.Validate);
+    }
+
+    [Fact]
     public void RewardSummary_ShouldBeExposedAsScriptEnumerableObject()
     {
         var result = Dispatcher.ToScriptDictionary(new Dictionary<string, int>

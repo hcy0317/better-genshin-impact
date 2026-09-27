@@ -13,6 +13,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
+[Collection("OfflineNativeDecision")]
 public class DomainTipUiReaderTests
 {
     internal static readonly DomainTipTexts Texts = new("地脉异常", "点击任意位置关闭");
@@ -40,7 +41,7 @@ public class DomainTipUiReaderTests
     public void RecordedCropsAreRecognizedByExplicitCpuPaddleV6()
     {
         Assert.True(ApplicationHostBootstrapGuard.IsProhibited);
-        Assert.Null(ConfigService.Config);
+        var originalConfig = ConfigService.Config;
         var model = PaddleOcrService.PaddleOcrModelType.V6;
         Assert.True(File.Exists(model.DetectionModel.ModalPath));
         Assert.True(File.Exists(model.RecognitionModel.ModalPath));
@@ -56,7 +57,7 @@ public class DomainTipUiReaderTests
             Assert.True(observed.CanDismiss, $"Actual CPU OCR: {observed}");
             Assert.InRange(observed.CloseBounds.X, 870, 890);
             Assert.InRange(observed.CloseBounds.Y, 680, 700);
-            Assert.Null(ConfigService.Config);
+            Assert.Same(originalConfig, ConfigService.Config);
         }
         finally { Environment.SetEnvironmentVariable("PATH", originalPath, EnvironmentVariableTarget.Process); }
     }

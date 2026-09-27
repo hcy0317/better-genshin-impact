@@ -82,7 +82,8 @@ public class Dispatcher
             GridScreenName = gridScreenName,
             ItemName = itemName,
             ItemNames = itemNames?.ToList() ?? [],
-            IconRecognitionMode = iconRecognitionMode
+            IconRecognitionMode = iconRecognitionMode,
+            IncludeScanEvidence = ScriptObjectConverter.GetValue(config, "includeScanEvidence", false)
         };
     }
 
@@ -96,6 +97,22 @@ public class Dispatcher
         }
 
         return expando;
+    }
+
+    internal static object ToScriptInventoryResult(object result)
+    {
+        if (result is InventoryCountSnapshot snapshot)
+        {
+            IDictionary<string, object> value = new ExpandoObject();
+            value["schema"] = "bgi.inventory-count.v1";
+            value["counts"] = ToScriptDictionary(snapshot.Counts);
+            value["coverageComplete"] = snapshot.CoverageComplete;
+            value["reason"] = snapshot.Reason;
+            value["pages"] = snapshot.Pages;
+            value["unrecognizedSlots"] = snapshot.UnrecognizedSlots;
+            return value;
+        }
+        return result is IReadOnlyDictionary<string, int> counts ? ToScriptDictionary(counts) : result;
     }
 
     private readonly object _config;
@@ -351,14 +368,7 @@ public class Dispatcher
                     CountInventoryItemParam param = ParseCountInventoryItemParam((ScriptObject)soloTask.Config);
 
                     var result = await new CountInventoryItem(param).Start(cancellationToken);
-                    if (param.ItemName != null)
-                    {
-                        return result;
-                    }
-                    else
-                    {
-                        return ToScriptDictionary((Dictionary<string, int>)result);
-                    }
+                    return ToScriptInventoryResult(result);
                 }
             default:
                 throw new ArgumentException($"未知的任务名称: {soloTask.Name}", nameof(soloTask.Name));
@@ -567,13 +577,6 @@ public class Dispatcher
         var cancellationToken = cancellation.Token;
         object result = await new CountInventoryItem(param).Start(cancellationToken);
 
-        if (param.ItemName != null)
-        {
-            return result;
-        }
-        else
-        {
-            return ToScriptDictionary((Dictionary<string, int>)result);
-        }
+        return ToScriptInventoryResult(result);
     }
 }

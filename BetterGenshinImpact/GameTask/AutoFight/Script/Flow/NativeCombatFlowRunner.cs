@@ -1420,7 +1420,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 // 未知不能在共用准入之前退出；先核实当前角色，再按原动作期限等待。
             }
             if (!hasUnresolved && command.Method == Method.Skill && command.Args?.Contains("fast") == true
-                && io.TryGetKnownSkillCooldown(name, out var cd) && cd > 0)
+                && io.TryGetKnownSkillCooldown(name, out var cd) && cd > 0
+                && Observe("e-ready", [], name) is not true)
             {
                 action.DiagnosticReason = $"fast 动作仍有已知 E 冷却 {cd:F2}s";
                 return command.LegacyOutcomePolicy ? CombatFlowResult.Skipped : CombatFlowResult.Deferred;

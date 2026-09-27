@@ -18,7 +18,7 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     internal const long DefaultMaximumBytes = 2L * 1024 * 1024 * 1024;
     private readonly string _root, _directory;
     private readonly Guid _run;
-    private readonly long _maximumBytes, _summaryReserve;
+    private readonly long _maximumBytes, _summaryReserve, _terminalReserve;
     private readonly TimeProvider _clock;
     private readonly Action<string>? _diagnostic;
     private FileStream? _lease;
@@ -27,6 +27,8 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     private volatile bool _budgetExhausted;
     private long _usedBytes;
     internal bool BudgetExhausted => _budgetExhausted;
+
+    internal static bool IsTerminalPhase(string phase) => phase is "terminal" or "combat-terminal";
 
     internal DiagnosticEvidenceStorage(string root, Guid run, long maximumBytes = DefaultMaximumBytes,
         TimeProvider? clock = null, Action<string>? diagnostic = null)
@@ -37,6 +39,7 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
         _directory = Path.Combine(_root, run.ToString("N"));
         _maximumBytes = maximumBytes;
         _summaryReserve = Math.Min(1024 * 1024, maximumBytes / 4);
+        _terminalReserve = Math.Min(64L * 1024 * 1024, maximumBytes / 4);
         _clock = clock ?? TimeProvider.System;
         _diagnostic = diagnostic;
     }
@@ -75,12 +78,14 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     internal async Task WriteAsync(DiagnosticEvidence evidence, Mat image)
     {
         Initialize();
-        if (_budgetExhausted) throw new DiagnosticEvidenceBudgetException();
+        var terminal = IsTerminalPhase(evidence.Phase);
+        if (_budgetExhausted && !terminal) throw new DiagnosticEvidenceBudgetException();
         if (evidence.RunId != _run || evidence.Sequence <= 0) throw new IOException("Evidence run identity mismatch");
         if (!Cv2.ImEncode(".png", image, out var png)) throw new IOException("PNG encoding failed");
         var metadata = JsonBytes(evidence);
         var bytes = checked(png.LongLength + metadata.LongLength);
-        if (bytes > _maximumBytes - _summaryReserve - _usedBytes)
+        var available = _maximumBytes - _summaryReserve - _usedBytes - (terminal ? 0 : _terminalReserve);
+        if (bytes > available)
         {
             _budgetExhausted = true;
             throw new DiagnosticEvidenceBudgetException();

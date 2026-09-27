@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Text;
 using BetterGenshinImpact.Core.Simulator;
 using System.Threading;
+using System;
 using Fischless.WindowsInput;
 
 namespace BetterGenshinImpact.Core.Simulator.Extensions;
@@ -13,6 +14,50 @@ namespace BetterGenshinImpact.Core.Simulator.Extensions;
 /// </summary>
 public static class InputSimulatorExtension
 {
+    public static void SimulateActionPulse(this InputSimulator self, GIActions action)
+        => SimulateKeyPulse(self, action.ToActionKey());
+
+    internal static void SimulateKeyPulse(this InputSimulator self, KeyId key, CancellationToken ct = default)
+    {
+        if (key is KeyId.None or KeyId.Unknown) return;
+        void Check()
+        {
+            ct.ThrowIfCancellationRequested();
+            GameTask.AutoFight.Script.Flow.CombatActionScope.Current?.Check();
+            GameTask.Common.Ui.UiOperation.Current?.Check();
+        }
+        using var submitted = new InputDispatchCapture();
+        PulseCore(() => KeyDown(self, key), () =>
+        {
+            // 首个原生调用未准入时，不让独立的up成为一次新的输入请求。
+            if (submitted.NativeCalls > 0) KeyUp(self, key);
+        }, milliseconds =>
+        {
+            if (GameTask.AutoFight.Script.Flow.CombatActionScope.Current is { } scope) scope.Sleep(milliseconds);
+            else if (ct.CanBeCanceled) ct.WaitHandle.WaitOne(milliseconds);
+            else Thread.Sleep(milliseconds);
+        }, Check);
+    }
+
+    internal static void PulseCore(Action down, Action up, Action<int> wait, Action check)
+    {
+        check();
+        Exception? failure = null;
+        try
+        {
+            down();
+            // 覆盖30fps的一帧；仍使用调用方原期限，取消或部分提交也必须配对松键。
+            wait(60);
+            check();
+        }
+        catch (Exception error) { failure = error; throw; }
+        finally
+        {
+            try { up(); }
+            catch (Exception cleanup) when (failure != null)
+            { throw new AggregateException("输入脉冲和松键均失败", failure, cleanup); }
+        }
+    }
 
     /// <summary>
     /// 模拟玩家操作

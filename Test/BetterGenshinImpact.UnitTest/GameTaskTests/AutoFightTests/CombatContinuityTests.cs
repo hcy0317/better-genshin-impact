@@ -45,10 +45,11 @@ public class CombatContinuityTests
     {
         var source = ReadSource("GameTask/AutoFight/Model/Avatar.cs");
         var start = source.IndexOf("if (!observeCooldown)", StringComparison.Ordinal);
-        var end = source.IndexOf("Sleep(200, Ct)", start, StringComparison.Ordinal);
+        var end = source.IndexOf("var recordedCd = 0d;", start, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "The ordinary non-blocking cooldown path must exist.");
         Assert.Contains("QueueSkillCooldownObservation();", source[start..end]);
         Assert.Contains("return;", source[start..end]);
-        Assert.Contains("observed == index ? ReadSkillCurrentCd(region) : 0", source);
+        Assert.Contains("observed == index ? ReadSkillCurrentCd(region) : (double?)null", source);
     }
 
     [Fact]
