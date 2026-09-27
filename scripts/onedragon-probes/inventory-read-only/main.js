@@ -20,6 +20,29 @@
                     try { selected = current.isExist(); } finally { current.dispose(); }
                     if (selected) {
                         if (!file.WriteImageSync("evidence/precious-page.png", frame.SrcMat)) throw new Error("PROBE_IMAGE_WRITE_FAILED");
+                        if (typeof settings !== "undefined" && settings.capturePages === true) {
+                            moveMouseTo(700, 500);
+                            await sleep(60);
+                            verticalScroll(50);
+                            await sleep(600);
+                            for (let page = 0; page < 13; page++) {
+                                const currentPage = captureGameRegion();
+                                try {
+                                    if (currentPage.Width !== 1920 || currentPage.Height !== 1080) throw new Error("PROBE_UNEXPECTED_FRAME_SIZE");
+                                    const header = currentPage.DeriveCrop(0, 0, 1920, 110);
+                                    try {
+                                        const marker = header.find(checked);
+                                        try { if (!marker.isExist()) throw new Error("PROBE_PAGE_CHANGED"); }
+                                        finally { marker.dispose(); }
+                                    } finally { header.dispose(); }
+                                    if (!file.WriteImageSync("evidence/precious-scroll-" + page + ".png", currentPage.SrcMat)) throw new Error("PROBE_IMAGE_WRITE_FAILED");
+                                } finally { currentPage.dispose(); }
+                                if (page < 12) {
+                                    verticalScroll(-3);
+                                    await sleep(500);
+                                }
+                            }
+                        }
                         file.WriteTextSync("evidence/result.json", JSON.stringify({status: "captured", page: "PreciousItems", itemUse: false}));
                         log.info("RDP_INVENTORY_PROBE_CAPTURED page=PreciousItems itemUse=false");
                         return;

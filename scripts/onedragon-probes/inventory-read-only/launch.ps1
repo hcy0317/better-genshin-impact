@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory)][string]$RuntimeRoot,
-    [Parameter(Mandatory)][int]$ExpectedSessionId
+    [Parameter(Mandatory)][int]$ExpectedSessionId,
+    [ValidateSet('Codex-Inventory-Probe-20260927','Codex-Inventory-Pages-Probe-20260927')]
+    [string]$GroupName = 'Codex-Inventory-Probe-20260927'
 )
 $ErrorActionPreference = 'Stop'
 $session = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -14,7 +16,7 @@ $foreignGame = @(Get-Process -Name YuanShen,GenshinImpact -ErrorAction SilentlyC
 if ($foreignGame.Count -ne 0) { throw 'A game in another session prevents an isolated probe.' }
 $exe = Join-Path $RuntimeRoot 'BetterGI.exe'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Runtime executable missing.' }
-$process = Start-Process -FilePath $exe -ArgumentList '--startGroups','Codex-Inventory-Probe-20260927' -WorkingDirectory $RuntimeRoot -WindowStyle Hidden -PassThru
+$process = Start-Process -FilePath $exe -ArgumentList '--startGroups',$GroupName -WorkingDirectory $RuntimeRoot -WindowStyle Hidden -PassThru
 if ($process.SessionId -ne $session) { throw 'Launched process session mismatch; no further action permitted.' }
 [pscustomobject]@{ProcessId=$process.Id; SessionId=$session; User=$identity; Exe=$exe} |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'launch-receipt.json') -Encoding utf8

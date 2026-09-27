@@ -4,8 +4,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 const source = fs.readFileSync(new URL('./onedragon-probes/inventory-read-only/main.js', import.meta.url), 'utf8');
-async function run({selected = true, fail = false} = {}) {
+async function run({selected = true, fail = false, capturePages = false, changePage = false} = {}) {
     const events = [];
+    let captures = 0;
     const context = vm.createContext({
         file: {
             ReadImageMatSync: name => ({name, dispose() {}}),
@@ -15,13 +16,17 @@ async function run({selected = true, fail = false} = {}) {
         RecognitionObject: {TemplateMatch: mat => mat},
         genshin: {returnMainUi: async () => { events.push('main'); }},
         keyPress: key => { events.push(key); }, sleep: async () => {},
+        settings: {capturePages},
+        moveMouseTo: (x, y) => { events.push(`move:${x},${y}`); },
+        verticalScroll: amount => { events.push(`scroll:${amount}`); },
         log: {info() {}},
         captureGameRegion() {
             if (fail) throw new Error('cancelled');
             events.push('capture');
+            captures++;
             return {Width: 1920, Height: 1080, SrcMat: {}, dispose() {}, DeriveCrop() {
                 return {dispose() {}, find: ro => ({dispose() {},
-                    isExist: () => ro.name.includes('_unchecked') || selected,
+                    isExist: () => ro.name.includes('_unchecked') || selected && (!changePage || captures < 3),
                     click: () => { events.push('select-tab'); },
                 })};
             }};
@@ -47,4 +52,20 @@ test('cancellation does not cause recovery or a second key press', async () => {
     const result = await run({fail: true});
     assert.match(result.error.message, /cancelled/);
     assert.deepEqual(result.events, ['main', 'B']);
+});
+
+test('page probe is bounded and retains thirteen images without using any item', async () => {
+    const result = await run({capturePages: true});
+    assert.ifError(result.error);
+    assert.equal(result.events.filter(x => x.startsWith('image:evidence/precious-scroll-')).length, 13);
+    assert.equal(result.events.filter(x => x === 'scroll:-3').length, 12);
+    assert.equal(result.events.filter(x => x === 'scroll:50').length, 1);
+    assert.equal(result.events.at(-1), 'captured');
+});
+
+test('page identity loss stops further scrolling and does not report success', async () => {
+    const result = await run({capturePages: true, changePage: true});
+    assert.match(result.error.message, /PROBE_PAGE_CHANGED/);
+    assert.equal(result.events.filter(x => x === 'scroll:-3').length, 1);
+    assert(!result.events.includes('captured'));
 });
