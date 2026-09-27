@@ -62,7 +62,8 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                     // GridScreen 使用构造时传入的令牌，必须贯穿打开背包、预滚动和每页扫描。
                     this.ct = scanToken;
                     await new ReturnMainUiTask().Start(scanToken);
-                    await AutoArtifactSalvageTask.OpenInventory(this.gridScreenName, input, logger, scanToken);
+                    await RequireInventoryOpenAsync(() =>
+                        AutoArtifactSalvageTask.TryOpenInventory(this.gridScreenName, input, logger, scanToken), scanToken);
                     using IItemIconRecognizer iconRecognizer = ItemIconRecognizerFactory.Create(this.iconRecognitionMode);
                     object result = this.itemName != null
                         ? await FindOne(iconRecognizer)
@@ -100,6 +101,14 @@ namespace BetterGenshinImpact.GameTask.Common.Job
             {
                 throw new TimeoutException($"背包计数扫描超过 {budget.TotalSeconds:0.###} 秒预算；未确认物品数量保持未知", exception);
             }
+        }
+
+        internal static async Task RequireInventoryOpenAsync(Func<Task<bool>> open, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            var confirmed = await open();
+            ct.ThrowIfCancellationRequested();
+            if (!confirmed) throw new InvalidOperationException("背包目标分类页未确认，不开始计数或推断零库存");
         }
 
         private GridParams CreateGridParams()
