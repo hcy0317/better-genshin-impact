@@ -154,7 +154,7 @@ internal class GoToSereniteaPotTask
                 Logger.LogDebug(
                     "领取尘歌壶奖励: 发送 F 确认传送，尝试 {Attempt}/3。",
                     confirmationFailures + 1);
-                Simulation.SendInput.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_F);
+                Simulation.SendInput.SimulateKeyPulse(KeyId.F, ct);
                 var progress = new SereniteaPotTeleportProgress();
                 teleportRequested = await NewRetry.WaitForAction(() =>
                 {
@@ -786,6 +786,7 @@ internal class GoToSereniteaPotTask
 
     public async Task DoOnce(CancellationToken ct)
     {
+        fail = false;
         InitConfigList();
         // /**
         //  * 1. 首先退出到主页面
@@ -806,7 +807,7 @@ internal class GoToSereniteaPotTask
         }
         if (!success)
         {
-            await Finished(ct);
+            await FailAfterCleanup("未确认进入尘歌壶，奖励领取失败", Finished, ct);
             return;
         }
         
@@ -815,7 +816,7 @@ internal class GoToSereniteaPotTask
         // 领取奖励
         if (fail)
         {
-            await Finished(ct);
+            await FailAfterCleanup("未找到或未能靠近阿圆，奖励领取失败", Finished, ct);
             return;
         }
 
@@ -824,6 +825,24 @@ internal class GoToSereniteaPotTask
 
         // 收尾操作 - 退出到主页面 - 传送到提瓦特大陆
         await Finished(ct);
+    }
+
+    internal static async Task FailAfterCleanup(string reason, Func<CancellationToken, Task> cleanup,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var failure = new InvalidOperationException(reason);
+        try
+        {
+            await cleanup(ct);
+            ct.ThrowIfCancellationRequested();
+        }
+        catch (Exception error) when (error is not OperationCanceledException
+            and not AutoGeniusInvokation.Exception.NormalEndException)
+        {
+            throw new AggregateException(reason, failure, error);
+        }
+        throw failure;
     }
     
     private void InitConfigList()
