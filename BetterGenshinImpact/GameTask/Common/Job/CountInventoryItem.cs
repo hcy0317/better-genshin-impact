@@ -18,7 +18,7 @@ using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 
 namespace BetterGenshinImpact.GameTask.Common.Job
 {
-    internal class CountInventoryItem : ISoloTask<object>
+    internal partial class CountInventoryItem : ISoloTask<object>
     {
         public string Name => "背包数物品";
 
@@ -29,6 +29,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job
         private readonly string? itemName;
         private readonly IReadOnlyCollection<string>? itemNames;
         private readonly ItemIconRecognitionMode iconRecognitionMode;
+        private readonly bool includeScanEvidence;
 
         public CountInventoryItem(CountInventoryItemParam param)
         {
@@ -43,6 +44,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job
             this.itemName = param.ItemName;
             this.itemNames = param.GetItemNamesOrNull()?.ToList();
             this.iconRecognitionMode = param.IconRecognitionMode;
+            this.includeScanEvidence = param.IncludeScanEvidence;
         }
 
         public async Task<object> Start(CancellationToken ct)
@@ -65,9 +67,21 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                     await RequireInventoryOpenAsync(() =>
                         AutoArtifactSalvageTask.TryOpenInventory(this.gridScreenName, input, logger, scanToken), scanToken);
                     using IItemIconRecognizer iconRecognizer = ItemIconRecognizerFactory.Create(this.iconRecognitionMode);
-                    object result = this.itemName != null
-                        ? await FindOne(iconRecognizer)
-                        : await FindMulti(iconRecognizer);
+                    InventoryScanEvidence? evidence = null;
+                    if (includeScanEvidence)
+                    {
+                        if (itemNames!.Any(name => !iconRecognizer.SupportsName(name)))
+                            throw new InvalidOperationException("当前物品模型不包含请求名称，不能证明缺项为零");
+                        await ResetPreciousInventoryToTopAsync(scanToken);
+                        evidence = new(itemNames, CreateGridParams().Columns);
+                    }
+                    object result;
+                    if (itemName != null) result = await FindOne(iconRecognizer);
+                    else
+                    {
+                        var counts = await FindMulti(iconRecognizer, evidence);
+                        result = evidence == null ? counts : evidence.Finish(counts);
+                    }
                     await new ReturnMainUiTask().Start(scanToken);
                     return result;
                 }, ct);
@@ -113,7 +127,8 @@ namespace BetterGenshinImpact.GameTask.Common.Job
 
         private GridParams CreateGridParams()
         {
-            return GridParams.Templates[this.gridScreenName];
+            var parameters = GridParams.Templates[this.gridScreenName];
+            return includeScanEvidence ? parameters.WithConservativePaging() : parameters;
         }
 
         private async Task PreScrollToBottomForWeaponOre()
@@ -180,7 +195,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job
             return count.Value;
         }
 
-        private async Task<Dictionary<string, int>> FindMulti(IItemIconRecognizer iconRecognizer)
+        private async Task<Dictionary<string, int>> FindMulti(IItemIconRecognizer iconRecognizer, InventoryScanEvidence? evidence = null)
         {
             Dictionary<string, int> itemsCountDic = new Dictionary<string, int>();
             List<string> notFoundItemNames = this.itemNames!.ToList();
@@ -188,6 +203,8 @@ namespace BetterGenshinImpact.GameTask.Common.Job
             GridScreen gridScreen = new GridScreen(CreateGridParams(), logger, ct);
             gridScreen.OnAfterTurnToNewPage += GridScreen.DrawItemsAfterTurnToNewPage;
             gridScreen.OnBeforeScroll += () => VisionContext.Instance().DrawContent.ClearAll();
+            var observation = evidence == null ? null : new InventoryPageEvidenceObserver(evidence, CreateGridParams(), ct);
+            observation?.Attach(gridScreen);
             try
             {
                 //如果包含武器页的武器经验道具，直接翻页到最底部
@@ -201,6 +218,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                     ct.ThrowIfCancellationRequested();
                     using ImageRegion itemRegion = pageRegion.DeriveCrop(itemRect);
                     string? predName = RecognizeItemName(itemRegion, iconRecognizer);
+                    observation?.RecordItem(predName);
                     if (predName == null)
                     {
                         continue;
@@ -228,6 +246,8 @@ namespace BetterGenshinImpact.GameTask.Common.Job
             {
                 VisionContext.Instance().DrawContent.ClearAll();
             }
+
+            observation?.FinishPage();
 
             if (notFoundItemNames.Count > 0)
             {

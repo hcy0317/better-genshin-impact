@@ -18,6 +18,9 @@ public class CountInventoryItemParam
 
     public ItemIconRecognitionMode IconRecognitionMode { get; set; } = ItemIconRecognitionMode.GridIcon;
 
+    /// <summary>贵重道具多物品计数的可选覆盖证明；只有完整扫描才确认缺项为零。</summary>
+    public bool IncludeScanEvidence { get; set; }
+
     /// <summary>
     /// 供脚本创建后逐项赋值；参数校验在任务消费参数时执行。
     /// </summary>
@@ -54,5 +57,8 @@ public class CountInventoryItemParam
         {
             throw new ArgumentException($"参数{nameof(ItemNames)}不能包含空名称");
         }
+        if (IncludeScanEvidence && (hasItemName || GridScreenName != GridScreenName.PreciousItems ||
+            IconRecognitionMode != ItemIconRecognitionMode.Item))
+            throw new ArgumentException("扫描覆盖证明仅支持贵重道具页的Item模式多物品计数");
     }
 }
