@@ -1,12 +1,34 @@
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.Model.Area;
 using OpenCvSharp;
+using Xunit.Abstractions;
+using BetterGenshinImpact.GameTask.AutoFight.Model;
+using Fischless.GameCapture;
+using BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 [Collection("OfflineNativeDecision")]
-public class FragmentedDirectionIndicatorTests
+public class FragmentedDirectionIndicatorTests(ITestOutputHelper output)
 {
+    [OfflineNativeDecisionFact]
+    public void RecordedS74AmbiguousArrowRetainsASearchHintWithoutInventingAnActionTarget()
+    {
+        var path = Environment.GetEnvironmentVariable("BGI_S74_COMBAT_FILE");
+        Assert.True(File.Exists(path));
+        using var source = Cv2.ImRead(path!);
+        Assert.False(source.Empty());
+        using var frame = new ImageRegion(source.Clone(), 0, 0);
+        frame.FrameStamp = new CaptureFrameSource(TimeProvider.System).Next();
+        AutoFightSeek.ResetSeekState();
+        var evidence = AvatarRecognition.ReadPassiveTargetEvidence(frame);
+        output.WriteLine(evidence.Diagnostics.ToCompactString());
+        Assert.Null(evidence.Decision.Visual);
+        Assert.True(evidence.Hint.HasValue, "Ambiguous orientation may guide search, but must not become confirmed enemy geometry.");
+        Assert.Equal(frame.FrameStamp, evidence.Hint.Value.Source);
+        Assert.InRange(evidence.Hint.Value.Visual.CenterX, 1440, 1480);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
