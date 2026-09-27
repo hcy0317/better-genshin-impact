@@ -94,6 +94,28 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.Model.GameUI
             1, 1, 3, 2, 2, 1, 1, 1} };
         }
 
+        [Fact]
+        public void FixedCountCropCanRecognizeDigitsWithoutDetection()
+        {
+            using var mat = new Mat(@"..\..\..\Assets\GetGridIcons\FoodGrid.png");
+            var cells = GridCell.ClusterToCells(GridScreen.GridEnumerator.GetGridItems(mat, 8, true), 10)
+                .OrderBy(cell => cell.RowNum).ThenBy(cell => cell.ColNum).ToArray();
+            using var item = mat.SubMat(cells[2].Rect);
+            using var count = item.SubMat(item.Height * 128 / 153, item.Height * 150 / 153,
+                item.Width * 5 / 125, item.Width * 120 / 125);
+            using var resized = count.Resize(new Size(count.Width * 2, count.Height * 2));
+            Assert.Equal("167", paddle.Get().OcrWithoutDetector(resized));
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(255)]
+        public void BlankCountCropDoesNotBecomeAQuantity(int color)
+        {
+            using var item = new Mat(153, 125, MatType.CV_8UC3, Scalar.All(color));
+            Assert.Equal(string.Empty, item.GetGridItemIconText(paddle.Get()));
+        }
+
         [Theory]
         [MemberData(nameof(GetGridItemIconTextTestData))]
         /// <summary>
@@ -117,7 +139,8 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.Model.GameUI
             }
 
             //
-            for (int i = 0; i < numbers.Length - 1; i++)
+            Assert.Equal(numbers.Length, result.Count);
+            for (int i = 0; i < numbers.Length; i++)
             {
                 Assert.True(int.TryParse(result[i], out int intResult), $"第{i + 1}个图标文字解析失败-->{result[i]}<--");
                 Assert.Equal(numbers[i], intResult);
