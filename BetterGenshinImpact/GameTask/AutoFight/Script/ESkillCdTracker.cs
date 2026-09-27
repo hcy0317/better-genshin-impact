@@ -63,6 +63,9 @@ public static class ESkillCdTracker
     /// <param name="characterName">角色名</param>
     /// <param name="ct">外部取消令牌</param>
     public static void TriggerECheck(Func<double> ocrFunc, string characterName, CancellationToken ct)
+        => TriggerEObservation(() => ocrFunc(), characterName, ct);
+
+    internal static void TriggerEObservation(Func<double?> ocrFunc, string characterName, CancellationToken ct)
     {
         CancellationTokenSource? oldCts;
         CancellationTokenSource newCts;
@@ -95,16 +98,13 @@ public static class ESkillCdTracker
                 ct.ThrowIfCancellationRequested();
                 debounceToken.ThrowIfCancellationRequested();
 
-                var recordedCd = Record(characterName, cd);
-                if (recordedCd <= 0)
-                {
-                    recordedCd = ApplyFallback(characterName);
-                }
+                var recordedCd = RecordObservation(characterName, cd);
+                if (!recordedCd.HasValue) return;
 
                 if (recordedCd > 0)
                 {
                     Logger.LogInformation("{Name} 元素战技，cd:{Cooldown} 秒",
-                        characterName, Math.Round(recordedCd, 2));
+                        characterName, Math.Round(recordedCd.Value, 2));
                 }
                 else
                 {
@@ -121,6 +121,14 @@ public static class ESkillCdTracker
                 capturedCts.Dispose();
             }
         }, CancellationToken.None);
+    }
+
+    internal static double? RecordObservation(string characterName, double? observedCooldown, bool log = true)
+    {
+        // 已切人/未观测不是识别到零CD，不允许据此触发角色兜底或报“CD未更新”。
+        if (!observedCooldown.HasValue) return null;
+        var recorded = Record(characterName, observedCooldown.Value);
+        return recorded > 0 ? recorded : ApplyFallback(characterName, log);
     }
 
     /// <summary>

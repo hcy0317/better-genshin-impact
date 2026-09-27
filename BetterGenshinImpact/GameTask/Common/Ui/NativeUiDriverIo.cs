@@ -84,7 +84,7 @@ internal sealed class NativeUiDriverIo
         switch (action)
         {
             case UiAction.OpenParty:
-                Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+                Simulation.SendInput.SimulateActionPulse(GIActions.OpenPartySetupScreen);
                 return true;
             case UiAction.ReviveParty:
                 return Bv.ClickIfInReviveModal(image);

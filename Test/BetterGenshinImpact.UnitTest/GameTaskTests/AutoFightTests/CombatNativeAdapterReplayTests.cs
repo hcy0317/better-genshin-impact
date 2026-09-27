@@ -1124,16 +1124,20 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         using (var runner = NativeCombatFlowRunner.Create(LoadProgram("琴 e(required)"), io))
             Assert.Equal(blocked ? CombatFlowResult.Failed : CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
         await evidence.DisposeAsync();
-        if (!blocked) Assert.Empty(saved);
+        var selectionWindow = Assert.Single(saved.Where(item => item.Phase == "selection-before-submit"));
+        Assert.NotNull(selectionWindow.Window);
+        Assert.True(selectionWindow.Source.IsKnown);
+        var failures = saved.Where(item => item.Phase != "selection-before-submit").ToArray();
+        if (!blocked) Assert.Empty(failures);
         else
         {
             Assert.Empty(io.Inputs);
-            Assert.InRange(saved.Count, 2, 3);
-            Assert.Single(saved.Select(item => item.Request).Distinct());
-            Assert.Contains(saved, item => item.Phase == "before-selection");
-            Assert.Contains(saved, item => item.Phase == "unconfirmed");
-            Assert.All(saved, item => Assert.True(item.Source.IsKnown));
-            Assert.True(saved[1].Source.IsAfter(saved[0].Source));
+            Assert.InRange(failures.Length, 2, 3);
+            Assert.Single(failures.Select(item => item.Request).Distinct());
+            Assert.Contains(failures, item => item.Phase == "before-selection");
+            Assert.Contains(failures, item => item.Phase == "unconfirmed");
+            Assert.All(failures, item => Assert.True(item.Source.IsKnown));
+            Assert.True(failures[1].Source.IsAfter(failures[0].Source));
         }
         Assert.False(io.HoldingInput);
     }
@@ -1918,6 +1922,21 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Equal(CombatFlowResult.Skipped, await runner.RunRoundAsync(default));
         Assert.Empty(io.Inputs);
         Assert.True(runner.Context.Now < 1);
+    }
+
+    [Fact]
+    public async Task FreshOnfieldReadyEvidenceOverridesAnOldFastSkillCooldownEstimate()
+    {
+        var clock = new FakeTimeProvider();
+        var script = CombatScriptParser.ParseContext("钟离 e(fast)");
+        using var io = new PhysicalReplay(clock, false, 50, LoadProgram("钟离 e"));
+        io.SetFrontActor("钟离");
+        io.PrimeKnownSkillCooldown("钟离", 30);
+        using var runner = NativeCombatFlowRunner.Create(script.CombatCommands, io, false,
+            CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing);
+        Assert.Equal(CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
+        Assert.Single(io.Inputs);
+        Assert.Empty(io.Selections);
     }
 
     [Theory]
@@ -3214,7 +3233,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var program = LoadProgram("call(主轴,required)\nsegment(主轴,define,onfail=保底) { 那维莱特 e(fast,required) }\nsegment(保底,define) { 那维莱特 attack(0.5) }");
         var clock = new FakeTimeProvider();
         using var io = new PhysicalReplay(clock, false, cost, program);
-        io.PrimeKnownSkillCooldown("那维莱特", 8);
+        io.PrimeSkillCooldown("那维莱特", 8);
         using var runner = NativeCombatFlowRunner.Create(program, io);
         for (var i = 0; i < 15 && double.IsPositiveInfinity(io.FirstAttack); i++) await runner.StepAsync(default);
         Assert.InRange(io.FirstAttack, 0, 2);

@@ -429,7 +429,7 @@ internal sealed class NativeCombatHostInputDevice : ICombatHostInputDevice
     public void MoveForward(bool down) => Simulation.SendInput.SimulateAction(GIActions.MoveForward,
         down ? KeyType.KeyDown : KeyType.KeyUp);
     public void PressDrop() => Simulation.SendInput.SimulateAction(GIActions.Drop);
-    public void PressParty() => Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+    public void PressParty() => Simulation.SendInput.SimulateActionPulse(GIActions.OpenPartySetupScreen);
     public void PressBreakout() => Simulation.SendInput.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_SPACE);
     public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => new(Task.Delay(milliseconds, ct));
 }
