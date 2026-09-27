@@ -8,6 +8,78 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceScopeTests
 {
     [Fact]
+    public async Task RepeatedFaultPhaseDoesNotInventAnotherMissingBeforeFrame()
+    {
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        for (var i = 0; i < 20; i++) scope.CaptureFault(frame, "skill", "attempt", "unconfirmed", "", logger);
+        await scope.DisposeAsync();
+        var summary = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
+        Assert.Contains("missingBefore=1", summary);
+        Assert.Contains("duplicateSuppressed=19", summary);
+        Assert.Single(logger.Messages.Where(message => message.Contains("reason=before-unavailable")));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SlowWriterLeavesTerminalCapacityWithoutBlockingTheProducer(bool queuePressure)
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var written = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope(async (item, _) =>
+        {
+            written.Add(item);
+            entered.TrySetResult();
+            await release.Task;
+        }, queueCapacity: queuePressure ? 4 : 64, maximumMemoryBytes: queuePressure ? 256L * 1024 * 1024 : 1200);
+        using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        try
+        {
+            Assert.True(scope.TryCapture(frame, "active", "ordinary", ""));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var count = 0;
+            while (count < 64 && scope.TryCapture(frame, "queued-" + count, "ordinary", "")) count++;
+            Assert.InRange(count, 1, 4);
+            Assert.True(scope.TryCapture(frame, "battle", "combat-terminal", "unconfirmed"));
+        }
+        finally { release.TrySetResult(); }
+        await scope.DisposeAsync();
+        Assert.Single(written.Where(item => item.Phase == "combat-terminal"));
+        Assert.InRange(written.Count, 2, queuePressure ? 5 : 4);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OrdinaryQuotaPressureKeepsRoomForOneTerminalFrame(bool imageLimit)
+    {
+        var written = System.Threading.Channels.Channel.CreateUnbounded<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) =>
+        {
+            written.Writer.TryWrite(item);
+            return Task.CompletedTask;
+        }, maxImages: imageLimit ? 8 : 100, maximumBytes: imageLimit ? null : 96);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        var accepted = 0;
+        while (accepted < 100 && scope.TryCapture(frame, "ordinary-" + accepted, "ordinary", ""))
+        {
+            accepted++;
+            await written.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.InRange(accepted, 1, 7);
+        Assert.True(scope.TryCapture(frame, "battle", "combat-terminal", "unconfirmed"));
+        var terminal = await written.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("combat-terminal", terminal.Phase);
+        Assert.InRange(terminal.Sequence, 2, 8);
+    }
+
+    [Fact]
     public async Task AnEvictedAnchorCannotRelabelLaterHistoryAsItsImmediateAfterFrames()
     {
         var saved = new List<DiagnosticEvidence>();
@@ -122,18 +194,21 @@ public class DiagnosticEvidenceScopeTests
     [Theory]
     [InlineData("map-area-selection")]
     [InlineData("return-main")]
-    public async Task UiHandoffEndTriggersAWindowFromExistingFrames(string name)
+    public async Task SuccessfulUiHandoffsLeaveCapacityForTerminalEvidence(string name)
     {
         var saved = new List<DiagnosticEvidence>();
-        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }, maxImages: 2);
         var source = new CaptureFrameSource();
         using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
-        using (BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin(name, TimeSpan.FromSeconds(10)))
-            for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        for (var operation = 0; operation < 20; operation++)
+            await BetterGenshinImpact.GameTask.Common.Ui.UiOperation.RunAsync(name, TimeSpan.FromSeconds(10), default, _ =>
+            {
+                for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+                return Task.FromResult(true);
+            });
+        Assert.True(scope.TryCapture(frame, "battle", "combat-terminal", "unconfirmed"));
         await scope.DisposeAsync();
-        Assert.Equal(11, saved.Count);
-        Assert.All(saved, item => Assert.Contains(name, item.Phase));
-        Assert.Equal(frame.FrameStamp, saved.Last().Window!.Anchor);
+        Assert.Equal("combat-terminal", Assert.Single(saved).Phase);
     }
 
     [Fact]
@@ -153,6 +228,37 @@ public class DiagnosticEvidenceScopeTests
         Assert.All(saved, item => { Assert.Equal(anchor, item.Window!.Anchor); Assert.Equal(anchor.SessionId, item.Source.SessionId); });
         Assert.Single(saved.Select(item => item.Window!.WindowId).Distinct());
         Assert.False(frame.SrcMat.IsDisposed);
+    }
+
+    [Fact]
+    public async Task TerminalWindowSavesItsAnchorBeforeHistoryConsumesTheLastSlot()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }, maxImages: 1);
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        Assert.True(scope.RequestWindow("battle", "combat-terminal", frame.FrameStamp, ""));
+        await scope.DisposeAsync();
+        var terminal = Assert.Single(saved);
+        Assert.Equal(0, terminal.Window!.RelativeIndex);
+        Assert.Equal(frame.FrameStamp, terminal.Source);
+    }
+
+    [Fact]
+    public async Task OrdinaryWindowsCannotExhaustTerminalWindowAdmission()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; },
+            maxWindows: 2, maxPendingWindows: 2);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        scope.ObserveExistingFrame(frame);
+        Assert.True(scope.RequestWindow("ordinary", "decision", frame.FrameStamp, ""));
+        Assert.False(scope.RequestWindow("ordinary-2", "decision", frame.FrameStamp, ""));
+        Assert.True(scope.RequestWindow("battle", "combat-terminal", frame.FrameStamp, ""));
+        await scope.DisposeAsync();
+        Assert.Contains(saved, item => item.Phase == "combat-terminal" && item.Window!.RelativeIndex == 0);
     }
 
     [Fact]
@@ -284,10 +390,11 @@ public class DiagnosticEvidenceScopeTests
         {
             Assert.True(scope.TryCapture(frame, "active", "first", "", logger));
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            for (var i = 0; i < 4; i++) Assert.True(scope.TryCapture(frame, "queued-" + i, "first", "", logger));
+            for (var i = 0; i < 3; i++) Assert.True(scope.TryCapture(frame, "queued-" + i, "first", "", logger));
             var rejected = Task.Run(() => scope.TryCapture(frame, "overflow", "first", "", logger));
             Assert.False(await rejected.WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.Contains(logger.Messages, message => message.Contains("writer-queue-full"));
+            Assert.True(scope.TryCapture(frame, "terminal", "terminal", "", logger));
         }
         finally { release.TrySetResult(); }
         await scope.DisposeAsync();
@@ -485,7 +592,7 @@ public class DiagnosticEvidenceScopeTests
         {
             images.Add(image);
             throw new IOException("disk unavailable");
-        }, maxImages: 2, maximumBytes: 600);
+        }, maxImages: 2, maximumBytes: 900);
         using var frame = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0)
         { FrameStamp = new CaptureFrameSource().Next() };
         Assert.True(scope.TryCapture(frame, "one", "first", ""));

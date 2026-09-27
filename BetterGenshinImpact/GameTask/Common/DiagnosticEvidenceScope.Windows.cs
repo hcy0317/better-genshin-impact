@@ -78,8 +78,11 @@ internal sealed partial class DiagnosticEvidenceScope
             phase = phase.Length > 64 ? phase[..64] : phase;
             detail = detail.Length > 2048 ? detail[..2048] : detail;
             if (_windowEvents.Contains((request, phase))) { _duplicateSuppressed++; return false; }
+            var terminal = DiagnosticEvidenceStorage.IsTerminalPhase(phase);
+            var windowLimit = _maxWindows - (!terminal && _maxWindows > 1 ? 1 : 0);
+            var pendingLimit = _maxPendingWindows - (!terminal && _maxPendingWindows > 1 ? 1 : 0);
             var rejection = _closed ? "scope-closed" : !anchor.IsKnown ? "source-unknown" :
-                _windowEvents.Count >= _maxWindows ? "window-budget" : _windows.Count >= _maxPendingWindows ? "window-queue-full" : null;
+                _windowEvents.Count >= windowLimit ? "window-budget" : _windows.Count >= pendingLimit ? "window-queue-full" : null;
             if (rejection != null)
             {
                 _missingBefore += 10;
@@ -103,8 +106,9 @@ internal sealed partial class DiagnosticEvidenceScope
                 _missingBefore += missing;
                 MissingFrame(request, phase, "window-before-unavailable", logger, missing);
             }
+            if (terminal) SaveHistory(window, pivot, 0);
             for (var i = 0; i < before.Length; i++) SaveHistory(window, before[i], i - before.Length);
-            SaveHistory(window, pivot, 0);
+            if (!terminal) SaveHistory(window, pivot, 0);
             // 触发可能稍晚于锚点：只补入环内确实已存在的后帧，不重标来源。
             foreach (var item in _history.Where(item => item.Source.IsAfter(anchor)).Take(10)) SaveHistory(window, item, window.Next++);
             if (window.Next <= 10)
