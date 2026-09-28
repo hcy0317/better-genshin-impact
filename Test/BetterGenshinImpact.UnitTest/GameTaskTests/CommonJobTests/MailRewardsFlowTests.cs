@@ -77,6 +77,62 @@ public class MailRewardsFlowTests
         Assert.True(File.Exists(Path.Combine(assets, "1920x1080", template!)));
     }
 
+    [Fact]
+    public async Task ClaimAllPollingWaitsForALateMailPageAndClaimsOnce()
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetUtcNow();
+        var attempts = 0;
+        var claimed = 0;
+        var result = await ClaimMailRewardsTask.WaitForClaimAllAsync(default, _ =>
+        {
+            attempts++;
+            if (attempts < 5) return Task.FromResult(false);
+            claimed++;
+            return Task.FromResult(true);
+        }, (milliseconds, _) =>
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            return Task.CompletedTask;
+        }, clock);
+
+        Assert.True(result);
+        Assert.Equal(5, attempts);
+        Assert.Equal(1, claimed);
+        Assert.Equal(TimeSpan.FromMilliseconds(2000), clock.GetUtcNow() - started);
+    }
+
+    [Fact]
+    public async Task ClaimAllPollingGivesUpAtItsTimeoutInsteadOfFailingTheStep()
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetUtcNow();
+        var attempts = 0;
+        var result = await ClaimMailRewardsTask.WaitForClaimAllAsync(default, _ =>
+        {
+            attempts++;
+            return Task.FromResult(false);
+        }, (milliseconds, _) =>
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            return Task.CompletedTask;
+        }, clock);
+
+        Assert.False(result);
+        Assert.Equal(ClaimMailRewardsTask.ClaimAllWaitTimeout, clock.GetUtcNow() - started);
+        Assert.InRange(attempts, 30, 32);
+    }
+
+    [Fact]
+    public async Task ClaimAllPollingStopsOnUserCancellation()
+    {
+        using var user = new CancellationTokenSource();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ClaimMailRewardsTask.WaitForClaimAllAsync(
+            user.Token,
+            _ => { user.Cancel(); return Task.FromResult(false); },
+            (_, _) => Task.CompletedTask));
+    }
+
     private sealed class MailUi(FakeTimeProvider clock) : IUiDriver
     {
         private long _frame;

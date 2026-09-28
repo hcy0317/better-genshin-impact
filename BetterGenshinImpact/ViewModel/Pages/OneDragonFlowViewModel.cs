@@ -597,6 +597,8 @@ public partial class OneDragonFlowViewModel : ViewModel
 
         // 启动等待之前先进行取消操作的初始化，便于在任务开始前终止任务.
         TaskControl.InitializeTaskCancellation();
+        // ViewModel 是单例：连续恢复失败计数必须按"本次运行"重新开始，不能被上一次运行残留污染。
+        _recoveryFailures.Reset();
 
         var taskListCopy = snapshot.Tasks;
 
@@ -696,7 +698,12 @@ public partial class OneDragonFlowViewModel : ViewModel
                         outcomes.Add(task.Name, recoveredFailure == null
                             ? new(ScriptOutcomeKind.Completed, "NATIVE_TASK_COMPLETED")
                             : new(ScriptOutcomeKind.Failed, recoveredFailure.Message));
-                        if (recoveredFailure is not null && propagateExceptions)
+                        if (recoveredFailure is null)
+                        {
+                            // 任务正常完成即打断"连续恢复失败"计数。
+                            _recoveryFailures.Reset();
+                        }
+                        else if (propagateExceptions)
                         {
                             managedFailures.Add(recoveredFailure);
                         }
@@ -808,13 +815,50 @@ public partial class OneDragonFlowViewModel : ViewModel
         if (propagateExceptions) outcomes.Complete().ThrowIfIncomplete();
     }
 
+    // 恢复失败只容忍"连续"发生，且连续多次失败仍按停止后续任务处理。
+    private readonly OneDragonRecoveryFailureBudget _recoveryFailures = new();
+    private const int RecoveryRounds = 2;
+
     private async Task RecoverOneDragonStepAsync(Exception exception, string taskName, CancellationToken ct)
     {
         _logger.LogError(exception, "一条龙任务 {TaskName} 执行失败，保持任务锁并恢复大世界主界面", taskName);
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-        await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(exception,
-            () => new ReturnMainUiTask().Start(ct, requireOverworld: true), ct, _logger,
-            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, $"{context} 一条龙任务 {taskName}"));
+        try
+        {
+            // 恢复自身也可能输给"界面无任何可识别标志"的中间态：允许一次带新预算的复检。
+            for (var round = 1; ; round++)
+            {
+                try
+                {
+                    await TaskFailureRecoveryPolicy.RecoverOrThrowAsync(exception,
+                        () => new ReturnMainUiTask().Start(ct, requireOverworld: true), ct, _logger,
+                        captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, $"{context} 一条龙任务 {taskName}"));
+                    break;
+                }
+                catch (Exception recoveryFailure) when (round < RecoveryRounds && !TaskFailureRecoveryPolicy.IsCancellation(recoveryFailure))
+                {
+                    _logger.LogWarning(recoveryFailure,
+                        "一条龙任务 {TaskName} 第 {Round}/{Rounds} 轮恢复未验证回到大世界主界面，使用新预算复检一次",
+                        taskName, round, RecoveryRounds);
+                }
+            }
+        }
+        catch (Exception recoveryFailure) when (!TaskFailureRecoveryPolicy.IsCancellation(recoveryFailure))
+        {
+            // 用户取消优先于降级：取消必须原样停止一条龙，不能被记成"跳过该任务继续"。
+            ct.ThrowIfCancellationRequested();
+            if (!_recoveryFailures.TryTolerateFailure())
+            {
+                throw;
+            }
+
+            _logger.LogWarning(recoveryFailure,
+                "一条龙任务 {TaskName} 恢复失败且已连续 {Count} 次，跳过该任务并继续后续任务；本次失败仍计入本轮结果。",
+                taskName, _recoveryFailures.ConsecutiveFailures);
+            return;
+        }
+
+        _recoveryFailures.Reset();
         _logger.LogInformation(
             "一条龙任务 {TaskName} 失败后已验证回到大世界主界面，耗时 {ElapsedSeconds:0.000} 秒，将继续后续任务",
             taskName, stopwatch.Elapsed.TotalSeconds);
