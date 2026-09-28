@@ -71,6 +71,26 @@ public class GameLoadingTrigger : ITaskTrigger
         GlobalEnabled = enabled;
     }
 
+    /// <summary>
+    /// 启动等待到期后的有界重试：重新开始一个 5 分钟开门窗口并重置兜底点击预算，
+    /// 让重试窗口内还能自动点击一次开门按钮；未启用自动进入游戏时保持禁用状态。
+    /// 兜底点击间隔（_prevDoorFallbackClickTime）刻意保留，避免重试瞬间多发一次盲点击。
+    /// </summary>
+    internal bool RearmForStartupRetry()
+    {
+        if (!_config.AutoEnterGameEnabled)
+        {
+            return false;
+        }
+
+        _triggerStartTime = DateTime.Now;
+        _doorFallbackClickCount = 0;
+        _recognizedDoorClickSucceeded = false;
+        biliLoginClicked = false;
+        InnerSetEnabled(true);
+        return true;
+    }
+
     public void Init()
     {
         if (!_config.AutoEnterGameEnabled)

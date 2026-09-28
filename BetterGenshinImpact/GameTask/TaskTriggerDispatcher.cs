@@ -132,6 +132,18 @@ namespace BetterGenshinImpact.GameTask
             }
         }
 
+        /// <summary>
+        /// 在触发器锁内为启动重试重新武装自动开门：与 Tick 里 OnCapture 的 5 分钟自禁串行，
+        /// 避免重新武装后又被同一轮触发器的自禁覆盖；未启用或不存在时返回 false。
+        /// </summary>
+        internal bool RearmGameLoadingTriggerForStartupRetry()
+        {
+            lock (_triggerListLocker)
+            {
+                return _triggers?.OfType<GameLoadingTrigger>().FirstOrDefault()?.RearmForStartupRetry() == true;
+            }
+        }
+
         public void Start(IntPtr hWnd, CaptureModes mode, int interval = 50)
         {
             lock (_lifecycleGate)

@@ -14,7 +14,7 @@ internal sealed class GameStartupWaitEvidence : IAsyncDisposable
     private readonly DiagnosticEvidenceScope _scope;
     private readonly ILogger _logger;
     private readonly string _request = "startup:" + Guid.NewGuid().ToString("N");
-    private bool _waitingAttempted, _terminalAttempted, _disposed;
+    private bool _waitingAttempted, _retryAttempted, _terminalAttempted, _disposed;
 
     private GameStartupWaitEvidence(ILogger logger)
     {
@@ -41,18 +41,27 @@ internal sealed class GameStartupWaitEvidence : IAsyncDisposable
     }
 
     internal void CaptureTimeout(Func<(ImageRegion? Frame, TimeSpan Age)> clone,
+        TimeSpan elapsed, string observedUi) =>
+        CaptureOnce(ref _terminalAttempted, "timeout", clone, elapsed, observedUi);
+
+    /// <summary>第一个窗口到期但还会重试一次：记录非终态取证，不占用终态帧。</summary>
+    internal void CaptureRetry(Func<(ImageRegion? Frame, TimeSpan Age)> clone,
+        TimeSpan elapsed, string observedUi) =>
+        CaptureOnce(ref _retryAttempted, "retry", clone, elapsed, observedUi);
+
+    private void CaptureOnce(ref bool attempted, string phase, Func<(ImageRegion? Frame, TimeSpan Age)> clone,
         TimeSpan elapsed, string observedUi)
     {
-        if (_disposed || _terminalAttempted) return;
-        _terminalAttempted = true;
+        if (_disposed || attempted) return;
+        attempted = true;
         try
         {
             var latest = clone();
             using var frame = latest.Frame;
-            if (frame == null) { Missing("timeout", "cache-empty"); return; }
-            Capture(frame, "timeout", elapsed, latest.Age, observedUi);
+            if (frame == null) { Missing(phase, "cache-empty"); return; }
+            Capture(frame, phase, elapsed, latest.Age, observedUi);
         }
-        catch (Exception error) { Missing("timeout", "cache-clone-failed:" + error.GetType().Name); }
+        catch (Exception error) { Missing(phase, "cache-clone-failed:" + error.GetType().Name); }
     }
 
     private void Capture(ImageRegion frame, string phase, TimeSpan elapsed, TimeSpan age, string observedUi)
