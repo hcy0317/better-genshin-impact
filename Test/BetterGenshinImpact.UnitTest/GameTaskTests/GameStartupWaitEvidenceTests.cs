@@ -65,6 +65,36 @@ public class GameStartupWaitEvidenceTests
         Assert.Empty(saved);
     }
 
+    [Fact]
+    public async Task RetryCaptureIsRecordedOnceAndDoesNotConsumeTheTerminalTimeout()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((record, _) => { saved.Add(record); return Task.CompletedTask; });
+        await using var evidence = GameStartupWaitEvidence.Begin(NullLogger.Instance);
+        Assert.NotNull(evidence);
+        var source = new CaptureFrameSource();
+        var clones = 0;
+        (ImageRegion?, TimeSpan) Clone()
+        {
+            clones++;
+            return (new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+            {
+                FrameStamp = source.Next()
+            }, TimeSpan.Zero);
+        }
+        evidence!.CaptureRetry(Clone, TimeSpan.FromMinutes(5), "未识别启动界面");
+        evidence.CaptureRetry(Clone, TimeSpan.FromMinutes(5), "未识别启动界面");
+        evidence.CaptureTimeout(Clone, TimeSpan.FromMinutes(10), "未识别启动界面");
+        evidence.CaptureTimeout(Clone, TimeSpan.FromMinutes(10), "未识别启动界面");
+        await evidence.DisposeAsync();
+        await scope.DisposeAsync();
+
+        Assert.Equal(2, clones);
+        Assert.Equal(new[] { "retry", "timeout" }, saved.Select(record => record.Phase));
+        Assert.Contains("elapsedSeconds=300.000", saved[0].Detail);
+        Assert.Contains("elapsedSeconds=600.000", saved[1].Detail);
+    }
+
     private sealed class ThrowingLogger : ILogger
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;

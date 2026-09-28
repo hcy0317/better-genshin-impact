@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -19,6 +19,7 @@ using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Job;
 using BetterGenshinImpact.GameTask.FarmingPlan;
+using BetterGenshinImpact.GameTask.GameLoading;
 using BetterGenshinImpact.GameTask.LogParse;
 using BetterGenshinImpact.GameTask.TaskProgress;
 using BetterGenshinImpact.Service.Interface;
@@ -671,127 +672,7 @@ public partial class ScriptService : IScriptService
 
             if (waitForMainUi)
             {
-                await Task.Run(async () =>
-                {
-                    await using var startupEvidence = GameStartupWaitEvidence.Begin(TaskControl.Logger);
-                    await Task.Delay(200);
-                    var first = true;
-                    var sw = Stopwatch.StartNew();
-                    var loseFocusCount = 0;
-                    var inputDispatchFailureLogged = false;
-                    var waitHeartbeat = new GameStartupWaitHeartbeat(TimeSpan.FromSeconds(30));
-                    var lastObservedUi = "尚未取得画面";
-                    var lastCachedFrameAge = TimeSpan.Zero;
-                    while (true)
-                    {
-                        if (sw.Elapsed >= TimeSpan.FromMinutes(5))
-                        {
-                            startupEvidence?.CaptureTimeout(() =>
-                            {
-                                var cached = TaskTriggerDispatcher.Instance().TryCloneLatestCaptureFrame(out var age);
-                                // CaptureRectArea接管克隆像素，诊断辅助负责释放；不签发新采集时间。
-                                return (cached == null ? null : new CaptureContent(cached, 0, 0).CaptureRectArea, age);
-                            }, sw.Elapsed, lastObservedUi);
-                            throw new TimeoutException(
-                                "自动进入游戏超时：5 分钟内未到达原神主界面，请检查开门页、登录弹窗或网络状态。");
-                        }
-
-                        if (CancellationContext.Instance.IsCancellationRequested)
-                        {
-                            TaskControl.Logger.LogInformation("检测到停止指令，退出启动等待");
-                            return;
-                        }
-
-                        if (waitHeartbeat.ShouldReport(sw.Elapsed))
-                        {
-                            TaskControl.Logger.LogInformation(
-                                "等待进入主界面：已等待 {ElapsedSeconds:0} 秒，剩余超时预算 {RemainingSeconds:0} 秒，截图器={DispatcherEnabled}，上下文={ContextInitialized}，游戏前台={GameActive}，最近界面={ObservedUi}，缓存帧年龄={CachedFrameAgeSeconds:0.0} 秒",
-                                sw.Elapsed.TotalSeconds,
-                                Math.Max(0, 300 - sw.Elapsed.TotalSeconds),
-                                homePageViewModel.TaskDispatcherEnabled,
-                                TaskContext.Instance().IsInitialized,
-                                SystemControl.IsGenshinImpactActiveByProcess(),
-                                lastObservedUi,
-                                lastCachedFrameAge.TotalSeconds);
-                        }
-
-                        if (!homePageViewModel.TaskDispatcherEnabled || !TaskContext.Instance().IsInitialized)
-                        {
-                            await Task.Delay(500);
-                            continue;
-                        }
-
-                        var latestFrame = TaskTriggerDispatcher.Instance().TryCloneLatestCaptureFrame(out lastCachedFrameAge);
-                        if (latestFrame == null)
-                        {
-                            lastObservedUi = "无可用缓存帧";
-                            await Task.Delay(500);
-                            continue;
-                        }
-
-                        using var content = new CaptureContent(latestFrame, 0, 0);
-                        var imageRegion = content.CaptureRectArea;
-                        var isMainUi = Bv.IsInMainUi(imageRegion);
-                        var isClosableUi = !isMainUi && Bv.IsInAnyClosableUi(imageRegion);
-                        var isDomain = !isMainUi && !isClosableUi && Bv.IsInDomain(imageRegion);
-                        lastObservedUi = isMainUi
-                            ? "主界面"
-                            : isClosableUi
-                                ? "可关闭界面"
-                                : isDomain
-                                    ? "秘境界面"
-                                    : "未识别启动界面";
-                        startupEvidence?.Observe(imageRegion, isMainUi || isClosableUi || isDomain,
-                            sw.Elapsed, lastCachedFrameAge, lastObservedUi);
-                        if (isMainUi || isClosableUi || isDomain)
-                        {
-                            return;
-                        }
-
-                        if (first)
-                        {
-                            first = false;
-                            TaskControl.Logger.LogInformation("当前不在游戏主界面，等待进入主界面后执行任务...");
-                            TaskControl.Logger.LogInformation("如果你已经在游戏内的其他界面，请自行退出当前界面（ESC），或是30秒后将程序将自动尝试到入主界面，使当前任务能够继续运行！");
-                        }
-
-                        await Task.Delay(500);
-                        if (sw.Elapsed.TotalSeconds >= 30)
-                        {
-                            //防止自启动游戏后因为一些原因失焦，导致一直卡住
-                            if (!SystemControl.IsGenshinImpactActiveByProcess())
-                            {
-                                loseFocusCount++;
-                                if (loseFocusCount > 50 && loseFocusCount < 100)
-                                {
-                                    SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
-                                }
-                                SystemControl.ActivateWindow();
-                            }
-
-                            //自启动游戏，如果鼠标在游戏外面，将无法自动开门，这里尝试移动到游戏界面
-                            if (sw.Elapsed.TotalSeconds < 200)
-                            {
-                                if (!GameStartupInputRecovery.TryExecute(
-                                        () => GlobalMethod.MoveMouseTo(300, 300),
-                                        out var inputDispatchFailure))
-                                {
-                                    if (!inputDispatchFailureLogged)
-                                    {
-                                        inputDispatchFailureLogged = true;
-                                        TaskControl.Logger.LogWarning(
-                                            inputDispatchFailure,
-                                            "RDP 会话暂时无法发送开门兜底鼠标消息；重新激活游戏并继续等待主界面");
-                                    }
-
-                                    SystemControl.ActivateWindow();
-                                    await Task.Delay(2000);
-                                }
-                            }
-
-                        }
-                    }
-                });
+                await WaitForMainUiWithRetryAsync(homePageViewModel);
             }
         }
 
@@ -801,6 +682,249 @@ public partial class ScriptService : IScriptService
         {
             await pendingUpdate;
             ScriptRepoUpdater.Instance.CommandLineAutoUpdateTask = null;
+        }
+    }
+
+    /// <summary>
+    /// 逐个等待窗口确认主界面：窗口到期后至多执行一次有界恢复并重试一次，
+    /// 只有最后一个窗口到期才按原有失败语义抛出超时，不出现无界等待。
+    /// </summary>
+    private static async Task WaitForMainUiWithRetryAsync(HomePageViewModel homePageViewModel)
+    {
+        var plan = GameStartupRetryPlan.Default;
+        var totalWatch = Stopwatch.StartNew();
+        // 整个启动等待只产生一份证据：waiting 一次、retry 一次、timeout 一次。
+        await using var startupEvidence = GameStartupWaitEvidence.Begin(TaskControl.Logger);
+        for (var attempt = plan.FirstAttempt; ; attempt++)
+        {
+            var outcome = await Task.Run(() =>
+                WaitForMainUiWindowAsync(homePageViewModel, plan, attempt, totalWatch, startupEvidence));
+            if (outcome != GameStartupWaitOutcome.WindowExpired)
+            {
+                return;
+            }
+
+            // 停止指令优先于重试：已经请求停止时不再拉起游戏或重新武装开门。
+            if (CancellationContext.Instance.IsCancellationRequested)
+            {
+                TaskControl.Logger.LogInformation("检测到停止指令，退出启动等待");
+                return;
+            }
+
+            if (!plan.AllowsRetryAfter(attempt) ||
+                !await TryRecoverForStartupRetryAsync(homePageViewModel, plan, attempt))
+            {
+                throw new TimeoutException(plan.TimeoutMessage);
+            }
+        }
+    }
+
+    /// <summary>单个等待窗口：到期返回 WindowExpired，进入主界面或收到停止指令时提前返回。</summary>
+    private static async Task<GameStartupWaitOutcome> WaitForMainUiWindowAsync(
+        HomePageViewModel homePageViewModel,
+        GameStartupRetryPlan plan,
+        int attempt,
+        Stopwatch totalWatch,
+        GameStartupWaitEvidence? startupEvidence)
+    {
+        // 缓存帧只在证据回调里克隆：截图器未初始化或克隆失败都由诊断层降级，不替换启动结果。
+        var cloneLatestCachedFrame = () =>
+        {
+            var cached = TaskTriggerDispatcher.Instance().TryCloneLatestCaptureFrame(out var age);
+            // CaptureRectArea接管克隆像素，诊断辅助负责释放；不签发新采集时间。
+            return (Frame: cached == null ? null : new CaptureContent(cached, 0, 0).CaptureRectArea, Age: age);
+        };
+        await Task.Delay(200);
+        var first = true;
+        var sw = Stopwatch.StartNew();
+        var loseFocusCount = 0;
+        var inputDispatchFailureLogged = false;
+        var waitHeartbeat = new GameStartupWaitHeartbeat(TimeSpan.FromSeconds(30));
+        var lastObservedUi = "尚未取得画面";
+        var lastCachedFrameAge = TimeSpan.Zero;
+        while (true)
+        {
+            // 停止指令优先于到期判定：不再把用户停止记录成启动超时。
+            if (CancellationContext.Instance.IsCancellationRequested)
+            {
+                TaskControl.Logger.LogInformation("检测到停止指令，退出启动等待");
+                return GameStartupWaitOutcome.Cancelled;
+            }
+
+            if (sw.Elapsed >= plan.AttemptWindow)
+            {
+                // 证据里的耗时是累计值：重试帧与终态帧都反映真实等待总时长。
+                if (plan.IsFinalAttempt(attempt))
+                {
+                    startupEvidence?.CaptureTimeout(cloneLatestCachedFrame, totalWatch.Elapsed, lastObservedUi);
+                }
+                else
+                {
+                    startupEvidence?.CaptureRetry(cloneLatestCachedFrame, totalWatch.Elapsed, lastObservedUi);
+                }
+
+                return GameStartupWaitOutcome.WindowExpired;
+            }
+
+            if (waitHeartbeat.ShouldReport(sw.Elapsed))
+            {
+                TaskControl.Logger.LogInformation(
+                    "等待进入主界面：第 {Attempt}/{AttemptCount} 次，本次已等待 {ElapsedSeconds:0} 秒，本次剩余超时预算 {RemainingSeconds:0} 秒，累计 {TotalSeconds:0} 秒，截图器={DispatcherEnabled}，上下文={ContextInitialized}，游戏前台={GameActive}，最近界面={ObservedUi}，缓存帧年龄={CachedFrameAgeSeconds:0.0} 秒",
+                    attempt,
+                    plan.AttemptCount,
+                    sw.Elapsed.TotalSeconds,
+                    plan.RemainingInWindow(sw.Elapsed).TotalSeconds,
+                    totalWatch.Elapsed.TotalSeconds,
+                    homePageViewModel.TaskDispatcherEnabled,
+                    TaskContext.Instance().IsInitialized,
+                    SystemControl.IsGenshinImpactActiveByProcess(),
+                    lastObservedUi,
+                    lastCachedFrameAge.TotalSeconds);
+            }
+
+            if (!homePageViewModel.TaskDispatcherEnabled || !TaskContext.Instance().IsInitialized)
+            {
+                await Task.Delay(500);
+                continue;
+            }
+
+            var latestFrame = TaskTriggerDispatcher.Instance().TryCloneLatestCaptureFrame(out lastCachedFrameAge);
+            if (latestFrame == null)
+            {
+                lastObservedUi = "无可用缓存帧";
+                await Task.Delay(500);
+                continue;
+            }
+
+            using var content = new CaptureContent(latestFrame, 0, 0);
+            var imageRegion = content.CaptureRectArea;
+            var isMainUi = Bv.IsInMainUi(imageRegion);
+            var isClosableUi = !isMainUi && Bv.IsInAnyClosableUi(imageRegion);
+            var isDomain = !isMainUi && !isClosableUi && Bv.IsInDomain(imageRegion);
+            lastObservedUi = isMainUi
+                ? "主界面"
+                : isClosableUi
+                    ? "可关闭界面"
+                    : isDomain
+                        ? "秘境界面"
+                        : "未识别启动界面";
+            startupEvidence?.Observe(imageRegion, isMainUi || isClosableUi || isDomain,
+                sw.Elapsed, lastCachedFrameAge, lastObservedUi);
+            if (isMainUi || isClosableUi || isDomain)
+            {
+                return GameStartupWaitOutcome.EnteredMainUi;
+            }
+
+            if (first && attempt == plan.FirstAttempt)
+            {
+                first = false;
+                TaskControl.Logger.LogInformation("当前不在游戏主界面，等待进入主界面后执行任务...");
+                TaskControl.Logger.LogInformation("如果你已经在游戏内的其他界面，请自行退出当前界面（ESC），或是30秒后将程序将自动尝试到入主界面，使当前任务能够继续运行！");
+            }
+
+            await Task.Delay(500);
+            if (sw.Elapsed.TotalSeconds >= 30)
+            {
+                //防止自启动游戏后因为一些原因失焦，导致一直卡住
+                if (!SystemControl.IsGenshinImpactActiveByProcess())
+                {
+                    loseFocusCount++;
+                    if (loseFocusCount > 50 && loseFocusCount < 100)
+                    {
+                        SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
+                    }
+                    SystemControl.ActivateWindow();
+                }
+
+                //自启动游戏，如果鼠标在游戏外面，将无法自动开门，这里尝试移动到游戏界面
+                if (sw.Elapsed.TotalSeconds < 200)
+                {
+                    if (!GameStartupInputRecovery.TryExecute(
+                            () => GlobalMethod.MoveMouseTo(300, 300),
+                            out var inputDispatchFailure))
+                    {
+                        if (!inputDispatchFailureLogged)
+                        {
+                            inputDispatchFailureLogged = true;
+                            TaskControl.Logger.LogWarning(
+                                inputDispatchFailure,
+                                "RDP 会话暂时无法发送开门兜底鼠标消息；重新激活游戏并继续等待主界面");
+                        }
+
+                        SystemControl.ActivateWindow();
+                        await Task.Delay(2000);
+                    }
+                }
+
+            }
+        }
+    }
+
+    /// <summary>到期后做一次有界恢复：只重新武装或重新关联，不结束还活着的游戏客户端。</summary>
+    private static async Task<bool> TryRecoverForStartupRetryAsync(
+        HomePageViewModel homePageViewModel, GameStartupRetryPlan plan, int attempt)
+    {
+        try
+        {
+            var (linkedStartEnabled, installPathAvailable) = ReadLinkedStartAvailability();
+            var action = GameStartupRecoveryPlan.Decide(
+                homePageViewModel.TaskDispatcherEnabled,
+                TaskContext.Instance().IsInitialized,
+                SystemControl.FindGenshinImpactHandle() != IntPtr.Zero,
+                linkedStartEnabled,
+                installPathAvailable);
+            switch (action)
+            {
+                case GameStartupRecoveryAction.RearmDoorTrigger:
+                    var rearmed = TaskTriggerDispatcher.Existing?.RearmGameLoadingTriggerForStartupRetry() == true;
+                    TaskControl.Logger.LogWarning(
+                        "第 {Attempt} 个 {Minutes:0} 分钟窗口内未进入主界面，自动重试一次：{Recovery}",
+                        attempt,
+                        plan.AttemptWindow.TotalMinutes,
+                        rearmed
+                            ? "已重新武装自动开门并继续等待"
+                            : "自动进入游戏未启用，仅继续等待");
+                    SystemControl.ActivateWindow();
+                    return true;
+                case GameStartupRecoveryAction.Reattach:
+                    TaskControl.Logger.LogWarning(
+                        "第 {Attempt} 个 {Minutes:0} 分钟窗口内未进入主界面，且游戏窗口或截图上下文已丢失，复用关联启动路径重新拉起后重试一次",
+                        attempt,
+                        plan.AttemptWindow.TotalMinutes);
+                    await homePageViewModel.OnStartTriggerAsync();
+                    return homePageViewModel.TaskDispatcherEnabled && TaskContext.Instance().IsInitialized;
+                default:
+                    TaskControl.Logger.LogWarning(
+                        "第 {Attempt} 个 {Minutes:0} 分钟窗口内未进入主界面，且游戏窗口已丢失或关联启动不可用，保持原有失败",
+                        attempt,
+                        plan.AttemptWindow.TotalMinutes);
+                    return false;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 停止指令不是恢复失败：保持取消语义，不替换为超时。
+            throw;
+        }
+        catch (Exception error)
+        {
+            // 恢复阶段任何其它异常都降级为“不重试”，保留原有超时失败语义。
+            TaskControl.Logger.LogWarning(error, "启动重试的恢复动作失败，保持原有启动失败");
+            return false;
+        }
+    }
+
+    private static (bool LinkedStartEnabled, bool InstallPathAvailable) ReadLinkedStartAvailability()
+    {
+        try
+        {
+            var startConfig = TaskContext.Instance().Config.GenshinStartConfig;
+            return (startConfig.LinkedStartEnabled, !string.IsNullOrEmpty(startConfig.InstallPath));
+        }
+        catch (Exception error)
+        {
+            TaskControl.Logger.LogWarning(error, "读取关联启动配置失败，本次重试按关联启动不可用处理");
+            return (false, false);
         }
     }
 }
@@ -822,6 +946,97 @@ internal static class GameStartupInputRecovery
             failure = exception;
             return false;
         }
+    }
+}
+
+/// <summary>单个等待窗口的结束原因；只有窗口到期才进入有界重试。</summary>
+internal enum GameStartupWaitOutcome
+{
+    EnteredMainUi,
+    Cancelled,
+    WindowExpired
+}
+
+/// <summary>启动等待的有界重试计划：窗口长度与尝试次数固定，默认重试 1 次，最坏总等待有界。</summary>
+internal sealed class GameStartupRetryPlan
+{
+    internal static GameStartupRetryPlan Default { get; } = new(TimeSpan.FromMinutes(5), 2);
+
+    internal GameStartupRetryPlan(TimeSpan attemptWindow, int attemptCount)
+    {
+        if (attemptWindow <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(attemptWindow));
+        }
+
+        if (attemptCount < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(attemptCount));
+        }
+
+        AttemptWindow = attemptWindow;
+        AttemptCount = attemptCount;
+    }
+
+    internal TimeSpan AttemptWindow { get; }
+
+    internal int AttemptCount { get; }
+
+    internal int FirstAttempt => 1;
+
+    internal TimeSpan TotalWindow => AttemptWindow * AttemptCount;
+
+    internal string TimeoutMessage =>
+        $"自动进入游戏超时：{AttemptCount} 个 {AttemptWindow.TotalMinutes:0} 分钟窗口（含 {AttemptCount - 1} 次自动重试）内均未到达原神主界面，请检查开门页、登录弹窗或网络状态。";
+
+    /// <summary>只有后面还存在等待窗口时才允许重试一次。</summary>
+    internal bool AllowsRetryAfter(int attempt) => attempt >= FirstAttempt && attempt < AttemptCount;
+
+    /// <summary>最后一个窗口到期后保持原有失败语义，不再重试。</summary>
+    internal bool IsFinalAttempt(int attempt) => attempt >= AttemptCount;
+
+    internal TimeSpan RemainingInWindow(TimeSpan elapsed)
+    {
+        var remaining = AttemptWindow - elapsed;
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
+}
+
+/// <summary>启动超时后的有界恢复动作；复用既有路径，不新增输入通道也不结束活着的客户端。</summary>
+internal enum GameStartupRecoveryAction
+{
+    /// <summary>游戏窗口与截图上下文都在，只是加载慢：重新武装自动开门并继续等待。</summary>
+    RearmDoorTrigger,
+
+    /// <summary>游戏窗口或截图上下文已丢失：复用既有重新关联或拉起路径。</summary>
+    Reattach,
+
+    /// <summary>无法恢复：保持原有失败，不重试也不弹窗。</summary>
+    Unavailable
+}
+
+internal static class GameStartupRecoveryPlan
+{
+    internal static GameStartupRecoveryAction Decide(
+        bool dispatcherEnabled,
+        bool contextInitialized,
+        bool gameWindowPresent,
+        bool linkedStartEnabled,
+        bool installPathAvailable)
+    {
+        if (dispatcherEnabled && contextInitialized && gameWindowPresent)
+        {
+            return GameStartupRecoveryAction.RearmDoorTrigger;
+        }
+
+        if (!gameWindowPresent && (!linkedStartEnabled || !installPathAvailable))
+        {
+            // 窗口已丢失又不能关联启动：再等一轮没有意义，
+            // 也避免无人值守时走到“没有找到原神的安装路径”模态对话框而无限等待。
+            return GameStartupRecoveryAction.Unavailable;
+        }
+
+        return GameStartupRecoveryAction.Reattach;
     }
 }
 
