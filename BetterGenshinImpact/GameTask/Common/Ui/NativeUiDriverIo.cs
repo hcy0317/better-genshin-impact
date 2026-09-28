@@ -89,6 +89,7 @@ internal sealed class NativeUiDriverIo
             case UiAction.ReviveParty:
                 return Bv.ClickIfInReviveModal(image);
             case UiAction.Escape:
+            case UiAction.EscapeProbe:
                 UiEscapeInput.Run(admission,
                     () => Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_ESCAPE),
                     () => Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_ESCAPE), Thread.Sleep);

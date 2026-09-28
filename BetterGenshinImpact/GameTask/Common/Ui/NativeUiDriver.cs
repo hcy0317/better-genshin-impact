@@ -146,6 +146,10 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         var escapeProposed = action == UiAction.Escape && observed.SourceBound && observed.HasUsableEvidence &&
             observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) && observed.CanEscape;
         if (action == UiAction.Escape && !escapeProposed) return Task.FromResult(false);
+        // 兜底探测只允许在"没有任何已识别界面"的空转状态发出，且同样要求后继新帧仍然空转。
+        var escapeProbeProposed = action == UiAction.EscapeProbe && observed.SourceBound && observed.HasUsableEvidence &&
+            observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) && UiStallEscapeProbe.IsUnrecognizedStall(observed);
+        if (action == UiAction.EscapeProbe && !escapeProbeProposed) return Task.FromResult(false);
         var domainExitProposed = action == UiAction.ConfirmDomainExit && observed.SourceBound &&
             observed.CanConfirmDomainExit && observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge);
         if (action == UiAction.ConfirmDomainExit && !domainExitProposed) return Task.FromResult(false);
@@ -204,6 +208,16 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                         throw new InvalidOperationException("Escape source expired before native input.");
                 }
                 return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitEscapeInput)));
+            case UiAction.EscapeProbe when escapeProbeProposed && current.IsAfter(observed) && UiStallEscapeProbe.IsUnrecognizedStall(current):
+                void AdmitEscapeProbeInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!UiStallEscapeProbe.IsUnrecognizedStall(current) ||
+                        !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                        throw new InvalidOperationException("兜底 Escape 来源在原生输入前失效。");
+                }
+                return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitEscapeProbeInput)));
             case UiAction.RequestDomainExit when observed.Matches(UiTarget.DomainMain) && current.Matches(UiTarget.DomainMain):
                 return Task.FromResult(Completed(_io.OtherAction(action, image, () => { })));
             case UiAction.ConfirmDomainExit when domainExitProposed && current.IsAfter(observed) && current.CanConfirmDomainExit:
