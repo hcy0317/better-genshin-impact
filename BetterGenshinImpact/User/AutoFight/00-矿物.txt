@@ -4,7 +4,8 @@ strategy(loop=battle)
 timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
-琴 q(if=q-ready(琴))
+// Q观察复用正常E出手后的场上帧。
+琴 e(fast,feed=琴), q(if=q-ready(琴))
 branch(if=round-odd(),then=岩短轴,else=聚怪落地)
 娜维娅 attack(0.4,keep=护盾), check
 

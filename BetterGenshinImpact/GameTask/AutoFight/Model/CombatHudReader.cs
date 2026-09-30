@@ -10,6 +10,8 @@ using Compunet.YoloSharp;
 using Compunet.YoloSharp.Data;
 using System.Collections.Generic;
 using System.Linq;
+using System;
+using System.Globalization;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Model;
 
@@ -33,7 +35,13 @@ internal static class CombatHudReader
             // 实拍冷却数字可为灰白色（约211），不能要求接近纯白而抹掉已施放证据。
             using var white = OpenCvCommonHelper.InRangeHsv(area.SrcMat, new Scalar(0, 0, 200), new Scalar(0, 25, 255));
             var raw = ocr.OcrWithoutDetector(white);
-            return new CooldownReading(raw, StringUtils.TryParseDouble(raw));
+            // 空白意味着未读到数字，仍需调用方的HUD/角色/冷却像素证据。
+            // 非空乱码绝不能与零冷却混用；NaN沿用double接口表达不可读。
+            var text = raw.Trim();
+            var seconds = text.Length == 0 ? 0 :
+                double.TryParse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var parsed)
+                && double.IsFinite(parsed) && parsed >= 0 ? parsed : double.NaN;
+            return new CooldownReading(raw, seconds);
         });
 
     internal static BurstReading ReadBurst(ImageRegion frame, BgiYoloPredictor predictor) =>

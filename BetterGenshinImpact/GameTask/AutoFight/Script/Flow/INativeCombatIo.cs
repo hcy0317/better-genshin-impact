@@ -39,7 +39,7 @@ internal interface INativeCombatIo
     double ReadSkillCooldown(NativeCombatActor actor, ImageRegion frame);
     bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown);
     BurstObservation ReadBurst(ImageRegion frame, bool active);
-    bool ReadLowHp(ImageRegion frame);
+    bool? ReadLowHp(ImageRegion frame);
     HashSet<int> ReadSideBurstReady(ImageRegion frame);
     bool TryGetKnownSkillCooldown(string actor, out double cooldown);
     void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc);

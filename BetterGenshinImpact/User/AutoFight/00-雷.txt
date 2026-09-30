@@ -8,8 +8,11 @@ call(开场,once=battle,required)
 雷电将军 e(fast,record=雷罚,maintain=雷罚,before=3)
 纳西妲 e(hold,fast,record=草标记,maintain=草标记,before=3), q(if=q-ready(纳西妲))
 菲谢尔 e(fast,record=奥兹,maintain=奥兹,before=2)
+// 正常短普攻后判定场上Q，后台未知不永久挡住拔刀段。
+雷电将军 attack(0.2,keep=护盾)
 branch(if=q-ready(雷电将军),then=雷神站场,else=普通短轴,unknown=普通短轴)
-菲谢尔 q(if=q-ready(菲谢尔) && !record-active(奥兹))
+// 奥兹缺位才发起显式续召意图；选角后的Q就绪检查仍由执行器执行。
+菲谢尔 q(if=!record-active(奥兹))
 纳西妲 check
 
 segment(开场,define,record=开场完成) {

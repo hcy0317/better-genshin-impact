@@ -47,7 +47,7 @@ public class TargetTrackPolicyTests
             out var decision,
             out var imageWidth,
             out var imageHeight));
-        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, decision.Action);
+        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
         Assert.Equal(SeekCueKind.HealthBar, decision.Cue);
         Assert.Equal(visual, decision.Visual);
         Assert.Equal(1920, imageWidth);

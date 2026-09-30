@@ -63,6 +63,7 @@ public partial class ConditionEvaluator
     private string? _currentActionName;
     private HashSet<int>? _qReadyCache;
     private bool? _lowHpCache;
+    private bool _lowHpObserved;
     // 出战角色识别上下文：箭头识别需在同一 context 内累计两次相同结果才返回有效编号，
     // 跨轮复用避免每次 onfield() 求值都从零统计导致永远识别失败
     private readonly AvatarActiveCheckContext _avatarActiveCheckContext = new();
@@ -97,6 +98,7 @@ public partial class ConditionEvaluator
         _cachedCapture = capture;
         _qReadyCache = null;
         _lowHpCache = null;
+        _lowHpObserved = false;
     }
 
     /// <summary>
@@ -141,7 +143,7 @@ public partial class ConditionEvaluator
             var ast = ParseOrExpr(tokens, ref pos);
             return ToBool(Eval(ast, currentIndex));
         }
-        catch (Exception e)
+        catch (Exception e) when (e is not OperationCanceledException and not Flow.CombatActionInterruptedException)
         {
             Logger.LogWarning("条件表达式求值失败：{Expr}，{Msg}", expression, e.Message);
             return false;
@@ -420,10 +422,23 @@ public partial class ConditionEvaluator
         var left = Eval(node.Left, currentIndex);
 
         // 短路求值
-        if (node.Op == "&&") return ToBool(left) && ToBool(Eval(node.Right, currentIndex));
-        if (node.Op == "||") return ToBool(left) || ToBool(Eval(node.Right, currentIndex));
+        if (node.Op == "&&")
+        {
+            if (left != null && !ToBool(left)) return false;
+            var value = Eval(node.Right, currentIndex);
+            if (value != null && !ToBool(value)) return false;
+            return left == null || value == null ? null! : true;
+        }
+        if (node.Op == "||")
+        {
+            if (left != null && ToBool(left)) return true;
+            var value = Eval(node.Right, currentIndex);
+            if (value != null && ToBool(value)) return true;
+            return left == null || value == null ? null! : false;
+        }
 
         var right = Eval(node.Right, currentIndex);
+        if (left == null || right == null) return null!;
         return node.Op switch
         {
             ">" => ToNumber(left) > ToNumber(right),
@@ -441,6 +456,7 @@ public partial class ConditionEvaluator
     private object EvalUnary(UnaryOpNode node, int currentIndex)
     {
         var operand = Eval(node.Operand, currentIndex);
+        if (operand == null) return null!;
         return node.Op switch
         {
             "!" => !ToBool(operand),
@@ -695,10 +711,9 @@ public partial class ConditionEvaluator
     /// <summary>
     /// 判断当前角色是否低血量（使用缓存的截图，每轮循环只检测一次）
     /// </summary>
-    private bool EvalLowHp()
+    private bool? EvalLowHp()
     {
-        if (_lowHpCache.HasValue)
-            return _lowHpCache.Value;
+        if (_lowHpObserved) return _lowHpCache;
 
         try
         {
@@ -706,19 +721,21 @@ public partial class ConditionEvaluator
             var ownRa = _cachedCapture == null;
             try
             {
-                _lowHpCache = Bv.CurrentAvatarIsLowHp(ra);
-                return _lowHpCache.Value;
+                _lowHpCache = Bv.ObserveCurrentAvatarLowHp(ra);
+                _lowHpObserved = true;
+                return _lowHpCache;
             }
             finally
             {
                 if (ownRa) ra.Dispose();
             }
         }
-        catch (Exception e)
+        catch (Exception e) when (e is not OperationCanceledException and not Flow.CombatActionInterruptedException)
         {
-            Logger.LogWarning("[低血检测] 异常：{Msg}", e.Message);
-            _lowHpCache = false;
-            return false;
+            Flow.CombatActionScope.Current?.Trace("low-hp-unavailable", e.GetType().Name);
+            _lowHpObserved = true;
+            _lowHpCache = null;
+            return null;
         }
     }
 

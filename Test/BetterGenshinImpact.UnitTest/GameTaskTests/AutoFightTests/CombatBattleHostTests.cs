@@ -806,6 +806,15 @@ public partial class CombatBattleHostTests
     [InlineData(false)]
     [InlineData(true)]
     public async Task OnlyRedHealthReductionNotDarkTrackGeometryCountsAsBattleProgress(bool redDecreases)
+        => await VerifyHealthProgress(redDecreases, false);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixedBossProgressRemainsObservableAlongsideASpatialTarget(bool redDecreases)
+        => await VerifyHealthProgress(redDecreases, true);
+
+    private static async Task VerifyHealthProgress(bool redDecreases, bool fixedBoss)
     {
         var clock = new FakeTimeProvider();
         var started = clock.GetTimestamp();
@@ -818,7 +827,9 @@ public partial class CombatBattleHostTests
             var visual = new EnemySeekVisual(900, 400, redWidth, 6, redWidth * 6)
             { HealthBarTrackWidth = (int)(seconds % 2) == 0 ? 70 : 90 };
             return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
-                new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, visual, 1, SeekCueKind.HealthBar), 1920, 1080);
+                new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                    fixedBoss ? new(900, 400, 60, 6, 360) : visual, 1, SeekCueKind.HealthBar), 1920, 1080)
+            { FixedTopHealth = fixedBoss ? visual with { X = 700, Y = 20 } : null };
         };
         using var host = new CombatBattleHost(io, new() { SeekEnabled = false, FinishDetectionEnabled = false });
         var result = CombatBattleHostResult.Continue;
@@ -881,7 +892,8 @@ public partial class CombatBattleHostTests
         for (var i = 0; i < 15000 && result == CombatBattleHostResult.Continue; i++)
             result = await host.AdvanceAsync(flow, default);
         Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
-        Assert.DoesNotContain(io.Inputs, x => x.Kind is CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.Camera);
+        Assert.DoesNotContain(io.Inputs, x => x.Kind == CombatBattleHostInputKind.Approach);
+        Assert.InRange(io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.Camera), 1, 24);
     }
 
     [Fact]
@@ -902,6 +914,26 @@ public partial class CombatBattleHostTests
         Assert.Equal(CombatBattleHostResult.Continue, result);
         Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 120, 121);
         Assert.Empty(io.Inputs);
+    }
+
+    [Fact]
+    public async Task FixedBossSearchHandsOffToTheNewSpatialTarget()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        var boss = new EnemySeekVisual(700, 20, 500, 8, 4000);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            io.Inputs.Any(x => x.Kind == CombatBattleHostInputKind.Camera)
+                ? new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                    new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar)
+                : new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None, boss, 1, SeekCueKind.FixedTopHealth),
+            1920, 1080) { FixedTopHealth = boss, Control = new(MotionStatus.Normal, false) };
+        using var host = new CombatBattleHost(io, new());
+        for (var i = 0; i < 15000 && !io.Inputs.Any(x => x.Kind == CombatBattleHostInputKind.Approach); i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Single(io.Inputs.Where(x => x.Kind == CombatBattleHostInputKind.Camera));
+        Assert.Contains(io.Inputs, x => x.Kind == CombatBattleHostInputKind.Approach);
     }
 
     [Fact]

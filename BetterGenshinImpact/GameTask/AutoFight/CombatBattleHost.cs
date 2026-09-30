@@ -13,6 +13,7 @@ internal enum CombatObservationQuality { Available, Unavailable, Faulted, Late }
 internal readonly record struct CombatBattleObservation(CaptureFrameStamp Source, Guid BattleId,
     CombatObservationQuality Quality, EnemySeekDecision? Target, int Width, int Height, ulong CueFingerprint = 0)
 {
+    public EnemySeekVisual? FixedTopHealth { get; init; }
     public MotionStatus Motion { get; init; } = MotionStatus.Unknown;
     public CombatControlObservation Control { get; init; }
     public SeekRecognitionDiagnostics? Recognition { get; init; }
@@ -101,6 +102,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private double _lastValidAt, _lastProgressAt, _nextProbe, _partyDeadline, _graceUntil;
     private double _nextFinishCheck = Math.Max(options.InitialBlockSeconds, options.FinishCheckIntervalSeconds);
     private EnemySeekVisual? _stableVisual;
+    private bool _progressHealthIsFixed;
     private int _minimumHealthWidth, _healthBaselineCandidate, _scanPulses, _approachPulses;
     private int _searchVerticalOffset;
     private double _healthBaselineSince;
@@ -113,6 +115,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private int _detachPulses;
     private Guid _inputRequestId;
     private long _inputRequestDeadline;
+    private (Phase Phase, CombatBattleHostInputKind Kind, Guid? SelectionGoal) _inputRequestIntent;
     private long? _performanceRecheckDeadline;
     private bool UsesPartyFinish => options.FinishDetectionEnabled && !options.ExternalCompletionAuthority;
     private CombatBattleHostResult _result;
@@ -238,7 +241,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 if (now - _lastProgressAt >= NoProgressDeadline && now >= _graceUntil)
                     return Stop("busy-without-game-progress");
                 if (options.SeekEnabled && _approachPulses < MaximumApproachPulses && newEvidence &&
-                    CanApproach(observation, io.BattleId, io.Clock) && flow.SelectionAssistance is { } assistance)
+                    flow.SelectionAssistance is { } assistance &&
+                    CanApproach(observation, io.BattleId, io.Clock, selectionAssistance: true))
                 {
                     if (await SendAsync(new(CombatBattleHostInputKind.Approach)
                         { SelectionGoal = assistance.Goal, DeadlineTimestamp = assistance.Deadline }, ct)) _approachPulses++;
@@ -447,8 +451,16 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             observation.CueFingerprint != _lastDamageFingerprint);
         _hadDamage = damage;
         _lastDamageFingerprint = observation.CueFingerprint;
-        if ((target?.Cue is SeekCueKind.HealthBar or SeekCueKind.FixedTopHealth) && target.Value.Visual is { } visual)
+        var fixedHealth = observation.FixedTopHealth ?? (target?.Cue == SeekCueKind.FixedTopHealth ? target.Value.Visual : null);
+        var health = fixedHealth ?? (target?.Cue == SeekCueKind.HealthBar ? target.Value.Visual : null);
+        if (health is { } visual)
         {
+            if (_progressHealthIsFixed != fixedHealth.HasValue)
+            {
+                _stableVisual = null;
+                _healthBaselineCandidate = 0;
+            }
+            _progressHealthIsFixed = fixedHealth.HasValue;
             if (_stableVisual == null) _minimumHealthWidth = visual.Width;
             if (!_firstTarget)
             {
@@ -510,9 +522,10 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             await io.DelayAsync(50, ct);
             return _result;
         }
-        if (observation.Target is { } target && target.Visual is { } visual)
+        // 固定Boss条仅是存在/进展证据；没有空间线索时走下方既有有界扫描。
+        if (observation.Target is { } target && target.Cue != SeekCueKind.FixedTopHealth && target.Visual is { } visual)
         {
-            if (target.Cue is SeekCueKind.FixedTopHealth or SeekCueKind.DamageNumber)
+            if (target.Cue == SeekCueKind.DamageNumber)
             {
                 if (TryResumeStrategy()) return _result;
                 _scanPulses = MaximumSearchPulses;
@@ -584,13 +597,16 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     }
 
     // 姿态Unknown保持Unknown；只有同帧控制检查和实际对准的目标共同允许有界试探。
-    internal static bool CanApproach(CombatBattleObservation observation, Guid battleId, TimeProvider clock) =>
+    internal static bool CanApproach(CombatBattleObservation observation, Guid battleId, TimeProvider clock,
+        bool selectionAssistance = false) =>
         observation.Quality == CombatObservationQuality.Available && observation.BattleId == battleId &&
         observation.Source.IsFresh(clock, TimeSpan.FromMilliseconds(150)) &&
         observation.Control.IsObserved && !observation.Control.KeyboardBreakoutRequested &&
         observation.Motion is not (MotionStatus.Climb or MotionStatus.Fly) &&
         observation.Control.Motion is not (MotionStatus.Climb or MotionStatus.Fly) &&
-        observation.Target is { Cue: SeekCueKind.HealthBar or SeekCueKind.DirectionIndicator, Visual: { } visual } target &&
+        observation.Target is { Cue: SeekCueKind.HealthBar, Visual: { } visual } target &&
+        // 显式选角恢复的小步不属于按距离接近，仍绑定原SelectionGoal和期限；普通寻敌必须尊重判近结果。
+        (selectionAssistance || target.Action == AutoFightSeekAction.ApproachVisibleEnemy) &&
         observation.Width > 0 && observation.Height > 0 &&
         Math.Abs(target.Cue == SeekCueKind.DirectionIndicator
             ? AutoFightSeek.GetIndicatorCameraOffset(target.Direction, visual, observation.Width, observation.Height)
@@ -738,9 +754,18 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         CaptureFrameStamp source, CancellationToken ct, TimeSpan? remaining = null)
     {
         ct.ThrowIfCancellationRequested();
+        var intent = (_phase, input.Kind, input.SelectionGoal);
+        // 只有NotSent会留下可继续的请求。不同动作/阶段/选角目标不能继承它的身份和期限；
+        // 同一意图等待新帧则必须保留原期限，不能靠每次重试续命。
+        if (_inputRequestId != Guid.Empty && _inputRequestIntent != intent)
+        {
+            _inputRequestId = Guid.Empty;
+            _inputRequestDeadline = 0;
+        }
         if (_inputRequestId == Guid.Empty)
         {
             _inputRequestId = Guid.NewGuid();
+            _inputRequestIntent = intent;
             var seconds = Math.Min(ObservationDeadline, remaining?.TotalSeconds ?? ObservationDeadline);
             if (options.TimeoutSeconds > 0) seconds = Math.Min(seconds, options.TimeoutSeconds - Now);
             _inputRequestDeadline = io.Clock.GetTimestamp() + (long)(Math.Max(0, seconds) * io.Clock.TimestampFrequency);

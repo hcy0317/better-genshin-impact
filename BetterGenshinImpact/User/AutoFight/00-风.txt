@@ -4,8 +4,10 @@ strategy(loop=battle)
 timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
-call(群疗,if=low-hp(琴) || low-hp(芙宁娜) || q-ready(琴))
 芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+call(群疗,if=low-hp())
+琴 e(fast,feed=琴)
+call(群疗,if=q-ready(琴))
 call(琴补能,if=q-energy-low(琴) && !q-cd(琴) && e-ready(琴))
 call(聚怪落地)
 枫原万叶 q(if=q-ready(枫原万叶))
@@ -19,7 +21,7 @@ segment(补盾,define) {
 }
 
 segment(群疗,define) {
-    琴 q(if=q-ready(琴))
+    琴 q(recharge,from=segment:琴补能)
 }
 segment(琴补能,define) {
     琴 e(fast,required,feed=琴)

@@ -531,7 +531,7 @@ public static class AvatarRecognition
                         indicatorCandidate = null;
                         RecordPublication(PublishPassiveObservation(false, false, fixedVisual, capture.Width, capture.Height,
                             capturedAtUtc, observationEpoch, target, capture.FrameStamp, battleId, motion: motion, control: control,
-                            recognition: targetRead.Diagnostics));
+                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth));
                     }
                     else if (target is { Cue: SeekCueKind.HealthBar, Visual: { } nearest })
                     {
@@ -544,7 +544,7 @@ public static class AvatarRecognition
                             capture.Height,
                             capturedAtUtc,
                             observationEpoch, source: capture.FrameStamp, battleId: battleId, motion: motion, control: control,
-                            recognition: targetRead.Diagnostics));
+                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth));
 
                         if (drawResults)
                         {
@@ -569,7 +569,8 @@ public static class AvatarRecognition
                                 capturedAtUtc,
                                 observationEpoch, source: capture.FrameStamp, battleId: battleId,
                                 cueFingerprint: FingerprintDamageCue(capture, damageVisual), motion: motion, control: control,
-                                recognition: targetRead.Diagnostics, damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, true)));
+                                recognition: targetRead.Diagnostics, damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, true),
+                                fixedTopHealth: target.FixedTopHealth));
 
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
@@ -615,7 +616,8 @@ public static class AvatarRecognition
                                     targetRead.Diagnostics.RawComponents == 0 ? "no-color-components" :
                                     targetRead.Diagnostics.Accepted == 0 ? "all-visual-candidates-filtered" : "target-selection-empty",
                                 damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, false),
-                                searchHint: confirmedIndicator == null ? targetRead.Hint : null));
+                                searchHint: confirmedIndicator == null ? targetRead.Hint : null,
+                                fixedTopHealth: target.FixedTopHealth));
                         }
                     }
 
@@ -674,7 +676,8 @@ public static class AvatarRecognition
         CaptureFrameStamp source = default, Guid battleId = default,
         CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0, MotionStatus motion = MotionStatus.Unknown,
         CombatControlObservation control = default, SeekRecognitionDiagnostics? recognition = null,
-        string? absenceReason = null, string? damageFallback = null, UnconfirmedSearchHint? searchHint = null)
+        string? absenceReason = null, string? damageFallback = null, UnconfirmedSearchHint? searchHint = null,
+        EnemySeekVisual? fixedTopHealth = null)
     {
         lock (_seekLock)
         {
@@ -698,7 +701,7 @@ public static class AvatarRecognition
                 { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
                     CueFingerprint = cueFingerprint, Motion = motion, Control = control,
                     Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback,
-                    SearchHint = searchHint };
+                    SearchHint = searchHint, FixedTopHealth = fixedTopHealth };
             }
             return true;
         }
@@ -751,6 +754,7 @@ internal readonly record struct PassiveTargetObservation(
     int ImageHeight,
     EnemySeekDecision? IndicatorDecision = null)
 {
+    public EnemySeekVisual? FixedTopHealth { get; init; }
     public CaptureFrameStamp Source { get; init; }
     public Guid BattleId { get; init; }
     public long CaptureEpoch { get; init; }

@@ -1401,6 +1401,8 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         using var io = new PhysicalReplay(clock, false, 50, program)
         { HideSideBurstDuringSelection = true };
         io.ScheduleEnergy(0, "琴", true);
+        // 场上证据准入；后台圆环不再授予就绪。
+        io.SetFrontActor("琴");
         using var runner = NativeCombatFlowRunner.Create(program, io);
 
         Assert.Equal(CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
@@ -2549,7 +2551,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     private static readonly NativeCombatActor[] RockParty = [new("钟离", 1), new("班尼特", 2), new("娜维娅", 3), new("香菱", 4)];
 
     [Fact]
-    public async Task ANewSatisfiedDemandInsideTheSelectedFeedFragmentCannotSpendTheProducerSkill()
+    public async Task UnobservableOffFieldEnergyChangeCannotPretendTheRechargeDemandWasWithdrawn()
     {
         var clock = new FakeTimeProvider();
         var program = LoadProgram("香菱 q(recharge,from=segment:供能,required,record=有效Q)\nsegment(供能,define) { 班尼特 wait(0.5),e(required,feed=香菱) }");
@@ -2559,8 +2561,8 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         using var runner = NativeCombatFlowRunner.Create(program, io);
         for (var i = 0; i < 200 && runner.Context.Find("有效Q") == null; i++) await runner.StepAsync(default);
         Assert.NotNull(runner.Context.Find("有效Q"));
-        Assert.DoesNotContain(io.Inputs, input => input.Actor == "班尼特");
-        Assert.Single(io.Inputs);
+        // 接收者已在后台；物理事件不是观测证据，不能再靠侧栏Hough取消已接受的需求。
+        Assert.Equal(new[] { "班尼特", "香菱" }, io.Inputs.Select(input => input.Actor));
     }
 
     [Fact]
@@ -2599,6 +2601,44 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task RockStrategyCanUseBennettsReadyBurstWithoutSidebarReadiness()
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram(LoadPartyScript("00-岩.txt"));
+        using var io = new PhysicalReplay(clock, false, 50, program) { Actors = RockParty, RockEnergyEvents = true };
+        io.SetFrontActor("娜维娅");
+        io.ScheduleEnergy(0, "班尼特", true);
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        for (var i = 0; i < 800 && !io.Inputs.Any(x => x.Actor == "班尼特" && x.Skill == Method.Burst); i++)
+            await runner.StepAsync(default);
+        Assert.Contains(io.Inputs, x => x.Actor == "班尼特" && x.Skill == Method.Burst);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public async Task WaterLowHealthDemandReachesOffFieldJeanWithoutBlindBurst(bool energy, bool unknown)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram(LoadPartyScript("00-水.txt"));
+        using var io = new PhysicalReplay(clock, false, 50, program)
+            { BurstUnknownUntil = unknown ? 999 : 0 };
+        io.SetFrontActor("芙宁娜");
+        io.ScheduleHealth(0, "芙宁娜", true);
+        io.ScheduleHealth(0, "钟离", true);
+        io.ScheduleEnergy(0, "琴", energy);
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        for (var i = 0; i < 1000 && !io.Primitives.Any(x => x.Name == "那维莱特" && x.Method == Method.Attack); i++)
+            await runner.StepAsync(default);
+        Assert.Equal(energy && !unknown, io.Inputs.Any(x => x.Actor == "琴" && x.Skill == Method.Burst));
+        Assert.Contains(io.Primitives, x => x.Name == "那维莱特" && x.Method == Method.Attack);
+        if (energy && !unknown)
+            Assert.Contains(runner.RuntimeStatistics.RecentEvents,
+                x => x.Actor == "琴" && x.Action == "burst" && x.ReportedResult == nameof(CombatFlowResult.Succeeded));
+    }
+
+    [Fact]
     public async Task InactivePendingActorDefeatProbeYieldsBeforeSwitchCompletionAndBlocksHostInput()
     {
         var clock = new FakeTimeProvider();
@@ -2617,6 +2657,48 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         for (var i = 0; i < 60 && runner.HasAwaitingObservation; i++) await runner.StepAsync(default);
         Assert.False(runner.HasAwaitingObservation);
         Assert.Single(io.Inputs);
+    }
+
+    [Fact]
+    public async Task ThunderCanResummonWithFischlBurstWhenOzExpiredAndSkillIsCooling()
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram(LoadPartyScript("00-雷.txt"));
+        using var io = new PhysicalReplay(clock, false, 50, program)
+            { Actors = [new("钟离", 1), new("纳西妲", 2), new("菲谢尔", 3), new("雷电将军", 4)] };
+        io.SetFrontActor("雷电将军");
+        io.PrimeSkillCooldown("菲谢尔", 99);
+        io.ScheduleEnergy(0, "菲谢尔", true);
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        for (var i = 0; i < 800 && !io.Inputs.Any(x => x.Actor == "菲谢尔" && x.Skill == Method.Burst); i++)
+            await runner.StepAsync(default);
+        Assert.Contains(io.Inputs, x => x.Actor == "菲谢尔" && x.Skill == Method.Burst);
+        Assert.DoesNotContain(io.Inputs, x => x.Actor == "菲谢尔" && x.Skill == Method.Skill);
+    }
+
+    [Fact]
+    public async Task CancellingWaterHealingSelectionCannotSendTheBurstOrFollowingDamage()
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram(LoadPartyScript("00-水.txt"));
+        using var cancellation = new CancellationTokenSource();
+        using var io = new PhysicalReplay(clock, false, 50, program);
+        io.SetFrontActor("芙宁娜");
+        io.ScheduleHealth(0, "芙宁娜", true);
+        io.ScheduleHealth(0, "钟离", true);
+        io.ScheduleEnergy(0, "琴", true);
+        io.AfterCapture = () =>
+        {
+            if (io.Selections.Contains(io.Actors.Single(x => x.Name == "琴").Index)) cancellation.Cancel();
+        };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            for (var i = 0; i < 1000; i++) await runner.StepAsync(cancellation.Token);
+        });
+        Assert.DoesNotContain(io.Inputs, x => x.Actor == "琴" && x.Skill == Method.Burst);
+        Assert.DoesNotContain(io.Primitives, x => x.Name == "那维莱特" && x.Method == Method.Attack);
+        Assert.False(io.HoldingInput);
     }
 
     [Theory]
@@ -3102,7 +3184,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var script = LoadWaterScript();
         // 沿用发布策略原定义体；此独立场景只让所选主轴在新护盾后立即开始，明确排除必要维护压力。
         var program = LoadProgram("timing(离线护盾,cd=12,duration=20)\ncall(开场,once=battle,required)\n" +
-            "branch(if=q-ready(那维莱特),then=Q双喷,else=E单喷,unknown=E单喷)\n" + script[script.IndexOf("segment(开场", StringComparison.Ordinal)..]);
+            "那维莱特 attack(0.2,keep=护盾)\nbranch(if=q-ready(那维莱特),then=Q双喷,else=E单喷,unknown=E单喷)\n" + script[script.IndexOf("segment(开场", StringComparison.Ordinal)..]);
         var clock = new FakeTimeProvider();
         using var io = new PhysicalReplay(clock, burstReady, decisionCost, program);
         using var runner = NativeCombatFlowRunner.Create(program, io);
@@ -3118,7 +3200,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var macros = ledger.Macros.Where(macro => macro.Branch == branch.Branch.Id).ToArray();
         Assert.Equal(burstReady ? 2 : 1, macros.Length);
         Assert.Empty(ledger.Maintenance);
-        Assert.Equal((burstReady ? 2 : 1) * 26, io.Primitives.Count);
+        Assert.Equal((burstReady ? 2 : 1) * 26, io.Primitives.Count(command => command.Method != Method.Attack));
         var total = macros[^1].CompletedAt - branch.Branch.EnteredAt;
         output.WriteLine($"BRANCH_NO_MAINTENANCE burst={burstReady} decision={decisionCost} total={total:F3}");
         Assert.InRange(total, 0, burstReady ? 16 : 10);
@@ -3628,7 +3710,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
                 FirstRockDemandAt = Math.Min(FirstRockDemandAt, sample.At);
             return active && actor != null ? new(EnergyFull(actor, sample.At), Cooling(actor, Method.Burst, sample.At)) : default;
         }
-        public bool ReadLowHp(ImageRegion frame)
+        public bool? ReadLowHp(ImageRegion frame)
         {
             var sample = Frame(frame);
             var events = _healthEvents.Where(item => item.Actor == sample.Actor && item.At <= sample.At).OrderBy(item => item.At).ToArray();
