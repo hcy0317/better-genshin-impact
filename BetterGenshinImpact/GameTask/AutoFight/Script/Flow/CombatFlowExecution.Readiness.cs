@@ -93,11 +93,15 @@ public sealed partial class CombatFlowExecution
         }
         var result = condition.EvaluateBoolean(Resolve);
         if (result != null || !allowPreparation || unknownActor == null || !CanPrepare()) return result;
+        // 观察只服务于即将执行的那个角色，不能为治疗OR/跨角色合取逐个切后台取样。
+        var plannedActor = child?.Nodes.FirstOrDefault()?.Command.Name ?? actor;
+        if (unknownActor != plannedActor) return null;
+        if (Math.Min(commandDeadline ?? double.PositiveInfinity, frame.Deadline) - Context.Now < 3) return null;
         var targetActor = unknownActor;
         var goal = "condition:" + unknownFunction + ":" + targetActor;
         if (_battle.NextConditionProbe.TryGetValue(goal, out var next) && Context.Now < next) return null;
         if (!_episodes.TrySpend(goal, Context.Now, CombatFlowPolicy.EpisodeTimeoutSeconds,
-                CombatFlowPolicy.EpisodeAttempts, out var deadline)) return null;
+                1, out var deadline)) return null;
         ct.ThrowIfCancellationRequested();
         _battle.NextConditionProbe[goal] = Context.Now + 1;
         var probe = new CombatFlowAction(new CombatCommand(targetActor, "e"), Context, CanPrepare,

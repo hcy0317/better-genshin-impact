@@ -606,7 +606,9 @@ public sealed partial class CombatFlowExecution : IDisposable
                     _game.Observe("q-energy-low", [], command.Name) is bool && _game.Observe("q-cd", [], command.Name) is bool)
                     _episodes.Resolve(goal);
             }
-            if (!confirming && !hasPendingSkill && await TryBeginRechargeAsync(frame, command, keep, action, ct))
+            if (!confirming && !hasPendingSkill &&
+                (frame.PreparingRecharge != null || !_game.HasObservationRequest) &&
+                await TryBeginRechargeAsync(frame, command, keep, action, ct))
             {
                 if (frame.PreparingRecharge != null || !ReferenceEquals(_frames.Peek(), frame))
                 {

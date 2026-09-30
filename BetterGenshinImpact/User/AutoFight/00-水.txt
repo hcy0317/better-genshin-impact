@@ -7,8 +7,9 @@ timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
 芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
-call(群疗,if=low-hp(琴) || q-ready(琴))
-琴 e(fast,feed=琴,if=q-energy-low(琴) && !q-cd(琴))
+call(群疗,if=low-hp() || (onfield(琴) && q-ready(琴)))
+// 短普攻正常上场，Q分支只读场上新帧；不为条件单独切人。
+那维莱特 attack(0.2,keep=护盾)
 branch(if=q-ready(那维莱特),then=Q双喷,else=E单喷,unknown=E单喷)
 那维莱特 check
 
@@ -19,7 +20,11 @@ segment(补盾,define) {
     钟离 e(hold,wait,timing=离线护盾,required,record=护盾,maintain=护盾)
 }
 segment(群疗,define) {
-    琴 q(if=q-ready(琴))
+    // 已确认治疗需求是显式动作意图；上场复核，缺能时复用有期限的补能流程。
+    琴 q(recharge,from=segment:琴补能)
+}
+segment(琴补能,define) {
+    琴 e(fast,required,feed=琴)
 }
 segment(E单喷,define,onfail=普通短打,requires=record-active(护盾)) {
     那维莱特 e(fast,required,keep=护盾), wait(0.65)

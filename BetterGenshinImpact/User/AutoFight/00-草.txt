@@ -5,10 +5,11 @@ strategy(loop=battle)
 timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
-call(雷环照护,if=low-hp(久岐忍) || low-hp(纳西妲) || low-hp(芙宁娜))
 久岐忍 e(fast,record=雷环,maintain=雷环,before=2)
 纳西妲 e(hold,fast,record=草标记,maintain=草标记,before=3), q(if=q-ready(纳西妲))
 芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+// 只消费正常上场者的血量，不巡回切三个角色观察。
+call(雷环照护,if=low-hp())
 branch(if=record-active(雷环),then=环内短轴,else=空档短轴,unknown=空档短轴)
 纳西妲 check
 

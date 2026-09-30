@@ -5,12 +5,15 @@ strategy(loop=battle)
 timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
-call(急救,if=low-hp(班尼特) || low-hp(香菱) || low-hp(芙宁娜))
 芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
-call(班尼特供能,if=q-energy-low(香菱) && !q-cd(香菱) && e-ready(班尼特))
+call(急救,if=low-hp())
+香菱 e(fast), attack(0.2,keep=护盾)
+// 需求在香菱正常出手后观察；供能片段独立核验班尼特E，不拼接两个前台。
+call(班尼特供能,if=q-energy-low(香菱) && !q-cd(香菱))
+班尼特 e(fast), attack(0.2,keep=护盾)
 call(班尼特自充,if=q-energy-low(班尼特) && !q-cd(班尼特) && e-ready(班尼特))
-香菱 e(fast)
-branch(if=q-ready(班尼特) && q-ready(香菱),then=双火爆发,else=普通短轴,unknown=普通短轴)
+// 先按场上班尼特证据入段，香菱Q由段内选角后的新帧独立核验。
+branch(if=q-ready(班尼特),then=双火爆发,else=普通短轴,unknown=普通短轴)
 班尼特 check
 
 segment(开场,define,record=开场完成) {
@@ -34,6 +37,6 @@ segment(双火爆发,define,atomic,timeout=8,onfail=普通短轴,requires=record
     香菱 walk(w,0.15), q(required,keep=鼓舞,record=旋火轮), attack(0.5,keep=护盾)
 }
 segment(急救,define) {
-    班尼特 q(if=q-ready(班尼特))
+    班尼特 q(recharge,from=segment:班尼特自充)
     香菱 attack(0.5,keep=护盾)
 }

@@ -7,6 +7,21 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatConditionalReadinessTests
 {
     [Fact]
+    public async Task HealingQueryCannotSwitchToAnUnrelatedActorJustToInspectItsHealth()
+    {
+        var clock = new FakeTimeProvider();
+        var game = new ReadinessGame(clock) { ActiveActor = "钟离" };
+        using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("""
+            call(治疗,if=low-hp(枫原万叶))
+            钟离 attack(0.1)
+            segment(治疗,define) { 琴 q }
+            """), game, clock);
+        await execution.RunRoundAsync();
+        Assert.Empty(game.Prepared);
+        Assert.Equal(new[] { "钟离:attack" }, game.Inputs);
+    }
+
+    [Fact]
     public async Task ExplicitUnknownBranchAndOptionalBurstDoNotForceOffFieldProbes()
     {
         var clock = new FakeTimeProvider();
@@ -89,7 +104,7 @@ public class CombatConditionalReadinessTests
         var game = new ReadinessGame(clock) { NeverReady = true };
         using var execution = new CombatFlowExecution(CombatFlowProgram.Compile("枫原万叶 e(if=e-ready(枫原万叶))"), game, clock);
         for (var i = 0; i < 30; i++) { await execution.RunRoundAsync(); clock.Advance(TimeSpan.FromSeconds(1)); }
-        Assert.Equal(3, game.Prepared.Count);
+        Assert.Single(game.Prepared);
         Assert.Empty(game.Inputs);
     }
 

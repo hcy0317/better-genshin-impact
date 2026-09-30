@@ -1013,6 +1013,7 @@ public partial class Avatar
         CombatActionScope.Current?.Trace("e-actor", $"actor={Name} active={active}");
         if (!active) return false;
         var cooldown = observedCooldown ?? ReadSkillCurrentCd(capture);
+        if (!double.IsFinite(cooldown) || cooldown < 0) return false;
         if (cooldown > 0)
         {
             ESkillCdTracker.Record(Name, cooldown);

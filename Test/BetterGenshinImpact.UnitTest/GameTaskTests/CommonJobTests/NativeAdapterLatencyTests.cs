@@ -325,7 +325,7 @@ public class NativeAdapterLatencyTests(ITestOutputHelper output)
         public bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown) =>
             IsActorActive(actor, frame) == true && cooldown <= 0 && !CombatHudReader.HasCooldownPixels(frame, false);
         public BurstObservation ReadBurst(ImageRegion frame, bool active) => CombatHudReader.ReadBurst(frame, _burst).Observation;
-        public bool ReadLowHp(ImageRegion frame) => throw new NotSupportedException();
+        public bool? ReadLowHp(ImageRegion frame) => throw new NotSupportedException();
         public HashSet<int> ReadSideBurstReady(ImageRegion frame) => CombatHudReader.ReadSideBurstReady(frame);
         public bool TryGetKnownSkillCooldown(string actor, out double cooldown) { cooldown = 0; return false; }
         public void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc) => throw new NotSupportedException();

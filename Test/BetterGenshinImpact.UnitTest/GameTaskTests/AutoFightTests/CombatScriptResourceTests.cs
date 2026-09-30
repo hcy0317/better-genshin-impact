@@ -722,6 +722,23 @@ public class CombatScriptResourceTests
             Math.Abs((classified!.Value.IndicatorBearingDegrees!.Value - expectedBearing + 540) % 360 - 180),
             0,
             0.1);
+
+        // 同一实拍模板经过生产使用的小窗口缩放后，仍须通过整条识别管线。
+        using var smallBgr = new Mat();
+        using var smallAlpha = new Mat();
+        var smallSize = new Size((int)Math.Round(template.Width * 2d / 3), (int)Math.Round(template.Height * 2d / 3));
+        Cv2.Resize(templateBgr, smallBgr, smallSize, interpolation: InterpolationFlags.Linear);
+        Cv2.Resize(alpha, smallAlpha, smallSize, interpolation: InterpolationFlags.Nearest);
+        using var source720 = Mat.Zeros(720, 1280, MatType.CV_8UC3).ToMat();
+        using var mask720 = Mat.Zeros(720, 1280, MatType.CV_8UC1).ToMat();
+        var rect720 = new Rect((int)Math.Round(640 + 500 * 2d / 3 * Math.Sin(bearingRadians) - smallSize.Width / 2d),
+            (int)Math.Round(360 - 280 * Math.Cos(bearingRadians) - smallSize.Height / 2d), smallSize.Width, smallSize.Height);
+        using (var roi = new Mat(source720, rect720)) smallBgr.CopyTo(roi);
+        using (var roi = new Mat(mask720, rect720)) smallAlpha.CopyTo(roi);
+        var visual720 = new EnemySeekVisual(rect720.X, rect720.Y, rect720.Width, rect720.Height, Cv2.CountNonZero(smallAlpha));
+        var classified720 = AutoFightSeek.ClassifySeekVisual(mask720, source720, visual720, 1280, 720);
+        Assert.NotNull(classified720);
+        Assert.InRange(Math.Abs((classified720!.Value.IndicatorBearingDegrees!.Value - expectedBearing + 540) % 360 - 180), 0, .1);
     }
 
     [Theory]

@@ -95,7 +95,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
                     Clock.GetElapsedTime(frame.FrameStamp.CapturedTimestamp).TotalMilliseconds); } catch { }
         }
     }
-    public bool ReadLowHp(ImageRegion frame) => Bv.CurrentAvatarIsLowHp(frame);
+    public bool? ReadLowHp(ImageRegion frame) => Bv.ObserveCurrentAvatarLowHp(frame);
     public HashSet<int> ReadSideBurstReady(ImageRegion frame) => CombatHudReader.ReadSideBurstReady(frame);
     public bool TryGetKnownSkillCooldown(string actor, out double cooldown) => ESkillCdTracker.TryGetKnownRemainingCd(actor, out cooldown);
     public void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc) => AvatarFor(actor).ConfirmSkillUsed(cooldown, inputAtUtc);

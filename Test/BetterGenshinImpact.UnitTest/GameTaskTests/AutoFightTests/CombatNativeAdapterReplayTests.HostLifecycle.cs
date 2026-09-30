@@ -249,8 +249,8 @@ public partial class CombatNativeAdapterReplayTests
         {
             clock.Advance(TimeSpan.FromMilliseconds(ReadDelayMs));
             return Last = Frozen ?? new CombatBattleObservation(source.Next(), battle, CombatObservationQuality.Available,
-                new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
-                    new(910, 400, 100, 9, 850), 1, SeekCueKind.HealthBar), 1920, 1080)
+                new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None,
+                    new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar), 1920, 1080)
                 { Control = new(MotionStatus.Unknown, false) };
         }
         public PartySetupFinishObservation ObservePartyBar() => throw new InvalidOperationException("No finish probe expected");

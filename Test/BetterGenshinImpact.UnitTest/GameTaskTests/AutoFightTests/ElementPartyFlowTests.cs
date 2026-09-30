@@ -38,7 +38,7 @@ public class ElementPartyFlowTests
     [InlineData(false, true)]
     [InlineData(true, null)]
     [InlineData(null, true)]
-    public async Task FireCannotEnterItsTwoBurstRouteWhenOnlyOneActorIsReady(bool? bennett, bool? xiangling)
+    public async Task FireCannotCompleteItsTwoBurstRouteWhenTheSecondActorIsNotReady(bool? bennett, bool? xiangling)
     {
         var clock = new FakeTimeProvider();
         var game = new ScriptGame(clock);
@@ -46,7 +46,9 @@ public class ElementPartyFlowTests
         game.BurstReadiness["香菱"] = xiangling;
         using var execution = new CombatFlowExecution(LoadProgram("火"), game, clock);
         await RunPass(execution);
-        Assert.DoesNotContain(game.Inputs, command => command.Method == Method.Burst);
+        // 两个角色不能同时前台取证；第二个Q未就绪不能提交整段完成。
+        Assert.Equal(bennett == true ? 1 : 0, game.Inputs.Count(command => command.Method == Method.Burst));
+        Assert.DoesNotContain(game.Inputs, command => command.Name == "香菱" && command.Method == Method.Burst);
         Assert.Null(execution.Context.Find("本次双火完成"));
         Assert.Contains(game.Inputs, command => command.Name == "班尼特" && command.Method == Method.Attack && command.Args![0] == "0.6");
     }
@@ -69,7 +71,9 @@ public class ElementPartyFlowTests
         var neuvillette = game.Inputs.Where(command => command.Name == "那维莱特").ToArray();
         Assert.Equal(skills, neuvillette.Count(command => command.Method == Method.Skill));
         Assert.Equal(bursts, neuvillette.Count(command => command.Method == Method.Burst));
-        Assert.Equal(ready == true ? Method.Burst : Method.Skill, neuvillette[0].Method);
+        Assert.Equal(Method.Attack, neuvillette[0].Method);
+        Assert.Equal(ready == true ? Method.Burst : Method.Skill,
+            neuvillette.First(command => command.Method == Method.Burst || command.Method == Method.Skill).Method);
         Assert.DoesNotContain(game.Inputs, command => command.Name == "琴" && command.Method == Method.Skill);
     }
 

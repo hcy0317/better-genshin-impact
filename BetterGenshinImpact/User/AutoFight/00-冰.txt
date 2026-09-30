@@ -5,11 +5,13 @@ strategy(loop=battle)
 timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
-call(心海治疗,if=low-hp(珊瑚宫心海) || low-hp(神里绫华) || low-hp(芙宁娜))
 芙宁娜 e(fast,record=沙龙,maintain=沙龙,before=3), q(if=q-ready(芙宁娜))
+call(心海治疗,if=low-hp())
 call(水母续期,if=record-active(水母) && record-remaining(水母)<6 && q-ready(珊瑚宫心海))
 珊瑚宫心海 e(fast,record=水母,maintain=水母,before=3)
 call(绫华自充,if=q-energy-low(神里绫华) && !q-cd(神里绫华) && e-ready(神里绫华))
+// 正常冲刺取得场上证据，再选Q/普通短轴；不依赖后台圆环。
+神里绫华 dash(0.2), wait(0.15)
 branch(if=q-ready(神里绫华),then=绫华爆发,else=普通短轴,unknown=普通短轴)
 神里绫华 check
 
@@ -37,5 +39,5 @@ segment(普通短轴,define) {
     神里绫华 attack(0.5,keep=护盾)
 }
 segment(绫华爆发,define,atomic,timeout=8,onfail=普通短轴,requires=record-active(护盾),record=本次霜灭完成) {
-    神里绫华 dash(0.2), wait(0.15), q(required,keep=护盾,record=霜灭), attack(1,keep=护盾)
+    神里绫华 q(required,keep=护盾,record=霜灭), attack(1,keep=护盾)
 }

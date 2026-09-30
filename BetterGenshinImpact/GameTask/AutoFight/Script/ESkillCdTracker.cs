@@ -139,7 +139,7 @@ public static class ESkillCdTracker
     /// <returns>实际记录的值（<= 0 表示未记录）</returns>
     public static double Record(string characterName, double cdSeconds)
     {
-        if (string.IsNullOrEmpty(characterName) || cdSeconds <= 0) return 0;
+        if (string.IsNullOrEmpty(characterName) || !double.IsFinite(cdSeconds) || cdSeconds <= 0) return 0;
         EReadyAt[characterName] = DateTime.UtcNow.AddSeconds(cdSeconds);
         return cdSeconds;
     }
@@ -150,6 +150,7 @@ public static class ESkillCdTracker
         DateTime confirmedAtUtc)
     {
         if (string.IsNullOrEmpty(characterName) ||
+            !double.IsFinite(cooldownSeconds) ||
             cooldownSeconds <= 0 ||
             confirmedAtUtc == default)
         {

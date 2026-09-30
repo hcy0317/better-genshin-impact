@@ -257,7 +257,11 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         EnemyIndicatorDirection Direction,
         EnemySeekVisual? Visual = null,
         int SignalCount = 0,
-        SeekCueKind? Cue = null);
+        SeekCueKind? Cue = null)
+    {
+        // 同帧存在/血量进展证据，不占用空间目标通道。
+        public EnemySeekVisual? FixedTopHealth { get; init; }
+    }
 
     internal enum SeekCueKind
     {
@@ -848,13 +852,22 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             reason = "invalid-image-size";
             if (imageWidth <= 0 || imageHeight <= 0) return false;
             reason = observation.TargetAbsenceReason ?? "no-published-visual";
+            if (observation.Visual == null && observation.FixedTopHealth is { } fixedHealth)
+            {
+                reason = "fixed-health-without-spatial-target";
+                decision = new(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
+                    fixedHealth, 1, SeekCueKind.FixedTopHealth) { FixedTopHealth = fixedHealth };
+                return true;
+            }
             if (observation.Visual is not { } visual) return false;
 
             if (observation.HasNormalHealthBar)
             {
                 reason = "health-bar";
                 decision = new EnemySeekDecision(
-                    AutoFightSeekAction.ApproachVisibleEnemy,
+                    ShouldApproachVisibleEnemy(visual, imageWidth, imageHeight)
+                        ? AutoFightSeekAction.ApproachVisibleEnemy
+                        : AutoFightSeekAction.KeepFighting,
                     EnemyIndicatorDirection.None,
                     visual,
                     SignalCount: 1,
@@ -1285,30 +1298,22 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             bool fixedTopHealthAdvanceCompleted = false,
             bool fixedTopHealthExhausted = false)
         {
-            // 顶部固定精英血条是整场唯一可靠的目标状态；同一帧可能混有技能栏、伤害特效等
-            // 短红条，必须先于普通悬浮血条选择，否则专用接近路线永远拿不到控制权。
+            // 固定血条提供存在/进展证据，不能遮住同帧的空间目标。
             var fixedTopHealthBar = visuals
                 .Where(visual => IsHealthBar(visual, imageHeight))
                 .Where(visual => IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight))
                 .OrderBy(visual => Math.Abs(visual.CenterX - imageWidth / 2))
                 .ThenByDescending(visual => visual.Width)
                 .FirstOrDefault();
-            if (fixedTopHealthBar != default || fixedTopHealthTracked)
-            {
-                if (fixedTopHealthExhausted)
-                {
-                    return new EnemySeekDecision(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None);
-                }
-                return new EnemySeekDecision(
-                    fixedTopHealthAdvanceCompleted
-                        ? AutoFightSeekAction.KeepFighting
-                        : AutoFightSeekAction.ApproachFixedTopHealthTarget,
-                    EnemyIndicatorDirection.None,
-                    fixedTopHealthBar == default ? null : fixedTopHealthBar,
-                    1,
-                    SeekCueKind.FixedTopHealth);
-            }
-
+            EnemySeekDecision FixedDecision() => new EnemySeekDecision(
+                fixedTopHealthExhausted ? AutoFightSeekAction.Scan : fixedTopHealthAdvanceCompleted
+                    ? AutoFightSeekAction.KeepFighting : AutoFightSeekAction.ApproachFixedTopHealthTarget,
+                EnemyIndicatorDirection.None, fixedTopHealthBar == default ? null : fixedTopHealthBar,
+                1, SeekCueKind.FixedTopHealth)
+            { FixedTopHealth = fixedTopHealthBar == default ? null : fixedTopHealthBar };
+            // 兼容旧入口已取得的路线锁；被动/ClosedLoop入口不持此锁，空间信息照常发布。
+            if (indicatorRouteLocked && (fixedTopHealthBar != default || fixedTopHealthTracked))
+                return FixedDecision();
             var floatingHealthBars = visuals
                 .Where(visual => IsHealthBar(visual, imageHeight))
                 .Where(visual => !IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight))
@@ -1320,7 +1325,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var floatingHealthBar = floatingHealthBars.FirstOrDefault();
             if (floatingHealthBar != default)
             {
-                return ShouldApproachVisibleEnemy(floatingHealthBar, imageWidth, imageHeight)
+                var decision = ShouldApproachVisibleEnemy(floatingHealthBar, imageWidth, imageHeight)
                     ? new EnemySeekDecision(
                         AutoFightSeekAction.ApproachVisibleEnemy,
                         GetVisibleEnemyDirection(floatingHealthBar, imageWidth),
@@ -1333,13 +1338,21 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         floatingHealthBar,
                         floatingHealthBars.Count,
                         SeekCueKind.HealthBar);
+                return decision with { FixedTopHealth = fixedTopHealthBar == default ? null : fixedTopHealthBar };
             }
 
-            return SelectDirectionIndicatorDecision(
+            var indicator = SelectDirectionIndicatorDecision(
                 visuals,
                 imageWidth,
                 imageHeight,
                 indicatorRouteLocked);
+            if (indicator.Cue == SeekCueKind.DirectionIndicator)
+                return indicator with { FixedTopHealth = fixedTopHealthBar == default ? null : fixedTopHealthBar };
+            if (fixedTopHealthBar != default || fixedTopHealthTracked)
+            {
+                return FixedDecision();
+            }
+            return indicator;
         }
 
         private static EnemySeekDecision SelectDirectionIndicatorDecision(
@@ -1463,12 +1476,14 @@ namespace BetterGenshinImpact.GameTask.AutoFight
 
         private static bool IsDirectionIndicatorFootprint(EnemySeekVisual visual, int imageWidth, int imageHeight)
         {
+            if (imageWidth <= 0 || imageHeight <= 0 || visual.Width <= 0 || visual.Height <= 0) return false;
+            var scale = Math.Min(1d, imageWidth / 1920d);
             // 实拍箭头的红色轮廓约 30x24~36x31。现场误报集中在 15x15、17x17、
             // 18x21 等小红块；短边、长边和面积必须同时达到真实箭头尺度。
-            if (visual.Width is > 46 || visual.Height is > 46
-                || Math.Min(visual.Width, visual.Height) < 18
-                || Math.Max(visual.Width, visual.Height) < 22
-                || visual.Area < 160)
+            if (visual.Width > Math.Ceiling(46 * scale) || visual.Height > Math.Ceiling(46 * scale)
+                || Math.Min(visual.Width, visual.Height) < Math.Floor(18 * scale)
+                || Math.Max(visual.Width, visual.Height) < Math.Floor(22 * scale)
+                || visual.Area < 160 * scale * scale)
             {
                 return false;
             }
@@ -2532,13 +2547,13 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 using var resized = new Mat();
                 using var score = new Mat();
                 Cv2.Resize(
-                    candidateMask,
+                    template.Mask,
                     resized,
-                    template.Mask.Size(),
+                    candidateMask.Size(),
                     interpolation: InterpolationFlags.Nearest);
                 Cv2.MatchTemplate(
+                    candidateMask,
                     resized,
-                    template.Mask,
                     score,
                     TemplateMatchModes.CCoeffNormed);
                 var currentScore = score.At<float>(0, 0);

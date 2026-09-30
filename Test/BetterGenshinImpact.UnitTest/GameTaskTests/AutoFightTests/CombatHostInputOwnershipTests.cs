@@ -62,7 +62,7 @@ public class CombatHostInputOwnershipTests
         public double ReadSkillCooldown(NativeCombatActor actor, ImageRegion frame) => throw new NotSupportedException();
         public bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown) => throw new NotSupportedException();
         public BurstObservation ReadBurst(ImageRegion frame, bool active) => throw new NotSupportedException();
-        public bool ReadLowHp(ImageRegion frame) => throw new NotSupportedException();
+        public bool? ReadLowHp(ImageRegion frame) => throw new NotSupportedException();
         public HashSet<int> ReadSideBurstReady(ImageRegion frame) => throw new NotSupportedException();
         public bool TryGetKnownSkillCooldown(string actor, out double cooldown) => throw new NotSupportedException();
         public void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc) => throw new NotSupportedException();

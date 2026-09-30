@@ -500,11 +500,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         internal ICombatHostInputDevice? ControlDevice => io.ControlDevice;
         internal TimeProvider ControlClock => io.Clock;
         internal ValueTask ControlDelayAsync(int milliseconds, CancellationToken ct) => new(io.DelayAsync(milliseconds, ct));
-        internal bool ReleasePhysicalInputForControl() => _input?.TryReleaseInput(() =>
+        internal bool ReleasePhysicalInputForControl() => _input == null || _input.TryReleaseInput(() =>
         {
             io.ReleaseInput();
             _atomicObservationId = null;
-        }) == true;
+        });
         internal (CaptureFrameStamp Source, CombatControlObservation Control) ObserveControlFrame()
         {
             ClearCapture();
@@ -563,7 +563,6 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private readonly DiagnosticEvidenceScope? _evidence = DiagnosticEvidenceScope.Current;
         private readonly HashSet<Guid> _evidenceAttempts = new();
         private readonly Dictionary<(string Function, string Actor), object?> _observations = new();
-        private HashSet<int>? _sideBurstReady;
         private CombatSkillAttempts? _attempts;
         private CombatInputCoordinator.Session? _input;
         private bool _disposed;
@@ -898,7 +897,6 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             var frame = _capture;
             _capture = null;
             _observations.Clear();
-            _sideBurstReady = null;
             _preparedCapture = false;
             return frame;
         }
@@ -1253,6 +1251,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     if (command.Method == Method.Skill)
                     {
                         var cd = io.ReadSkillCooldown(avatar, capture);
+                        if (!double.IsFinite(cd) || cd < 0) return Sample(action, capture, null, null);
                         var ready = io.IsSkillReady(avatar, capture, cd);
                         return Sample(action, capture, cd > 0 ? true : ready ? false : null, ready);
                     }
@@ -1339,6 +1338,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 if (active)
                 {
                     var cd = io.ReadSkillCooldown(avatar, _capture);
+                    if (!double.IsFinite(cd) || cd < 0) return null;
                     _observations[("e-cd", target)] = cd > 0 ? cd : null;
                     var ready = io.IsSkillReady(avatar, _capture, cd);
                     _observations[("e-ready", target)] = ready;
@@ -1350,13 +1350,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             }
             if (!active)
             {
-                if (function != "q-ready") return null;
-                if (_sideBurstReady == null)
-                {
-                    // 旧侧栏算法会原地调整像素，必须隔离，不能污染本步的其他观测。
-                    _sideBurstReady = io.ReadSideBurstReady(_capture);
-                }
-                return _sideBurstReady.Contains(avatar.Index) ? true : null;
+                // 后台圆环不能证明Q就绪；显式动作仍可在原期限内选角后读取场上分类。
+                return null;
             }
             if (function == "low-hp") return io.ReadLowHp(_capture);
             if (function is "q-ready" or "q-cd" or "q-energy-low")
@@ -1499,6 +1494,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     pendingObservation = $"actorActive={active} source={capture.FrameStamp.SessionId}/{capture.FrameStamp.Sequence}";
                     if (!active) return Sample(action, capture, null, null);
                     var observedCd = command.Method == Method.Skill ? io.ReadSkillCooldown(avatar, capture) : 0;
+                    if (!double.IsFinite(observedCd) || observedCd < 0) return Sample(action, capture, null, null);
                     pendingCd = observedCd;
                     var skillReady = command.Method == Method.Skill && io.IsSkillReady(avatar, capture, observedCd);
                     var burst = command.Method == Method.Burst ? io.ReadBurst(capture, active) : default;
@@ -1893,7 +1889,6 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _capture?.Dispose();
             _capture = null;
             _observations.Clear();
-            _sideBurstReady = null;
             _preparedCapture = false;
         }
         private ImageRegion? CaptureFreshFrame()

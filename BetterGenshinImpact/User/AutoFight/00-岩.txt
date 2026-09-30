@@ -6,10 +6,11 @@ strategy(loop=battle)
 timing(离线护盾,cd=12,duration=20)
 call(开场,once=battle,required)
 钟离 e(hold,wait,timing=离线护盾,record=护盾,maintain=护盾,watch=护盾,watch-mode=call,watch-target=补盾,before=4,required)
-班尼特 q(if=q-ready(班尼特))
+// 正常短打上场后再观察Q；E留给香菱已经确认的供能需求，不提前消耗。
+班尼特 attack(0.2), q(if=q-ready(班尼特))
 香菱 e(fast), q(recharge,from=segment:供能)
-娜维娅 q(if=q-ready(娜维娅))
 call(一枪短打,if=e-ready(娜维娅))
+娜维娅 q(if=q-ready(娜维娅))
 娜维娅 attack(0.4,keep=护盾), check
 
 segment(开场,define,record=开场完成) {

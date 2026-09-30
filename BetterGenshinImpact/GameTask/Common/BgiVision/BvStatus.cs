@@ -353,15 +353,38 @@ public static partial class Bv
     /// <param name="captureRa"></param>
     /// <returns></returns>
     public static bool CurrentAvatarIsLowHp(ImageRegion captureRa)
-        => CurrentAvatarIsLowHp(captureRa, TaskContext.Instance().SystemInfo.AssetScale);
+        => ObserveCurrentAvatarLowHp(captureRa) == true;
 
     internal static bool CurrentAvatarIsLowHp(ImageRegion captureRa, double assetScale)
-    {
-        // 获取 (808, 1010) 位置的像素颜色
-        var pixelColor = captureRa.SrcMat.At<Vec3b>((int)(1010 * assetScale), (int)(808 * assetScale));
+        => ObserveCurrentAvatarLowHp(captureRa, assetScale) == true;
 
-        // 判断颜色是否是 (255, 90, 90)
-        return pixelColor is { Item2: 255, Item1: 90, Item0: 90 };
+    internal static bool? ObserveCurrentAvatarLowHp(ImageRegion captureRa)
+        => ObserveCurrentAvatarLowHp(captureRa, Math.Min(1, captureRa.Width / 1920d));
+
+    internal static bool? ObserveCurrentAvatarLowHp(ImageRegion captureRa, double assetScale)
+    {
+        var mat = captureRa.SrcMat;
+        if (!double.IsFinite(assetScale) || assetScale <= 0 || mat.Empty() || mat.Type() != MatType.CV_8UC3) return null;
+        var x = (int)(808 * assetScale);
+        var y = (int)(1010 * assetScale);
+        var rx = Math.Max(1, (int)Math.Round(3 * assetScale));
+        var ry = Math.Max(1, (int)Math.Round(2 * assetScale));
+        if (x - rx < 0 || y - ry < 0 || x + rx >= mat.Width || y + ry >= mat.Height) return null;
+        var red = 0;
+        var green = 0;
+        for (var row = y - ry; row <= y + ry; row++)
+        for (var column = x - rx; column <= x + rx; column++)
+        {
+            var p = mat.At<Vec3b>(row, column);
+            if (p.Item2 >= 180 && p.Item2 > p.Item1 * 1.5 && p.Item2 > p.Item0 * 1.5) red++;
+            else if (p.Item1 >= 130 && p.Item1 > p.Item2 * 1.15 && p.Item1 > p.Item0 * 1.15) green++;
+        }
+        // 只解释有颜色证据的生命条；空白/遮挡不是健康，混色边界也不强行二选一。
+        var pixels = (rx * 2 + 1) * (ry * 2 + 1);
+        if (red + green < (pixels + 1) / 2) return null;
+        if (red >= (red + green) * .8) return true;
+        if (green >= (red + green) * .8) return false;
+        return null;
     }
 
     /// <summary>
