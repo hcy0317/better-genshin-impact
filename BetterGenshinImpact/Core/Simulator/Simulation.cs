@@ -38,22 +38,30 @@ public class Simulation
                 TaskControl.Logger.LogDebug($"解除{key}的按下状态.");
                 DispatchWithPostMessageFallback(
                     () => SendInput.Keyboard.KeyUp(key),
-                    () => TaskContext.Instance().PostMessageSimulator.KeyUpBackground(key));
+                    () => ReleaseFallback().KeyUpBackground(key));
             }
         }
 
         ReleaseMouseButtonIfDown(
             User32.VK.VK_LBUTTON,
             () => SendInput.Mouse.LeftButtonUp(),
-            () => TaskContext.Instance().PostMessageSimulator.LeftButtonUp());
+            () => ReleaseFallback().LeftButtonUp());
         ReleaseMouseButtonIfDown(
             User32.VK.VK_RBUTTON,
             () => SendInput.Mouse.RightButtonUp(),
-            () => TaskContext.Instance().PostMessageSimulator.RightButtonUp());
+            () => ReleaseFallback().RightButtonUp());
         ReleaseMouseButtonIfDown(
             User32.VK.VK_MBUTTON,
             () => SendInput.Mouse.MiddleButtonUp(),
-            () => TaskContext.Instance().PostMessageSimulator.MiddleButtonUp());
+            () => ReleaseFallback().MiddleButtonUp());
+    }
+
+    private static PostMessageSimulator ReleaseFallback()
+    {
+        var runtime = TaskContext.Instance().Runtime;
+        if (runtime?.Kind != GameTask.Runtime.GameRuntimeKind.Win32Window || !runtime.Window.IsAlive)
+            throw new InvalidOperationException("松键后台回退需要有效的原生游戏窗口");
+        return new PostMessageSimulator(runtime.Window.Handle);
     }
 
     private static void ReleaseMouseButtonIfDown(

@@ -1,5 +1,5 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition.ONNX;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
@@ -361,7 +361,7 @@ public class AutoFightTask : ISoloTask
             }
             finally
             {
-                Simulation.ReleaseAllKey();
+                InputHub.ReleaseAll();
                 FightStatusFlag = false;
             }
         }, cts2.Token);
@@ -485,7 +485,7 @@ public class AutoFightTask : ISoloTask
 
                 for (int attempt = 0; attempt < 6; attempt++)
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+                    InputHub.Foreground.SimulateAction(GIActions.OpenPartySetupScreen);
                     var enterGameAppear = await NewRetry.WaitForElementAppear(
                         ElementRecognition.Get("PartyBtnChooseView"),
                         () => { },
@@ -583,7 +583,7 @@ public class AutoFightTask : ISoloTask
             
             if (picker != null)
             {
-                Simulation.ReleaseAllKey();
+                InputHub.ReleaseAll();
 
                 if (picker.Name == "枫原万叶")
                 {
@@ -720,7 +720,7 @@ public class AutoFightTask : ISoloTask
             var before = ObservePartySetupBar(beforeCapture, Interlocked.Increment(ref finishDetectConfig.FinishFrameSequence));
             finishOperation.Check();
             // 最终方案确认战斗结束
-            Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+            InputHub.Foreground.SimulateAction(GIActions.OpenPartySetupScreen);
             var probe = new PartySetupFinishDetector(before, DateTimeOffset.UtcNow);
             if (finishDetectConfig.PaimonEndCheckEnabled)
             {
@@ -772,10 +772,10 @@ public class AutoFightTask : ISoloTask
                 {
                     finishDetectConfig.EndConfirmed = true;
                     finishOperation.Check();
-                    Simulation.SendInput.SimulateAction(GIActions.Drop);
+                    BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.Drop);
                     Logger.LogInformation("检测到编队加载进度条，识别到战斗结束");
                     // 取消正在进行的换队
-                    Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+                    BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.OpenPartySetupScreen);
                     return true;
                 }
 
@@ -786,7 +786,7 @@ public class AutoFightTask : ISoloTask
             }
 
             finishOperation.Check();
-            Simulation.SendInput.SimulateAction(GIActions.Drop);
+            BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.Drop);
             Logger.LogInformation("未确认编队加载进度条，继续战斗：{Reason}，check={Check}", probe.Reason, finishOperation.Id);
 
             _lastFightFlagTime = DateTime.Now;
@@ -894,7 +894,7 @@ public class AutoFightTask : ISoloTask
                     : 0;
             if (pulse != 0)
             {
-                Simulation.SendInput.Mouse.MoveMouseBy(pulse, 0);
+                BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.MoveMouseBy(pulse, 0);
                 cameraPulse = pulse;
                 outcome = "camera-input-returned";
             }

@@ -35,7 +35,7 @@ internal static class UiEscapeInput
     {
         using var capture = new InputDispatchCapture(admission);
         input();
-        if (capture.NativeCalls == 0 || capture.Requested <= 0 || capture.Submitted != capture.Requested || capture.Uncertain)
+        if (!capture.HasCompleteReceipt)
             throw new InvalidOperationException("ESC未取得完整原生输入回执");
     }
 }

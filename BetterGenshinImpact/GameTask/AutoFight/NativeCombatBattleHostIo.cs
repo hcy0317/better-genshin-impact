@@ -330,6 +330,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             result = actual with
             {
                 NativeRequested = nativeCapture.Requested, NativeSubmitted = nativeCapture.Submitted,
+                TransportRequested = nativeCapture.TransportCalls, TransportAcknowledged = nativeCapture.TransportAcknowledged,
                 ObservableAfterTimestamp = Clock.GetTimestamp(),
                 Reason = actual.Reason ?? result.Reason
             };
@@ -454,11 +455,11 @@ internal sealed class NativeCombatHostInputDevice : ICombatHostInputDevice
     public ILogger Logger => TaskControl.Logger;
     public void PrepareInput() => TaskControl.CheckAndSleep(0);
     public InputDispatchCapture BeginNativeCapture(Action beforeFirstNative) => new(beforeFirstNative);
-    public void MoveCamera(int x, int y) => Simulation.SendInput.Mouse.MoveMouseBy(x, y);
-    public void MoveForward(bool down) => Simulation.SendInput.SimulateAction(GIActions.MoveForward,
+    public void MoveCamera(int x, int y) => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.MoveMouseBy(x, y);
+    public void MoveForward(bool down) => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.MoveForward,
         down ? KeyType.KeyDown : KeyType.KeyUp);
-    public void PressDrop() => Simulation.SendInput.SimulateAction(GIActions.Drop);
-    public void PressParty() => Simulation.SendInput.SimulateActionPulse(GIActions.OpenPartySetupScreen);
-    public void PressBreakout() => Simulation.SendInput.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_SPACE);
+    public void PressDrop() => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.Drop);
+    public void PressParty() => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.OpenPartySetupScreen);
+    public void PressBreakout() => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_SPACE);
     public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => new(Task.Delay(milliseconds, ct));
 }

@@ -1,5 +1,5 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Config;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
@@ -300,9 +300,9 @@ public partial class PathExecutor
             }, () =>
             {
                 _pathingMacro.Release();
-                Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_W);
-                Simulation.SendInput.Mouse.RightButtonUp();
-                Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
+                BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(User32.VK.VK_W);
+                BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.RightButtonUp();
+                BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
             }, ct);
             if (endedEarly)
             {
@@ -677,9 +677,9 @@ public partial class PathExecutor
                 if (avatar.TrySwitch())
                 {
                     //1命白术能两次
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
                     await Delay(800, ct);
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
                     await Delay(800, ct);
                     await SwitchAvatar(PartyConfig.MainAvatarIndex);
                     await Delay(4000, ct);
@@ -692,7 +692,7 @@ public partial class PathExecutor
             {
                 if (avatar.TrySwitch())
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
                     await Delay(11000, ct);
                     await SwitchAvatar(PartyConfig.MainAvatarIndex);
                     return true;
@@ -704,10 +704,10 @@ public partial class PathExecutor
             {
                 if (avatar.TrySwitch())
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill);
+                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
                     await Delay(500, ct);
                     //尝试Q全队回血
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalBurst);
+                    InputHub.Foreground.SimulateAction(GIActions.ElementalBurst);
                     //单人血只给行走位加血
                     await SwitchAvatar(PartyConfig.MainAvatarIndex);
                     await Delay(5000, ct);
@@ -1368,9 +1368,9 @@ public partial class PathExecutor
         // 钟离往身后放柱子
         if (avatar.Name == "钟离")
         {
-            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+            InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
             await Delay(50, ct);
-            Simulation.SendInput.SimulateAction(GIActions.MoveBackward);
+            InputHub.Foreground.SimulateAction(GIActions.MoveBackward);
             await Delay(200, ct);
         }
 
@@ -1379,7 +1379,7 @@ public partial class PathExecutor
         // 钟离往身后放柱子 后继续走路
         if (avatar.Name == "钟离")
         {
-            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+            InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
         }
     }
 
@@ -1446,8 +1446,7 @@ public partial class PathExecutor
                 break;
             }
 
-            stationary = previousPosition is { } old && lastPulse.Requested > 0 &&
-                lastPulse.Requested == lastPulse.Submitted && !lastPulse.Uncertain &&
+            stationary = previousPosition is { } old && lastPulse.HasCompleteReceipt &&
                 Math.Abs(position.X - old.X) + Math.Abs(position.Y - old.Y) < .1 ? stationary + 1 : 0;
             previous = observation.Stamp;
             previousPosition = position;
@@ -1544,7 +1543,7 @@ public partial class PathExecutor
         if (waypoint.Action == ActionEnum.UpDownGrabLeaf.Code)
         {
             _pathingMacro?.Release();
-            Simulation.SendInput.Mouse.MiddleButtonClick();
+            InputHub.Foreground.Mouse.MiddleButtonClick();
             await Delay(300, ct);
             using var screen = CaptureToRectArea();
             var position = await GetPosition(screen, waypoint);
@@ -1762,7 +1761,7 @@ public partial class PathExecutor
                     Logger.LogInformation(@$"地图中心点识别失败！");
                 }
                
-                Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
+                InputHub.Foreground.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
                 //Bv.IsInMainUi(imageRegion);
                 await WaitForCloseMap(10,200);
                 DateTime end = DateTime.Now;
@@ -1826,7 +1825,7 @@ public partial class PathExecutor
             }
 
             Logger.LogInformation("检测到其他界面，使用ESC关闭界面");
-            Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
+            InputHub.Foreground.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
             await Delay(1000, ct); // 等待界面关闭
         }
 
@@ -1858,7 +1857,8 @@ public partial class PathExecutor
                     ClosePopupPagedEnabled = true,
                     ClickChatOption = "优先选择最后一个选项",
                 });
-                _autoSkipTrigger.Init();
+                // 这个实例由路径追踪自己驱动，不经过调度器，需要手动进入启用状态
+                _autoSkipTrigger.OnEnabled(null);
             }
 
             int noDisabledUiButtonTimes = 0;

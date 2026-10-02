@@ -55,6 +55,11 @@ internal readonly record struct CombatBattleHostInputResult(CombatBattleHostInpu
 {
     public int? NativeRequested { get; init; }
     public int? NativeSubmitted { get; init; }
+    public int TransportRequested { get; init; }
+    public int TransportAcknowledged { get; init; }
+    public bool HasCompleteReceipt => Status == CombatBattleHostInputStatus.Sent &&
+        ((NativeRequested is > 0 && NativeRequested == NativeSubmitted) ||
+         (TransportRequested > 0 && TransportRequested == TransportAcknowledged));
     public long? StartedTimestamp { get; init; }
     public long? ObservableAfterTimestamp { get; init; }
     public CombatInputPerformanceRecheck? PerformanceRecheck { get; init; }

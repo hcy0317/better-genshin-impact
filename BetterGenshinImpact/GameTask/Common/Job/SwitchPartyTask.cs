@@ -1,12 +1,11 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
-using BetterGenshinImpact.View.Drawable;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
@@ -183,9 +182,9 @@ public class SwitchPartyTask
         await Task.Delay(50, ct);
         GameCaptureRegion.GameRegion1080PPosClick(700, 125);
         await Task.Delay(50, ct);
-        Simulation.SendInput.Mouse.LeftButtonDown();
+        InputHub.Foreground.Mouse.LeftButtonDown();
         try { await Task.Delay(450, ct); }
-        finally { Simulation.SendInput.Mouse.LeftButtonUp(); }
+        finally { InputHub.Foreground.Mouse.LeftButtonUp(); }
         await Task.Delay(100, ct);
 
         RecognitionObject recognitionObject = new RecognitionObject
@@ -256,7 +255,7 @@ public class SwitchPartyTask
         }
         finally
         {
-            VisionContext.Instance().DrawContent.ClearAll();
+            TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll();
         }
 
         // 未找到

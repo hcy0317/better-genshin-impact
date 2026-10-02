@@ -1,9 +1,8 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoPick.Assets;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
-using Fischless.WindowsInput;
 using OpenCvSharp;
 using System;
 using System.Text.RegularExpressions;
@@ -230,7 +229,7 @@ public static partial class Bv
         return false;
     }
 
-    public static bool FindFAndPress(ImageRegion captureRa, IKeyboardSimulator keyboard, params string[] text)
+    public static bool FindFAndPress(ImageRegion captureRa, IKeyboardInput keyboard, params string[] text)
     {
         if (FindF(captureRa, text))
         {

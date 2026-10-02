@@ -2,7 +2,7 @@ using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Helpers;
-using BetterGenshinImpact.View.Drawable;
+using BetterGenshinImpact.Core.Mask;
 using Fischless.GameCapture;
 using Microsoft.Extensions.Time.Testing;
 using OpenCvSharp;
@@ -364,7 +364,7 @@ internal sealed class DomainTipNativeFixture : IDisposable
         Clock.Advance(TimeSpan.FromMilliseconds(1));
         var source = Producer.Next();
         var image = new ImageRegion(new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black), 0, 0,
-            drawContent: new DrawContent()) { FrameStamp = SourceOverride?.Invoke(source) ?? source };
+            drawingBoard: NullMaskWindowDrawingBoard.Instance) { FrameStamp = SourceOverride?.Invoke(source) ?? source };
         Frames.Add(image);
         try { AfterCapture?.Invoke(); return image; }
         catch { image.Dispose(); throw; }

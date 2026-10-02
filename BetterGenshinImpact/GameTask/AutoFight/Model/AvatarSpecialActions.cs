@@ -1,5 +1,6 @@
+using BetterGenshinImpact.Core.Mask;
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Config;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
@@ -177,20 +178,20 @@ public static class AvatarSpecialAction
             {
                 using (AvatarRecognition.BeginExclusiveOperation())
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
+                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
                     try
                     {
                         Sleep(300, avatar.Ct);
                         for (int j = 0; j < 10; j++)
                         {
-                            Simulation.SendInput.Mouse.MoveMouseBy(1000, 0);
+                            InputHub.Foreground.Mouse.MoveMouseBy(1000, 0);
                             Sleep(50, avatar.Ct);
                         }
                         Sleep(300, avatar.Ct);
                     }
                     finally
                     {
-                        Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
+                        InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
                     }
                     return true;
                 }
@@ -198,9 +199,9 @@ public static class AvatarSpecialAction
             // 坎蒂丝长按 E：固定等待 3 秒
             case "坎蒂丝":
             {
-                Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
+                InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
                 try { Sleep(3000, avatar.Ct); }
-                finally { Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp); }
+                finally { InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp); }
                 return true;
             }
             default:
@@ -221,7 +222,7 @@ public static class AvatarSpecialAction
                 using (AvatarRecognition.BeginExclusiveOperation())
                 {
                     var dpi = TaskContext.Instance().DpiScale;
-                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
+                    InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
                     try
                     {
                         while (ms >= 0)
@@ -231,14 +232,14 @@ public static class AvatarSpecialAction
                                 return true;
                             }
 
-                            Simulation.SendInput.Mouse.MoveMouseBy((int)(1000 * dpi), 0);
+                            InputHub.Foreground.Mouse.MoveMouseBy((int)(1000 * dpi), 0);
                             ms -= 50;
                             Sleep(50);
                         }
                     }
                     finally
                     {
-                        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
+                        InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
                     }
                 }
                 return true;
@@ -249,7 +250,7 @@ public static class AvatarSpecialAction
                 using (AvatarRecognition.BeginExclusiveOperation())
                 {
                     var dpi = TaskContext.Instance().DpiScale;
-                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
+                    InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
                     try
                     {
                         int tick = -4;
@@ -293,7 +294,7 @@ public static class AvatarSpecialAction
                                 rateY = 0;
                             }
 
-                            Simulation.SendInput.Mouse.MoveMouseBy((int)(rateX * 50 * dpi), (int)(rateY * 50 * dpi));
+                            InputHub.Foreground.Mouse.MoveMouseBy((int)(rateX * 50 * dpi), (int)(rateY * 50 * dpi));
                             tick = (tick + 1) % 100;
                             Sleep(25);
                             ms -= 25;
@@ -303,7 +304,7 @@ public static class AvatarSpecialAction
                     }
                     finally
                     {
-                        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
+                        InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
                     }
                 }
             }
@@ -318,12 +319,14 @@ public static class AvatarSpecialAction
                     var drawResults = visConfig.DrawRecognitionResults;
                     var lockLostWaitTime = visConfig.LockLostWaitTime;
 
-                    Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
+                    InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
 
                     DateTime? lastSeenTargetTime = null;
                     var startTime = DateTime.UtcNow;
                     var maxDurationMs = ms;
                     int overheatCount = 0;  // 红温连续命中计数
+                    // 取自截图区域，收尾清理时截图已释放，所以单独保存
+                    IMaskWindowDrawingBoard drawingBoard = NullMaskWindowDrawingBoard.Instance;
 
                     try
                     {
@@ -331,6 +334,7 @@ public static class AvatarSpecialAction
                         {
                             using (var capture = CaptureToRectArea())
                             {
+                                drawingBoard = capture.DrawingBoard;
                                 // 距重击开始超过 3 秒后开始检测红温，连续命中 3 次（1/3 → 2/3 → 3/3）才提前退出
                                 if ((DateTime.UtcNow - startTime).TotalSeconds >= 3)
                                 {
@@ -357,7 +361,7 @@ public static class AvatarSpecialAction
                                 var bars = AvatarRecognition.FindBloodBars(capture);
                                 var valid = bars.Where(b => b.x > (int)(200 * AssetScale)).ToList();
 
-                                var drawList = new System.Collections.Generic.List<View.Drawable.RectDrawable>();
+                                var drawList = new System.Collections.Generic.List<MaskWindowDrawingShape>();
 
                                 bool hasLegendaryBar = valid.Any(b => AvatarRecognition.IsLegendaryBar(b.x, b.y));
 
@@ -368,7 +372,7 @@ public static class AvatarSpecialAction
                                     //Logger.LogInformation("追踪血条: 裁剪坐标({X},{Y}) 大小({W}×{H})", nearest.x, nearest.y, nearest.width, nearest.height);
                                     var offsetX = (nearest.x + nearest.width / 2) - preAimX;
                                     var offsetY = (nearest.y + nearest.height / 2) - preAimY;
-                                    Simulation.SendInput.Mouse.MoveMouseBy((int)(offsetX * 0.35 * dpi), (int)(offsetY * 0.25 * dpi));
+                                    InputHub.Foreground.Mouse.MoveMouseBy((int)(offsetX * 0.35 * dpi), (int)(offsetY * 0.25 * dpi));
 
                                     if (drawResults)
                                     {
@@ -376,9 +380,9 @@ public static class AvatarSpecialAction
                                         {
                                             var rect = new OpenCvSharp.Rect(b.x, b.y, b.width, b.height);
                                             if (b.x == nearest.x && b.y == nearest.y && b.width == nearest.width && b.height == nearest.height)
-                                                drawList.Add(capture.ToRectDrawable(rect, "target", _targetPen));
+                                                drawList.Add(capture.ToMaskWindowDrawingRect(rect, _targetPen));
                                             else
-                                                drawList.Add(capture.ToRectDrawable(rect, "blood"));
+                                                drawList.Add(capture.ToMaskWindowDrawingRect(rect));
                                         }
                                     }
                                 }
@@ -391,12 +395,11 @@ public static class AvatarSpecialAction
                                         lastSeenTargetTime = DateTime.UtcNow;
                                         var offsetX = dcx - preAimX;
                                         var offsetY = dcy - preAimY;
-                                        Simulation.SendInput.Mouse.MoveMouseBy((int)(offsetX * 0.35 * dpi), (int)(offsetY * 0.25 * dpi));
+                                        InputHub.Foreground.Mouse.MoveMouseBy((int)(offsetX * 0.35 * dpi), (int)(offsetY * 0.25 * dpi));
                                         if (drawResults)
                                         {
-                                            drawList.Add(capture.ToRectDrawable(
+                                            drawList.Add(capture.ToMaskWindowDrawingRect(
                                                 new OpenCvSharp.Rect(dx, dy, dw, dh),
-                                                "damage_target",
                                                 _targetPen));
                                         }
                                     }
@@ -407,18 +410,18 @@ public static class AvatarSpecialAction
                                         if (!hasLegendaryBar && (DateTime.UtcNow - (lastSeenTargetTime ?? startTime)).TotalSeconds >= 1.5)
                                         {
                                             Logger.LogInformation("桑多涅重击特化：超过1.5秒未找到目标，提前退出");
-                                            View.Drawable.VisionContext.Instance().DrawContent.PutOrRemoveRectList("SandroneBloodBars", drawList);
+                                            drawingBoard.Set("SandroneBloodBars", drawList);
                                             break;
                                         }
 
                                         if (!lastSeenTargetTime.HasValue || (DateTime.UtcNow - lastSeenTargetTime.Value).TotalSeconds >= lockLostWaitTime)
                                         {
-                                            Simulation.SendInput.Mouse.MoveMouseBy((int)(1000 * dpi), 0);
+                                            InputHub.Foreground.Mouse.MoveMouseBy((int)(1000 * dpi), 0);
                                         }
                                     }
                                 }
 
-                                View.Drawable.VisionContext.Instance().DrawContent.PutOrRemoveRectList("SandroneBloodBars", drawList);
+                                drawingBoard.Set("SandroneBloodBars", drawList);
                             }
 
                             Sleep(frameIntervalMs);
@@ -430,8 +433,8 @@ public static class AvatarSpecialAction
                     }
                     finally
                     {
-                        View.Drawable.VisionContext.Instance().DrawContent.RemoveRect("SandroneBloodBars");
-                        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
+                        drawingBoard.Clear("SandroneBloodBars");
+                        InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
                     }
                 }
 

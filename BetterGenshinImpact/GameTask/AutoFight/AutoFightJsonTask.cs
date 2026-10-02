@@ -1,5 +1,5 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition.ONNX;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
@@ -196,7 +196,7 @@ public class AutoFightJsonTask : ISoloTask
                 }
                 finally
                 {
-                    Simulation.ReleaseAllKey();
+                    InputHub.ReleaseAll();
                     AutoFightTask.FightStatusFlag = false;
                 }
             }, cts2.Token);
@@ -429,7 +429,7 @@ public class AutoFightJsonTask : ISoloTask
 
                 for (int attempt = 0; attempt < 6; attempt++)
                 {
-                    Simulation.SendInput.SimulateAction(GIActions.OpenPartySetupScreen);
+                    InputHub.Foreground.SimulateAction(GIActions.OpenPartySetupScreen);
                     var enterGameAppear = await NewRetry.WaitForElementAppear(
                         ElementRecognition.Get("PartyBtnChooseView"),
                         () => { },
@@ -518,7 +518,7 @@ public class AutoFightJsonTask : ISoloTask
 
             if (picker != null)
             {
-                Simulation.ReleaseAllKey();
+                InputHub.ReleaseAll();
 
                 if (picker.Name == "枫原万叶")
                 {

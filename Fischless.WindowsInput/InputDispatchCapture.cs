@@ -10,6 +10,7 @@ public sealed class InputDispatchCapture : IDisposable
     private readonly Action? _beforeFirstNative;
     private bool _disposed;
     private int _calls, _requested, _submitted, _uncertain;
+    private int _transportCalls, _transportAcknowledged;
 
     public InputDispatchCapture(Action? beforeFirstNative = null)
     {
@@ -22,6 +23,45 @@ public sealed class InputDispatchCapture : IDisposable
     public int Requested => Volatile.Read(ref _requested);
     public int Submitted => Volatile.Read(ref _submitted);
     public bool Uncertain => Volatile.Read(ref _uncertain) != 0;
+    public int TransportCalls => Volatile.Read(ref _transportCalls);
+    public int TransportAcknowledged => Volatile.Read(ref _transportAcknowledged);
+    public bool HasDispatch => NativeCalls > 0 || TransportCalls > 0;
+    public bool HasCompleteReceipt => HasDispatch && !Uncertain && Requested == Submitted &&
+        TransportCalls == TransportAcknowledged;
+    public static bool IsCapturing => Active.Value != null;
+
+    /// <summary>
+    /// Records a non-Win32 transport acknowledgement separately from native input counts.
+    /// The transport invokes admit immediately before posting and returns only after acknowledgement.
+    /// </summary>
+    public static void DispatchTransport(Action<Action> dispatchAndWait)
+    {
+        var capture = Active.Value;
+        var entered = false;
+        void Admit()
+        {
+            for (var item = capture; item != null; item = item._previous)
+            {
+                if (item._disposed) throw new ObjectDisposedException(nameof(InputDispatchCapture));
+                if (!item.HasDispatch) item._beforeFirstNative?.Invoke();
+            }
+            entered = true;
+            for (var item = capture; item != null; item = item._previous)
+                Interlocked.Increment(ref item._transportCalls);
+        }
+        try
+        {
+            dispatchAndWait(Admit);
+            if (!entered) throw new InvalidOperationException("Transport did not enter dispatch admission.");
+            for (var item = capture; item != null; item = item._previous)
+                Interlocked.Increment(ref item._transportAcknowledged);
+        }
+        catch
+        {
+            if (entered) capture?.MarkUncertain();
+            throw;
+        }
+    }
 
     internal static InputDispatchCapture? BeforeNative()
     {
@@ -29,7 +69,7 @@ public sealed class InputDispatchCapture : IDisposable
         for (var item = capture; item != null; item = item._previous)
         {
             if (item._disposed) throw new ObjectDisposedException(nameof(InputDispatchCapture));
-            if (item.NativeCalls == 0) item._beforeFirstNative?.Invoke();
+            if (!item.HasDispatch) item._beforeFirstNative?.Invoke();
         }
         return capture;
     }

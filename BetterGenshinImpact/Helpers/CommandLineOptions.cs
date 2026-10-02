@@ -11,6 +11,7 @@ namespace BetterGenshinImpact.Helpers;
 public class CommandLineOptions
 {
     public const string InstanceArgument = "--instance";
+    public const string InstanceNameArgument = "--instance-name";
     public const string RestartFromProcessIdArgument = "--restart-from-pid";
     public const string ChildSessionOneDragonArgument = "--child-session-one-dragon";
     public const string AutomationResultArgument = "--automation-result";
@@ -33,6 +34,11 @@ public class CommandLineOptions
     /// 是否通过命令行明确指定了只能作为客户端运行的实例类型。
     /// </summary>
     public bool HasExplicitInstanceType { get; }
+
+    /// <summary>
+    /// 实例名（--instance-name），只对网页版实例有意义，未校验。
+    /// </summary>
+    public string? InstanceName { get; }
 
     /// <summary>
     /// 应用重启时被替换的旧进程 ID。
@@ -82,7 +88,8 @@ public class CommandLineOptions
         string? automationResultPath = null,
         string? automationRunId = null,
         int automationTimeoutSeconds = 14_400,
-        string? artifactHostRequestPath = null)
+        string? artifactHostRequestPath = null,
+        string? instanceName = null)
     {
         Action = action;
         OneDragonConfigName = oneDragonConfigName;
@@ -94,6 +101,7 @@ public class CommandLineOptions
         AutomationRunId = automationRunId;
         AutomationTimeoutSeconds = automationTimeoutSeconds;
         ArtifactHostRequestPath = artifactHostRequestPath;
+        InstanceName = instanceName;
     }
 
     internal static CommandLineOptions Parse(string[] args)
@@ -102,6 +110,7 @@ public class CommandLineOptions
         var instanceType = BetterGiInstanceType.Primary;
         var hasExplicitInstanceType = false;
         int? restartFromProcessId = null;
+        string? instanceName = null;
         var commandArgs = new List<string>();
 
         for (var index = 0; index < launchArgs.Length; index++)
@@ -122,6 +131,15 @@ public class CommandLineOptions
                         instanceType = parsedType.Value;
                         hasExplicitInstanceType = true;
                     }
+                }
+                continue;
+            }
+
+            if (argument.Equals(InstanceNameArgument, StringComparison.OrdinalIgnoreCase))
+            {
+                if (TryReadNext(launchArgs, ref index, out var instanceNameValue))
+                {
+                    instanceName = instanceNameValue;
                 }
                 continue;
             }
@@ -217,7 +235,8 @@ public class CommandLineOptions
                 automationResultPath,
                 automationRunId,
                 automationTimeoutSeconds,
-                artifactHostRequestPath);
+                artifactHostRequestPath,
+                instanceName);
         }
     }
 

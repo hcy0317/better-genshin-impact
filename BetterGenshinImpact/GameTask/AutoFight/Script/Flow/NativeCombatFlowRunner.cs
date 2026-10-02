@@ -1838,8 +1838,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             else action.ClearUnsubmittedInput();
             ct.ThrowIfCancellationRequested();
             if (receipt.Status == CombatBattleHostInputStatus.NotSent) return CombatFlowResult.AwaitingObservation;
-            if (requireCompleteReceipt && (receipt.Status != CombatBattleHostInputStatus.Sent || receipt.NativeRequested is not > 0 ||
-                receipt.NativeRequested != receipt.NativeSubmitted))
+            if (requireCompleteReceipt && !receipt.HasCompleteReceipt)
                 TaskExecutionScope.StopUnconfirmedCombat("持键瞄准输入未取得完整回执，停止区间且禁止重放");
             if (receipt.Status == CombatBattleHostInputStatus.Unknown)
                 TaskExecutionScope.StopUnconfirmedCombat("原始输入结果未知，禁止重放未完成指令");

@@ -4,7 +4,7 @@ using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area.Converter;
 using BetterGenshinImpact.Helpers;
-using BetterGenshinImpact.View.Drawable;
+using BetterGenshinImpact.Core.Mask;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using SixLabors.ImageSharp;
@@ -70,7 +70,7 @@ public class ImageRegion : Region
     }
 
     public ImageRegion(Mat mat, int x, int y, Region? owner = null, INodeConverter? converter = null,
-        DrawContent? drawContent = null) : base(x, y, mat.Width, mat.Height, owner, converter, drawContent)
+        IMaskWindowDrawingBoard? drawingBoard = null) : base(x, y, mat.Width, mat.Height, owner, converter, drawingBoard)
     {
         SrcMat = mat;
         FrameStamp = owner is ImageRegion imageOwner ? imageOwner.FrameStamp : default;
@@ -214,7 +214,7 @@ public class ImageRegion : Region
                     {
                         if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                         {
-                            drawContent.RemoveRect(ro.Name);
+                            DrawingBoard.Clear(ro.Name);
                         }
 
                         failAction?.Invoke();
@@ -301,9 +301,9 @@ public class ImageRegion : Region
                 {
                     // 画出OCR识别到的区域
                     var drawList = result.Regions.Select(item =>
-                        this.ToRectDrawable(item.Rect.BoundingRect() + effectiveRegionOfInterest.Location, ro.Name,
+                        this.ToMaskWindowDrawingRect(item.Rect.BoundingRect() + effectiveRegionOfInterest.Location,
                             ro.DrawOnWindowPen)).ToList();
-                    drawContent.PutOrRemoveRectList(ro.Name, drawList);
+                    DrawingBoard.Set(ro.Name, drawList);
                 }
 
                 successAction?.Invoke(newRa);
@@ -313,7 +313,7 @@ public class ImageRegion : Region
             {
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
-                    drawContent.RemoveRect(ro.Name);
+                    DrawingBoard.Clear(ro.Name);
                 }
 
                 failAction?.Invoke();
@@ -356,9 +356,9 @@ public class ImageRegion : Region
                 {
                     // 画出OCR识别到的区域
                     var drawList = result.Regions.Select(item =>
-                        this.ToRectDrawable(item.Rect.BoundingRect() + effectiveRegionOfInterest.Location, ro.Name,
+                        this.ToMaskWindowDrawingRect(item.Rect.BoundingRect() + effectiveRegionOfInterest.Location,
                             ro.DrawOnWindowPen)).ToList();
-                    drawContent.PutOrRemoveRectList(ro.Name, drawList);
+                    DrawingBoard.Set(ro.Name, drawList);
                 }
 
                 if (effectiveRegionOfInterest != default)
@@ -379,7 +379,7 @@ public class ImageRegion : Region
             {
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
-                    drawContent.RemoveRect(ro.Name);
+                    DrawingBoard.Clear(ro.Name);
                 }
 
                 failAction?.Invoke();
@@ -473,8 +473,8 @@ public class ImageRegion : Region
 
                         if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                         {
-                            VisionContext.Instance().DrawContent.PutOrRemoveRectList(ro.Name,
-                                resRaList.Select(ra => ra.SelfToRectDrawable(ro.Name)).ToList());
+                            DrawingBoard.Set(ro.Name,
+                                resRaList.Select(ra => ra.SelfToMaskWindowDrawingRect()).ToList());
                         }
 
                         successAction?.Invoke(resRaList);
@@ -484,7 +484,7 @@ public class ImageRegion : Region
                     {
                         if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                         {
-                            VisionContext.Instance().DrawContent.RemoveRect(ro.Name);
+                            DrawingBoard.Clear(ro.Name);
                         }
 
                         failAction?.Invoke();
@@ -544,8 +544,8 @@ public class ImageRegion : Region
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
                     // 画出OCR识别到的区域
-                    var drawList = resRaList.Select(item => item.SelfToRectDrawable(ro.Name, ro.DrawOnWindowPen)).ToList();
-                    VisionContext.Instance().DrawContent.PutOrRemoveRectList(ro.Name, drawList);
+                    var drawList = resRaList.Select(item => item.SelfToMaskWindowDrawingRect(ro.DrawOnWindowPen)).ToList();
+                    DrawingBoard.Set(ro.Name, drawList);
                 }
 
                 successAction?.Invoke(resRaList);
@@ -555,7 +555,7 @@ public class ImageRegion : Region
             {
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
-                    VisionContext.Instance().DrawContent.RemoveRect(ro.Name);
+                    DrawingBoard.Clear(ro.Name);
                 }
 
                 failAction?.Invoke();

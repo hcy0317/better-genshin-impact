@@ -88,7 +88,7 @@ internal sealed class RelativeMouseMessageHandler
         {
             foreach (var sample in samples)
             {
-                Simulation.SendInput.Mouse.MoveMouseBy(sample.DeltaX, sample.DeltaY);
+                BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.MoveMouseBy(sample.DeltaX, sample.DeltaY);
             }
             return true;
         }

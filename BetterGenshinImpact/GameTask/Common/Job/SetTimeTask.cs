@@ -1,13 +1,12 @@
+using BetterGenshinImpact.Core.Input;
 using System;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoSkip.Assets;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Model.Area;
-using BetterGenshinImpact.View.Drawable;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using Fischless.WindowsInput;
 using Microsoft.Extensions.Logging;
@@ -41,7 +40,7 @@ public class SetTimeTask
         }
         finally
         {
-            if (_io == null) { try { VisionContext.Instance().DrawContent.ClearAll(); } catch { } }
+            if (_io == null) { try { TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll(); } catch { } }
         }
     }
 
@@ -57,8 +56,8 @@ public class SetTimeTask
         Open = async token =>
         {
             UiEscapeInput.Run(() => { token.ThrowIfCancellationRequested(); UiOperation.Current?.Check(); },
-                () => Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_ESCAPE),
-                () => Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_ESCAPE), Thread.Sleep);
+                () => InputHub.Foreground.Keyboard.KeyDown(User32.VK.VK_ESCAPE),
+                () => InputHub.Foreground.Keyboard.KeyUp(User32.VK.VK_ESCAPE), Thread.Sleep);
             await Delay(800, token);
             await MouseClick(50, 700, 900, token);
         },
@@ -102,8 +101,8 @@ public class SetTimeTask
     }
 
     private static async Task HoldMouseAsync(Func<Task> body, CancellationToken ct, Action? admission = null)
-        => await HoldMouseAsync(body, () => Simulation.SendInput.Mouse.LeftButtonDown(),
-            () => Simulation.SendInput.Mouse.LeftButtonUp(), ct, admission);
+        => await HoldMouseAsync(body, () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.LeftButtonDown(),
+            () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.LeftButtonUp(), ct, admission);
 
     internal static async Task HoldMouseAsync(Func<Task> body, Action down, Action up, CancellationToken ct, Action? admission = null)
     {
@@ -115,7 +114,7 @@ public class SetTimeTask
                 { ct.ThrowIfCancellationRequested(); UiOperation.Current?.Check(); admission?.Invoke(); entered = true; }))
             {
                 down();
-                if (capture.NativeCalls == 0 || capture.Requested <= 0 || capture.Submitted != capture.Requested || capture.Uncertain)
+                if (!capture.HasCompleteReceipt)
                     throw new InvalidOperationException("调时按下缺少完整原生回执");
             }
             await body();
@@ -129,7 +128,7 @@ public class SetTimeTask
                 {
                     using var capture = new InputDispatchCapture();
                     up();
-                    if (capture.NativeCalls == 0 || capture.Requested <= 0 || capture.Submitted != capture.Requested || capture.Uncertain)
+                    if (!capture.HasCompleteReceipt)
                         throw new InvalidOperationException("调时松键缺少完整原生回执");
                 }
                 catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }

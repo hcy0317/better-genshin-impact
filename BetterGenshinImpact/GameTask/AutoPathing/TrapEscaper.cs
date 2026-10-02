@@ -1,4 +1,4 @@
-using BetterGenshinImpact.Core.Simulator;
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.AutoPathing.Model.Enum;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
@@ -161,7 +161,7 @@ public class TrapEscaper(CancellationToken ct)
         {
             using var screen = (scope?.Io.Capture() ?? CaptureToRectArea());
             return scope?.Io.Motion(screen) ?? Bv.GetMotionStatus(screen);
-        }, () => Simulation.SendInput.SimulateAction(GIActions.NormalAttack), ct);
+        }, () => InputHub.Foreground.SimulateAction(GIActions.NormalAttack), ct);
         (scope?.Io.Logger ?? Logger).LogDebug(attacked
             ? "脱困：确认飞行，执行一次下落攻击"
             : "脱困：未确认飞行，不发送普攻");
@@ -243,7 +243,7 @@ public class TrapEscaper(CancellationToken ct)
     private static Task Send(PathRecoveryScope? scope, GIActions action, KeyType type = KeyType.KeyPress)
     {
         if (scope != null) return scope.SendAsync(action, type);
-        Simulation.SendInput.SimulateAction(action, type);
+        InputHub.Foreground.SimulateAction(action, type);
         return Task.CompletedTask;
     }
 

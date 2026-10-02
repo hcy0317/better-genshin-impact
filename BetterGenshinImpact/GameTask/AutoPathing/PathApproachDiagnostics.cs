@@ -10,7 +10,13 @@ using OpenCvSharp;
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
 internal readonly record struct PathApproachPulse(int Requested, int Submitted, bool Uncertain, double ElapsedMilliseconds,
-    DiagnosticInputReceipt? Receipt = null);
+    DiagnosticInputReceipt? Receipt = null)
+{
+    internal bool HasCompleteReceipt => !Uncertain &&
+        ((Requested > 0 && Requested == Submitted) ||
+         (Receipt is { TransportRequested: > 0, Status: DiagnosticInputStatus.Sent } &&
+          Receipt.TransportRequested == Receipt.TransportAcknowledged));
+}
 
 /// <summary>仅记录既有精确接近的事实，不改变距离、方向或步数。</summary>
 internal sealed class PathApproachDiagnostics(string route, string context)
@@ -99,7 +105,7 @@ internal sealed class PathApproachDiagnostics(string route, string context)
     private static PathApproachPulse FinishPulse(InputDispatchCapture capture, DiagnosticInputAttempt input,
         TimeProvider clock, long started, Exception? failure, ImageRegion? before)
     {
-        var receipt = input.Complete(capture.NativeCalls > 0, failure);
+        var receipt = input.Complete(capture.HasDispatch, failure);
         if (failure != null)
         {
             try

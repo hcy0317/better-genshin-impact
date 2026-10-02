@@ -44,12 +44,12 @@ internal static class PathingPrimitiveInput
             throw new ArgumentException("该命令不是可发送的匿名路径导航输入");
         if (command.Method == Method.Jump)
         {
-            Simulation.SendInput.SimulateAction(GIActions.Jump);
+            BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.Jump);
             return;
         }
         if (command.Method == Method.KeyPress)
         {
-            Simulation.SendInput.Keyboard.KeyPress(KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(command.Args![0])));
+            BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyPress(KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(command.Args![0])));
             return;
         }
         var direction = command.Method == Method.W ? GIActions.MoveForward :
@@ -57,8 +57,8 @@ internal static class PathingPrimitiveInput
             command.Method == Method.S ? GIActions.MoveBackward : GIActions.MoveRight;
         var key = direction.ToActionKey().ToVK();
         var milliseconds = checked((int)Math.Ceiling(double.Parse(command.Args![0], CultureInfo.InvariantCulture) * 1000));
-        Simulation.SendInput.Keyboard.KeyDown(key);
+        BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyDown(key);
         try { TaskControl.Sleep(milliseconds, ct); }
-        finally { Simulation.SendInput.Keyboard.KeyUp(key); }
+        finally { BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(key); }
     }
 }

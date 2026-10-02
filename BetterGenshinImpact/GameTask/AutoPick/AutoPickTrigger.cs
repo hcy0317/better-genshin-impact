@@ -1,9 +1,9 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.ONNX.SVTR;
 using BetterGenshinImpact.Core.Script.Dependence.Model.TimerConfig;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoPick.Assets;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.Helpers;
@@ -28,7 +28,7 @@ public partial class AutoPickTrigger : ITaskTrigger
     private readonly ILogger<AutoPickTrigger> _logger = App.GetLogger<AutoPickTrigger>();
 
     public string Name => "自动拾取";
-    public bool IsEnabled { get; set; }
+    public bool IsEnabledByConfig => TaskContext.Instance().Config.AutoPickConfig.Enabled;
     public int Priority => 30;
     public bool IsExclusive => false;
 
@@ -56,23 +56,59 @@ public partial class AutoPickTrigger : ITaskTrigger
 
     private RecognitionObject _pickRo = null!;
 
-    // 外部配置
+    /// <summary>
+    /// 脚本传入的外部配置，只在本次启用期间有效
+    /// </summary>
     private AutoPickExternalConfig? _externalConfig;
 
-    public AutoPickTrigger()
+    /// <summary>
+    /// 名单文件版本号。界面修改名单文件后递增，触发器下一次拾取时重读
+    /// </summary>
+    private static int _listVersion;
+
+    /// <summary>
+    /// 当前名单对应的缓存键，键不变就不重读文件
+    /// </summary>
+    private (AutoPickMode Mode, bool BlacklistModePickEnabled, bool WhitelistModeDoNotPickEnabled, int Version)? _loadedListKey;
+
+    /// <summary>
+    /// 名单文件被界面修改后调用，下一次拾取时重读
+    /// </summary>
+    public static void ReloadLists()
     {
+        Interlocked.Increment(ref _listVersion);
     }
 
-    public AutoPickTrigger(AutoPickExternalConfig? config) : this()
+    public void OnEnabled(object? options)
     {
-        _externalConfig = config;
+        _externalConfig = options as AutoPickExternalConfig;
+        _lastText = string.Empty;
+        _prevClickFrameIndex = -1;
     }
 
-    public void Init()
+    public void OnDisabled()
     {
-        var config = TaskContext.Instance().Config.AutoPickConfig;
-        IsEnabled = config.Enabled;
+        _externalConfig = null;
+    }
 
+    /// <summary>
+    /// 拾取模式、名单开关或名单文件变化时重读名单，否则直接使用缓存
+    /// </summary>
+    private void EnsureLists(AutoPickConfig config)
+    {
+        var key = (config.Mode, config.BlacklistModePickEnabled, config.WhitelistModeDoNotPickEnabled, Volatile.Read(ref _listVersion));
+        if (_loadedListKey == key)
+        {
+            return;
+        }
+
+        // 读取失败时也记下这个键，同一份配置只提示一次
+        _loadedListKey = key;
+        LoadLists(config);
+    }
+
+    private void LoadLists(AutoPickConfig config)
+    {
         var blackList = new HashSet<string>();
         var fuzzyBlackList = new List<string>();
         var whiteList = new HashSet<string>();
@@ -106,6 +142,14 @@ public partial class AutoPickTrigger : ITaskTrigger
         _whitelistModeFinalPickList = whitelistModeFinalPickList;
     }
 
+    /// <summary>
+    /// 名单在截图线程上读取，弹窗投递到 UI 线程，不等待用户确认
+    /// </summary>
+    private static void ShowListReadError()
+    {
+        UIDispatcherHelper.BeginInvoke(() => ThemedMessageBox.Error("读取拾取名单配置失败，请确认修改后的名单内容格式是否正确！"));
+    }
+
     private HashSet<string> ReadJson(string jsonFilePath)
     {
         try
@@ -119,7 +163,7 @@ public partial class AutoPickTrigger : ITaskTrigger
         catch (Exception e)
         {
             _logger.LogError(e, "读取拾取名单配置失败");
-            ThemedMessageBox.Error("读取拾取名单配置失败，请确认修改后的名单内容格式是否正确！");
+            ShowListReadError();
         }
 
         return [];
@@ -139,7 +183,7 @@ public partial class AutoPickTrigger : ITaskTrigger
         catch (Exception e)
         {
             _logger.LogError(e, "读取拾取名单配置失败");
-            ThemedMessageBox.Error("读取拾取名单配置失败，请确认修改后的名单内容格式是否正确！");
+            ShowListReadError();
         }
 
         return [];
@@ -159,7 +203,7 @@ public partial class AutoPickTrigger : ITaskTrigger
         catch (Exception e)
         {
             _logger.LogError(e, "读取拾取名单配置失败");
-            ThemedMessageBox.Error("读取拾取名单配置失败，请确认修改后的名单内容格式是否正确！");
+            ShowListReadError();
         }
 
         return [];
@@ -197,10 +241,6 @@ public partial class AutoPickTrigger : ITaskTrigger
     {
         _autoPickAssets = AutoPickAssets.Get(content.CaptureRectArea, TaskContext.Instance().Config.AutoPickConfig.PickKey);
         _pickRo = _autoPickAssets.PickRo;
-        while (RunnerContext.Instance.AutoPickTriggerStopCount > 0)
-        {
-            Thread.Sleep(1000);
-        }
 
         var speedTimer = new SpeedTimer();
         var forceInteraction = _externalConfig is { ForceInteraction: true };
@@ -218,7 +258,7 @@ public partial class AutoPickTrigger : ITaskTrigger
             if (HasScrollIcon(content.CaptureRectArea))
             {
                 // 滚轮下
-                Simulation.SendInput.Mouse.VerticalScroll(2);
+                InputHub.Foreground.Mouse.VerticalScroll(2);
                 Thread.Sleep(50);
             }
 
@@ -236,6 +276,7 @@ public partial class AutoPickTrigger : ITaskTrigger
 
         var scale = TaskContext.Instance().SystemInfo.AssetScale;
         var config = TaskContext.Instance().Config.AutoPickConfig;
+        EnsureLists(config);
 
         if (ShouldBackOffControllerYForTalkUi(content))
         {
@@ -315,7 +356,7 @@ public partial class AutoPickTrigger : ITaskTrigger
         //    {
         //        _fastModePickCount = 0;
         //        LogPick(content, "急速拾取");
-        //        Simulation.SendInput.Keyboard.KeyPress(VirtualKeyCode.VK_F);
+        //        InputHub.Foreground.Keyboard.KeyPress(VirtualKeyCode.VK_F);
         //    }
         //    return;
         //}

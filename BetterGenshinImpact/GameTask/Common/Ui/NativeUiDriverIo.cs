@@ -60,8 +60,8 @@ internal sealed class NativeUiDriverIo
             {
                 using var target = image.DeriveCrop(bounds);
                 DomainTipClick.Run(admission, target.Move,
-                    () => Simulation.SendInput.Mouse.LeftButtonDown(),
-                    () => Simulation.SendInput.Mouse.LeftButtonUp(), Thread.Sleep);
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.LeftButtonDown(),
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.LeftButtonUp(), Thread.Sleep);
             },
             OtherAction = SendNativeAction,
             Delay = TaskControl.Delay,
@@ -84,18 +84,18 @@ internal sealed class NativeUiDriverIo
         switch (action)
         {
             case UiAction.OpenParty:
-                Simulation.SendInput.SimulateActionPulse(GIActions.OpenPartySetupScreen);
+                BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.OpenPartySetupScreen);
                 return true;
             case UiAction.ReviveParty:
                 return Bv.ClickIfInReviveModal(image);
             case UiAction.Escape:
             case UiAction.EscapeProbe:
                 UiEscapeInput.Run(admission,
-                    () => Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_ESCAPE),
-                    () => Simulation.SendInput.Keyboard.KeyUp(User32.VK.VK_ESCAPE), Thread.Sleep);
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyDown(User32.VK.VK_ESCAPE),
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(User32.VK.VK_ESCAPE), Thread.Sleep);
                 return true;
             case UiAction.RequestDomainExit:
-                Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
+                BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
                 return true;
             default:
                 throw new InvalidOperationException("Unsupported native UI action.");
