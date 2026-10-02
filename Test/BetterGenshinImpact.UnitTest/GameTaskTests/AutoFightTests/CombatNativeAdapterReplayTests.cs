@@ -1183,6 +1183,30 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Empty(io.Inputs);
     }
 
+    [Theory]
+    [InlineData(.5)]
+    [InlineData(2.0)]
+    public async Task BurstHudDisappearanceWaitsForConfirmationWithoutResending(double hiddenSeconds)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var program = LoadProgram("那维莱特 q(required)");
+        using var io = new PhysicalReplay(clock, true, 50, program);
+        var hiddenReads = 0;
+        io.CombatHudProbe = () =>
+        {
+            var visible = io.Inputs.Count == 0 ||
+                clock.GetElapsedTime(started).TotalSeconds - io.Inputs[0].At >= hiddenSeconds;
+            if (!visible) hiddenReads++;
+            return visible;
+        };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        Assert.Equal(CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
+        Assert.True(hiddenReads > 0);
+        Assert.Equal(Method.Burst, Assert.Single(io.Inputs).Skill);
+        Assert.False(io.HoldingInput);
+    }
+
     [Fact]
     public async Task ChangedModelRequirementsAreRepreparedWithoutRenewingAnAwaitingActionsDeadline()
     {
@@ -3525,6 +3549,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public string? MoveByReceiptFault { get; init; }
         public List<bool> MoveByHeldStates { get; } = [];
         public bool CombatHudVisible { get; init; } = true;
+        public Func<bool>? CombatHudProbe { get; set; }
         public double HeldActiveReadCost { get; init; }
         public double HeldControlReadCost { get; init; }
         public double ControlReadCost { get; init; }
@@ -3696,7 +3721,8 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             }
             public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => new(owner.DelayAsync(milliseconds, ct));
         }
-        public bool IsCombatHud(ImageRegion frame) => CombatHudVisible && Frame(frame).Actor != null;
+        public bool IsCombatHud(ImageRegion frame) => CombatHudVisible &&
+            (CombatHudProbe?.Invoke() ?? true) && Frame(frame).Actor != null;
         public bool IsMainUi(ImageRegion frame) => IsCombatHud(frame);
         public int ReadActive(ImageRegion frame, AvatarActiveCheckContext context)
         {
