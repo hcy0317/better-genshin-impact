@@ -10,13 +10,17 @@ using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask.Common;
 using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.Core.Script.Dependence;
 
 public class Http
 {
+    // 进程内稳定的接口身份；不落盘路径，也不输出可离线枚举敏感路径的裸摘要。
+    private static readonly byte[] DiagnosticEndpointKey = RandomNumberGenerator.GetBytes(32);
     private readonly ILogger<Http> _logger = App.GetLogger<Http>();
     private static readonly HttpClient SharedClient = new(new SocketsHttpHandler
     {
@@ -77,20 +81,75 @@ public class Http
         try
         {
             var result = await SendAsync(SharedClient, request, ct, TimeSpan.FromSeconds(100));
+            RecordResponseEvidence(requestId, url, result, Stopwatch.GetElapsedTime(started).TotalMilliseconds, _logger);
             _logger.LogDebug("HTTP_REQUEST request={Request} phase=complete status={Status} ms={Milliseconds:F1}",
                 requestId, result.status_code, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             return result;
         }
         catch (Exception error)
         {
+            try
+            {
+                DiagnosticEvidenceScope.Current?.RequestLatestWindow(IncidentKey(url), "http-failed",
+                    $"requestId={requestId} endpoint={SafeAddress(url)} errorType={error.GetType().Name} " +
+                    $"cancelled={ct.IsCancellationRequested} elapsedMs={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F1} " +
+                    "businessCode=unknown:no-response lockHolder=unknown:not-exposed-by-script-http-bridge", _logger,
+                    changeKey: $"errorType={error.GetType().Name};cancelled={ct.IsCancellationRequested}");
+            }
+            catch { /* 取证失败不替换原始请求异常。 */ }
             _logger.LogDebug("HTTP_REQUEST request={Request} phase=failed errorType={Type} cancelled={Cancelled} ms={Milliseconds:F1}",
                 requestId, error.GetType().Name, ct.IsCancellationRequested, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
             throw;
         }
     }
 
+    internal static void RecordResponseEvidence(Guid requestId, string url, HttpReponse response, double elapsedMs, ILogger logger)
+    {
+        try
+        {
+            long? code = null;
+            var busy = response.status_code is 429 or 503;
+            var codeState = response.body.Length > 65536 ? "payload-too-large" : "no-numeric-code";
+            if (response.body.Length <= 65536)
+            {
+                try
+                {
+                    using var json = JsonDocument.Parse(response.body);
+                    if (json.RootElement.ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (var name in new[] { "retcode", "code" })
+                            if (json.RootElement.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.Number && field.TryGetInt64(out var value))
+                            { code = value; break; }
+                        foreach (var name in new[] { "message", "msg" })
+                            if (json.RootElement.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.String)
+                                busy |= field.GetString()?.Contains("系统繁忙", StringComparison.Ordinal) == true;
+                    }
+                }
+                catch (JsonException) { codeState = "non-json-response"; }
+            }
+            var detail = FormattableString.Invariant($"requestId={requestId} endpoint={SafeAddress(url)} httpStatus={response.status_code} businessCode={code?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown:" + codeState} busy={busy} elapsedMs={elapsedMs:F1} lockHolder=unknown:not-exposed-by-script-http-bridge lockConflict=unknown:not-exposed-by-script-http-bridge");
+            logger.LogDebug("HTTP_RESPONSE_EVIDENCE {Detail}", detail);
+            if (busy || response.status_code >= 400)
+            {
+                logger.LogWarning("HTTP_FAILURE_EVIDENCE {Detail}", detail);
+                DiagnosticEvidenceScope.Current?.RequestLatestWindow(IncidentKey(url), "http-failed", detail, logger,
+                    changeKey: $"httpStatus={response.status_code};businessCode={code};busy={busy}");
+            }
+        }
+        catch { /* 不读取完整请求/响应到日志，不重试或改变接口返回值。 */ }
+    }
+
+    private static string IncidentKey(string url)
+    {
+        var endpoint = Uri.TryCreate(url, UriKind.Absolute, out var address)
+            ? address.GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped)
+            : "invalid-url";
+        return "http:" + Convert.ToHexString(HMACSHA256.HashData(DiagnosticEndpointKey, Encoding.UTF8.GetBytes(endpoint)));
+    }
+
     internal static string SafeAddress(string url) => Uri.TryCreate(url, UriKind.Absolute, out var address)
-        ? address.GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped)
+        // 任意脚本URL没有受控路由模板，路径也可能包含token/用户ID；只记录服务来源。
+        ? address.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped).TrimEnd('/') + "/[redacted-path]"
         : "invalid-url";
 
     internal static async Task<HttpReponse> SendAsync(HttpClient client, HttpRequestMessage request,

@@ -7,6 +7,94 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class DiagnosticEvidenceStorageTests
 {
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task ErrorReclaimsLowerPriorityMetadataButKeepsTheSharedImage(int lowerPriority)
+    {
+        var lower = (DiagnosticEvidencePriority)lowerPriority;
+        using var fixture = new EvidenceDirectory();
+        var run = Guid.NewGuid();
+        const long budget = 32768;
+        var evicted = new List<int>();
+        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run, budget, onEvicted: (sequence, _) => evicted.Add(sequence));
+        using var image = new Mat(2, 2, MatType.CV_8UC3, Scalar.Black);
+        var stamp = new CaptureFrameSource().Next();
+        await storage.WriteAsync(new(run, 1, "earlier-error", "terminal", stamp, "preserve"), image);
+        var sequence = 2;
+        for (; sequence < 100; sequence++)
+        {
+            try { await storage.WriteAsync(new(run, sequence, "lower-" + sequence, "sample", stamp,
+                new string('x', 1024), Priority: lower), image); }
+            catch (DiagnosticEvidenceBudgetException) { break; }
+        }
+        Assert.InRange(sequence, 3, 99);
+        await storage.WriteAsync(new(run, ++sequence, "incoming-error", "combat-terminal", stamp, new string('y', 14000)), image);
+        await storage.CompleteAsync(new { });
+        var directory = System.IO.Path.Combine(fixture.Path, run.ToString("N"));
+        Assert.True(File.Exists(System.IO.Path.Combine(directory, "evidence-0001.json")));
+        Assert.False(File.Exists(System.IO.Path.Combine(directory, "evidence-0002.json")));
+        Assert.Contains(2, evicted);
+        Assert.DoesNotContain(1, evicted);
+        Assert.Single(Directory.GetFiles(directory, "*.png"));
+        var document = Newtonsoft.Json.Linq.JObject.Parse(await File.ReadAllTextAsync(
+            System.IO.Path.Combine(directory, $"evidence-{sequence:D4}.json")));
+        Assert.Equal("evidence-0001.png", (string?)document["ImageFile"]);
+        Assert.True(File.Exists(System.IO.Path.Combine(directory, (string)document["ImageFile"]!)));
+        Assert.InRange(Directory.GetFiles(directory).Sum(path => new FileInfo(path).Length), 1, budget);
+    }
+
+    [Fact]
+    public async Task ANewFaultReclaimsRoutineEvidenceWithoutDeletingEarlierFaults()
+    {
+        using var fixture = new EvidenceDirectory();
+        var run = Guid.NewGuid();
+        const long budget = 32768;
+        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run, budget);
+        using var image = new Mat(2, 2, MatType.CV_8UC3, Scalar.Black);
+        var source = new CaptureFrameSource();
+        var sequence = 1;
+        for (; sequence < 100; sequence++)
+        {
+            try { await storage.WriteAsync(new(run, sequence, "routine", "ordinary", source.Next(), new string('x', 1024)), image); }
+            catch (DiagnosticEvidenceBudgetException) { break; }
+        }
+        var firstFault = ++sequence;
+        await storage.WriteAsync(new(run, sequence, "first-fault", "terminal", source.Next(), "first fault"), image);
+        var laterFault = ++sequence;
+        var anchor = source.Next();
+        await storage.WriteAsync(new(run, sequence, "later-fault", "deadline", anchor, new string('y', 10000),
+            Window: new(Guid.NewGuid(), anchor, 0)), image);
+        await storage.CompleteAsync(new { });
+        var directory = System.IO.Path.Combine(fixture.Path, run.ToString("N"));
+        Assert.True(File.Exists(System.IO.Path.Combine(directory, $"evidence-{firstFault:D4}.json")));
+        Assert.True(File.Exists(System.IO.Path.Combine(directory, $"evidence-{laterFault:D4}.json")));
+        Assert.False(File.Exists(System.IO.Path.Combine(directory, "evidence-0001.json")));
+        Assert.InRange(Directory.GetFiles(directory).Sum(path => new FileInfo(path).Length), 1, budget);
+    }
+
+    [Fact]
+    public async Task OverlappingIncidentsReusePixelsAndKeepIndependentMetadata()
+    {
+        using var fixture = new EvidenceDirectory();
+        var run = Guid.NewGuid();
+        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run);
+        using var image = new Mat(2, 2, MatType.CV_8UC3, Scalar.Black);
+        var stamp = new CaptureFrameSource().Next();
+        await storage.WriteAsync(new(run, 1, "incident-a", "deadline", stamp, "first"), image);
+        await storage.WriteAsync(new(run, 2, "incident-b", "deadline", stamp, "overlap"), image);
+        var directory = System.IO.Path.Combine(fixture.Path, run.ToString("N"));
+        Assert.Single(Directory.GetFiles(directory, "*.png"));
+        var second = Newtonsoft.Json.Linq.JObject.Parse(await File.ReadAllTextAsync(System.IO.Path.Combine(directory, "evidence-0002.json")));
+        Assert.Equal("evidence-0001.png", (string?)second["ImageFile"]);
+        Assert.Equal("incident-b", (string?)second["Request"]);
+        Assert.NotNull(second["WrittenAt"]);
+        Assert.NotNull(second["ObservedAt"]);
+        var identity = Newtonsoft.Json.Linq.JObject.Parse(await File.ReadAllTextAsync(System.IO.Path.Combine(directory, "run.json")));
+        Assert.NotNull(identity["Build"]?["ModuleVersionId"]);
+        Assert.Equal(10L * 1024 * 1024 * 1024, DiagnosticEvidenceStorage.DefaultMaximumBytes);
+    }
+
     [Fact]
     public void StartupRemovesOnlyExpiredRecognizedInactiveRunsOldestFirst()
     {
@@ -101,7 +189,7 @@ public class DiagnosticEvidenceStorageTests
         using var fixture = new EvidenceDirectory();
         var clock = new FakeTimeProvider();
         var run = Guid.NewGuid();
-        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run, maximumBytes: 2048, clock: clock);
+        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run, maximumBytes: 4096, clock: clock);
         using var image = new Mat(2, 2, MatType.CV_8UC3, Scalar.Black);
         var stamp = new CaptureFrameSource(clock).Next();
         var written = 0;
@@ -113,8 +201,8 @@ public class DiagnosticEvidenceStorageTests
         Assert.InRange(written, 1, 19);
         await storage.CompleteAsync(new { accepted = written });
         var files = Directory.GetFiles(System.IO.Path.Combine(fixture.Path, run.ToString("N")));
-        Assert.InRange(files.Sum(file => new FileInfo(file).Length), 1, 2048);
-        Assert.Equal(written, files.Count(file => file.EndsWith(".png")));
+        Assert.InRange(files.Sum(file => new FileInfo(file).Length), 1, 4096);
+        Assert.Single(files.Where(file => file.EndsWith(".png"))); // 多条元数据引用同一源帧。
         Assert.Contains(files, file => file.EndsWith("summary.json"));
     }
 

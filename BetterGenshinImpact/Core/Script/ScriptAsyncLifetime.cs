@@ -21,6 +21,7 @@ internal sealed class ScriptAsyncLifetime : IDisposable
     private bool _disposed;
 
     internal static ScriptAsyncLifetime? Current => Active.Value;
+    internal static Guid? DiagnosticId => Active.Value?._id;
     internal CancellationToken Token { get { Check(); return _cancellation.Token; } }
 
     internal ScriptAsyncLifetime(CancellationToken parent, ILogger? logger = null)

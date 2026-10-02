@@ -263,8 +263,12 @@ public class GlobalMethod
 
     public static void RequestEvidenceWindow(string request, string phase, string detail)
     {
-        // 纯诊断bridge：不截图、不读取App服务、不改变脚本结果或取消传播。
-        try { DiagnosticEvidenceScope.Current?.RequestLatestWindow(request, phase, detail); } catch { }
+        // 保留旧脚本调用签名，但任意脚本文本不是可信诊断字段，不得原样落盘。
+        // 具体HTTP码和请求关联由宿主HTTP桥提取；这里只接受枚举事件和UUID。
+        var safeRequest = Guid.TryParse(request, out var id) ? "script:" + id.ToString("N") : "script:unclassified";
+        var safePhase = phase is "api-busy" or "http-failed" or "script-failed" ? phase : "script-failed";
+        try { DiagnosticEvidenceScope.Current?.RequestLatestWindow(safeRequest, safePhase,
+            "scriptDetail=redacted:untrusted-text; structuredFields=unknown:not-exposed-by-script"); } catch { }
     }
 
     public static string[] GetAvatars()

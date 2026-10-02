@@ -187,6 +187,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     {
         _ct = ct;
         _rewardSummary.Clear();
+        BeginDomainEvidence();
         _pendingSupplementalResinRecords.Clear();
         _stopAfterPreparedSupplementalResins = false;
 
@@ -1071,6 +1072,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     /// </summary>
     private Task DomainEndDetectionTask(CancellationTokenSource cts)
     {
+        BeginDomainEvidence();
         return Task.Run(async () =>
         {
             try
@@ -1079,6 +1081,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                 {
                     if (IsDomainEnd())
                     {
+                        RecordDomainEvidence("cancel", "domain-completion-detector");
                         await cts.CancelAsync();
                         break;
                     }
@@ -1108,6 +1111,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             if (Regex.IsMatch(upperText, this.challengeCompletedLocalizedString))
             {
                 Logger.LogInformation("检测到秘境结束提示(挑战达成)，结束秘境");
+                RecordDomainEvidence("completion", "challenge-achieved", ra.FrameStamp);
                 return true;
             }
         }
@@ -1117,6 +1121,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         if (Regex.IsMatch(text, this.autoLeavingLocalizedString))
         {
             Logger.LogInformation("检测到秘境结束提示(xxx秒后自动退出)，结束秘境");
+            RecordDomainEvidence("completion", "automatic-exit-tip", ra.FrameStamp);
             return true;
         }
 
@@ -1597,6 +1602,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             }
 
             Logger.LogInformation("自动秘境：{ResinName} 对应的本轮奖励领取完成", pendingRecord.Name);
+            RecordDomainEvidence("reward", "supplemental-claim-returned-success");
             _pendingSupplementalResinRecords.Dequeue();
             claimedPreparedSupplementalReward = true;
             isLastTurn = _resinPriorityListWhenSpecifyUse.Sum(record => record.RemainCount) <= 0
@@ -1607,6 +1613,8 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         var supplementPromptDetected = textListInPrompt.Any(t =>
             Regex.IsMatch(t.Text, insufficientCountString, RegexOptions.IgnoreCase)
             || Regex.IsMatch(t.Text, replenishResinString, RegexOptions.IgnoreCase));
+        if (!claimedPreparedSupplementalReward)
+            RecordDomainEvidence("reward", $"choose-resin={chooseResinPrompt};supplement-prompt={supplementPromptDetected}", ra2.FrameStamp);
         if (supplementPromptDetected && !claimedPreparedSupplementalReward)
         {
             var transientResinRemainCount = _resinPriorityListWhenSpecifyUse
@@ -2212,6 +2220,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             using var exitRegion = capture.Find(RecognitionAssets.Get("AutoFight", "Exit", capture));
             if (exitRegion.IsExist())
             {
+                RecordDomainEvidence("reward", "reward-result-exit-button-visible", capture.FrameStamp);
                 return true;
             }
             await Delay(300, _ct);
@@ -2224,7 +2233,8 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         using var suspendedCombatBudget = BetterGenshinImpact.GameTask.AutoFight.Script.Flow.CombatActionScope.Suspend();
         using var driver = new NativeUiDriver();
         await UiRecovery.ExitDomainAsync(driver, _ct, Logger,
-            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
+            captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context),
+            evidenceContext: DomainEvidenceSnapshot());
         return true;
     }
 

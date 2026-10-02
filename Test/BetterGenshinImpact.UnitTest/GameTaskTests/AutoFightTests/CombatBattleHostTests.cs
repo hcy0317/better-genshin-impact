@@ -281,6 +281,10 @@ public partial class CombatBattleHostTests
         Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 18.4, 30);
         Assert.Contains(io.Traces, trace => trace.State == "Reengaging");
         Assert.Contains(io.Inputs, input => input.Kind == CombatBattleHostInputKind.CloseParty);
+        var finalTrace = Newtonsoft.Json.Linq.JObject.FromObject(io.Traces.Last());
+        Assert.NotNull(finalTrace["LastProgress"]?["Source"]);
+        Assert.NotNull(finalTrace["LastProgress"]?["Kind"]);
+        Assert.True((long?)finalTrace["LastProgress"]?["Source"]?["Sequence"] > 0);
     }
 
     [Fact]

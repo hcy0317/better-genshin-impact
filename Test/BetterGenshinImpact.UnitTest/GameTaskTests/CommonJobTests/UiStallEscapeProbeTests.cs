@@ -1,6 +1,7 @@
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
 using BetterGenshinImpact.GameTask.Common.Ui;
+using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Helpers;
 using BetterGenshinImpact.View.Drawable;
@@ -17,6 +18,30 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 [Collection("OfflineNativeDecision")]
 public class UiStallEscapeProbeTests
 {
+    [Fact]
+    public async Task DiagnosticEvidencePinsUnsampledUiInputFrameBeforeItIsDisposed()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var fixture = new ProbeFixture();
+        var failure = new IOException("fixture");
+        var dispatcher = new Fischless.WindowsInput.WindowsInputMessageDispatcher(null, _ => throw failure, () => 0);
+        fixture.BeforeOtherAction = () => dispatcher.DispatchInput(new Vanara.PInvoke.User32.INPUT[1]);
+        var observed = fixture.Driver.Capture();
+        var actual = await Assert.ThrowsAsync<IOException>(() => UiOperation.RunAsync<bool>("exit-domain",
+            TimeSpan.FromSeconds(10), default, op => op.InvokeActionAsync(UiAction.EscapeProbe,
+                () => fixture.Driver.ActAsync(UiAction.EscapeProbe, observed, op.Token), 1, 1), clock: fixture.Clock));
+        Assert.Same(failure, actual);
+        await scope.DisposeAsync();
+        var anchor = Assert.Single(saved.Where(item => item.Phase == "ui-input-failed" && item.Window?.RelativeIndex == 0));
+        Assert.Equal(fixture.Frames[1].FrameStamp, anchor.Source);
+        var receipt = anchor.Fields!["nativeInput"];
+        Assert.Contains("status=Unknown", receipt);
+        Assert.Contains("reason=IOException", receipt);
+        var final = saved.First(item => item.Phase == "exit-domain").Fields!["input:last"];
+        Assert.Contains(receipt, final);
+    }
+
     [Fact]
     public void StallPredicateAcceptsOnlyUnrecognizableButUsableFrames()
     {
@@ -170,6 +195,7 @@ public class UiStallEscapeProbeTests
         internal readonly List<ImageRegion> Frames = new();
         internal readonly List<UiAction> Actions = new();
         internal UiSnapshot Scene = new(1);
+        internal Action? BeforeOtherAction;
 
         internal ProbeFixture()
         {
@@ -184,6 +210,7 @@ public class UiStallEscapeProbeTests
                         drawContent: new DrawContent());
                     frame.FrameStamp = Producer.Next();
                     Frames.Add(frame);
+                    DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
                     return frame;
                 },
                 ReadScene = _ => Scene,
@@ -194,6 +221,7 @@ public class UiStallEscapeProbeTests
                 OtherAction = (action, _, admission) =>
                 {
                     admission();
+                    BeforeOtherAction?.Invoke();
                     Actions.Add(action);
                     return true;
                 },

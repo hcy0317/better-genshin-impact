@@ -52,7 +52,8 @@ public class NavigationInstance
 
     public Point2f GetPosition(ImageRegion imageRegion, string mapName, string mapMatchMethod, MapLayerSelector? selector)
     {
-        using var colorMat = new Mat(imageRegion.SrcMat, MapAssets.Get(imageRegion).MimiMapRect);
+        var miniMapRect = MapAssets.Get(imageRegion).MimiMapRect;
+        using var colorMat = new Mat(imageRegion.SrcMat, miniMapRect);
         var captureTime = DateTime.UtcNow;
         var state = GetState(selector);
         var primaryMap = MapManager.GetMap(mapName, mapMatchMethod, selector);
@@ -60,6 +61,8 @@ public class NavigationInstance
         var sceneMap = state.UseTemplateMatchFallback && !primaryUsesTemplateMatch
             ? MapManager.GetMap(mapName, "TemplateMatch", selector)
             : primaryMap;
+        var matchedMap = sceneMap;
+        var search = state.PrevX > 0 && state.PrevY > 0 ? "local" : "global";
         var p = sceneMap is SceneBaseMapByTemplateMatch templateMatchMap
             ? templateMatchMap.GetMiniMapPosition(colorMat, state.PrevX, state.PrevY, selector)
             : sceneMap.GetMiniMapPosition(colorMat, state.PrevX, state.PrevY);
@@ -76,9 +79,15 @@ public class NavigationInstance
             {
                 state.UseTemplateMatchFallback = true;
                 p = templateMap.GetMiniMapPosition(colorMat, state.PrevX, state.PrevY, selector);
+                matchedMap = templateMap;
             }
         }
 
+        var match = (matchedMap as SceneBaseMapByTemplateMatch)?.LastDiagnosticMatch;
+        new NavigationFrameEvidence(true, imageRegion.FrameStamp, mapMatchMethod,
+            matchedMap is SceneBaseMapByTemplateMatch ? "TemplateMatch" : mapMatchMethod,
+            selector?.StateKey ?? MapLayerSelector.Empty.StateKey, match?.Layer?.LayerId, match?.Layer?.Floor,
+            match?.Confidence, state.UseTemplateMatchFallback, search, miniMapRect.ToString(), p != default).Store(imageRegion, mapName, mapMatchMethod, selector);
         UpdateStateAndNotify(state, p, captureTime);
         return p;
     }
@@ -118,12 +127,14 @@ public class NavigationInstance
 
     public Point2f GetPositionStable(ImageRegion imageRegion, string mapName, string mapMatchMethod, MapLayerSelector? selector)
     {
-        using var colorMat = new Mat(imageRegion.SrcMat, MapAssets.Get(imageRegion).MimiMapRect);
+        var miniMapRect = MapAssets.Get(imageRegion).MimiMapRect;
+        using var colorMat = new Mat(imageRegion.SrcMat, miniMapRect);
         var captureTime = DateTime.UtcNow;
         var state = GetState(selector);
 
         // 先尝试使用局部匹配
         var sceneMap = MapManager.GetMap(mapName, mapMatchMethod, selector);
+        var search = state.PrevX > 0 && state.PrevY > 0 ? "local" : "global";
         // 提高局部匹配的阈值，以解决在沙漠录制点位时，移动过远不会触发全局匹配的情况
         var p = (sceneMap as SceneBaseMapByTemplateMatch)?.GetMiniMapPosition(colorMat, state.PrevX, state.PrevY, 0, selector)
                 ?? sceneMap.GetMiniMapPosition(colorMat, state.PrevX, state.PrevY);
@@ -134,11 +145,17 @@ public class NavigationInstance
             Reset(selector);
             state = GetState(selector);
             sceneMap = MapManager.GetMap(mapName, mapMatchMethod, selector);
+            search = "global-after-local-rejection";
             p = sceneMap is SceneBaseMapByTemplateMatch templateMatchMap
                 ? templateMatchMap.GetMiniMapPosition(colorMat, state.PrevX, state.PrevY, selector)
                 : sceneMap.GetMiniMapPosition(colorMat, state.PrevX, state.PrevY);
         }
 
+        var match = (sceneMap as SceneBaseMapByTemplateMatch)?.LastDiagnosticMatch;
+        new NavigationFrameEvidence(true, imageRegion.FrameStamp, mapMatchMethod,
+            sceneMap is SceneBaseMapByTemplateMatch ? "TemplateMatch" : mapMatchMethod,
+            selector?.StateKey ?? MapLayerSelector.Empty.StateKey, match?.Layer?.LayerId, match?.Layer?.Floor,
+            match?.Confidence, false, search, miniMapRect.ToString(), p != default).Store(imageRegion, mapName, mapMatchMethod, selector);
         UpdateStateAndNotify(state, p, captureTime);
         return p;
     }

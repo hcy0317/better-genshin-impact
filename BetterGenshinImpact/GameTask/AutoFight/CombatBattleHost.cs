@@ -22,6 +22,8 @@ internal readonly record struct CombatBattleObservation(CaptureFrameStamp Source
     public string? DamageFallback { get; init; }
 }
 internal enum CombatBattleHostResult { Continue, Completed, Unconfirmed }
+internal sealed record CombatProgressEvidence(CaptureFrameStamp Source, string Kind, EnemySeekDecision? Target,
+    EnemySeekVisual? FixedTopHealth, long ObservedTimestamp);
 internal sealed record CombatBattleHostTrace(Guid BattleId, string Episode, string State, string Reason,
     CombatBattleHostResult Result, CombatBattleObservation Observation, int ScanUsed, int ApproachUsed,
     double ProgressAge, double SettleRemaining, bool FinalProbe, string? CapturePhase = null)
@@ -34,6 +36,7 @@ internal sealed record CombatBattleHostTrace(Guid BattleId, string Episode, stri
     public string? PartyReason { get; init; }
     public string? ClosedEpisode { get; init; }
     public string? ObservationGate { get; init; }
+    public CombatProgressEvidence? LastProgress { get; init; }
 }
 internal enum CombatBattleHostInputKind { Camera, Approach, OpenParty, CloseParty, Detach, Breakout }
 internal readonly record struct CombatBattleHostInput(CombatBattleHostInputKind Kind,
@@ -100,6 +103,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private PartySetupFinishObservation _before;
     private PartySetupFinishDetector? _finish;
     private double _lastValidAt, _lastProgressAt, _nextProbe, _partyDeadline, _graceUntil;
+    private CombatProgressEvidence? _lastProgressEvidence;
     private double _nextFinishCheck = Math.Max(options.InitialBlockSeconds, options.FinishCheckIntervalSeconds);
     private EnemySeekVisual? _stableVisual;
     private bool _progressHealthIsFixed;
@@ -363,7 +367,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     {
                         InputRequest = _traceInputRequest, InputSource = _traceInputSource, InputStatus = _traceInputStatus,
                         InputKind = _traceInputKind, PartySample = _tracePartySample, PartyReason = _tracePartyReason,
-                        ClosedEpisode = _closedEvidenceEpisode, ObservationGate = _traceObservationGate
+                        ClosedEpisode = _closedEvidenceEpisode, ObservationGate = _traceObservationGate,
+                        LastProgress = _lastProgressEvidence
                     });
                 }
             }
@@ -503,6 +508,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             _evidenceActive = false;
         }
         _lastProgressAt = now;
+        _lastProgressEvidence = new(observation.Source, damage ? "new-damage-cue" : "health-progress",
+            observation.Target, observation.FixedTopHealth, io.Clock.GetTimestamp());
         _reengaged = false;
         _scanPulses = _approachPulses = 0;
         _searchVerticalOffset = 0;

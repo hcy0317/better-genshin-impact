@@ -869,6 +869,9 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Contains(saved, item => item.Phase == "before-skill" && item.Detail.Contains("hold=False") &&
             item.Detail.Contains("purpose=Pathing") && item.Detail.Contains("motion=Unknown") && item.Detail.Contains("controlObserved=True"));
         Assert.Contains(saved, item => item.Phase == "deadline" && item.Detail.Contains("cooling=False") && item.Detail.Contains("ready=True"));
+        Assert.Contains(saved, item => item.Phase == "deadline" && item.Window != null);
+        Assert.Contains(saved, item => item.Phase == "before-skill" && item.Detail.Contains("nativeRequested=") &&
+            item.Detail.Contains("nativeSubmitted=") && item.Detail.Contains("completedTimestamp="));
     }
 
     [Theory]
@@ -1124,22 +1127,43 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         using (var runner = NativeCombatFlowRunner.Create(LoadProgram("琴 e(required)"), io))
             Assert.Equal(blocked ? CombatFlowResult.Failed : CombatFlowResult.Succeeded, await runner.RunRoundAsync(default));
         await evidence.DisposeAsync();
-        var selectionWindow = Assert.Single(saved.Where(item => item.Phase == "selection-before-submit"));
-        Assert.NotNull(selectionWindow.Window);
-        Assert.True(selectionWindow.Source.IsKnown);
+        Assert.DoesNotContain(saved, item => item.Phase == "selection-before-submit");
         var failures = saved.Where(item => item.Phase != "selection-before-submit").ToArray();
         if (!blocked) Assert.Empty(failures);
         else
         {
             Assert.Empty(io.Inputs);
-            Assert.InRange(failures.Length, 2, 3);
-            Assert.Single(failures.Select(item => item.Request).Distinct());
+            Assert.InRange(failures.Length, 2, 64);
             Assert.Contains(failures, item => item.Phase == "before-selection");
             Assert.Contains(failures, item => item.Phase == "unconfirmed");
             Assert.All(failures, item => Assert.True(item.Source.IsKnown));
-            Assert.True(failures[1].Source.IsAfter(failures[0].Source));
+            Assert.Contains(failures, item => item.Window != null);
         }
         Assert.False(io.HoldingInput);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedSelectionEvidenceIncludesNativeReceiptAndOriginalInputFrame(bool uncertain)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var program = LoadProgram("琴 e(required)");
+        using var io = new PhysicalReplay(new FakeTimeProvider(), false, 50, program)
+        { IgnoreSwitchUntil = 99, UnknownSwitchOutcome = uncertain, CompleteSelectionReceipts = true };
+        using (var runner = NativeCombatFlowRunner.Create(program, io))
+            await Record.ExceptionAsync(async () => await runner.RunRoundAsync(default));
+        await evidence.DisposeAsync();
+        var before = Assert.Single(saved.Where(item => item.Phase == "before-selection"));
+        Assert.Contains("nativeRequested=2", before.Detail);
+        Assert.Contains("nativeSubmitted=" + (uncertain ? 1 : 2), before.Detail);
+        Assert.Contains("uncertain=" + uncertain, before.Detail);
+        Assert.Contains("requestedTimestamp=", before.Detail);
+        Assert.Contains("startedTimestamp=", before.Detail);
+        Assert.Contains("completedTimestamp=", before.Detail);
+        Assert.Contains(saved, item => item.Window != null && item.Detail.Contains("nativeRequested=2"));
+        Assert.Empty(io.Inputs);
     }
 
     [Fact]
@@ -1529,7 +1553,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         if (!dropped) Assert.Empty(saved);
         else
         {
-            Assert.InRange(saved.Count, 2, 3);
+            Assert.InRange(saved.Count, 2, 64); // 10s/5s稀疏窗口及末态，不再是旧版的两三张单帧。
             Assert.Contains(saved, item => item.Phase == "before-skill");
             Assert.Contains(saved, item => item.Phase == "unconfirmed");
             Assert.Single(saved.Select(item => item.Request).Distinct());
@@ -3740,6 +3764,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
         public Action? BeforeSelectionInput { get; set; }
         public Exception? InputReleaseError { get; set; }
+        public bool CompleteSelectionReceipts { get; set; }
         public CombatBattleHostInputResult SelectActor(int index, CombatNativeInputRequest request, CancellationToken ct)
         {
             BeforeSelectionInput?.Invoke();
@@ -3752,6 +3777,9 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             // OS已接收不代表游戏能立刻换人：此窗口内游戏明确忽略按键。
             if (Now >= IgnoreSwitchUntil && (!SelectionNeedsMovement || ApproachPulses > 0) && _selected == null && _actor != actor)
             { _selected = actor; _selectionCompletes = Now + 1; }
+            if (CompleteSelectionReceipts)
+                return new(UnknownSwitchOutcome ? CombatBattleHostInputStatus.Unknown : CombatBattleHostInputStatus.Sent, Clock.GetTimestamp())
+                { NativeRequested = 2, NativeSubmitted = UnknownSwitchOutcome ? 1 : 2, StartedTimestamp = Clock.GetTimestamp(), ObservableAfterTimestamp = Clock.GetTimestamp() };
             return UnknownSwitchOutcome
                 ? new(CombatBattleHostInputStatus.Unknown)
                     { ObservableAfterTimestamp = Clock.GetTimestamp(), NativeRequested = 2, NativeSubmitted = 1 }

@@ -19,6 +19,8 @@ public abstract class SceneBaseMapByTemplateMatch : SceneBaseMap
     private List<BaseMapLayerByTemplateMatch> _layers = [];
     private readonly object _layersLock = new();
     private readonly Dictionary<string, MatchResult> _prevSuccessResultsBySelectorKey = new();
+    private readonly System.Threading.AsyncLocal<MatchResult?> _diagnosticMatch = new();
+    internal MatchResult? LastDiagnosticMatch => _diagnosticMatch.Value;
 
     public new List<BaseMapLayerByTemplateMatch> Layers
     {
@@ -134,6 +136,7 @@ public abstract class SceneBaseMapByTemplateMatch : SceneBaseMap
     
     private Point2f UpdateResult(in MatchResult result, int rank, MapLayerSelector? selector)
     {
+        _diagnosticMatch.Value = result; // 包括失败候选；不重跑匹配，不把旧成功层冒充当前层。
         if (!result.IsSuccess(rank)) return default;
         SetPrevSuccessResult(selector, result);
         return ConvertGenshinMapCoordinatesToImageCoordinates(result.MapPos);

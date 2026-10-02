@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,6 +32,10 @@ internal sealed class UiOperation : IDisposable
     private int _debugEvents, _suppressed;
     private bool _ended, _disposed;
     private string? _latestDescription;
+    private readonly Queue<string> _stateHistory = new();
+    private readonly Dictionary<string, (string First, string Last, int Count)> _milestones = new(StringComparer.Ordinal);
+    private int _milestonesOmitted;
+    private string? _firstInputReceipt, _lastInputReceipt;
     private readonly double?[] _phaseMilliseconds = new double?[Enum.GetValues<UiOperationPhase>().Length];
     private double _constructionMilliseconds, _logProducerMilliseconds;
     private double? _firstCheckAtMilliseconds, _dispatchMilliseconds;
@@ -71,9 +77,11 @@ internal sealed class UiOperation : IDisposable
 
     internal static async Task<T> RunAsync<T>(string name, TimeSpan budget, CancellationToken ct,
         Func<UiOperation, Task<T>> work, ILogger? logger = null, TimeProvider? clock = null,
-        Action<Exception, string>? captureFailure = null)
+        Action<Exception, string>? captureFailure = null, IReadOnlyDictionary<string, string>? evidenceContext = null)
     {
         using var operation = Begin(name, budget, ct, logger, clock);
+        if (evidenceContext != null)
+            foreach (var item in evidenceContext.Take(8)) operation.RememberMilestone(item.Key, item.Value);
         try
         {
             operation.Check();
@@ -153,23 +161,44 @@ internal sealed class UiOperation : IDisposable
     {
         Expected = expected.ToString();
         _latestDescription = snapshot.Describe();
+        RememberMilestone("state:" + phase + ":" + Expected, $"frame={snapshot.FrameId} source={snapshot.SourceStamp.SessionId}/{snapshot.SourceStamp.Sequence} observed={_latestDescription}");
+        var milestone = snapshot.Reward.IsCandidate ? "reward" : snapshot.DomainExit.Visible ? "exit-confirmation"
+            : snapshot.MainReady ? snapshot.InDomain ? "domain-main" : "overworld-main" : "unknown-or-loading";
+        RememberMilestone("scene:" + milestone, $"source={snapshot.SourceStamp.SessionId}/{snapshot.SourceStamp.Sequence} frame={snapshot.FrameId} observed={_latestDescription}");
         if (_lastSignature == snapshot.Signature && Elapsed.TotalSeconds - _lastStateLog < 2)
         { _suppressed++; return; }
         _lastSignature = snapshot.Signature;
         _lastStateLog = Elapsed.TotalSeconds;
+        RememberState($"frame={snapshot.FrameId} captured={snapshot.CapturedAt:O} phase={phase} observed={_latestDescription}");
         Debug(() => _logger.LogDebug("UI_STATE root={RootId} op={OpId} phase={Phase} expected={Expected} frame={FrameId} captured={CapturedAt:O} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0}",
             RootId, Id, phase, Expected, snapshot.FrameId, snapshot.CapturedAt, snapshot.Describe(), Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds));
     }
 
-    public void Action(UiAction action, bool applied, int attempt, int maxAttempts) => Debug(() =>
-        _logger.LogDebug("UI_ACTION root={RootId} op={OpId} action={Action} applied={Applied} attempt={Attempt}/{MaxAttempts} remainingMs={RemainingMs:F0}",
+    internal async Task<bool> InvokeActionAsync(UiAction action, Func<Task<bool>> execute, int attempt, int maxAttempts)
+    {
+        using var input = new DiagnosticInputAttempt(_clock);
+        bool applied = false;
+        Exception? failure = null;
+        try { applied = await execute(); return applied; }
+        catch (Exception error) { failure = error; throw; }
+        finally { Action(action, applied, attempt, maxAttempts, input.Complete(applied, failure)); }
+    }
+
+    public void Action(UiAction action, bool applied, int attempt, int maxAttempts, DiagnosticInputReceipt? receipt = null)
+    {
+        RememberMilestone("action:" + action, $"applied={applied} attempt={attempt}/{maxAttempts} elapsedMs={Elapsed.TotalMilliseconds:F0}");
+        if (receipt != null) RememberInputReceipt(action, receipt);
+        Debug(() => _logger.LogDebug("UI_ACTION root={RootId} op={OpId} action={Action} applied={Applied} attempt={Attempt}/{MaxAttempts} remainingMs={RemainingMs:F0}",
             RootId, Id, action, applied, attempt, maxAttempts, Remaining.TotalMilliseconds));
+    }
 
     /// <summary>登记专用控制器的实际观察，仅用于诊断，不推断通用界面状态。</summary>
     public void Observe(string expected, string description, long frameId)
     {
         Expected = expected;
         _latestDescription = description;
+        RememberMilestone("state:" + expected, $"frame={frameId} observed={description}");
+        RememberState($"frame={frameId} expected={expected} observed={description}");
         var signature = HashCode.Combine(expected, description);
         if (_lastSignature == signature && Elapsed.TotalSeconds - _lastStateLog < 2)
         { _suppressed++; return; }
@@ -189,9 +218,13 @@ internal sealed class UiOperation : IDisposable
     {
         if (_ended) return;
         _ended = true;
-        if (outcome != "completed" && (Name is "map-area-selection" or "return-main"))
+        if (outcome == "failed" || outcome == "cancelled" && (Name is "map-area-selection" or "return-main" or "exit-domain"))
             SafeLog(() => DiagnosticEvidenceScope.Current?.RequestLatestWindow("ui:" + Id, Name,
-                $"outcome={outcome}; expected={Expected}; observed={_latestDescription}", _logger));
+                $"root={RootId} op={Id} operation={Name} outcome={outcome}; expected={Expected}; observed={_latestDescription}; " +
+                $"cancelCaller={_callerToken.IsCancellationRequested} cancelUser={_userToken.IsCancellationRequested} " +
+                $"cancelDeadline={_deadline.IsCancellationRequested} cancelParent={_parent?.Token.IsCancellationRequested}; " +
+                $"states=[{string.Join(" -> ", _stateHistory)}] milestonesOmitted={_milestonesOmitted}", _logger,
+                EvidenceFields()));
         SafeLog(() => _logger.Log(error == null || outcome == "cancelled" ? LogLevel.Debug : LogLevel.Warning,
             error, "UI_END root={RootId} op={OpId} operation={Operation} outcome={Outcome} expected={Expected} observed={Observed} elapsedMs={ElapsedMs:F0} remainingMs={RemainingMs:F0} suppressed={Suppressed} constructionMs={ConstructionMs:F3} dispatchMs={DispatchMs:F3} firstCheckAtMs={FirstCheckAtMs:F3} checksMs={ChecksMs:F3} pauseMs={PauseMs:F3} focusMs={FocusMs:F3} admissionMs={AdmissionMs:F3} nativeInputMs={NativeInputMs:F3} explicitWaitMs={ExplicitWaitMs:F3} logProducerBeforeEndMs={LogProducerBeforeEndMs:F3} captureMs={CaptureMs:F3} sceneMs={SceneMs:F3} areaOcrMs={AreaOcrMs:F3}",
             RootId, Id, Name, outcome, Expected, _latestDescription ?? "未取得观察", Elapsed.TotalMilliseconds, Remaining.TotalMilliseconds, _suppressed,
@@ -201,6 +234,43 @@ internal sealed class UiOperation : IDisposable
             _phaseMilliseconds[(int)UiOperationPhase.NativeInput], _phaseMilliseconds[(int)UiOperationPhase.ExplicitWait],
             _logProducerMilliseconds, _phaseMilliseconds[(int)UiOperationPhase.Capture],
             _phaseMilliseconds[(int)UiOperationPhase.SceneRecognition], _phaseMilliseconds[(int)UiOperationPhase.AreaOcr]));
+    }
+
+    private void RememberState(string state)
+    {
+        if (_stateHistory.Count >= 4) _stateHistory.Dequeue();
+        _stateHistory.Enqueue(state.Length > 256 ? state[..256] : state);
+    }
+
+    private void RememberInputReceipt(UiAction action, DiagnosticInputReceipt receipt)
+    {
+        var value = $"action={action} {receipt.Describe()}";
+        _firstInputReceipt ??= value;
+        _lastInputReceipt = value;
+        _parent?.RememberInputReceipt(action, receipt);
+    }
+
+    private IReadOnlyDictionary<string, string> EvidenceFields()
+    {
+        var fields = new Dictionary<string, string>();
+        // 类型化回执独立于200字符里程碑，先入有界字段集以保留完整时间和原因。
+        if (_firstInputReceipt != null) fields["input:first"] = _firstInputReceipt;
+        if (_lastInputReceipt != null) fields["input:last"] = _lastInputReceipt;
+        foreach (var item in _milestones)
+            fields[item.Key] = $"count={item.Value.Count} first=[{item.Value.First}] last=[{item.Value.Last}]";
+        return fields;
+    }
+
+    private void RememberMilestone(string key, string value)
+    {
+        // 固定数量且分字段保留首次/末次；连续loading不能挤掉已见的完成/领奖/退出动作。
+        key = key.Length > 64 ? key[..64] : key;
+        value = value.Length > 200 ? value[..200] : value;
+        if (_milestones.TryGetValue(key, out var previous))
+            _milestones[key] = (previous.First, value, previous.Count == int.MaxValue ? int.MaxValue : previous.Count + 1);
+        else if (_milestones.Count < 16) _milestones.Add(key, (value, value, 1));
+        else if (_milestonesOmitted < int.MaxValue) _milestonesOmitted++;
+        _parent?.RememberMilestone(key, value);
     }
 
     public void RecordDispatch(TimeSpan elapsed) => _dispatchMilliseconds = elapsed.TotalMilliseconds;

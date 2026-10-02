@@ -161,10 +161,12 @@ public class PathExecutionFailureTests
         var replay = new PathReplay();
         var points = Enumerable.Range(0, 4).Select(_ => replay.Point("walk")).ToList();
         Assert.False(PathExecutor.CanRestartAfterHealing(points, 3));
+        Assert.Equal("original-entry-not-teleport", PathExecutor.HealingRestartRejection(points, 3));
         points[0].Type = "teleport";
         Assert.True(PathExecutor.CanRestartAfterHealing(points, 3));
         points[1].Action = "combat_script";
         Assert.False(PathExecutor.CanRestartAfterHealing(points, 3));
+        Assert.Equal("unsafe-macro-prefix:index=1", PathExecutor.HealingRestartRejection(points, 3));
         Assert.True(PathExecutor.CanRestartAfterHealing(points, 1)); // 此节点尚未执行，不属于回放区间。
     }
 

@@ -160,6 +160,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     {
         try
         {
+            DiagnosticEvidenceScope.Current?.RegisterIdentity("strategy-" + format, Context.BattleId.ToString("N"), path ?? "in-memory", textHash);
             _diagnosticLogger.LogInformation("FIGHT_STRATEGY battle={Battle} executor=NativeCombatFlowRunner format={Format} path={Path} parsedUtf8TextSha256={TextHash} assembly={Version}",
                 Context.BattleId, format, path ?? "in-memory", textHash ?? "unavailable", typeof(NativeCombatFlowRunner).Assembly.GetName().Version);
         }
@@ -594,6 +595,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private bool _selectionBlockedCaptured;
         private CombatControlObservation _selectionControl;
         private CaptureFrameStamp _selectionControlSource;
+        private string _selectionReceiptDetail = "receipt=not-requested nativeRequested=0 nativeSubmitted=0 uncertain=False";
         private string? _lastSelectionTrace;
         private int _selectionTraceCount;
         private string? _selectionActor;
@@ -799,10 +801,28 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     (index, request) =>
                     {
                         if (_selectionObservationOnly) throw new CombatActionInterruptedException();
-                        var receipt = io.SelectActor(index, request, ct);
+                        var requestedAt = io.Clock.GetTimestamp();
+                        CombatBattleHostInputResult receipt;
+                        try
+                        {
+                            receipt = io.SelectActor(index, request, ct);
+                            _selectionReceiptDetail = $"inputRequest={request.Id} requestedTimestamp={requestedAt} startedTimestamp={receipt.StartedTimestamp?.ToString() ?? "unknown"} " +
+                                $"completedTimestamp={receipt.CompletedTimestamp?.ToString() ?? "unknown"} inputFrequency={io.Clock.TimestampFrequency} " +
+                                $"nativeRequested={receipt.NativeRequested?.ToString() ?? "unknown"} nativeSubmitted={receipt.NativeSubmitted?.ToString() ?? "unknown"} " +
+                                $"status={receipt.Status} uncertain={receipt.Status == CombatBattleHostInputStatus.Unknown} receiptReason={receipt.Reason}";
+                        }
+                        catch
+                        {
+                            _selectionReceiptDetail = $"inputRequest={request.Id} requestedTimestamp={requestedAt} status=Unknown uncertain=True reason=submission-threw receipt=unavailable";
+                            if (_selection is { } failedGoal)
+                                _evidence?.AppendBeforeDetail("selection", failedGoal.GoalId.ToString("N"), _selectionReceiptDetail);
+                            throw;
+                        }
+                        if (_selection is { } receiptGoal)
+                            _evidence?.AppendBeforeDetail("selection", receiptGoal.GoalId.ToString("N"), _selectionReceiptDetail);
                         if (receipt.Status is CombatBattleHostInputStatus.Sent or CombatBattleHostInputStatus.Unknown || receipt.NativeSubmitted > 0)
                             action.RecordInputSubmission(request.Id);
-                        action.Trace("switch-submission", $"goal={_selection?.GoalId} pulse={request.Id} source={request.Source.Sequence} index={index} status={receipt.Status} reason={receipt.Reason}");
+                        action.Trace("switch-submission", $"goal={_selection?.GoalId} pulse={request.Id} source={request.Source.Sequence} index={index} {_selectionReceiptDetail}");
                         if (receipt.Status == CombatBattleHostInputStatus.NotSent && _selection is { HasSubmittedInput: false } notSent)
                             _evidence?.ForgetBefore("selection", notSent.GoalId.ToString("N"));
                         return receipt;
@@ -818,8 +838,6 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                             _evidence?.RememberBefore(frame, "selection", goal.GoalId.ToString("N"),
                                 $"battle={action.BattleId} goal={goal.GoalId} pulse={request.Id} target={actor.Name}/{actor.Index} originalDeadline={goal.DeadlineTimestamp}; before native submission");
                             _evidence?.ObserveExistingFrame(frame);
-                            _evidence?.RequestWindow("selection:" + goal.GoalId, "selection-before-submit", frame.FrameStamp,
-                                $"target={actor.Name}/{actor.Index}", Logger);
                         }
                     });
             }
@@ -839,11 +857,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 if (phase != null)
                 {
                     // 协议Unknown和外层control早退都在持有原帧时取证；正挣脱提示在恢复前记录一次。
-                    var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} submitted=False " +
+                    var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} submitted=False {_selectionReceiptDetail} " +
                         $"controlObserved={control.IsObserved} motion={control.Motion} keyboardBreakout={control.KeyboardBreakoutRequested} " +
                         $"purpose={Purpose} command={DescribeCommand(action.Command)} deadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}";
                     _evidence?.TryCapture(frame, "selection:" + goal.GoalId, phase, detail, Logger);
-                    _evidence?.RequestWindow("selection:" + goal.GoalId, phase, frame.FrameStamp, detail, Logger);
+                    _evidence?.RequestWindowFromFrame("selection:" + goal.GoalId, phase, frame, detail, Logger);
                     if (phase == "deadline") _selectionDeadlineCaptured = true;
                     else _selectionBlockedCaptured = true;
                 }
@@ -855,7 +873,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         {
             if (_selection is not { } goal || _selectionAction is not { } action) return;
             var source = goal.ObservedSource;
-            var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} actual={goal.ObservedIndex?.ToString() ?? "unknown"} state={state} reason={goal.Reason} source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} originalDeadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}s " +
+            var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} actual={goal.ObservedIndex?.ToString() ?? "unknown"} state={state} reason={goal.Reason} source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} originalDeadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}s {_selectionReceiptDetail} " +
                 $"controlObserved={_selectionControl.IsObserved} motion={_selectionControl.Motion} keyboardBreakout={_selectionControl.KeyboardBreakoutRequested} controlSource={_selectionControlSource.SessionId}/{_selectionControlSource.Sequence} " +
                 $"purpose={Purpose} command={DescribeCommand(action.Command)} pathingPrimitive={PathingPrimitiveInput.Supports(action.Command)} atomic={action.InAtomicScope} observationOnly={_selectionObservationOnly}";
             action.Trace("selection", detail);
@@ -872,7 +890,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 if (phase != null)
                 {
                     _evidence?.CaptureFault(_capture, "selection", goal.GoalId.ToString("N"), phase, detail, Logger);
-                    _evidence?.RequestWindow("selection:" + goal.GoalId, phase, _capture.FrameStamp, detail, Logger);
+                    _evidence?.RequestWindowFromFrame("selection:" + goal.GoalId, phase, _capture, detail, Logger);
                     if (phase == "deadline") _selectionDeadlineCaptured = true;
                     else _selectionUnconfirmedCaptured = true;
                 }
@@ -951,6 +969,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _selectionBlockedCaptured = false;
             _selectionControl = default;
             _selectionControlSource = default;
+            _selectionReceiptDetail = "receipt=not-requested nativeRequested=0 nativeSubmitted=0 uncertain=False";
             _lastSelectionTrace = null;
             _selectionTraceCount = 0;
         }
@@ -1516,9 +1535,15 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     var request = observedAttempt.AttemptId.ToString("N");
                     if (pendingResult != CombatFlowResult.Succeeded && _capture != null &&
                         action.Now - observedAttempt.InputAt >= 1)
+                    {
+                        var phase = observedAttempt.Deadline - action.Now <= .2 ? "deadline" : "unconfirmed";
+                        var detail = $"battle={action.BattleId} command={action.CommandId} syntax={DescribeCommand(command)} purpose={Purpose} actor={name} inputAt={observedAttempt.InputAt:F3} deadline={observedAttempt.Deadline:F3} now={action.Now:F3} reason={action.DiagnosticReason} {pendingObservation}";
                         _evidence?.CaptureFault(_capture, "skill", request,
-                            observedAttempt.Deadline - action.Now <= .2 ? "deadline" : "unconfirmed",
-                            $"battle={action.BattleId} command={action.CommandId} syntax={DescribeCommand(command)} purpose={Purpose} actor={name} inputAt={observedAttempt.InputAt:F3} deadline={observedAttempt.Deadline:F3} now={action.Now:F3} reason={action.DiagnosticReason} {pendingObservation}", Logger);
+                            phase, detail, Logger);
+                        _evidence?.ObserveExistingFrame(_capture);
+                        _evidence?.RequestWindowFromFrame(request, phase, _capture, detail, Logger,
+                            changeKey: $"{pendingResult}:{action.DiagnosticReason}:cooling={recoverySample.CoolingDown}:ready={recoverySample.Ready}:control={recoveryControlValid}");
+                    }
                     if (pendingResult is CombatFlowResult.Succeeded or CombatFlowResult.Failed)
                     {
                         _evidence?.ForgetBefore("skill", request);
@@ -1651,17 +1676,38 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     action.Trace("skill-input-context", inputContext);
                     Guid? submittingAttempt = null;
                     var sent = CombatSkillInput.Send(_attempts, action, name, source,
-                        (request, begin) => io.SubmitInput(avatar, command, request, () =>
+                        (request, begin) =>
                         {
-                            begin();
-                            if (action.PendingAttempt is { } attempt && _capture != null)
+                            var requestedAt = io.Clock.GetTimestamp();
+                            try
                             {
-                                submittingAttempt = attempt.AttemptId;
-                                if (_evidence?.RememberBefore(_capture, "skill", attempt.AttemptId.ToString("N"),
-                                    $"battle={action.BattleId} command={action.CommandId} {inputContext} deadline={action.AbsoluteDeadline:F3}; before native submission") == true)
-                                    _evidenceAttempts.Add(attempt.AttemptId);
+                                var receipt = io.SubmitInput(avatar, command, request, () =>
+                                {
+                                    begin();
+                                    if (action.PendingAttempt is { } attempt && _capture != null)
+                                    {
+                                        submittingAttempt = attempt.AttemptId;
+                                        if (_evidence?.RememberBefore(_capture, "skill", attempt.AttemptId.ToString("N"),
+                                            $"battle={action.BattleId} command={action.CommandId} {inputContext} deadline={action.AbsoluteDeadline:F3}; before native submission") == true)
+                                            _evidenceAttempts.Add(attempt.AttemptId);
+                                    }
+                                }, ct);
+                                if (submittingAttempt is { } id)
+                                    _evidence?.AppendBeforeDetail("skill", id.ToString("N"),
+                                        $"inputRequest={request.Id} requestedTimestamp={requestedAt} startedTimestamp={receipt.StartedTimestamp} " +
+                                        $"completedTimestamp={receipt.CompletedTimestamp} inputFrequency={io.Clock.TimestampFrequency} " +
+                                        $"nativeRequested={receipt.NativeRequested} nativeSubmitted={receipt.NativeSubmitted} status={receipt.Status} " +
+                                        $"uncertain={receipt.Status == CombatBattleHostInputStatus.Unknown} receiptReason={receipt.Reason}");
+                                return receipt;
                             }
-                        }, ct), ct, io.Clock);
+                            catch
+                            {
+                                if (submittingAttempt is { } id)
+                                    _evidence?.AppendBeforeDetail("skill", id.ToString("N"),
+                                        $"inputRequest={request.Id} requestedTimestamp={requestedAt} status=Unknown reason=submission-threw receipt=unavailable");
+                                throw;
+                            }
+                        }, ct, io.Clock);
                     if (sent != CombatFlowResult.Pending && submittingAttempt is { } unsubmitted)
                     {
                         _evidence?.ForgetBefore("skill", unsubmitted.ToString("N"));
@@ -1912,6 +1958,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 frame.Dispose();
                 return null;
             }
+            // 选角等待也必须持续喂入已有源帧，不能只在首次输入前更新环缓存。
+            _evidence?.ObserveExistingFrame(frame);
             return frame;
         }
 

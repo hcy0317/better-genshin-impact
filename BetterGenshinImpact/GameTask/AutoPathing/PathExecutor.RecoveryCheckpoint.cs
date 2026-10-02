@@ -9,6 +9,7 @@ using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using Fischless.GameCapture;
+using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
@@ -18,10 +19,17 @@ public partial class PathExecutor
         (!string.IsNullOrEmpty(waypoint.Action) && !_skipOtherOperations) || waypoint.Action == ActionEnum.CombatScript.Code;
 
     internal static bool CanRestartAfterHealing(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex) =>
-        segment is { Count: > 0 } && resumeIndex >= 0 && resumeIndex < segment.Count &&
-        segment[0].Type == WaypointType.Teleport.Code &&
-        // 原宏同时含位移与副作用，不能为新增回血重启假定它可以安全重放。
-        !segment.Take(resumeIndex).Any(point => point.Action == ActionEnum.CombatScript.Code);
+        HealingRestartRejection(segment, resumeIndex) == null;
+
+    internal static string? HealingRestartRejection(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex)
+    {
+        if (segment is not { Count: > 0 }) return "segment-unavailable";
+        if (resumeIndex < 0 || resumeIndex >= segment.Count) return "checkpoint-out-of-range";
+        if (segment[0].Type != WaypointType.Teleport.Code) return "original-entry-not-teleport";
+        for (var index = 0; index < resumeIndex; index++)
+            if (segment[index].Action == ActionEnum.CombatScript.Code) return "unsafe-macro-prefix:index=" + index;
+        return null;
+    }
 
     private async Task RecoverAtStatueAndRestartAsync(CaptureFrameStamp before)
     {
@@ -29,12 +37,37 @@ public partial class PathExecutor
             ? Math.Max(CurWaypoint.Item1, RecordWaypoint.Item1) : CurWaypoint.Item1;
         // 能否重放只决定恢复后的路线处理，不能阻止当前低血角色先安全回血。
         var canRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex);
-        await ConfirmHealingRestartAsync(before, TpStatueOfTheSeven, () =>
+        var request = "healing:" + Guid.NewGuid().ToString("N");
+        var context = $"route={CurWaypoint.Item2.PathingTaskFileName} segment={CurWaypoints.Item1} node={CurWaypoint.Item1} " +
+            $"checkpoint={resumeIndex} recordedCheckpoint={RecordWaypoint.Item1} skipOtherOperations={_skipOtherOperations} " +
+            $"canRestart={canRestart} rejection={HealingRestartRejection(CurWaypoints.Item2, resumeIndex) ?? "none"} " +
+            $"beforeSource={before.SessionId}/{before.Sequence}";
+        var lastObservation = "unavailable:not-observed";
+        void Trace(string state, bool fault)
         {
-            using var frame = _moveIo.Capture();
-            return new(frame.FrameStamp, _moveIo.CombatHud(frame) && !_moveIo.Transformed(frame),
-                Bv.CurrentAvatarIsLowHp(frame));
-        }, milliseconds => _moveIo.Delay(milliseconds, ct), ct, _moveIo.Clock, canRestart);
+            try
+            {
+                var detail = $"request={request} {context} state={state} observation={lastObservation} cancelled={ct.IsCancellationRequested}";
+                _moveIo.Logger.LogDebug("PATH_HEALING_CHECKPOINT {Detail}", detail);
+                if (fault) DiagnosticEvidenceScope.Current?.RequestLatestWindow(request, "healing-resume-failed", detail, _moveIo.Logger);
+            }
+            catch { /* 诊断不能改变回血结果或失败传播。 */ }
+        }
+        Trace("restore-requested", false);
+        try
+        {
+            await ConfirmHealingRestartAsync(before, TpStatueOfTheSeven, () =>
+            {
+                using var frame = _moveIo.Capture();
+                DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
+                var result = new HealingFrame(frame.FrameStamp, _moveIo.CombatHud(frame) && !_moveIo.Transformed(frame),
+                    Bv.CurrentAvatarIsLowHp(frame));
+                lastObservation = result.ToString();
+                return result;
+            }, milliseconds => _moveIo.Delay(milliseconds, ct), ct, _moveIo.Clock, canRestart);
+        }
+        catch (HealingRecoveryCompletedException) { Trace("healed-restart-confirmed", false); throw; }
+        catch (Exception error) { Trace("failed:" + error.GetType().Name, true); throw; }
     }
 
     internal static async Task ConfirmHealingRestartAsync(CaptureFrameStamp before, Func<Task> recover,

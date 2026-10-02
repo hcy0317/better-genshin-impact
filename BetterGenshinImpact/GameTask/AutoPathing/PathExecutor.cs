@@ -77,8 +77,9 @@ public partial class PathExecutor
             LocateDirect = (screen, point) =>
             {
                 var position = Navigation.GetPosition(screen, point.MapName, point.MapMatchMethod, point.MapLayerSelector);
-                return Task.FromResult(new PathPosition(position, 0,
-                    position != default && float.IsFinite(position.X) && float.IsFinite(position.Y)));
+                var valid = position != default && float.IsFinite(position.X) && float.IsFinite(position.Y);
+                return Task.FromResult(new PathPosition(position, 0, valid,
+                    valid ? PathPositionSource.Direct : PathPositionSource.Invalid));
             },
             EndJudgment = EndJudgment,
             RotateUntil = (target, diff) => WaitUntilRotatedTo(target, diff),
@@ -1403,7 +1404,12 @@ public partial class PathExecutor
         PathApproachPulse lastPulse = default;
         var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
         var approachDiagnostics = new PathApproachDiagnostics(waypoint.PathingTaskFileName,
-            $"segment={CurWaypoints.Item1 + 1} node={waypoint.Id} move={waypoint.MoveMode} action={waypoint.Action}");
+            $"segment={CurWaypoints.Item1 + 1} node={waypoint.Id} move={waypoint.MoveMode} action={waypoint.Action} " +
+            $"map={waypoint.MapName} method={waypoint.MapMatchMethod} layer={waypoint.MapLayerSelector}");
+        DiagnosticEvidenceScope.Current?.RegisterIdentity("route", waypoint.PathingTaskFileName,
+            waypoint.PathingTaskFullPath, "unknown:route-content-digest-not-exposed-by-waypoint");
+        DiagnosticEvidenceScope.Current?.RegisterIdentity("map-config", waypoint.PathingTaskFileName,
+            $"map={waypoint.MapName} method={waypoint.MapMatchMethod} layer={waypoint.MapLayerSelector}", "observed-effective-selector");
         while (true)
         {
             operation.Check();
@@ -1425,7 +1431,8 @@ public partial class PathExecutor
                 throw new RetryException("精确接近目标点超时，重试当前路线分段");
             position = location.Point;
             var distance = Navigation.GetDistance(waypoint, position);
-            approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, _moveIo.Logger, location.IsDirect);
+            approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, _moveIo.Logger, location.IsDirect,
+                NavigationFrameEvidence.Read(screen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector), observation.Motion.ToString(), location.Source);
             if (distance < 2)
             {
                 _moveIo.Logger.LogDebug("已到达路径点");
@@ -1489,7 +1496,7 @@ public partial class PathExecutor
             operation.Check();
             lastPulse = await PathApproachDiagnostics.RunPulseAsync(
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
-                () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock);
+                () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, screen);
             approachDiagnostics.RecordPulse(lastPulse);
             // Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_W).Sleep(60).KeyUp(User32.VK.VK_W);
             await _moveIo.Delay(20, operation.Token);
@@ -1698,6 +1705,7 @@ public partial class PathExecutor
         }, imageRegion, waypoint.PathingTaskFileName);
         var position = Navigation.GetPosition(imageRegion, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector);
         var isDirect = float.IsFinite(position.X) && float.IsFinite(position.Y) && position != default;
+        var positionSource = isDirect ? PathPositionSource.Direct : PathPositionSource.Invalid;
         int time = 0;
         if (position == new Point2f())
         {
@@ -1725,10 +1733,12 @@ public partial class PathExecutor
                 {
                     position = prePosition;
                     isDirect = false;
+                    positionSource = PathPositionSource.Cache;
                     Logger.LogInformation(@$"未识别到具体路径，取上次点位");
                 }
             }else if (waypoint.Misidentification.HandlingMode == "mapRecognition"){
                 isDirect = false;
+                positionSource = PathPositionSource.Invalid;
                 //大地图识别坐标
                 DateTime start = DateTime.Now;
                 TpTask tpTask = new TpTask(ct);
@@ -1736,6 +1746,8 @@ public partial class PathExecutor
                 try
                 {
                     position = MapManager.GetMap(waypoint.MapContext).ConvertGenshinMapCoordinatesToImageCoordinates(tpTask.GetPositionFromBigMap(waypoint.MapContext));
+                    if (position != default && float.IsFinite(position.X) && float.IsFinite(position.Y))
+                        positionSource = PathPositionSource.Fallback;
                 }
                 catch (Exception e)
                 {
@@ -1768,7 +1780,7 @@ public partial class PathExecutor
         }
 
         //Logger.LogDebug("识别到路径："+position.X+","+position.Y);
-        return new(position, time, isDirect);
+        return new(position, time, isDirect, positionSource);
     }
 
     private async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes = 50)
