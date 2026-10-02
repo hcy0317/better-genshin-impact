@@ -12,6 +12,45 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PathExecutionFailureTests
 {
     [Fact]
+    public void CompletedSimpleAttackDoesNotBlockHealingAndIsNotExecutedAgainDuringReturn()
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 4).Select(_ => replay.Point("dash")).ToList();
+        points[0].Type = "teleport";
+        points[1].Type = "path";
+        points[1].Action = "combat_script";
+        points[1].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext("attack(0.3)", false);
+        Assert.True(PathExecutor.CanRestartAfterHealing(points, 2));
+        replay.Executor.CurWaypoints = (0, points);
+        replay.Executor.CurWaypoint = (2, points[2]);
+        replay.Executor.StartSkipOtherOperations();
+        Assert.True(replay.Executor.ShouldExecuteWaypointAction(points[1])); // 普通重试的宏语义不变。
+        replay.Executor.StartSkipOtherOperations(afterHealing: true);
+        replay.Executor.CurWaypoint = (1, points[1]);
+        replay.Executor.TryCloseSkipOtherOperations();
+        Assert.False(replay.Executor.ShouldExecuteWaypointAction(points[1]));
+        replay.Executor.CurWaypoint = (2, points[2]);
+        replay.Executor.TryCloseSkipOtherOperations();
+        Assert.True(replay.Executor.ShouldExecuteWaypointAction(points[1]));
+    }
+
+    [Theory]
+    [InlineData("keypress(f)")]
+    [InlineData("skill")]
+    [InlineData("w(1)")]
+    [InlineData("attack(0.3),keypress(f)")]
+    public void HealingStillRejectsInteractionSkillsMovementAndCompoundMacroPrefixes(string script)
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 3).Select(_ => replay.Point("walk")).ToList();
+        points[0].Type = "teleport";
+        points[1].Type = "path";
+        points[1].Action = "combat_script";
+        points[1].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext(script, false);
+        Assert.False(PathExecutor.CanRestartAfterHealing(points, 2));
+    }
+
+    [Fact]
     public async Task UnsafeMacroPrefixStillHealsButCannotRetryOrCompleteTheRoute()
     {
         var replay = new PathReplay();

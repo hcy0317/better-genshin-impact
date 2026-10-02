@@ -123,6 +123,7 @@ public partial class PathExecutor
 
     //跳过除走路径以外的操作
     private bool _skipOtherOperations = false;
+    private bool _healingNavigationReplay;
 
     // 最近一次获取派遣奖励的时间
     private DateTime _lastGetExpeditionRewardsTime = DateTime.MinValue;
@@ -148,11 +149,15 @@ public partial class PathExecutor
         }
 
         _skipOtherOperations = false;
+        _healingNavigationReplay = false;
     }
 
     //记录点位，方便后面恢复
-    public void StartSkipOtherOperations()
+    public void StartSkipOtherOperations() => StartSkipOtherOperations(afterHealing: false);
+
+    internal void StartSkipOtherOperations(bool afterHealing)
     {
+        _healingNavigationReplay |= afterHealing;
         if (_skipOtherOperations && RecordWaypoints == CurWaypoints && RecordWaypoint.Item1 >= CurWaypoint.Item1)
             return;
         _moveIo.Logger.LogWarning("记录恢复点位，地图追踪将到达上次点位之前将跳过走路之外的操作");
@@ -286,7 +291,7 @@ public partial class PathExecutor
                     TaskFailureDiagnostics.CaptureScreenshotOnce(exception,
                         $"地图追踪分段 {CurWaypoints.Item1 + 1} 点位 {CurWaypoint.Item1 + 1} 原始失败，尚未重试：{exception.GetType().Name}");
                 }
-                StartSkipOtherOperations();
+                StartSkipOtherOperations(afterHealing: exception is HealingRecoveryCompletedException);
                 Logger.LogWarning("地图追踪分段 {Segment} 点位 {Waypoint} 将重试：{Reason}",
                     CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, exception.Message);
             }, () =>

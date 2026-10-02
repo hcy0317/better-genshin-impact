@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.AutoPathing.Model.Enum;
+using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Ui;
@@ -16,7 +17,16 @@ namespace BetterGenshinImpact.GameTask.AutoPathing;
 public partial class PathExecutor
 {
     internal bool ShouldExecuteWaypointAction(WaypointForTrack waypoint) =>
-        (!string.IsNullOrEmpty(waypoint.Action) && !_skipOtherOperations) || waypoint.Action == ActionEnum.CombatScript.Code;
+        (!string.IsNullOrEmpty(waypoint.Action) && !_skipOtherOperations) ||
+        waypoint.Action == ActionEnum.CombatScript.Code &&
+        !(_skipOtherOperations && _healingNavigationReplay && CanSkipCompletedHealingMacro(waypoint));
+
+    // 回血后仅略过已经完成的、单个当前角色普攻路径点；不重放输入，也不跳过技能/交互/移动宏。
+    // target/orientation宏可能承担业务交互，不属于这个可略过的导航前缀。
+    internal static bool CanSkipCompletedHealingMacro(WaypointForTrack waypoint) =>
+        waypoint.Type == WaypointType.Path.Code && waypoint.CombatScript?.CombatCommands is { Count: 1 } commands &&
+        commands[0].Name == CombatScriptParser.CurrentAvatarName && commands[0].Method == Method.Attack &&
+        !commands[0].RequiresFlow;
 
     internal static bool CanRestartAfterHealing(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex) =>
         HealingRestartRejection(segment, resumeIndex) == null;
@@ -27,7 +37,8 @@ public partial class PathExecutor
         if (resumeIndex < 0 || resumeIndex >= segment.Count) return "checkpoint-out-of-range";
         if (segment[0].Type != WaypointType.Teleport.Code) return "original-entry-not-teleport";
         for (var index = 0; index < resumeIndex; index++)
-            if (segment[index].Action == ActionEnum.CombatScript.Code) return "unsafe-macro-prefix:index=" + index;
+            if (segment[index].Action == ActionEnum.CombatScript.Code && !CanSkipCompletedHealingMacro(segment[index]))
+                return "unsafe-macro-prefix:index=" + index;
         return null;
     }
 
