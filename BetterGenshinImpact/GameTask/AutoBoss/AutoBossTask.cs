@@ -1323,6 +1323,7 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
         if (!await WaitForRewardResultReady(page))
             throw new BossRewardUncertainException("使用树脂后未确认奖励结果页，不允许重复领奖");
         progress.ConfirmClaim();
+        _taskParam.RewardClaimedCallback?.Invoke();
         await TryRecognizeRewardResult(page);
         await CloseRewardResult();
         Notify.Event("AutoBoss").Success($"{Name}奖励领取");

@@ -12,3 +12,12 @@ public sealed class ExternalLlmFactAttribute : FactAttribute
             Skip = "真实 LLM 集成未授权；仅显式设置 BGI_TEST_ENABLE_LLM=1 时执行。";
     }
 }
+
+public sealed class ExternalLlmTheoryAttribute : TheoryAttribute
+{
+    public ExternalLlmTheoryAttribute()
+    {
+        if (!ExternalLlmFactAttribute.IsEnabled)
+            Skip = "真实 LLM 集成未授权；仅显式设置 BGI_TEST_ENABLE_LLM=1 时执行。";
+    }
+}
