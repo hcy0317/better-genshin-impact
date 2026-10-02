@@ -8,6 +8,80 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class AvatarSelectionProtocolTests
 {
     [Fact]
+    public void DuplicateBetweenTwoFreshTargetFramesDoesNotEraseConfirmation()
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var stamp = source.Next();
+        using var selection = new AvatarSelectionProtocol.Continuation<ObservedFrame>(1, 4, TimeSpan.FromSeconds(2),
+            () => new(stamp), f => f.Source, _ => true, _ => 1, f => new(f.Source),
+            (_, _) => throw new InvalidOperationException("already active"), clock);
+        using (var first = selection.Advance(default)) Assert.False(first.Confirmed);
+        clock.Advance(TimeSpan.FromMilliseconds(10));
+        using (var duplicate = selection.Advance(default)) Assert.False(duplicate.Confirmed);
+        clock.Advance(TimeSpan.FromMilliseconds(40));
+        stamp = source.Next();
+        using var next = selection.Advance(default);
+        Assert.True(next.Confirmed);
+    }
+
+    [Theory]
+    [InlineData("stale")]
+    [InlineData("reordered")]
+    [InlineData("foreign")]
+    public void InvalidSourceStillClearsTargetConfirmation(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var earlier = source.Next();
+        clock.Advance(TimeSpan.FromMilliseconds(30));
+        var stamp = source.Next();
+        using var selection = new AvatarSelectionProtocol.Continuation<ObservedFrame>(1, 4, TimeSpan.FromSeconds(2),
+            () => new(stamp), f => f.Source, _ => true, _ => 1, f => new(f.Source),
+            (_, _) => throw new InvalidOperationException("already active"), clock);
+        using (selection.Advance(default)) { }
+        if (fault == "stale") clock.Advance(TimeSpan.FromMilliseconds(160));
+        else stamp = fault == "reordered" ? earlier : new CaptureFrameSource(clock).Next();
+        using (var invalid = selection.Advance(default)) Assert.False(invalid.Confirmed);
+        clock.Advance(TimeSpan.FromMilliseconds(30));
+        stamp = source.Next();
+        using (var first = selection.Advance(default)) Assert.False(first.Confirmed);
+        clock.Advance(TimeSpan.FromMilliseconds(30));
+        stamp = source.Next();
+        using var second = selection.Advance(default);
+        Assert.True(second.Confirmed);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DuplicatePollingDoesNotStarveStableMismatchRetryOrReplayUnknownInput(bool unknown)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var stamp = source.Next();
+        var sends = 0;
+        using var selection = new AvatarSelectionProtocol.Continuation<ObservedFrame>(1, 4, TimeSpan.FromSeconds(2),
+            () => new(stamp), f => f.Source, _ => true, _ => 2, f => new(f.Source),
+            (_, _) => { sends++; return new(unknown ? CombatBattleHostInputStatus.Unknown : CombatBattleHostInputStatus.Sent,
+                clock.GetTimestamp()); }, clock);
+        using (selection.Advance(default)) { }
+        for (var i = 0; i < 6; i++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(90));
+            stamp = source.Next();
+            using (selection.Advance(default)) { }
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+            using (selection.Advance(default)) { }
+        }
+        Assert.Equal(unknown ? 1 : 2, sends);
+        clock.Advance(TimeSpan.FromSeconds(2));
+        using var expired = selection.Advance(default);
+        Assert.False(expired.Confirmed);
+        Assert.False(expired.AwaitingObservation);
+    }
+
+    [Fact]
     public void AssistanceDiagnosticsDistinguishAFreshFrameFromAPostInputFrame()
     {
         var clock = new FakeTimeProvider();

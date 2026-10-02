@@ -132,6 +132,13 @@ internal static class AvatarSelectionProtocol
                 var stamp = _source(frame);
                 ObservedSource = stamp;
                 if (!stamp.IsFresh(_clock, _maximumAge)) return Unknown("stale-or-unknown-source");
+                if (_last.IsKnown && stamp == _last)
+                {
+                    // 重复轮询不是新的矛盾证据：不增加确认次数、不发输入，也不清空已观察的新帧序列。
+                    // 过期/乱序/换源仍走Unknown；原deadline在入口检查，不因重复帧续期。
+                    Reason = "duplicate-source-wait";
+                    return new(false, false, _last, null, null, _fence, awaitingObservation: true);
+                }
                 if (_last.IsKnown && !stamp.IsAfter(_last)) return Unknown("duplicate-reordered-or-restarted-source");
                 if (_fence is { } fence && !fence.Accepts(stamp)) return Unknown("pre-input-or-foreign-source");
                 _last = stamp;
