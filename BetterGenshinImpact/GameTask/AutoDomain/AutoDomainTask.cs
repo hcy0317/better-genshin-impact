@@ -248,12 +248,15 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             }
 
 
-            await Delay(2000, ct);
-            if (!await Bv.WaitForMainUi(_ct, 30))
-                throw new InvalidOperationException("秘境任务结束后未确认主界面，停止后续背包处理");
-            await Delay(2000, ct);
-
-            await ArtifactSalvage();
+            await CompleteDomainHandoffAsync(ExitDomain, async () =>
+            {
+                await Delay(2000, ct);
+                return await Bv.WaitForMainUi(ct, 30);
+            }, async () =>
+            {
+                await Delay(2000, ct);
+                await ArtifactSalvage();
+            }, ct);
             Notify.Event(NotificationEvent.DomainEnd).Success("自动秘境结束");
             return new Dictionary<string, int>(_rewardSummary);
         }
@@ -391,7 +394,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
 
             // 5. 快速领取奖励并判断是否有下一轮
             Logger.LogInformation("自动秘境：{Text}", "5. 领取奖励");
-            if (!await GettingTreasure())
+            if (!await GettingTreasure(i + 1 >= _taskParam.DomainRoundNum))
             {
                 Logger.LogInformation("体力耗尽或者设置轮次已达标，结束自动秘境");
                 break;
@@ -1561,7 +1564,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     /// <summary>
     /// 领取奖励
     /// </summary>
-    private async Task<bool> GettingTreasure()
+    private async Task<bool> GettingTreasure(bool finalConfiguredRound)
     {
         bool isLastTurn = false;
         // 等待窗口弹出
@@ -1778,7 +1781,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             using var confirmRectArea = ra.Find(RecognitionAssets.Get("AutoFight", "Confirm", ra));
             if (!confirmRectArea.IsEmpty())
             {
-                if (isLastTurn)
+                if (ShouldExitAfterDomainReward(isLastTurn, finalConfiguredRound))
                 {
                     // 最后一回合 退出
                     var exitRectArea = ra.Find(RecognitionAssets.Get("AutoFight", "Exit", ra));
