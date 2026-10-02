@@ -5,6 +5,31 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.ScriptTests;
 public class HttpRequestTests
 {
     [Fact]
+    public async Task ScriptEvidenceKeepsKnownPhasesAndOpaqueDistinctRequestsWithOnlyWhitelistedFields()
+    {
+        var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();
+        await using var scope = new BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope((item, _) =>
+        { saved.Add(item); return Task.CompletedTask; });
+        using var frame = new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(
+            new OpenCvSharp.Mat(2, 2, OpenCvSharp.MatType.CV_8UC3, OpenCvSharp.Scalar.Black), 0, 0)
+        { FrameStamp = new Fischless.GameCapture.CaptureFrameSource().Next() };
+        scope.ObserveExistingFrame(frame);
+        GlobalMethod.RequestEvidenceWindow("commission:1:secret", "commission-before", "secret");
+        GlobalMethod.RequestEvidenceWindow("commission:1:secret", "commission-result", "{\"completed\":true,\"index\":2,\"token\":\"secret\"}");
+        GlobalMethod.RequestEvidenceWindow("commission:2:secret", "commission-result", "{\"completed\":false,\"index\":999}");
+        await scope.DisposeAsync();
+        var before = Assert.Single(saved.Where(e => e.Phase == "commission-before"));
+        var results = saved.Where(e => e.Phase == "commission-result").ToArray();
+        Assert.Equal(2, results.Length);
+        Assert.Equal(before.Request, results[0].Request);
+        Assert.NotEqual(results[0].Request, results[1].Request);
+        Assert.Equal("True", results[0].Fields!["completed"]);
+        Assert.Equal("2", results[0].Fields!["slotIndex"]);
+        Assert.False(results[1].Fields!.ContainsKey("slotIndex"));
+        Assert.DoesNotContain("secret", Newtonsoft.Json.JsonConvert.SerializeObject(saved));
+    }
+
+    [Fact]
     public async Task ScriptEvidenceBridgeCannotPersistArbitraryArguments()
     {
         var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();
