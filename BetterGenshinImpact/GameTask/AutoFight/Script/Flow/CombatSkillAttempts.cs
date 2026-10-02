@@ -80,10 +80,18 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
                 !action.CanStart || !action.CanContinue || action.Now >= slot.RecoveryWindowEnd ||
                 action.RemainingBudget < CombatFlowPolicy.ActionSeconds(command)) return null;
             if (!actorAndControlValid || sample.BattleId != battleId || !sample.SourceBound || !sample.SourceAcceptedFresh ||
+                !double.IsFinite(sample.CapturedAt) || sample.CapturedAt > action.Now || action.Now - sample.CapturedAt > .15 ||
                 slot.InputFence is not { } fence || !fence.Accepts(sample.SourceStamp) ||
                 sample.SourceStamp.SessionId != fence.Before.SessionId ||
-                slot.RecoverySource.IsKnown && !sample.SourceStamp.IsAfter(slot.RecoverySource) ||
                 sample.Ready != true || sample.CoolingDown != false)
+            {
+                slot.RecoveryReady = null;
+                return null;
+            }
+            // 同一有效就绪帧的重复轮询不构成新证据，也不打断原200ms观察窗口。
+            // 控制失效/未知/冷却矛盾已经在上方使窗口失效；乱序帧仍需重新观察。
+            if (slot.RecoverySource.IsKnown && sample.SourceStamp == slot.RecoverySource) return null;
+            if (slot.RecoverySource.IsKnown && !sample.SourceStamp.IsAfter(slot.RecoverySource))
             {
                 slot.RecoveryReady = null;
                 return null;

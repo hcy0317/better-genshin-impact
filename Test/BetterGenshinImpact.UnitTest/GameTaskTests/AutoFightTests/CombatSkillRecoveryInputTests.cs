@@ -8,6 +8,32 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatSkillRecoveryInputTests
 {
+    [Theory]
+    [InlineData("班尼特", "q(required)")]
+    [InlineData("钟离", "e(hold,wait)")]
+    public void DuplicateReadySampleDoesNotEraseTheRecoveryObservationWindow(string actor, string syntax)
+    {
+        using var trial = new Trial(actor: actor, syntax: syntax);
+        var first = trial.Ready(100);
+        Assert.Null(trial.Claim(first));
+        Assert.Null(trial.Claim(first));
+        var pulse = trial.Claim(trial.Ready());
+        Assert.NotNull(pulse);
+        Assert.Null(trial.Claim(trial.Ready(10)));
+        Assert.Equal(1, trial.Context.InputAttemptRevision); // 取得许可不是发送或确认成功。
+    }
+
+    [Fact]
+    public void DuplicateWithLostControlStillInvalidatesTheRecoveryWindow()
+    {
+        using var trial = new Trial();
+        var first = trial.Ready(100);
+        Assert.Null(trial.Claim(first));
+        Assert.Null(trial.Claim(first, controlled: false));
+        Assert.Null(trial.Claim(trial.Ready()));
+        Assert.NotNull(trial.Claim(trial.Ready()));
+    }
+
     private sealed class Trial : IDisposable
     {
         internal readonly FakeTimeProvider Clock = new();

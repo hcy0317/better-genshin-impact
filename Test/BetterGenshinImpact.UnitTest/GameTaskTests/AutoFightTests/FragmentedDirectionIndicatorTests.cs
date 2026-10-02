@@ -12,6 +12,25 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class FragmentedDirectionIndicatorTests(ITestOutputHelper output)
 {
     [OfflineNativeDecisionFact]
+    public void RecordedFailureFrameReportsClassificationWithoutGameInput()
+    {
+        var path = Environment.GetEnvironmentVariable("BGI_RECORDED_COMBAT_FILE");
+        Assert.True(File.Exists(path));
+        using var source = Cv2.ImRead(path!);
+        Assert.False(source.Empty());
+        using var frame = new ImageRegion(source.Clone(), 0, 0);
+        var diagnostics = new SeekRecognitionDiagnostics();
+        var hints = new List<EnemySeekVisual>();
+        AutoFightSeek.ResetSeekState();
+        var decision = AutoFightSeek.RecognizeSeekDecision(frame, new Scalar(255, 90, 90), null,
+            out _, out _, saveDiagnostics: false, diagnostics: diagnostics, unconfirmedDirection: hints.Add);
+        output.WriteLine($"decision={decision} unconfirmedHints={hints.Count}");
+        output.WriteLine(diagnostics.ToCompactString());
+        Assert.Equal(0, Cv2.Norm(source, frame.SrcMat, NormTypes.L1));
+        Assert.Null(System.Windows.Application.Current);
+    }
+
+    [OfflineNativeDecisionFact]
     public void RecordedS74AmbiguousArrowRetainsASearchHintWithoutInventingAnActionTarget()
     {
         var path = Environment.GetEnvironmentVariable("BGI_S74_COMBAT_FILE");
