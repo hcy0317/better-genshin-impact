@@ -124,6 +124,7 @@ public partial class PathExecutor
     //跳过除走路径以外的操作
     private bool _skipOtherOperations = false;
     private bool _healingNavigationReplay;
+    private bool _segmentHasStartedTraversal;
 
     // 最近一次获取派遣奖励的时间
     private DateTime _lastGetExpeditionRewardsTime = DateTime.MinValue;
@@ -209,6 +210,7 @@ public partial class PathExecutor
         foreach (var waypoints in waypointsList) // 按传送点分割的路径
         {
             CurWaypoints = (waypointsList.FindIndex(wps => wps == waypoints), waypoints);
+            _segmentHasStartedTraversal = false;
             var capturedRetryFailure = false;
             var endedEarly = await ExecuteSegmentWithRetriesAsync(async () =>
             {
@@ -225,6 +227,7 @@ public partial class PathExecutor
                     CurWaypoint = (waypoints.FindIndex(wps => wps == waypoint), waypoint);
                     TryCloseSkipOtherOperations();
                     await RecoverWhenLowHp(waypoint); // 低血量恢复
+                    _segmentHasStartedTraversal = true;
 
                     if (waypoint.Type == WaypointType.Teleport.Code)
                     {

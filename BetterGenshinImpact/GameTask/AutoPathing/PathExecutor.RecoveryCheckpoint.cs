@@ -16,6 +16,11 @@ namespace BetterGenshinImpact.GameTask.AutoPathing;
 
 public partial class PathExecutor
 {
+    internal sealed class HealingReplanRequiredException() : InvalidOperationException(
+        "[BGI_HEALING_REPLAN_REQUIRED] 已确认回血；当前无传送入口片段尚未开始，需要父流程从已确认的纯导航检查点返回");
+
+    internal static bool CanRequestParentHealingReplan(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex, bool started) =>
+        !started && resumeIndex == 0 && HealingRestartRejection(segment, resumeIndex) == "original-entry-not-teleport";
     internal bool ShouldExecuteWaypointAction(WaypointForTrack waypoint) =>
         (!string.IsNullOrEmpty(waypoint.Action) && !_skipOtherOperations) ||
         waypoint.Action == ActionEnum.CombatScript.Code &&
@@ -48,6 +53,7 @@ public partial class PathExecutor
             ? Math.Max(CurWaypoint.Item1, RecordWaypoint.Item1) : CurWaypoint.Item1;
         // 能否重放只决定恢复后的路线处理，不能阻止当前低血角色先安全回血。
         var canRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex);
+        var allowParentReplan = CanRequestParentHealingReplan(CurWaypoints.Item2, resumeIndex, _segmentHasStartedTraversal);
         var request = "healing:" + Guid.NewGuid().ToString("N");
         var context = $"route={CurWaypoint.Item2.PathingTaskFileName} segment={CurWaypoints.Item1} node={CurWaypoint.Item1} " +
             $"checkpoint={resumeIndex} recordedCheckpoint={RecordWaypoint.Item1} skipOtherOperations={_skipOtherOperations} " +
@@ -75,7 +81,7 @@ public partial class PathExecutor
                     Bv.CurrentAvatarIsLowHp(frame));
                 lastObservation = result.ToString();
                 return result;
-            }, milliseconds => _moveIo.Delay(milliseconds, ct), ct, _moveIo.Clock, canRestart);
+            }, milliseconds => _moveIo.Delay(milliseconds, ct), ct, _moveIo.Clock, canRestart, allowParentReplan);
         }
         catch (HealingRecoveryCompletedException) { Trace("healed-restart-confirmed", false); throw; }
         catch (Exception error) { Trace("failed:" + error.GetType().Name, true); throw; }
@@ -83,7 +89,7 @@ public partial class PathExecutor
 
     internal static async Task ConfirmHealingRestartAsync(CaptureFrameStamp before, Func<Task> recover,
         Func<HealingFrame> observe, Func<int, Task> delay, CancellationToken ct, TimeProvider clock,
-        bool canRestart = true)
+        bool canRestart = true, bool allowParentReplan = false)
     {
         ct.ThrowIfCancellationRequested();
         TaskExecutionScope.ThrowIfFailed();
@@ -111,7 +117,10 @@ public partial class PathExecutor
         TaskExecutionScope.ThrowIfFailed();
         UiOperation.Current?.Check();
         if (!canRestart)
+        {
+            if (allowParentReplan) throw new HealingReplanRequiredException();
             throw new InvalidOperationException("已确认神像回血，但缺少可安全回放的原传送入口或前缀；路线未完成，不重放路径宏");
+        }
         throw new HealingRecoveryCompletedException();
     }
 }

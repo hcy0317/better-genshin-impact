@@ -12,6 +12,36 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PathExecutionFailureTests
 {
     [Fact]
+    public void ParentHealingReplanIsLimitedToAnUnstartedNonTeleportFragment()
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 3).Select(_ => replay.Point("walk")).ToList();
+        Assert.True(PathExecutor.CanRequestParentHealingReplan(points, 0, false));
+        Assert.False(PathExecutor.CanRequestParentHealingReplan(points, 0, true));
+        Assert.False(PathExecutor.CanRequestParentHealingReplan(points, 1, false));
+        Assert.False(PathExecutor.CanRequestParentHealingReplan(null, 0, false));
+        points[0].Type = "teleport";
+        Assert.False(PathExecutor.CanRequestParentHealingReplan(points, 0, false));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ParentReplanSignalRequiresConfirmedHealing(bool healthy)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var failure = await Record.ExceptionAsync(() => PathExecutor.ConfirmHealingRestartAsync(before,
+            () => { clock.Advance(TimeSpan.FromSeconds(1)); return Task.CompletedTask; },
+            () => { clock.Advance(TimeSpan.FromMilliseconds(1)); return new(source.Next(), true, !healthy); },
+            ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, default, clock,
+            canRestart: false, allowParentReplan: true));
+        if (healthy) Assert.IsType<PathExecutor.HealingReplanRequiredException>(failure);
+        else Assert.IsType<InvalidOperationException>(failure);
+    }
+
+    [Fact]
     public void CompletedSimpleAttackDoesNotBlockHealingAndIsNotExecutedAgainDuringReturn()
     {
         var replay = new PathReplay();
