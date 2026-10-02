@@ -85,16 +85,17 @@ public class DiagnosticEvidenceScopeTests
         var saved = new List<DiagnosticEvidence>();
         var logger = new EvidenceLogger();
         await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
-        var source = new CaptureFrameSource();
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
         using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
         var anchor = source.Next();
         frame.FrameStamp = anchor;
         scope.ObserveExistingFrame(frame);
-        for (var i = 0; i < 22; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        for (var i = 0; i < 22; i++) { clock.Advance(TimeSpan.FromSeconds(1)); frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
         Assert.False(scope.RequestWindow("late-anchor", "decision", anchor, "", logger));
         await scope.DisposeAsync();
         Assert.Empty(saved);
-        Assert.Contains(logger.Messages, message => message.StartsWith("EVIDENCE_DRAINED ") && message.Contains("dropped=21"));
+        Assert.Contains(logger.Messages, message => message.Contains("window-anchor-unavailable"));
     }
 
     [Fact]
@@ -121,9 +122,9 @@ public class DiagnosticEvidenceScopeTests
         Assert.False(scope.RequestWindow("missing", "decision", default, "", logger));
         await scope.DisposeAsync();
         var drained = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
-        Assert.Contains("dropped=21", drained);
-        Assert.Contains("missingBefore=10", drained);
-        Assert.Contains("capture:source-unknown\":21", drained);
+        Assert.Contains("dropped=1", drained);
+        Assert.Contains("missingBefore=1", drained);
+        Assert.Contains("capture:source-unknown\":1", drained);
         var count = logger.Messages.Count;
         Assert.False(scope.RequestWindow("late", "decision", default, "", logger));
         Assert.Equal(count, logger.Messages.Count);
@@ -145,7 +146,7 @@ public class DiagnosticEvidenceScopeTests
         Assert.True(scope.RequestWindow("current", "decision", current, "", logger));
         frame.FrameStamp = old with { Sequence = 2, CapturedTimestamp = 150 };
         scope.ObserveExistingFrame(frame);
-        frame.FrameStamp = current with { Sequence = 2, CapturedTimestamp = 201 };
+        frame.FrameStamp = current with { Sequence = 2, CapturedTimestamp = 1200 };
         scope.ObserveExistingFrame(frame);
         await scope.DisposeAsync();
         Assert.Equal(new[] { 0, 1 }, saved.Select(item => item.Window!.RelativeIndex));
@@ -170,9 +171,9 @@ public class DiagnosticEvidenceScopeTests
         await scope.DisposeAsync();
         Assert.Single(saved);
         var drained = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
-        Assert.Contains("dropped=41", drained); // 10前缺 + 10切源后缺 + 拒绝的21槽。
-        Assert.Contains("capture:capture-source-changed\":10", drained);
-        Assert.Contains("capture:window-budget\":21", drained);
+        Assert.Contains("dropped=3", drained); // 前窗不足、切源后窗不足、窗口预算拒绝；不虚构缺失帧数。
+        Assert.Contains("capture:capture-source-changed\":1", drained);
+        Assert.Contains("capture:window-budget\":1", drained);
     }
 
     [Fact]
@@ -184,9 +185,11 @@ public class DiagnosticEvidenceScopeTests
         var source = new CaptureFrameSource();
         using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
         for (var i = 0; i < 4; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
-        Assert.True(scope.RequestWindow("memory", "decision", frame.FrameStamp, "", logger));
+        Assert.True(scope.RequestWindowFromFrame("memory", "decision", frame, "", logger));
         await scope.DisposeAsync();
-        Assert.Empty(saved);
+        var retained = Assert.Single(saved); // 故障预留仍可保存一张真实历史帧，但不能冒充缺失锚点。
+        Assert.True(retained.Window!.RelativeIndex < 0);
+        Assert.NotEqual(frame.FrameStamp, retained.Source);
         Assert.False(frame.SrcMat.IsDisposed);
         Assert.Contains(logger.Messages, message => message.Contains("memory-budget"));
     }
@@ -212,33 +215,37 @@ public class DiagnosticEvidenceScopeTests
     }
 
     [Fact]
-    public async Task WindowUsesTenExistingFramesOnEachSideWithoutChangingTheirSource()
+    public async Task WindowUsesTimedExistingSamplesWithoutChangingTheirSource()
     {
         var saved = new List<DiagnosticEvidence>();
         await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
-        var source = new CaptureFrameSource();
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
         using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
-        for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); clock.Advance(TimeSpan.FromSeconds(1)); }
         var anchor = frame.FrameStamp;
         Assert.True(scope.RequestWindow("decision", "handoff", anchor, "fixture"));
-        for (var i = 0; i < 10; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
+        for (var i = 0; i < 10; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); clock.Advance(TimeSpan.FromSeconds(1)); }
         await scope.DisposeAsync();
-        Assert.Equal(Enumerable.Range(1, 21).Select(i => (long)i), saved.Select(item => item.Source.Sequence));
-        Assert.Equal(Enumerable.Range(-10, 21), saved.Select(item => item.Window!.RelativeIndex));
+        saved = saved.OrderBy(item => item.Window!.RelativeIndex).ToList();
+        Assert.Equal(Enumerable.Range(1, 16).Select(i => (long)i), saved.Select(item => item.Source.Sequence));
+        Assert.Equal(Enumerable.Range(-10, 16), saved.Select(item => item.Window!.RelativeIndex));
         Assert.All(saved, item => { Assert.Equal(anchor, item.Window!.Anchor); Assert.Equal(anchor.SessionId, item.Source.SessionId); });
         Assert.Single(saved.Select(item => item.Window!.WindowId).Distinct());
         Assert.False(frame.SrcMat.IsDisposed);
     }
 
-    [Fact]
-    public async Task TerminalWindowSavesItsAnchorBeforeHistoryConsumesTheLastSlot()
+    [Theory]
+    [InlineData("combat-terminal")]
+    [InlineData("deadline")]
+    public async Task TerminalWindowSavesItsAnchorBeforeHistoryConsumesTheLastSlot(string phase)
     {
         var saved = new List<DiagnosticEvidence>();
         await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }, maxImages: 1);
         var source = new CaptureFrameSource();
         using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
         for (var i = 0; i < 11; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
-        Assert.True(scope.RequestWindow("battle", "combat-terminal", frame.FrameStamp, ""));
+        Assert.True(scope.RequestWindowFromFrame("battle", phase, frame, ""));
         await scope.DisposeAsync();
         var terminal = Assert.Single(saved);
         Assert.Equal(0, terminal.Window!.RelativeIndex);

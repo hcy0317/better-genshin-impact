@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -41,12 +42,20 @@ internal sealed class ApplicationLogPipeline : IAsyncDisposable
     private sealed class QueuedSink : ILogEventSink, IDisposable
     {
         private readonly Logger _output;
-        private readonly Channel<(LogEvent Event, long QueuedAt)> _queue;
+        private readonly LinkedList<(LogEvent Event, long QueuedAt)> _queue = new();
+        private readonly LinkedList<LinkedListNode<(LogEvent Event, long QueuedAt)>>[] _priorityQueues =
+            [new(), new(), new(), new()];
+        private readonly object _gate = new();
+        private readonly int _capacity;
+        private readonly Channel<byte> _wake = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
+        { SingleReader = true, FullMode = BoundedChannelFullMode.DropWrite, AllowSynchronousContinuations = false });
+        private bool _closed;
+        private long _importantDropped;
         private double _lastQueueMilliseconds = double.NaN;
         private double _lastOutputMilliseconds = double.NaN;
         private long _reportedDrops;
         public long Dropped;
-        public int Pending => _queue.Reader.Count;
+        public int Pending { get { lock (_gate) return _queue.Count; } }
         public Task Completion { get; }
         public double? LastQueueMilliseconds => Known(Volatile.Read(ref _lastQueueMilliseconds));
         public double? LastOutputMilliseconds => Known(Volatile.Read(ref _lastOutputMilliseconds));
@@ -54,27 +63,70 @@ internal sealed class ApplicationLogPipeline : IAsyncDisposable
         public QueuedSink(Logger output, int capacity)
         {
             _output = output;
-            _queue = Channel.CreateBounded<(LogEvent, long)>(new BoundedChannelOptions(capacity)
-            {
-                SingleReader = true,
-                FullMode = BoundedChannelFullMode.Wait,
-                AllowSynchronousContinuations = false
-            });
+            _capacity = capacity;
             Completion = Task.Run(DrainAsync);
         }
 
         public void Emit(LogEvent logEvent)
         {
-            // 仅TryWrite，不等待空位；队列满不能延误输入或无限增加内存。
-            if (!_queue.Writer.TryWrite((logEvent, Stopwatch.GetTimestamp())))
-                Interlocked.Increment(ref Dropped);
+            // 不等待writer；只有有界链表操作，重要日志替换低优先项但不扩大容量。
+            lock (_gate)
+            {
+                if (_closed) { Drop(logEvent); return; }
+                if (_queue.Count == _capacity)
+                {
+                    LinkedList<LinkedListNode<(LogEvent Event, long QueuedAt)>>? candidates = null;
+                    for (var priority = 0; priority < Importance(logEvent); priority++)
+                        if (_priorityQueues[priority].Count > 0) { candidates = _priorityQueues[priority]; break; }
+                    if (candidates?.First == null)
+                    { Drop(logEvent); return; }
+                    var candidate = candidates.First.Value;
+                    Drop(candidate.Value.Event);
+                    _queue.Remove(candidate);
+                    candidates.RemoveFirst();
+                }
+                var added = _queue.AddLast((logEvent, Stopwatch.GetTimestamp()));
+                _priorityQueues[Importance(logEvent)].AddLast(added);
+                _wake.Writer.TryWrite(0);
+            }
+        }
+
+        private static int Importance(LogEvent item)
+        {
+            if (item.Level >= LogEventLevel.Error) return 3;
+            if (item.Level >= LogEventLevel.Warning) return 2;
+            var name = item.MessageTemplate.Text;
+            return name.StartsWith("INPUT_", StringComparison.Ordinal) || name.StartsWith("NATIVE_INPUT", StringComparison.Ordinal) ||
+                name.StartsWith("SELECTION_GOAL", StringComparison.Ordinal) || name.StartsWith("UI_END", StringComparison.Ordinal) ||
+                name.StartsWith("EVIDENCE_", StringComparison.Ordinal) || name.StartsWith("HTTP_", StringComparison.Ordinal) ||
+                name.StartsWith("PATH_HEALING_CHECKPOINT", StringComparison.Ordinal) || name.StartsWith("FIGHT_HOST_DECISION", StringComparison.Ordinal) ||
+                name.StartsWith("FIGHT_STRATEGY", StringComparison.Ordinal) ? 1 : 0;
+        }
+
+        private void Drop(LogEvent item)
+        {
+            Interlocked.Increment(ref Dropped);
+            if (Importance(item) > 0) Interlocked.Increment(ref _importantDropped);
+        }
+
+        private bool TryTake(out (LogEvent Event, long QueuedAt) entry)
+        {
+            lock (_gate)
+            {
+                if (_queue.First == null) { entry = default; return false; }
+                entry = _queue.First.Value;
+                _queue.RemoveFirst();
+                _priorityQueues[Importance(entry.Event)].RemoveFirst();
+                return true;
+            }
         }
 
         private async Task DrainAsync()
         {
             try
             {
-                await foreach (var entry in _queue.Reader.ReadAllAsync().ConfigureAwait(false))
+                await foreach (var _ in _wake.Reader.ReadAllAsync().ConfigureAwait(false))
+                while (TryTake(out var entry))
                 {
                     var queueMs = Stopwatch.GetElapsedTime(entry.QueuedAt).TotalMilliseconds;
                     Volatile.Write(ref _lastQueueMilliseconds, queueMs);
@@ -85,7 +137,8 @@ internal sealed class ApplicationLogPipeline : IAsyncDisposable
                         var dropped = Interlocked.Read(ref Dropped);
                         if (dropped > _reportedDrops)
                         {
-                            _output.Warning("LOG_QUEUE_DROPPED count={Count} total={Total}", dropped - _reportedDrops, dropped);
+                            _output.Warning("LOG_QUEUE_DROPPED count={Count} total={Total} importantTotal={ImportantTotal}",
+                                dropped - _reportedDrops, dropped, Interlocked.Read(ref _importantDropped));
                             _reportedDrops = dropped;
                         }
                         _output.Write(entry.Event);
@@ -105,6 +158,9 @@ internal sealed class ApplicationLogPipeline : IAsyncDisposable
         }
 
         private static double? Known(double value) => double.IsNaN(value) ? null : value;
-        public void Dispose() => _queue.Writer.TryComplete();
+        public void Dispose()
+        {
+            lock (_gate) { _closed = true; _wake.Writer.TryComplete(); }
+        }
     }
 }

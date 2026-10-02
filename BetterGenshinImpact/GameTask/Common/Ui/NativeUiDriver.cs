@@ -154,6 +154,9 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             observed.CanConfirmDomainExit && observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge);
         if (action == UiAction.ConfirmDomainExit && !domainExitProposed) return Task.FromResult(false);
         using var image = _io.Capture();
+        using var fallbackInput = DiagnosticInputAttempt.Current == null ? new DiagnosticInputAttempt(_io.Clock) : null;
+        try
+        {
         var current = ReadCurrent(image);
         if (UiOperation.Current is { } operation && Enum.TryParse<UiTarget>(operation.Expected, out var target))
             operation.Observe(current, target, "pre-input");
@@ -232,6 +235,19 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                 return Task.FromResult(Completed(true));
             default:
                 return Task.FromResult(false);
+        }
+        }
+        catch (Exception error)
+        {
+            try
+            {
+                var receipt = DiagnosticInputAttempt.Current!.Complete(false, error);
+                DiagnosticEvidenceScope.Current?.RequestWindowFromFrame("ui-input:" + receipt.RequestId.ToString("N"),
+                    "ui-input-failed", image, $"action={action}; original input exception preserved",
+                    fields: new System.Collections.Generic.Dictionary<string, string> { ["nativeInput"] = receipt.Describe() });
+            }
+            catch { /* 原图取证失败不改变输入异常。 */ }
+            throw;
         }
     }
 

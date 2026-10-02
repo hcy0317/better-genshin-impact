@@ -286,6 +286,10 @@ public static class AvatarRecognition
     internal static string DescribeDamageFallback(DamageNumberRecognitionMode mode, bool found) =>
         mode == DamageNumberRecognitionMode.Disabled ? "not-run:Disabled" : $"{(found ? "found" : "not-found")}:{mode}";
 
+    // 白名单快照，不序列化完整配置；记录实际夹取后的间隔及实际绘制开关。
+    internal static string DescribeEvidenceConfig(VisualRecognitionConfig config, bool effectiveDrawResults) =>
+        FormattableString.Invariant($"intervalMs={config.TargetingDetectionInterval};draw={effectiveDrawResults};lockLostWaitSeconds={config.LockLostWaitTime:R};damageMode={config.DamageNumberRecognitionMode}");
+
     /// <summary>
     /// 根据配置的伤害数字识别模式寻找伤害数字/反应文字。
     ///   - Disabled：直接返回 null
@@ -457,6 +461,10 @@ public static class AvatarRecognition
         var visConfig = GetVisualRecognitionConfig();
         var frameIntervalMs = visConfig.TargetingDetectionInterval;
         var drawResults = visConfig.DrawRecognitionResults && (_currentAutoFightParam.Value?.EnableCombatTargeting ?? true);
+        var effectiveIdentity = DescribeEvidenceConfig(visConfig, drawResults);
+        DiagnosticEvidenceScope.Current?.RegisterIdentity("combat-recognition", diagnosticBattleId ?? "unbound",
+            effectiveIdentity, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(effectiveIdentity))));
         EnemySeekVisual? indicatorCandidate = null;
         DateTime indicatorCandidateSince = default;
         long indicatorEpoch = -1;

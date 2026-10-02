@@ -13,6 +13,53 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PathApproachDiagnosticsTests
 {
     [Fact]
+    public async Task FailedPulsePinsTheUnsampledInputFrameAndKeepsTheOriginalException()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        frame.FrameStamp = source.Next();
+        scope.ObserveExistingFrame(frame);
+        clock.Advance(TimeSpan.FromMilliseconds(30));
+        frame.FrameStamp = source.Next();
+        scope.ObserveExistingFrame(frame);
+        var failure = new IOException("fixture");
+        var dispatcher = new WindowsInputMessageDispatcher(null, _ => throw failure, () => 0);
+        var actual = await Assert.ThrowsAsync<IOException>(() => PathApproachDiagnostics.RunPulseAsync(
+            () => dispatcher.DispatchInput(new User32.INPUT[1]), () => { }, _ => Task.CompletedTask, clock, frame));
+        Assert.Same(failure, actual);
+        await scope.DisposeAsync();
+        var anchor = Assert.Single(saved.Where(item => item.Window?.RelativeIndex == 0));
+        Assert.Equal(frame.FrameStamp, anchor.Source);
+        Assert.Contains("status=Unknown", anchor.Fields!["nativeInput"]);
+        Assert.Contains("reason=IOException", anchor.Fields["nativeInput"]);
+        Assert.False(frame.SrcMat.IsDisposed);
+    }
+
+    [Theory]
+    [InlineData(2, "cache")]
+    [InlineData(3, "fallback")]
+    [InlineData(4, "invalid")]
+    public async Task StallEvidencePreservesTheActualLocationSource(int sourceKind, string expected)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var probe = new PathApproachDiagnostics("source", "node=1");
+        var source = new CaptureFrameSource();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 0; i < 6; i++)
+        {
+            frame.FrameStamp = source.Next();
+            probe.Observe(frame, new(10, 10), new(20, 10), 10, i, NullLogger.Instance,
+                directPosition: false, locationSource: (PathPositionSource)sourceKind);
+        }
+        await scope.DisposeAsync();
+        Assert.Contains("locationSource=" + expected + " ", Assert.Single(saved.Where(item => item.Window?.RelativeIndex == 0)).Detail);
+    }
+
+    [Fact]
     public void FailedPulsePreservesNativeAndCleanupErrorsWithoutRepeatingDown()
     {
         var original = new IOException("down failed");
@@ -66,15 +113,18 @@ public class PathApproachDiagnosticsTests
                 () => dispatcher.DispatchInput(new User32.INPUT[1]), _ => { }));
             using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
             { FrameStamp = staleDuplicate ? duplicate : producer.Next() };
-            probe.Observe(frame, new(10, 10), new(12.24f, 10), 2.24, i + 1, NullLogger.Instance, directPosition);
+            probe.Observe(frame, new(10, 10), new(12.24f, 10), 2.24, i + 1, NullLogger.Instance, directPosition,
+                navigation: new(true, frame.FrameStamp, "SIFT", "TemplateMatch", "requested-floor-1", "actual-layer-2", 2, .87, true, "local", "roi-fixture"));
             Assert.False(frame.SrcMat.IsDisposed);
         }
         await evidence.DisposeAsync();
-        var saved = Assert.Single(records);
+        var saved = Assert.Single(records.Where(item => item.Window?.RelativeIndex == 0));
         Assert.Equal("precise-stall", saved.Phase);
         Assert.Contains("requested=2 submitted=2", saved.Detail);
-        Assert.Contains(directPosition == true ? "locationSource=direct" : directPosition == false
-            ? "locationSource=fallback-or-invalid" : "locationSource=unknown", saved.Detail);
+        Assert.Contains("actualLayer=actual-layer-2", saved.Detail);
+        Assert.Contains("candidateScore=0.87", saved.Detail);
+        Assert.Contains("actualMethod=TemplateMatch", saved.Detail);
+        Assert.Contains(directPosition == true ? "locationSource=direct" : "locationSource=unknown", saved.Detail);
         if (staleDuplicate) Assert.Contains("sourceAdvanced=False", saved.Detail);
     }
 }

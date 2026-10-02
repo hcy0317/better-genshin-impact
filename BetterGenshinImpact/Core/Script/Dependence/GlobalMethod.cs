@@ -20,6 +20,7 @@ namespace BetterGenshinImpact.Core.Script.Dependence;
 
 public class GlobalMethod
 {
+    private static readonly byte[] ScriptEvidenceKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
     public static async Task Sleep(int millisecondsTimeout)
     {
         await Task.Delay(millisecondsTimeout, ScriptAsyncLifetime.Current?.Token ?? CancellationContext.Instance.Cts.Token);
@@ -263,8 +264,38 @@ public class GlobalMethod
 
     public static void RequestEvidenceWindow(string request, string phase, string detail)
     {
-        // 纯诊断bridge：不截图、不读取App服务、不改变脚本结果或取消传播。
-        try { DiagnosticEvidenceScope.Current?.RequestLatestWindow(request, phase, detail); } catch { }
+        // 保留旧脚本调用签名，但任意脚本文本不是可信诊断字段，不得原样落盘。
+        // 具体HTTP码由宿主HTTP桥提取；脚本事件只保留枚举、不可逆请求身份及白名单标量。
+        try
+        {
+            var boundedRequest = request == null ? "" : request[..Math.Min(request.Length, 512)];
+            var safeRequest = Guid.TryParse(request, out var id) ? "script:" + id.ToString("N")
+                : "script:" + Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(
+                    ScriptEvidenceKey, System.Text.Encoding.UTF8.GetBytes(boundedRequest)));
+            var safePhase = phase is "api-busy" or "http-failed" or "script-failed" or
+                "commission-before" or "commission-result" or "commission-exit" ? phase : "script-failed";
+            var fields = new System.Collections.Generic.Dictionary<string, string>();
+            if (safePhase == "commission-result" && detail is { Length: <= 1024 })
+            {
+                try
+                {
+                    using var json = System.Text.Json.JsonDocument.Parse(detail);
+                    if (json.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        if (json.RootElement.TryGetProperty("completed", out var completed) &&
+                            completed.ValueKind is System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False)
+                            fields["completed"] = completed.GetBoolean().ToString();
+                        if (json.RootElement.TryGetProperty("index", out var index) &&
+                            index.ValueKind == System.Text.Json.JsonValueKind.Number && index.TryGetInt32(out var slot) && slot is >= 0 and < 4)
+                            fields["slotIndex"] = slot.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                }
+                catch (System.Text.Json.JsonException) { }
+            }
+            DiagnosticEvidenceScope.Current?.RequestLatestWindow(safeRequest, safePhase,
+                "scriptDetail=redacted:untrusted-text; structuredFields=whitelisted-only", fields: fields);
+        }
+        catch { }
     }
 
     public static string[] GetAvatars()

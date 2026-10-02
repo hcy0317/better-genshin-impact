@@ -123,7 +123,7 @@ public class CombatSafetyIntegrationContractTests
         var ordinarySkill = Slice(
             avatar,
             "public double AfterUseSkill",
-            "/// <summary>\r\n    /// 元素战技是否正在CD中");
+            "private double GetSkillCurrentCd");
         var seek = ReadSource(
             "BetterGenshinImpact",
             "GameTask",

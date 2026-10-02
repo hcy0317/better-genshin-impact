@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -38,18 +39,16 @@ internal static class UiRecovery
         UiOperation.RunAsync("party-confirm", TimeSpan.FromSeconds(20), ct, async operation =>
         {
             var list = await UiTransition.WaitAsync(operation, UiTarget.PartyList, driver);
-            var selected = await select(operation.Token);
+            var selected = await operation.InvokeActionAsync(UiAction.SelectParty, () => select(operation.Token), 1, 1);
             if (selected) driver.MarkInputCompleted(list);
             operation.Check();
-            operation.Action(UiAction.SelectParty, selected, 1, 1);
             if (!selected) throw new InvalidOperationException("未找到或未点击队伍选择确认按钮，不能记录切队成功");
             var party = await UiTransition.WaitAsync(operation, UiTarget.Party, driver);
             // 秘境调用方拥有“开始挑战”，不能在通用切队过程中提前触发加载。
             if (deferApplyToCaller) return party;
-            var applied = await apply(operation.Token);
+            var applied = await operation.InvokeActionAsync(UiAction.ApplyParty, () => apply(operation.Token), 1, 1);
             if (applied) driver.MarkInputCompleted(party);
             operation.Check();
-            operation.Action(UiAction.ApplyParty, applied, 1, 1);
             if (!applied) throw new InvalidOperationException("未找到或未点击队伍出战按钮，不能记录切队成功");
             return await UiTransition.WaitAsync(operation, UiTarget.PartyOrMain, driver);
         }, logger, clock);
@@ -138,7 +137,8 @@ internal static class UiRecovery
     }
 
     internal static Task<UiSnapshot> ExitDomainAsync(IUiDriver driver, CancellationToken ct,
-        ILogger? logger = null, TimeProvider? clock = null, Action<Exception, string>? captureFailure = null)
+        ILogger? logger = null, TimeProvider? clock = null, Action<Exception, string>? captureFailure = null,
+        IReadOnlyDictionary<string, string>? evidenceContext = null)
     {
         var requested = false;
         var confirmed = false;
@@ -164,6 +164,6 @@ internal static class UiRecovery
                 if (!applied) return;
                 if (action == UiAction.RequestDomainExit) { requested = true; requestFrame = observed; }
                 if (action == UiAction.ConfirmDomainExit) confirmed = true;
-            });
+            }, evidenceContext: evidenceContext);
     }
 }

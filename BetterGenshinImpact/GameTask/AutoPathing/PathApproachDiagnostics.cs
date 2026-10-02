@@ -9,7 +9,8 @@ using OpenCvSharp;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
-internal readonly record struct PathApproachPulse(int Requested, int Submitted, bool Uncertain, double ElapsedMilliseconds);
+internal readonly record struct PathApproachPulse(int Requested, int Submitted, bool Uncertain, double ElapsedMilliseconds,
+    DiagnosticInputReceipt? Receipt = null);
 
 /// <summary>仅记录既有精确接近的事实，不改变距离、方向或步数。</summary>
 internal sealed class PathApproachDiagnostics(string route, string context)
@@ -22,32 +23,42 @@ internal sealed class PathApproachDiagnostics(string route, string context)
 
     internal void RecordPulse(PathApproachPulse pulse) => _pulse = pulse;
 
-    internal void Observe(ImageRegion frame, Point2f position, Point2f target, double distance, int step, ILogger logger, bool? directPosition = null)
+    internal void Observe(ImageRegion frame, Point2f position, Point2f target, double distance, int step, ILogger logger,
+        bool? directPosition = null, NavigationFrameEvidence navigation = default, string? motion = null,
+        PathPositionSource locationSource = PathPositionSource.Unknown)
     {
         try
         {
+            DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
             if (_captured || !frame.FrameStamp.IsKnown) return;
             var sourceAdvanced = !_source.IsKnown || frame.FrameStamp.IsAfter(_source);
             var sameSource = !_source.IsKnown || frame.FrameStamp.SessionId == _source.SessionId;
             _stationary = sameSource && _previous is { } previous &&
                 Math.Abs(position.X - previous.X) + Math.Abs(position.Y - previous.Y) < .1 ? _stationary + 1 : 0;
+            var previousPosition = _previous;
             _previous = position;
             _source = frame.FrameStamp;
             if (_stationary < 5 || distance < 2) return;
             _captured = true;
             var age = frame.FrameStamp.TimestampFrequency == TimeProvider.System.TimestampFrequency
                 ? TimeProvider.System.GetElapsedTime(frame.FrameStamp.CapturedTimestamp).TotalMilliseconds : -1;
-            var detail = FormattableString.Invariant($"{context} step={step}/25 target=({target.X:F2},{target.Y:F2}) current=({position.X:F2},{position.Y:F2}) distance={distance:F2} stationary={_stationary} locationSource={(directPosition == true ? "direct" : directPosition == false ? "fallback-or-invalid" : "unknown")} requested={_pulse.Requested} submitted={_pulse.Submitted} uncertain={_pulse.Uncertain} holdRequestedMs=60 pulseElapsedMs={_pulse.ElapsedMilliseconds:F2} sourceAdvanced={sourceAdvanced} sourceAgeMs={age:F2}; diagnostic only, stale/duplicate frames retained as such; no arrival-policy change");
-            DiagnosticEvidenceScope.Current?.TryCapture(frame, "path-approach:" + route + ":" + context, "precise-stall", detail, logger);
+            var sourceKind = locationSource != PathPositionSource.Unknown ? locationSource.ToString().ToLowerInvariant()
+                : directPosition == true ? "direct" : "unknown";
+            var detail = FormattableString.Invariant($"{context} step={step}/25 target=({target.X:F2},{target.Y:F2}) current=({position.X:F2},{position.Y:F2}) distance={distance:F2} stationary={_stationary} locationSource={sourceKind} requested={_pulse.Requested} submitted={_pulse.Submitted} uncertain={_pulse.Uncertain} holdRequestedMs=60 pulseElapsedMs={_pulse.ElapsedMilliseconds:F2} sourceAdvanced={sourceAdvanced} sourceAgeMs={age:F2}; diagnostic only, stale/duplicate frames retained as such; no arrival-policy change");
+            detail += $" previous=({previousPosition?.X},{previousPosition?.Y}) observedMotion={motion ?? "unknown:not-observed"} " + navigation.Describe();
+            DiagnosticEvidenceScope.Current?.RequestWindowFromFrame("path-approach:" + route + ":" + context, "precise-stall", frame, detail, logger,
+                fields: new System.Collections.Generic.Dictionary<string, string>
+                { ["nativeInput"] = _pulse.Receipt?.Describe() ?? "unknown:no-pulse-observed" });
             logger.LogWarning("PATH_APPROACH_STALL {Route} {Detail}", route, detail);
         }
         catch { /* 原帧取证或日志故障不能改变路径结果。 */ }
     }
 
-    internal static PathApproachPulse RunPulse(Action down, Action up, Action<int> wait)
+    internal static PathApproachPulse RunPulse(Action down, Action up, Action<int> wait, ImageRegion? before = null)
     {
         var clock = TimeProvider.System;
         var started = clock.GetTimestamp();
+        using var input = new DiagnosticInputAttempt(clock);
         var entered = false;
         Exception? failure = null;
         using var capture = new InputDispatchCapture(() => entered = true);
@@ -61,14 +72,14 @@ internal sealed class PathApproachDiagnostics(string route, string context)
                 catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }
             }
         }
-        if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
-        return new(capture.Requested, capture.Submitted, capture.Uncertain, clock.GetElapsedTime(started).TotalMilliseconds);
+        return FinishPulse(capture, input, clock, started, failure, before);
     }
 
     internal static async System.Threading.Tasks.Task<PathApproachPulse> RunPulseAsync(Action down, Action up,
-        Func<int, System.Threading.Tasks.Task> wait, TimeProvider clock)
+        Func<int, System.Threading.Tasks.Task> wait, TimeProvider clock, ImageRegion? before = null)
     {
         var started = clock.GetTimestamp();
+        using var input = new DiagnosticInputAttempt(clock);
         var entered = false;
         Exception? failure = null;
         using var capture = new InputDispatchCapture(() => entered = true);
@@ -82,7 +93,30 @@ internal sealed class PathApproachDiagnostics(string route, string context)
                 catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }
             }
         }
-        if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
-        return new(capture.Requested, capture.Submitted, capture.Uncertain, clock.GetElapsedTime(started).TotalMilliseconds);
+        return FinishPulse(capture, input, clock, started, failure, before);
+    }
+
+    private static PathApproachPulse FinishPulse(InputDispatchCapture capture, DiagnosticInputAttempt input,
+        TimeProvider clock, long started, Exception? failure, ImageRegion? before)
+    {
+        var receipt = input.Complete(capture.NativeCalls > 0, failure);
+        if (failure != null)
+        {
+            try
+            {
+                var fields = new System.Collections.Generic.Dictionary<string, string> { ["nativeInput"] = receipt.Describe() };
+                var request = "path-input:" + receipt.RequestId.ToString("N");
+                if (before != null)
+                    DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(request, "path-input-failed", before,
+                        "native pulse failed; business exception preserved", fields: fields);
+                else
+                    DiagnosticEvidenceScope.Current?.RequestLatestWindow(request, "path-input-failed",
+                        "native pulse failed; business exception preserved; inputSource=unknown:not-supplied", fields: fields);
+            }
+            catch { /* 取证不能替换按下/释放的原始异常。 */ }
+            ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+        return new(capture.Requested, capture.Submitted, capture.Uncertain,
+            clock.GetElapsedTime(started).TotalMilliseconds, receipt);
     }
 }

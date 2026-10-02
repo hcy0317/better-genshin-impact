@@ -15,6 +15,7 @@ internal sealed class TaskExecutionScope : IDisposable
 {
     internal sealed class State
     {
+        internal readonly Guid DiagnosticId = Guid.NewGuid();
         internal readonly object Gate = new();
         internal bool Closed;
         internal ExceptionDispatchInfo? Failure;
@@ -33,6 +34,7 @@ internal sealed class TaskExecutionScope : IDisposable
     }
 
     internal static TaskExecutionScope BeginOwned() => new();
+    internal static Guid? DiagnosticId => Active.Value?.DiagnosticId;
     internal static Guard Capture() => new(Active.Value);
     internal static void ThrowIfFailed() => Capture().Check();
     internal static Exception? Failure => Active.Value?.Failure?.SourceException;

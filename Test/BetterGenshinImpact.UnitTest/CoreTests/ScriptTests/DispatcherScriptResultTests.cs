@@ -11,6 +11,34 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.ScriptTests;
 public class DispatcherScriptResultTests
 {
     [Fact]
+    public void InventoryConfigSupportsAutomaticPagesAndSortWithoutInitializingTheApp()
+    {
+        using var engine = new V8ScriptEngine();
+        var config = Assert.IsAssignableFrom<ScriptObject>(engine.Evaluate("({itemNames:['fixture'],stopByItemSort:true})"));
+        var param = Dispatcher.ParseCountInventoryItemParam(config);
+        param.Validate();
+        Assert.Null(param.GridScreenName);
+        Assert.True(param.StopByItemSort);
+        param.UseDefaultIconRecognitionMode(ItemIconRecognitionMode.Item);
+        Assert.Equal(ItemIconRecognitionMode.Item, param.IconRecognitionMode);
+        param.IconRecognitionMode = ItemIconRecognitionMode.GridIcon;
+        param.UseDefaultIconRecognitionMode(ItemIconRecognitionMode.Item);
+        Assert.Equal(ItemIconRecognitionMode.GridIcon, param.IconRecognitionMode);
+    }
+
+    [Fact]
+    public void InventoryLegacySingleItemContractIsStillValidAndCannotBeMixedWithMultiItem()
+    {
+        using var engine = new V8ScriptEngine();
+        var config = Assert.IsAssignableFrom<ScriptObject>(engine.Evaluate("({gridScreenName:'PreciousItems',itemName:'fixture'})"));
+        var param = Dispatcher.ParseCountInventoryItemParam(config);
+        param.Validate();
+        Assert.Equal("fixture", param.ItemName);
+        param.ItemNames.Add("other");
+        Assert.Throws<ArgumentException>(param.Validate);
+    }
+
+    [Fact]
     public void VerifiedInventorySnapshotPreservesKnownUnknownAndConfirmedAbsentCounts()
     {
         var snapshot = new InventoryCountSnapshot(new Dictionary<string, int>

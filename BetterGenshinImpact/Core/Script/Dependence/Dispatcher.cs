@@ -69,22 +69,23 @@ public class Dispatcher
 
     internal static CountInventoryItemParam ParseCountInventoryItemParam(ScriptObject config)
     {
-        GridScreenName gridScreenName = ScriptObjectConverter.GetValue(
-            config, "gridScreenName", (GridScreenName?)null)
-            ?? throw new Exception("gridScreenName为空或错误");
+        GridScreenName? gridScreenName = ScriptObjectConverter.GetValue(
+            config, "gridScreenName", (GridScreenName?)null);
         string? itemName = ScriptObjectConverter.GetValue(config, "itemName", (string?)null);
         IEnumerable<string>? itemNames = ScriptObjectConverter.GetValue<string>(config, "itemNames");
-        ItemIconRecognitionMode iconRecognitionMode = ScriptObjectConverter.GetValue(
-            config, "iconRecognitionMode", ItemIconRecognitionMode.GridIcon);
+        ItemIconRecognitionMode? iconRecognitionMode = ScriptObjectConverter.GetValue(
+            config, "iconRecognitionMode", (ItemIconRecognitionMode?)null);
 
-        return new CountInventoryItemParam
+        var param = new CountInventoryItemParam
         {
             GridScreenName = gridScreenName,
             ItemName = itemName,
             ItemNames = itemNames?.ToList() ?? [],
-            IconRecognitionMode = iconRecognitionMode,
+            StopByItemSort = ScriptObjectConverter.GetValue(config, "stopByItemSort", false),
             IncludeScanEvidence = ScriptObjectConverter.GetValue(config, "includeScanEvidence", false)
         };
+        if (iconRecognitionMode.HasValue) param.IconRecognitionMode = iconRecognitionMode.Value;
+        return param;
     }
 
     internal static ExpandoObject ToScriptDictionary(IReadOnlyDictionary<string, int> values)
@@ -564,7 +565,7 @@ public class Dispatcher
     /// </summary>
     /// <param name="param">背包物品计数参数。</param>
     /// <param name="customCt">自定义取消令牌。</param>
-    /// <returns>单物品返回数量；多物品返回名称到数量的脚本对象。</returns>
+    /// <returns>返回名称到数量的脚本对象。</returns>
     public async Task<object?> RunCountInventoryItemTask(CountInventoryItemParam param, CancellationToken? customCt = null)
     {
         using var ownedTask = _taskGuard.Enter();

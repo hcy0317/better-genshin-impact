@@ -63,5 +63,7 @@ internal sealed class PathMoveToIo
     private static T Missing<T>(string boundary) => throw new InvalidOperationException($"Isolated path I/O requires an explicit {boundary} boundary.");
 }
 
-internal readonly record struct PathPosition(Point2f Point, int AdditionalTimeInMs, bool IsDirect);
+internal enum PathPositionSource { Unknown, Direct, Cache, Fallback, Invalid }
+internal readonly record struct PathPosition(Point2f Point, int AdditionalTimeInMs, bool IsDirect,
+    PathPositionSource Source = PathPositionSource.Unknown);
 internal readonly record struct PathMoveObservation(CaptureFrameStamp Stamp, Point2f Position, bool Valid, MotionStatus Motion, bool SourceUsable);

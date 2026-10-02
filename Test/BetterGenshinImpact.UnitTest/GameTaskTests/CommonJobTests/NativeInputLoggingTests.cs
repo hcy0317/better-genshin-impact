@@ -12,6 +12,56 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class NativeInputLoggingTests
 {
+    [Theory]
+    [InlineData("none", 0)]
+    [InlineData("sent", 1)]
+    [InlineData("partial", 2)]
+    [InlineData("failed", 3)]
+    public void DiagnosticReceiptDistinguishesDeliveryWithoutSendingRealInput(string mode, int expected)
+    {
+        var clock = new FakeTimeProvider();
+        using var attempt = new DiagnosticInputAttempt(clock);
+        clock.Advance(TimeSpan.FromMilliseconds(30));
+        Exception? failure = null;
+        if (mode == "failed") failure = new IOException("private-error-not-for-evidence");
+        if (mode is "sent" or "partial")
+        {
+            var dispatcher = new Fischless.WindowsInput.WindowsInputMessageDispatcher(null,
+                _ => mode == "partial" ? 1u : 2u, () => 0);
+            failure = Record.Exception(() => dispatcher.DispatchInput(new Vanara.PInvoke.User32.INPUT[2]));
+        }
+        clock.Advance(TimeSpan.FromMilliseconds(60));
+        var receipt = attempt.Complete(mode != "none", failure);
+        Assert.Equal((DiagnosticInputStatus)expected, receipt.Status);
+        Assert.Equal(clock.TimestampFrequency, receipt.Frequency);
+        Assert.Equal(90, clock.GetElapsedTime(receipt.RequestedAt, receipt.CompletedAt).TotalMilliseconds);
+        Assert.Equal(mode is "sent" or "partial", receipt.StartedAt.HasValue);
+        Assert.DoesNotContain("private-error", receipt.Describe());
+    }
+
+    [Fact]
+    public async Task WarningAndErrorReplaceDebugFloodWithoutGrowingTheQueue()
+    {
+        var sink = new BlockingSink();
+        await using var pipeline = new ApplicationLogPipeline(
+            new LoggerConfiguration().MinimumLevel.Debug().WriteTo.Sink(sink), capacity: 2);
+        pipeline.Logger.Debug("hold-output");
+        try
+        {
+            await sink.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            pipeline.Logger.Debug("routine-a");
+            pipeline.Logger.Debug("routine-b");
+            pipeline.Logger.Warning("important-warning");
+            pipeline.Logger.Error("important-error");
+            Assert.Equal(2, pipeline.Pending);
+        }
+        finally { sink.Release.TrySetResult(); }
+        await pipeline.DisposeAsync();
+        Assert.Contains(sink.Events, e => e.MessageTemplate.Text == "important-warning");
+        Assert.Contains(sink.Events, e => e.MessageTemplate.Text == "important-error");
+        Assert.DoesNotContain(sink.Events, e => e.MessageTemplate.Text == "routine-a");
+    }
+
     [Fact]
     public void DelayedFirstNativeCheckRecordsNoPauseFocusOrInputWork()
     {
@@ -90,6 +140,7 @@ public class NativeInputLoggingTests
 
     private sealed class BlockingSink : ILogEventSink, IDisposable
     {
+        public List<LogEvent> Events { get; } = [];
         public int DisposeCalls;
         public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -97,6 +148,7 @@ public class NativeInputLoggingTests
         {
             Entered.TrySetResult();
             Release.Task.GetAwaiter().GetResult();
+            Events.Add(logEvent);
         }
         public void Dispose() => Interlocked.Increment(ref DisposeCalls);
     }

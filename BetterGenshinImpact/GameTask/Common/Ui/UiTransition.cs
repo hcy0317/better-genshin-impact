@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -32,9 +33,10 @@ internal static class UiTransition
         CancellationToken ct, TimeSpan timeout, Func<UiSnapshot, UiAction?>? chooseAction = null,
         int maxActions = 8, ILogger? logger = null, TimeProvider? clock = null,
         Action<Exception, string>? captureFailure = null,
-        Action<UiAction, bool, UiSnapshot>? actionCompleted = null) =>
+        Action<UiAction, bool, UiSnapshot>? actionCompleted = null,
+        IReadOnlyDictionary<string, string>? evidenceContext = null) =>
         UiOperation.RunAsync(name, timeout, ct,
-            operation => WaitAsync(operation, target, driver, chooseAction, maxActions, actionCompleted), logger, clock, captureFailure);
+            operation => WaitAsync(operation, target, driver, chooseAction, maxActions, actionCompleted), logger, clock, captureFailure, evidenceContext);
 
     internal static async Task<UiSnapshot> WaitAsync(UiOperation operation, UiTarget target, IUiDriver driver,
         Func<UiSnapshot, UiAction?>? chooseAction = null, int maxActions = 8,
@@ -83,10 +85,10 @@ internal static class UiTransition
                     {
                         operation.Check();
                         admissionChecks++;
-                        var applied = await driver.ActAsync(action, observed, operation.Token);
+                        var applied = await operation.InvokeActionAsync(action,
+                            () => driver.ActAsync(action, observed, operation.Token), attempts + 1, maxActions);
                         operation.Check();
                         if (applied) attempts++;
-                        operation.Action(action, applied, attempts, maxActions);
                         actionCompleted?.Invoke(action, applied, observed);
                     }
                 }

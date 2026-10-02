@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Simulator;
@@ -110,11 +112,38 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         {
             if (phase == "terminal")
                 evidence.RequestWindow("battle:" + BattleId.ToString("N") + ":" + trace.Episode,
-                    "combat-terminal", frame.Source, detail, _device.Logger);
-            evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger);
+                    "combat-terminal", frame.Source, detail, _device.Logger, EvidenceFields(trace));
+            evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger, EvidenceFields(trace));
             if (phase == "terminal")
                 evidence.CapturePendingTerminal(BattleId.ToString("N"), trace.Episode, () => _vision?.Capture());
         }
+    }
+
+    internal static IReadOnlyDictionary<string, string> EvidenceFields(CombatBattleHostTrace trace)
+    {
+        static string Limited(IEnumerable<string> values)
+        {
+            var samples = values.Take(7).ToArray();
+            return string.Join(";", samples.Take(6).Select(value => value.Length > 64 ? value[..64] + "[truncated]" : value)) +
+                (samples.Length > 6 ? ";more=omitted" : "");
+        }
+        var observation = trace.Observation;
+        var recognition = observation.Recognition;
+        return new Dictionary<string, string>
+        {
+            ["termination"] = $"state={trace.State} reason={trace.Reason} result={trace.Result}",
+            ["currentTarget"] = $"source={observation.Source.SessionId}/{observation.Source.Sequence} cue={observation.Target?.Cue} visual={observation.Target?.Visual} direction={observation.Target?.Direction}",
+            ["lastProgressSource"] = trace.LastProgress is { } progress
+                ? $"source={progress.Source.SessionId}/{progress.Source.Sequence} capturedAt={progress.Source.CapturedAt:O} kind={progress.Kind} observedTimestamp={progress.ObservedTimestamp}"
+                : "unknown:no-valid-progress-observed",
+            ["lastProgressTarget"] = trace.LastProgress is { } last ? $"cue={last.Target?.Cue} visual={last.Target?.Visual} fixedHealth={last.FixedTopHealth}" : "unknown:no-valid-progress-observed",
+            ["partyProbe"] = $"request={trace.InputRequest} kind={trace.InputKind} status={trace.InputStatus} source={trace.PartySample.Source.SessionId}/{trace.PartySample.Source.Sequence} bar={trace.PartySample.BarVisible} reason={trace.PartyReason}",
+            ["recognitionCounts"] = recognition == null ? "unknown:not-observed" : $"raw={recognition.RawComponents} accepted={recognition.Accepted} widthRejected={recognition.HealthWidthRejected} darkChecked={recognition.DarkTrackChecked} darkAccepted={recognition.DarkTrackAccepted}",
+            ["filterReasons"] = recognition == null ? "unknown:not-observed" : Limited(recognition.Rejections.Select(item => $"{item.Key}:{item.Value}")),
+            ["narrowTargets"] = recognition == null ? "unknown:not-observed" : Limited(recognition.NarrowBarSamples.Select(item => $"{item.X},{item.Y},{item.Width}x{item.Height},minW={item.MinimumWidth}")),
+            ["darkTrack"] = recognition == null ? "unknown:not-observed" : Limited(recognition.DarkTrackSamples),
+            ["gates"] = $"host={trace.ObservationGate} passive={observation.PassiveGate} damage={observation.DamageFallback}"
+        };
     }
 
     internal ValueTask<CombatBattleHostInputResult> SendControlAsync(CombatBattleHostInput input, CancellationToken ct)

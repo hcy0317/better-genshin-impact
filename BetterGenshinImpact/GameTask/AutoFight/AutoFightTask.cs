@@ -139,9 +139,11 @@ public class AutoFightTask : ISoloTask
         public TaskFightFinishDetectConfig(AutoFightParam taskParam) : this(taskParam.FinishDetectConfig)
         {
             CombatTargetingMode = taskParam.CombatTargetingMode;
-            RotaryFactor = taskParam.RotaryFactor;
+            RotaryFactor = Math.Clamp(taskParam.RotaryFactor, 1, 13);
         }
 
+        // 保留仅传入结束检测配置的构造方式，兼容不持有完整 AutoFightParam 的调用方。
+        // 此路径沿用 RotaryFactor 的默认值；持有完整参数时由下方构造函数覆盖为用户配置值。
         public TaskFightFinishDetectConfig(AutoFightParam.FightFinishDetectConfig finishDetectConfig)
         {
             FastCheckEnabled = finishDetectConfig.FastCheckEnabled;
