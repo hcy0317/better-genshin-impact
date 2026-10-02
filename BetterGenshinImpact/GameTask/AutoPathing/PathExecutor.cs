@@ -1505,8 +1505,9 @@ public partial class PathExecutor
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, screen);
             approachDiagnostics.RecordPulse(lastPulse);
-            // Simulation.SendInput.Keyboard.KeyDown(User32.VK.VK_W).Sleep(60).KeyUp(User32.VK.VK_W);
-            await _moveIo.Delay(20, operation.Token);
+            // 松键后的识图也要等待游戏30–60ms响应；按键保持时间不能代替响应后的等待。
+            // 不放宽到达距离或停滞判据，仍由下一张有效源帧确认实际位置。
+            await _moveIo.Delay(60, operation.Token);
         }
 
         _arrivalReachedAt = Stopwatch.GetTimestamp();

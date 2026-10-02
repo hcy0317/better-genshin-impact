@@ -10,6 +10,31 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PreciseApproachRecoveryTests
 {
     [Fact]
+    public async Task NextPositionCaptureWaitsForGameResponseAfterMovementRelease()
+    {
+        var replay = new PathReplay { EmitReceipts = true };
+        DateTimeOffset? releasedAt = null;
+        var observedAfterRelease = false;
+        replay.PositionAt = _ => releasedAt.HasValue ? new Point2f(100, 100) : new Point2f(104, 100);
+        replay.OnInput = (action, type) =>
+        {
+            if (action == GIActions.MoveForward && type == KeyType.KeyUp)
+                releasedAt = replay.Clock.GetUtcNow();
+        };
+        replay.BeforeCapture = _ =>
+        {
+            if (releasedAt is not { } released) return;
+            observedAfterRelease = true;
+            Assert.True(replay.Clock.GetUtcNow() - released >= TimeSpan.FromMilliseconds(60),
+                "不能在游戏30–60ms响应窗口尚未结束时重新识别位置");
+        };
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        Assert.True(observedAfterRelease);
+        Assert.Single(replay.Inputs.Where(input => input.Type == KeyType.KeyDown));
+        Assert.Empty(replay.RecoveryInputs);
+    }
+
+    [Fact]
     public async Task KnownTransformationCanConfirmItsDirectPositionWithoutOrdinaryAvatarHud()
     {
         var replay = new PathReplay { Transformed = true, Hud = false };
