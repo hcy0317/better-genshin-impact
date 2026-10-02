@@ -1,7 +1,7 @@
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
-using BetterGenshinImpact.View.Drawable;
+using BetterGenshinImpact.Core.Mask;
 using BetterGenshinImpact.Helpers;
 using Fischless.GameCapture;
 using Microsoft.Extensions.Time.Testing;
@@ -122,7 +122,7 @@ public class DomainTipUiReaderTests
                 using var target = new Mat(full, bounds);
                 pixels.CopyTo(target);
             }
-            return new ImageRegion(full, 0, 0, drawContent: new DrawContent()) { FrameStamp = source };
+            return new ImageRegion(full, 0, 0, drawingBoard: NullMaskWindowDrawingBoard.Instance) { FrameStamp = source };
         }
         catch { full.Dispose(); throw; }
     }

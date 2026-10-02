@@ -49,13 +49,13 @@ internal sealed class PathMoveToIo
         LoggerFactory = () => Common.TaskControl.Logger;
         Capture = () => Common.TaskControl.CaptureToRectArea();
         CameraOrientation = image => Common.Map.CameraOrientation.Compute(image.SrcMat);
-        MouseMove = (x, y) => Simulation.SendInput.Mouse.MoveMouseBy(x, y);
+        MouseMove = (x, y) => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.MoveMouseBy(x, y);
         Dpi = () => TaskContext.Instance().DpiScale;
         Motion = Bv.GetMotionStatus;
         CombatHud = Bv.IsCombatHud;
         Transformed = SaurianUiReader.IsKnownTransformation;
-        Send = (action, type) => Simulation.SendInput.SimulateAction(action, type);
-        IsDown = action => Simulation.IsKeyDown(action.ToActionKey().ToVK());
+        Send = (action, type) => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(action, type);
+        IsDown = action => BetterGenshinImpact.Core.Input.InputHub.Foreground.IsKeyDown(action.ToActionKey().ToVK());
         Delay = Common.TaskControl.Delay;
         CheckInput = () => Common.TaskControl.CheckAndSleep(0);
     }

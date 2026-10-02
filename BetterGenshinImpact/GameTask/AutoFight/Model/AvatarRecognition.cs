@@ -1,3 +1,4 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
@@ -5,7 +6,7 @@ using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Model.Area;
-using BetterGenshinImpact.View.Drawable;
+using BetterGenshinImpact.Core.Mask;
 using OpenCvSharp;
 using Fischless.GameCapture;
 using BetterGenshinImpact.GameTask.Common;
@@ -480,6 +481,7 @@ public static class AvatarRecognition
             if (published) publishedFrames++;
             else rejectedFrames++;
         }
+        IMaskWindowDrawingBoard drawingBoard = NullMaskWindowDrawingBoard.Instance;
 
         try
         {
@@ -509,6 +511,7 @@ public static class AvatarRecognition
                     capturedFrames++;
                     // 只消费宿主按事件登记的有界取证请求，复用本次已有帧；正常帧不复制/落盘。
                     DiagnosticEvidenceScope.Current?.CaptureRequestedFrames(battleId.ToString("N"), capture);
+                    drawingBoard = capture.DrawingBoard;
 
                     // 使用现有LivingHud识别大世界/秘境；不恢复上游被动线程中的输入操作
                     if (!Bv.IsCombatHud(capture))
@@ -532,7 +535,7 @@ public static class AvatarRecognition
                     // 被动观察和寻敌使用同一几何分类；普通血条不能仅因连续静止就变成顶部固定血条。
                     var targetRead = ReadPassiveTargetEvidence(capture);
                     var target = targetRead.Decision;
-                    var drawList = new List<RectDrawable>();
+                    var drawList = new List<MaskWindowDrawingShape>();
                     // 2. 血条追踪：持续感知只发布观察，不直接发送战斗输入。
                     if (target is { Cue: SeekCueKind.FixedTopHealth, Visual: { } fixedVisual })
                     {
@@ -556,7 +559,7 @@ public static class AvatarRecognition
 
                         if (drawResults)
                         {
-                            drawList.Add(capture.ToRectDrawable(new Rect(nearest.X, nearest.Y, nearest.Width, nearest.Height), "target", _targetPen));
+                            drawList.Add(capture.ToMaskWindowDrawingRect(new Rect(nearest.X, nearest.Y, nearest.Width, nearest.Height), _targetPen));
                         }
                     }
                     else
@@ -583,9 +586,8 @@ public static class AvatarRecognition
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
                             {
-                                drawList.Add(capture.ToRectDrawable(
+                                drawList.Add(capture.ToMaskWindowDrawingRect(
                                     new OpenCvSharp.Rect(dx, dy, dw, dh),
-                                    "damage_target",
                                     _targetPen));
                             }
                         }
@@ -630,7 +632,7 @@ public static class AvatarRecognition
                     }
 
                     // 提交叠加层
-                    VisionContext.Instance().DrawContent.PutOrRemoveRectList("ContinuousTargeting", drawList);
+                    drawingBoard.Set("ContinuousTargeting", drawList);
                 }
 
                 CombatRuntimeMetrics.Shared.Record(
@@ -653,7 +655,7 @@ public static class AvatarRecognition
         finally
         {
             Trace(force: true);
-            VisionContext.Instance().DrawContent.RemoveRect("ContinuousTargeting");
+            drawingBoard.Clear("ContinuousTargeting");
         }
     }
 

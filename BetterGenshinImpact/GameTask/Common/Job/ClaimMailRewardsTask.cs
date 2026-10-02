@@ -1,8 +1,9 @@
 using System;
+using BetterGenshinImpact.Core.Input;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Ui;
@@ -32,7 +33,7 @@ public class ClaimMailRewardsTask
         await RunAsync(driver, async token =>
         {
             await Delay(200, token);
-            TaskContext.Instance().PostMessageSimulator.SimulateAction(GIActions.OpenPaimonMenu);
+            InputHub.Background.SimulateAction(GIActions.OpenPaimonMenu);
         }, token =>
         {
             token.ThrowIfCancellationRequested();
@@ -61,7 +62,7 @@ public class ClaimMailRewardsTask
                 Logger.LogInformation("邮件：{Text}", "全部领取");
                 await Delay(200, token);
                 // 只关闭本次明确领取后产生的奖励遮罩，后续邮件页/派蒙菜单由状态恢复处理。
-                TaskContext.Instance().PostMessageSimulator.KeyPress(User32.VK.VK_ESCAPE);
+                InputHub.Background.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
                 return;
             }
 

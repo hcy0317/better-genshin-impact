@@ -149,8 +149,8 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
             {
                 ct.ThrowIfCancellationRequested();
                 CombatActionScope.Current?.Check();
-                if (primitive.Method == Method.KeyDown) Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
-                else if (primitive.Method == Method.KeyUp) Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
+                if (primitive.Method == Method.KeyDown) BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.KeyDown);
+                else if (primitive.Method == Method.KeyUp) BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.KeyUp);
                 else primitive.Execute(AvatarFor(actor));
                 ct.ThrowIfCancellationRequested();
                 command.NativeSkillObserver?.Invoke();
@@ -175,7 +175,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         }
         return receipt;
     }
-    public void ReleaseInput() => Simulation.ReleaseAllKey();
+    public void ReleaseInput() => BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
     public Vanara.PInvoke.User32.VK? HeldEPhysicalKey() =>
         ResolveHeldEPhysicalKey(ViewModel.Pages.KeyBindingsSettingsPageViewModel.MappingKey);
 
@@ -192,9 +192,9 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         new CombatNativeInput(Clock, Logger, () => TaskControl.CheckAndSleep(0)).Submit(request,
             down ? "held-e-down" : "held-e-up", () =>
             {
-                if (down) Simulation.SendInput.Keyboard.KeyDown(key);
-                else Simulation.SendInput.Keyboard.KeyUp(key);
+                if (down) BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyDown(key);
+                else BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(key);
             }, ct, beforeFirstNative);
-    public void ReleaseHeldE(Vanara.PInvoke.User32.VK key) => Simulation.SendInput.Keyboard.KeyUp(key);
+    public void ReleaseHeldE(Vanara.PInvoke.User32.VK key) => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(key);
     public Task DelayAsync(int milliseconds, CancellationToken ct) => Task.Delay(milliseconds, ct);
 }

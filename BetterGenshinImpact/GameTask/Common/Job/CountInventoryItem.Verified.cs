@@ -41,7 +41,7 @@ internal partial class CountInventoryItem
                 GameCaptureRegion.GameRegion1080PPosMove(1289, 123);
                 await TaskControl.Delay(80, ct);
             }
-            finally { if (dispatch.NativeCalls > 0) input.Mouse.LeftButtonUp(); }
+            finally { if (dispatch.HasDispatch) input.Mouse.LeftButtonUp(); }
             await TaskControl.Delay(300, ct);
         }
         // 后续首个扫描帧仍必须证明顶部；拖动次数耗尽不能产生完成证明。

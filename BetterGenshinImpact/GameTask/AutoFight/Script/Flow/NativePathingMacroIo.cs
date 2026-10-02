@@ -19,7 +19,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingMacroInput>? transport = null) : IPathingMacroIo
 {
-    private static readonly InputSimulator CleanupInput = new();
+    private static readonly Core.Input.IInputChannel CleanupInput = new Core.Input.Backends.Win32.SendInputChannel(new InputSimulator());
     private readonly HashSet<string> _unknownReported = new(StringComparer.Ordinal);
     private PathingMacroEvidence? _evidence;
     public void BeginEvidence(IReadOnlyList<CombatCommand> commands)
@@ -90,15 +90,18 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
             if (!cleanup) TaskControl.CheckAndSleep(0);
             admit();
             if (transport != null) transport(input);
-            else Dispatch(input, cleanup ? CleanupInput : Simulation.SendInput);
+            else Dispatch(input, cleanup && Core.Input.InputHub.Backend.Kind == Core.Input.InputBackendKind.Win32
+                ? CleanupInput : Core.Input.InputHub.Foreground);
         }
         catch (Exception failure) { error = failure; }
         var finished = Clock.GetTimestamp();
         return CombatNativeInput.Classify(capture, error, finished) with
-        { NativeRequested = capture.Requested, NativeSubmitted = capture.Submitted, ObservableAfterTimestamp = finished };
+        { NativeRequested = capture.Requested, NativeSubmitted = capture.Submitted,
+            TransportRequested = capture.TransportCalls, TransportAcknowledged = capture.TransportAcknowledged,
+            ObservableAfterTimestamp = finished };
     }
 
-    private static void Dispatch(PathingMacroInput input, InputSimulator simulator)
+    private static void Dispatch(PathingMacroInput input, Core.Input.IInputChannel simulator)
     {
             switch (input.Kind)
             {

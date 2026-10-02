@@ -85,7 +85,7 @@ public static class CombatScriptExecutor
             }
             catch (GuardianCoverageException)
             {
-                BetterGenshinImpact.Core.Simulator.Simulation.ReleaseAllKey();
+                BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
                 throw;
             }
             catch (RetryException e)

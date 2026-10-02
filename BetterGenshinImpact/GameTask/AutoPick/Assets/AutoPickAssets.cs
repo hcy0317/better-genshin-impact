@@ -117,7 +117,7 @@ public sealed class AutoPickAssets
             return;
         }
 
-        Simulation.SendInput.Keyboard.KeyPress(PickVk);
+        BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyPress(PickVk);
     }
 
     private static IReadOnlyList<RecognitionObject> LoadControllerIconBlacklistTemplates(CaptureSize captureSize)

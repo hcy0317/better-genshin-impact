@@ -65,7 +65,7 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
             "角色配装检测 OCR：PpOcrRecV6 固定区域（排除 TensorRT）；不加载 DetV6，第二帧仅在首帧失败时启用");
         try
         {
-            Simulation.SendInput.SimulateAction(GIActions.OpenCharacterScreen);
+            BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.OpenCharacterScreen);
             await OpenCharacterListAsync(assets, cancellationToken);
             var gridParams = GridParams.CharacterDevelopmentForCapture(
                 new Size(captureRect.Width, captureRect.Height));
@@ -471,7 +471,7 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
         using var pacer = new YasScrollInputPacer();
         for (var inputIndex = 0; inputIndex < inputCount; inputIndex++)
         {
-            Simulation.SendInput.Mouse.VerticalScroll(direction);
+            BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.VerticalScroll(direction);
             if (intervalMilliseconds > 0)
             {
                 await pacer.DelayAsync(intervalMilliseconds, cancellationToken);

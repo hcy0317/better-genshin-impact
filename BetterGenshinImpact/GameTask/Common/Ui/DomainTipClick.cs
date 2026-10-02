@@ -39,7 +39,7 @@ internal static class DomainTipClick
     {
         using var capture = new InputDispatchCapture(admission);
         input();
-        if (capture.NativeCalls == 0 || capture.Requested <= 0 || capture.Submitted != capture.Requested || capture.Uncertain)
+        if (!capture.HasCompleteReceipt)
             throw new InvalidOperationException("Domain tip click did not produce a complete native receipt.");
     }
 }

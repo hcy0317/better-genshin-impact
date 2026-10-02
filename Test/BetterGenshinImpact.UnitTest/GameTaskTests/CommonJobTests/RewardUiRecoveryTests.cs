@@ -6,7 +6,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Helpers;
-using BetterGenshinImpact.View.Drawable;
+using BetterGenshinImpact.Core.Mask;
 using Fischless.GameCapture;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
@@ -214,7 +214,7 @@ public class RewardUiRecoveryTests
                 {
                     Clock.Advance(TimeSpan.FromMilliseconds(1));
                     var frame = new ImageRegion(Stage == 0 ? pixels.Clone() : new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black),
-                        0, 0, drawContent: new DrawContent());
+                        0, 0, drawingBoard: NullMaskWindowDrawingBoard.Instance);
                     var stamp = Producer.Next();
                     frame.FrameStamp = SourceOverride?.Invoke(stamp) ?? stamp;
                     Frames.Add(frame);

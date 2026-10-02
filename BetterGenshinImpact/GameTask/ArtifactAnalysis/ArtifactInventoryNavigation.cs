@@ -23,7 +23,7 @@ internal static class ArtifactInventoryNavigation
             () => new ReturnMainUiTask().Start(cancellationToken),
             () => AutoArtifactSalvageTask.OpenInventory(
                 GridScreenName.Artifacts,
-                Core.Simulator.Simulation.SendInput,
+                BetterGenshinImpact.Core.Input.InputHub.Foreground,
                 logger,
                 cancellationToken,
                 allowRetryOpenAction: false),

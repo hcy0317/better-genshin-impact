@@ -234,7 +234,7 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
         {
             return _messageState.WebViewConnectionsByProcessId.Values
                 .Select(x => x.Endpoint)
-                .OrderBy(x => x.WindowsSessionId)
+                .OrderBy(x => x.InstanceName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(x => x.ProcessId)
                 .ToArray();
         }
@@ -483,6 +483,7 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
                         new ConnectionOpenRequest
                         {
                             RequestedType = Context.InstanceType,
+                            InstanceName = Context.InstanceName,
                             RestartFromProcessId = restartFromProcessId,
                             Arguments = includeActivationArguments
                                 ? Environment.GetCommandLineArgs()

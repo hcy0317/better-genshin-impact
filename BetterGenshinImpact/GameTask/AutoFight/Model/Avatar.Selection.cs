@@ -43,7 +43,7 @@ public partial class Avatar
     {
         ct.ThrowIfCancellationRequested();
         // 先实际释放输入，再进入不受战斗150ms约束的恢复阶段。
-        Simulation.ReleaseAllKey();
+        BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
         using var suspension = CombatActionScope.Suspend();
         using var operation = UiOperation.Begin("selection-recovery", TimeSpan.FromSeconds(60), ct, TaskControl.Logger);
         KnownReviveTarget? target = null;

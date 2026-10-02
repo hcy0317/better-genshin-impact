@@ -458,7 +458,7 @@ internal sealed class ArtifactNativePlanTask(
         CancellationToken ct)
     {
         await new ReturnMainUiTask().Start(ct);
-        Simulation.SendInput.SimulateAction(GIActions.OpenCharacterScreen);
+        BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.OpenCharacterScreen);
         await Delay(450, ct);
         using (var capture = CaptureToRectArea())
         {
@@ -478,7 +478,7 @@ internal sealed class ArtifactNativePlanTask(
             throw new InvalidDataException(
                 $"Unable to find quick-equip character '{quickPlan.CharacterKey}'.");
         }
-        Simulation.SendInput.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
+        BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyPress(User32.VK.VK_ESCAPE);
         await Delay(300, ct);
         await ClickAnyTextAsync(["圣遗物"], ct);
         await ClickAnyTextAsync(["快速装备"], ct);
@@ -520,7 +520,7 @@ internal sealed class ArtifactNativePlanTask(
         capture.MoveTo(point.X, point.Y);
         for (var index = 0; index < 12; index++)
         {
-            Simulation.SendInput.Mouse.VerticalScroll(10);
+            BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.VerticalScroll(10);
             await Delay(30, ct);
         }
         await Delay(180, ct);

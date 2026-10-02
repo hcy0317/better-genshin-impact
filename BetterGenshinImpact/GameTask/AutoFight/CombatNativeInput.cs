@@ -49,6 +49,7 @@ internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Acti
         var result = Classify(capture, failure, returnedAt) with
         {
             NativeRequested = capture.Requested, NativeSubmitted = capture.Submitted,
+            TransportRequested = capture.TransportCalls, TransportAcknowledged = capture.TransportAcknowledged,
             StartedTimestamp = startedAt, ObservableAfterTimestamp = returnedAt
         };
         try
@@ -70,6 +71,10 @@ internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Acti
     {
         if (capture.Uncertain || capture.Submitted > 0 && capture.Submitted != capture.Requested)
             return new(CombatBattleHostInputStatus.Unknown, Reason: "native-input-partial-or-unknown", Error: error);
+        if (capture.TransportCalls > 0)
+            return capture.HasCompleteReceipt
+                ? new(CombatBattleHostInputStatus.Sent, returnedAt, "sdk-call-acknowledged-game-effect-unconfirmed", error)
+                : new(CombatBattleHostInputStatus.Unknown, Reason: "sdk-call-unconfirmed", Error: error);
         if (capture.Submitted > 0)
             // 完整提交是不可回退的事实；执行阶段的后置错误由消费者在保存fence之后处理。
             return new(CombatBattleHostInputStatus.Sent, returnedAt,

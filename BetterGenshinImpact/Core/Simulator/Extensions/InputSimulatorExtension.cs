@@ -14,6 +14,33 @@ namespace BetterGenshinImpact.Core.Simulator.Extensions;
 /// </summary>
 public static class InputSimulatorExtension
 {
+    public static void SimulateActionPulse(this Core.Input.IInputChannel self, GIActions action)
+        => SimulateKeyPulse(self, action.ToActionKey());
+
+    internal static void SimulateKeyPulse(this Core.Input.IInputChannel self, KeyId key, CancellationToken ct = default)
+    {
+        if (key is KeyId.None or KeyId.Unknown) return;
+        void Check()
+        {
+            ct.ThrowIfCancellationRequested();
+            GameTask.TaskExecutionScope.ThrowIfFailed();
+            GameTask.AutoFight.Script.Flow.CombatActionScope.Current?.Check();
+            GameTask.Common.Ui.UiOperation.Current?.Check();
+        }
+        using var submitted = new InputDispatchCapture();
+        var returned = false;
+        PulseCore(() => { self.Keyboard.KeyDown(key.ToVK()); returned = true; }, () =>
+        {
+            // 非Win32通道没有原生计数；正常返回也必须配对松键，不能伪造提交回执。
+            if (returned || submitted.HasDispatch) self.Keyboard.KeyUp(key.ToVK());
+        }, milliseconds =>
+        {
+            if (GameTask.AutoFight.Script.Flow.CombatActionScope.Current is { } scope) scope.Sleep(milliseconds);
+            else if (ct.CanBeCanceled) ct.WaitHandle.WaitOne(milliseconds);
+            else Thread.Sleep(milliseconds);
+        }, Check);
+    }
+
     public static void SimulateActionPulse(this InputSimulator self, GIActions action)
         => SimulateKeyPulse(self, action.ToActionKey());
 

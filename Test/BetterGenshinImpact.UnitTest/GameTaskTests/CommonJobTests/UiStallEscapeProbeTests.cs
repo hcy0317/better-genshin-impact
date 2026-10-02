@@ -4,7 +4,7 @@ using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.Helpers;
-using BetterGenshinImpact.View.Drawable;
+using BetterGenshinImpact.Core.Mask;
 using Fischless.GameCapture;
 using Microsoft.Extensions.Time.Testing;
 using OpenCvSharp;
@@ -207,7 +207,7 @@ public class UiStallEscapeProbeTests
                 {
                     Clock.Advance(TimeSpan.FromMilliseconds(1));
                     var frame = new ImageRegion(new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black), 0, 0,
-                        drawContent: new DrawContent());
+                        drawingBoard: NullMaskWindowDrawingBoard.Instance);
                     frame.FrameStamp = Producer.Next();
                     Frames.Add(frame);
                     DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);

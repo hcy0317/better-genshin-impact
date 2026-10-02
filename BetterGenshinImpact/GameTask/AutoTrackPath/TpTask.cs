@@ -1,7 +1,7 @@
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.Core.Script.Dependence;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.GameTask.AutoPathing;
@@ -326,7 +326,7 @@ public class TpTask
             };
             var waypointForTrack = new WaypointForTrack(waypoint, nameof(MapTypes.Teyvat), _mapMatchingMethod);
             await new PathExecutor(ct).MoveTo(waypointForTrack);
-            Simulation.SendInput.SimulateAction(GIActions.Drop);
+            InputHub.Foreground.SimulateAction(GIActions.Drop);
         }
 
         await Delay((int)(_tpConfig.HpRestoreDuration * 1000), ct);
@@ -394,7 +394,7 @@ public class TpTask
             try
             {
                 // 打开地图前释放所有按键
-                Simulation.ReleaseAllKey();
+                InputHub.ReleaseAll();
                 await Delay(GetTeleportOperationDelay(20), ct);
                 await CheckInBigMapUi(mapName);
                 return;
@@ -1226,7 +1226,7 @@ public class TpTask
             return true;
         }
 
-        Simulation.SendInput.SimulateAction(GIActions.OpenMap);
+        InputHub.Foreground.SimulateAction(GIActions.OpenMap);
         await Delay(100, ct);
         return await WaitForBigMapUiAppear(GetBigMapOpenTimeoutMilliseconds(mapName));
     }
@@ -1814,7 +1814,7 @@ public class TpTask
         var singleWheelNotch = Math.Sign(wheelNotches);
         for (var i = 0; i < Math.Abs(wheelNotches); i++)
         {
-            Simulation.SendInput.Mouse.VerticalScroll(singleWheelNotch);
+            InputHub.Foreground.Mouse.VerticalScroll(singleWheelNotch);
             if (i + 1 < Math.Abs(wheelNotches))
             {
                 await Delay(GetTeleportOperationDelay(MapZoomWheelBurstIntervalMs), ct);
@@ -1973,7 +1973,9 @@ public class TpTask
         var capture = context.SystemInfo.CaptureAreaRect;
         var bounds = new System.Drawing.Rectangle(capture.X, capture.Y, capture.Width, capture.Height);
         var desktop = System.Windows.Forms.SystemInformation.VirtualScreen;
-        var pointer = new MapDragPointer(context.GameHandle, bounds, desktop);
+        IMapDragPointer pointer = context.Runtime is { Kind: Runtime.GameRuntimeKind.WebPage } webRuntime
+            ? new SdkMapDragPointer(webRuntime, bounds)
+            : new MapDragPointer(context.GameHandle, bounds, desktop);
         pointer.Check();
         // 起点向预期拖动方向的反方向偏移，并保留随机性；位移按可拖动地图区域裁剪。
         double startX = 0;
@@ -2747,7 +2749,7 @@ public class TpTask
 
     private async Task PressTeleportConfirmKey()
     {
-        Simulation.SendInput.SimulateKeyPulse(Core.Config.KeyId.F, ct);
+        InputHub.Foreground.SimulateKeyPulse(Core.Config.KeyId.F, ct);
         await Delay(30, ct);
     }
 

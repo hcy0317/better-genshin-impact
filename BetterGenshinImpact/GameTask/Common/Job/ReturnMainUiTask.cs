@@ -1,9 +1,9 @@
 using System;
 using System.Diagnostics;
+using BetterGenshinImpact.Core.Input;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.BgiVision;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using Microsoft.Extensions.Logging;

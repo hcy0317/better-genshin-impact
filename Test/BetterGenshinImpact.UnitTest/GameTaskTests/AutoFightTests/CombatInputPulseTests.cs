@@ -7,8 +7,10 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatInputPulseTests
 {
-    [Fact]
-    public void NativeAdmissionFailureCannotTurnCleanupIntoANewInput()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NativeAdmissionFailureCannotTurnCleanupIntoANewInput(bool channel)
     {
         var submissions = 0;
         var admissions = 0;
@@ -16,13 +18,19 @@ public class CombatInputPulseTests
         var keyboard = new KeyboardSimulator(new InputSimulator(), dispatcher);
         var simulator = new InputSimulator(keyboard, null!, null!);
         using var capture = new InputDispatchCapture(() => { admissions++; throw new TimeoutException("expired"); });
-        Assert.Throws<TimeoutException>(() => simulator.SimulateKeyPulse(KeyId.F));
+        Assert.Throws<TimeoutException>(() =>
+        {
+            if (channel) new BetterGenshinImpact.Core.Input.Backends.Win32.SendInputChannel(simulator).SimulateKeyPulse(KeyId.F);
+            else simulator.SimulateKeyPulse(KeyId.F);
+        });
         Assert.Equal(0, submissions);
         Assert.Equal(1, admissions);
     }
 
-    [Fact]
-    public void CancellationAfterNativeDownStillSubmitsThePairedUp()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CancellationAfterNativeDownStillSubmitsThePairedUp(bool channel)
     {
         using var cancellation = new CancellationTokenSource();
         var submissions = 0;
@@ -35,7 +43,11 @@ public class CombatInputPulseTests
         var keyboard = new KeyboardSimulator(new InputSimulator(), dispatcher);
         var simulator = new InputSimulator(keyboard, null!, null!);
         using var capture = new InputDispatchCapture();
-        Assert.Throws<OperationCanceledException>(() => simulator.SimulateKeyPulse(KeyId.F, cancellation.Token));
+        Assert.Throws<OperationCanceledException>(() =>
+        {
+            if (channel) new BetterGenshinImpact.Core.Input.Backends.Win32.SendInputChannel(simulator).SimulateKeyPulse(KeyId.F, cancellation.Token);
+            else simulator.SimulateKeyPulse(KeyId.F, cancellation.Token);
+        });
         Assert.Equal(2, submissions);
         Assert.Equal(2, capture.Submitted);
     }

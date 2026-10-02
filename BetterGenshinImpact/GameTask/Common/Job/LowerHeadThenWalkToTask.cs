@@ -1,15 +1,14 @@
+using BetterGenshinImpact.Core.Input;
 using System;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OCR;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoPick.Assets;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.Helpers;
-using BetterGenshinImpact.View.Drawable;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using Vanara.PInvoke;
@@ -74,8 +73,8 @@ public class LowerHeadThenWalkToTask
                     var centerY = trackPointRa.Y + trackPointRa.Height / 2;
                     if (centerY > CaptureRect.Height / 2)
                     {
-                        Simulation.SendInput.Mouse.MoveMouseBy(-50, 0);
-                        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+                        InputHub.Foreground.Mouse.MoveMouseBy(-50, 0);
+                        InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
 
                         Debug.WriteLine("使追踪点位于俯视角上方");
                         continue;
@@ -94,17 +93,17 @@ public class LowerHeadThenWalkToTask
                     };
                     if (moveX != 0)
                     {
-                        Simulation.SendInput.Mouse.MoveMouseBy(moveX, 0);
+                        InputHub.Foreground.Mouse.MoveMouseBy(moveX, 0);
                         Debug.WriteLine("调整方向:" + moveX);
                     }
 
                     if (moveX == 0 || prevMoveX * moveX < 0)
                     {
-                        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+                        InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
                     }
                     else
                     {
-                        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+                        InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
                     }
 
                     // 识别F
@@ -112,7 +111,7 @@ public class LowerHeadThenWalkToTask
                     if (!string.IsNullOrEmpty(text) && text.Contains("激活"))
                     {
                         Logger.LogInformation("追踪：识别到[{Msg}]", text);
-                        Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+                        InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
                         return true;
                     }
 
@@ -130,7 +129,7 @@ public class LowerHeadThenWalkToTask
                     return false;
                 }
 
-                Simulation.SendInput.Mouse.MoveMouseBy(0, 800); // 保证俯视角（低头）
+                InputHub.Foreground.Mouse.MoveMouseBy(0, 800); // 保证俯视角（低头）
                 await Delay(100, ct);
             }
 
@@ -138,8 +137,8 @@ public class LowerHeadThenWalkToTask
         }
         finally
         {
-            Simulation.SendInput.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-            VisionContext.Instance().DrawContent.ClearAll();
+            InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
+            TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll();
         }
     }
 }

@@ -1,9 +1,9 @@
 using BetterGenshinImpact.Core.Recognition;
 using System.Collections.Generic;
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.Core.Script.Dependence;
-using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoFight.Config;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
@@ -184,7 +184,7 @@ public partial class Avatar
         var swimming = AutoFightParam.SwimmingEnabled && AutoFightTask.FightStatusFlag && SwimmingConfirm(region);
         if (Bv.IsCombatHud(region) && !swimming) return;
         ct.ThrowIfCancellationRequested();
-        Simulation.ReleaseAllKey();
+        BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
         using var suspension = CombatActionScope.Suspend();
         ThrowWhenDefeated(region, ct, null);
     }
@@ -247,7 +247,7 @@ public partial class Avatar
                         cts.CancelAfter(15000);
                         // 使用 Climb 模式：MoveTo 内部对 Climb 模式跳过卡死脱困检测，避免水中 TrapEscaper 死循环
                         AutoFightTask.FightWaypoint.MoveMode = MoveModeEnum.Climb.Code;
-                        Simulation.SendInput.Mouse.RightButtonDown();
+                        InputHub.Foreground.Mouse.RightButtonDown();
                         pathExecutor.MoveTo(AutoFightTask.FightWaypoint).GetAwaiter().GetResult();
                         Logger.LogInformation("游泳检测：移动结束");
                     }
@@ -277,8 +277,8 @@ public partial class Avatar
                         cts.Cancel(); // 终止 PathExecutor 内部截屏循环
                         AutoFightTask.FightWaypoint.MoveMode = originalMoveMode;
                         AutoFightTask.FightWaypoint = null;
-                        Simulation.SendInput.Mouse.RightButtonUp();
-                        Simulation.ReleaseAllKey();
+                        InputHub.Foreground.Mouse.RightButtonUp();
+                        InputHub.ReleaseAll();
                     }
                 }
 
@@ -497,7 +497,7 @@ public partial class Avatar
         if (receipt.Status == CombatBattleHostInputStatus.Unknown ||
             receipt.Status == CombatBattleHostInputStatus.Failed && receipt.NativeSubmitted > 0)
         {
-            Simulation.ReleaseAllKey();
+            BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
             receipt = receipt with { ObservableAfterTimestamp = TimeProvider.System.GetTimestamp() };
         }
         return receipt;
@@ -508,19 +508,19 @@ public partial class Avatar
         switch (index)
         {
             case 1:
-                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember1);
+                InputHub.Foreground.SimulateActionPulse(GIActions.SwitchMember1);
                 break;
             case 2:
-                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember2);
+                InputHub.Foreground.SimulateActionPulse(GIActions.SwitchMember2);
                 break;
             case 3:
-                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember3);
+                InputHub.Foreground.SimulateActionPulse(GIActions.SwitchMember3);
                 break;
             case 4:
-                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember4);
+                InputHub.Foreground.SimulateActionPulse(GIActions.SwitchMember4);
                 break;
             case 5:
-                Simulation.SendInput.SimulateActionPulse(GIActions.SwitchMember5);
+                InputHub.Foreground.SimulateActionPulse(GIActions.SwitchMember5);
                 break;
             default:
                 break;
@@ -535,13 +535,13 @@ public partial class Avatar
         var direction = UnstuckDirections[UnstuckRandom.Next(4)];
         Logger.LogWarning("切换角色卡住，执行脱困（方向：{Dir}）", direction);
 
-        Simulation.SendInput.SimulateAction(GIActions.Jump);
+        InputHub.Foreground.SimulateAction(GIActions.Jump);
         Sleep(200, ct);
-        Simulation.SendInput.SimulateAction(direction, KeyType.KeyDown);
+        InputHub.Foreground.SimulateAction(direction, KeyType.KeyDown);
         SimulateSwitchAction(Index);
         Sleep(1000, ct);
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
-        Simulation.ReleaseAllKey();
+        InputHub.Foreground.SimulateAction(GIActions.NormalAttack);
+        InputHub.ReleaseAll();
     }
 
     /// <summary>
@@ -650,7 +650,7 @@ public partial class Avatar
                 return;
             }
 
-            Simulation.SendInput.SimulateAction(GIActions.NormalAttack);
+            InputHub.Foreground.SimulateAction(GIActions.NormalAttack);
             ms -= 200;
             Sleep(200, Ct);
         }
@@ -691,11 +691,11 @@ public partial class Avatar
             CombatActionScope.Current?.Trace("e-input-call", $"actor={Name} hold={hold}");
             if (hold)
             {
-                Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
+                InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
             }
             else
             {
-                Simulation.SendInput.SimulateActionPulse(GIActions.ElementalSkill);
+                InputHub.Foreground.SimulateActionPulse(GIActions.ElementalSkill);
             }
             CombatActionScope.Current?.Trace("e-input-return", $"actor={Name}");
 
@@ -753,15 +753,15 @@ public partial class Avatar
         Ct.ThrowIfCancellationRequested();
         if (!AvatarSpecialAction.ExecuteSpecializedAction(this, "UseSkill", Name, new ActionArgs(Hold: hold)))
         {
-            if (hold) Simulation.SendInput.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
-            else Simulation.SendInput.SimulateActionPulse(GIActions.ElementalSkill);
+            if (hold) BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.ElementalSkill, KeyType.Hold);
+            else BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.ElementalSkill);
         }
     }
 
     internal void SendBurstInput()
     {
         Ct.ThrowIfCancellationRequested();
-        Simulation.SendInput.SimulateActionPulse(GIActions.ElementalBurst);
+        BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.ElementalBurst);
     }
 
     /// <summary>
@@ -889,7 +889,7 @@ public partial class Avatar
                 }, () =>
                 {
                     CombatActionScope.Current?.Trace("q-input-call", $"actor={Name}");
-                    Simulation.SendInput.SimulateActionPulse(GIActions.ElementalBurst);
+                    BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.ElementalBurst);
                     CombatActionScope.Current?.Trace("q-input-return", $"actor={Name}");
                 },
                 milliseconds => Sleep(milliseconds, Ct), Ct, timeoutSeconds: timeoutSeconds, maxSamples: maxSamples,
@@ -1041,9 +1041,9 @@ public partial class Avatar
             ms = 200;
         }
 
-        Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyDown);
+        InputHub.Foreground.SimulateAction(GIActions.SprintMouse, KeyType.KeyDown);
         try { Sleep(ms, Ct); }
-        finally { Simulation.SendInput.SimulateAction(GIActions.SprintMouse, KeyType.KeyUp); }
+        finally { InputHub.Foreground.SimulateAction(GIActions.SprintMouse, KeyType.KeyUp); }
     }
 
     public void Walk(string key, int ms)
@@ -1076,9 +1076,9 @@ public partial class Avatar
             return;
         }
 
-        Simulation.SendInput.Keyboard.KeyDown(vk);
+        InputHub.Foreground.Keyboard.KeyDown(vk);
         try { Sleep(ms, Ct); }
-        finally { Simulation.SendInput.Keyboard.KeyUp(vk); }
+        finally { InputHub.Foreground.Keyboard.KeyUp(vk); }
     }
 
     /// <summary>
@@ -1088,7 +1088,7 @@ public partial class Avatar
     /// <param name="pixelDeltaY"></param>
     public void MoveCamera(int pixelDeltaX, int pixelDeltaY)
     {
-        Simulation.SendInput.Mouse.MoveMouseBy(pixelDeltaX, pixelDeltaY);
+        InputHub.Foreground.Mouse.MoveMouseBy(pixelDeltaX, pixelDeltaY);
     }
 
     /// <summary>
@@ -1325,7 +1325,7 @@ public partial class Avatar
     /// </summary>
     public void Jump()
     {
-        Simulation.SendInput.SimulateAction(GIActions.Jump);
+        InputHub.Foreground.SimulateAction(GIActions.Jump);
     }
 
     /// <summary>
@@ -1341,9 +1341,9 @@ public partial class Avatar
 
         if (AvatarSpecialAction.ExecuteSpecializedAction(this, "Charge", Name, new ActionArgs(Ms: ms))) return;
 
-        Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
+        InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyDown);
         try { Sleep(ms, Ct); }
-        finally { Simulation.SendInput.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp); }
+        finally { InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp); }
     }
 
     public void MouseDown(string key = "left")
@@ -1351,15 +1351,15 @@ public partial class Avatar
         key = key.ToLower();
         if (key == "left")
         {
-            Simulation.SendInput.Mouse.LeftButtonDown();
+            InputHub.Foreground.Mouse.LeftButtonDown();
         }
         else if (key == "right")
         {
-            Simulation.SendInput.Mouse.RightButtonDown();
+            InputHub.Foreground.Mouse.RightButtonDown();
         }
         else if (key == "middle")
         {
-            Simulation.SendInput.Mouse.MiddleButtonDown();
+            InputHub.Foreground.Mouse.MiddleButtonDown();
         }
     }
 
@@ -1368,15 +1368,15 @@ public partial class Avatar
         key = key.ToLower();
         if (key == "left")
         {
-            Simulation.SendInput.Mouse.LeftButtonUp();
+            InputHub.Foreground.Mouse.LeftButtonUp();
         }
         else if (key == "right")
         {
-            Simulation.SendInput.Mouse.RightButtonUp();
+            InputHub.Foreground.Mouse.RightButtonUp();
         }
         else if (key == "middle")
         {
-            Simulation.SendInput.Mouse.MiddleButtonUp();
+            InputHub.Foreground.Mouse.MiddleButtonUp();
         }
     }
 
@@ -1385,15 +1385,15 @@ public partial class Avatar
         key = key.ToLower();
         if (key == "left")
         {
-            Simulation.SendInput.Mouse.LeftButtonClick();
+            InputHub.Foreground.Mouse.LeftButtonClick();
         }
         else if (key == "right")
         {
-            Simulation.SendInput.Mouse.RightButtonClick();
+            InputHub.Foreground.Mouse.RightButtonClick();
         }
         else if (key == "middle")
         {
-            Simulation.SendInput.Mouse.MiddleButtonClick();
+            InputHub.Foreground.Mouse.MiddleButtonClick();
         }
     }
 
@@ -1407,85 +1407,23 @@ public partial class Avatar
 
     public void Scroll(int scrollAmountInClicks)
     {
-        Simulation.SendInput.Mouse.VerticalScroll(scrollAmountInClicks);
+        InputHub.Foreground.Mouse.VerticalScroll(scrollAmountInClicks);
     }
 
+    // 鼠标键（VK_LBUTTON、VK_RBUTTON、VK_MBUTTON、VK_XBUTTON1、VK_XBUTTON2）由输入通道转成对应的鼠标键
     public void KeyDown(string key)
     {
-        var vk = KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(key));
-        switch (key)
-        {
-            case "VK_LBUTTON":
-                Simulation.SendInput.Mouse.LeftButtonDown();
-                break;
-            case "VK_RBUTTON":
-                Simulation.SendInput.Mouse.RightButtonDown();
-                break;
-            case "VK_MBUTTON":
-                Simulation.SendInput.Mouse.MiddleButtonDown();
-                break;
-            case "VK_XBUTTON1":
-                Simulation.SendInput.Mouse.XButtonDown(0x0001);
-                break;
-            case "VK_XBUTTON2":
-                Simulation.SendInput.Mouse.XButtonDown(0x0001);
-                break;
-            default:
-                Simulation.SendInput.Keyboard.KeyDown(vk);
-                break;
-        }
+        InputHub.Foreground.Keyboard.KeyDown(KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(key)));
     }
 
     public void KeyUp(string key)
     {
-        var vk = KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(key));
-        switch (key)
-        {
-            case "VK_LBUTTON":
-                Simulation.SendInput.Mouse.LeftButtonUp();
-                break;
-            case "VK_RBUTTON":
-                Simulation.SendInput.Mouse.RightButtonUp();
-                break;
-            case "VK_MBUTTON":
-                Simulation.SendInput.Mouse.MiddleButtonUp();
-                break;
-            case "VK_XBUTTON1":
-                Simulation.SendInput.Mouse.XButtonUp(0x0001);
-                break;
-            case "VK_XBUTTON2":
-                Simulation.SendInput.Mouse.XButtonUp(0x0001);
-                break;
-            default:
-                Simulation.SendInput.Keyboard.KeyUp(vk);
-                break;
-        }
+        InputHub.Foreground.Keyboard.KeyUp(KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(key)));
     }
 
     public void KeyPress(string key)
     {
-        var vk = KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(key));
-        switch (key)
-        {
-            case "VK_LBUTTON":
-                Simulation.SendInput.Mouse.LeftButtonClick();
-                break;
-            case "VK_RBUTTON":
-                Simulation.SendInput.Mouse.RightButtonClick();
-                break;
-            case "VK_MBUTTON":
-                Simulation.SendInput.Mouse.MiddleButtonClick();
-                break;
-            case "VK_XBUTTON1":
-                Simulation.SendInput.Mouse.XButtonClick(0x0001);
-                break;
-            case "VK_XBUTTON2":
-                Simulation.SendInput.Mouse.XButtonClick(0x0001);
-                break;
-            default:
-                Simulation.SendInput.Keyboard.KeyPress(vk);
-                break;
-        }
+        InputHub.Foreground.Keyboard.KeyPress(KeyBindingsSettingsPageViewModel.MappingKey(User32Helper.ToVk(key)));
     }
 
     /// <summary>
