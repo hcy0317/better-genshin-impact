@@ -10,6 +10,17 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiTransitionTests
 {
     [Fact]
+    public async Task UnchangedDefeatStopsAfterTwoSubmittedReviveAttempts()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { Revive = true, FullPartyDefeat = true });
+        var started = clock.GetUtcNow();
+        await Assert.ThrowsAsync<TimeoutException>(() => UiRecovery.ToMainAsync(driver, default, clock: clock));
+        Assert.Equal(2, driver.Actions.Count);
+        Assert.True(clock.GetUtcNow() - started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public async Task OrdinaryPartyHandoffLeavesAnAlreadyOpenPartyPageBeforeSuccess()
     {
         var clock = new FakeTimeProvider();

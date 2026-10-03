@@ -55,6 +55,8 @@ internal sealed record UiSnapshot(long FrameId)
     public bool Prompt { get; init; }
     public bool Revive { get; init; }
     public bool FullPartyDefeat { get; init; }
+    public OpenCvSharp.Rect ReviveButtonBounds { get; init; }
+    public bool DefeatOverlay { get; init; }
     public bool InDomain { get; init; }
     public bool Closable { get; init; }
     public bool ExitDoor { get; init; }

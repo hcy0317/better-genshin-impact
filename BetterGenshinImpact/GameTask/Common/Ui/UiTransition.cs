@@ -48,6 +48,9 @@ internal static class UiTransition
         int? confirmedSignature = null;
         var attempts = 0;
         var admissionChecks = 0;
+        UiAction? previousAction = null;
+        int? actionSignature = null;
+        var unchangedActions = 0;
         while (true)
         {
             operation.Check();
@@ -80,6 +83,13 @@ internal static class UiTransition
                 {
                     confirmed = 0;
                     confirmedSignature = null;
+                    if (previousAction is UiAction.ReviveParty or UiAction.Escape or UiAction.EscapeProbe &&
+                        actionSignature == observed.Signature && unchangedActions >= 2)
+                    {
+                        var error = new TimeoutException($"界面转换超时：{operation.Name}，期望={target}，实际={observed.Describe()}；恢复无进展：{previousAction} 已提交两次，页面仍未变化");
+                        error.Data["UI_NO_PROGRESS"] = true;
+                        throw error;
+                    }
                     if (attempts < maxActions && admissionChecks < Math.Max(8, maxActions) &&
                         chooseAction?.Invoke(observed) is { } action)
                     {
@@ -88,8 +98,17 @@ internal static class UiTransition
                         var applied = await operation.InvokeActionAsync(action,
                             () => driver.ActAsync(action, observed, operation.Token), attempts + 1, maxActions);
                         operation.Check();
-                        if (applied) attempts++;
+                        if (applied)
+                        {
+                            attempts++;
+                            unchangedActions = previousAction == action && actionSignature == observed.Signature
+                                ? unchangedActions + 1 : 1;
+                            previousAction = action;
+                            actionSignature = observed.Signature;
+                        }
                         actionCompleted?.Invoke(action, applied, observed);
+                        if (applied && action == UiAction.ReviveParty)
+                            await driver.DelayAsync(1000, operation.Token);
                     }
                 }
             }

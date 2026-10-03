@@ -48,6 +48,7 @@ public class TpTask
     private readonly string _mapMatchingMethod = TaskContext.Instance().Config.PathingConditionConfig.MapMatchingMethod;
     private readonly BlessingOfTheWelkinMoonTask _blessingOfTheWelkinMoonTask = new();
     private RouteMapContext _routeMapContext;
+    private TeleportArrivalProgress? _arrivalProgress;
 
     private readonly CancellationToken ct;
     private readonly CultureInfo cultureInfo;
@@ -1063,57 +1064,20 @@ public class TpTask
     /// </summary>
     private async Task WaitForTeleportCompletion()
     {
-        var stopwatch = Stopwatch.StartNew();
-        var observedLoadingState = false;
-        var consecutiveNonUiChecks = 0;
-        var consecutiveMainUiChecks = 0;
-        long frame = 0;
         long nextBlessingCheckAt = BlessingCheckIntervalMs;
-        while (stopwatch.ElapsedMilliseconds < TeleportTimeoutMs)
+        await TeleportPanelConfirmation.WaitForArrivalAsync(
+            _arrivalProgress ?? new TeleportArrivalProgress(TimeProvider.System),
+            () => CaptureToRectArea(), WorldFrameAvailability.ReadNative, Delay, ct,
+            TimeSpan.FromMilliseconds(TeleportTimeoutMs), whileWaiting: async elapsed =>
         {
-            ct.ThrowIfCancellationRequested();
-
-            var capture = CaptureToRectArea();
-            using var ownedCapture = capture;
-            var isInMainUi = Bv.IsInMainUi(capture);
-            var isInBigMapUi = Bv.IsInBigMapUi(capture);
-            UiOperation.Current?.Observe("传送加载后主界面连续三帧就绪",
-                $"phase=teleport-loading,hud={isInMainUi},map={isInBigMapUi},loadingObserved={observedLoadingState},stableHud={consecutiveMainUiChecks}",
-                ++frame);
-
-            if (isInMainUi)
-            {
-                consecutiveNonUiChecks = 0;
-                if (observedLoadingState &&
-                    stopwatch.ElapsedMilliseconds >= TeleportMinimumCompletionMs &&
-                    ++consecutiveMainUiChecks >= TeleportCompletionStableMainUiChecks)
-                {
-                    return;
-                }
-            }
-            else
-            {
-                consecutiveMainUiChecks = 0;
-                if (!observedLoadingState)
-                {
-                    // 地图关闭后出现的黑屏、白屏或加载界面均不属于大地图和主界面。
-                    // 必须先观察到这个中间态，避免把传送尚未开始时短暂出现的主界面误判为完成。
-                    consecutiveNonUiChecks = isInBigMapUi ? 0 : consecutiveNonUiChecks + 1;
-                    observedLoadingState = consecutiveNonUiChecks >= TeleportLoadingStableNonUiChecks;
-                }
-            }
-            await Delay(TeleportLoadingPollIntervalMs, ct);
-
             // 打开大地图期间推送的月卡会在传送之后直接显示，导致检测不到传送完成。
-            if (observedLoadingState && !isInMainUi && stopwatch.ElapsedMilliseconds >= nextBlessingCheckAt)
+            if (elapsed.TotalMilliseconds >= nextBlessingCheckAt)
             {
                 await _blessingOfTheWelkinMoonTask.Start(ct);
                 ct.ThrowIfCancellationRequested();
-                nextBlessingCheckAt = stopwatch.ElapsedMilliseconds + BlessingCheckIntervalMs;
+                nextBlessingCheckAt = (long)elapsed.TotalMilliseconds + BlessingCheckIntervalMs;
             }
-        }
-
-        throw new TimeoutException("传送等待超时：未确认加载后稳定返回主界面");
+        });
     }
 
     private bool IsGameRegionPointInClickableArea(double clickX, double clickY, double requiredVisibleRadius = 0)
@@ -2663,7 +2627,7 @@ public class TpTask
         ImageRegion imageRegion,
         GiTpPosition? targetTp)
     {
-        if (await TeleportPanelConfirmation.TryConfirmAsync(imageRegion, _ => PressTeleportConfirmKey(), ct))
+        if (await ConfirmTeleportPanel(imageRegion))
         {
             return TeleportPanelResult.Confirmed;
         }
@@ -2717,7 +2681,7 @@ public class TpTask
 
             var screen = CaptureToRectArea();
             using var ownedScreen = screen;
-            if (await TeleportPanelConfirmation.TryConfirmAsync(screen, _ => PressTeleportConfirmKey(), ct))
+            if (await ConfirmTeleportPanel(screen))
             {
                 return TeleportPanelResult.Confirmed;
             }
@@ -2747,10 +2711,10 @@ public class TpTask
         return TeleportPanelResult.RetryPoint;
     }
 
-    private async Task PressTeleportConfirmKey()
+    private Task<bool> ConfirmTeleportPanel(ImageRegion image)
     {
-        InputHub.Foreground.SimulateKeyPulse(Core.Config.KeyId.F, ct);
-        await Delay(30, ct);
+        _arrivalProgress = new TeleportArrivalProgress(TimeProvider.System);
+        return TeleportPanelConfirmation.TryConfirmNativeAsync(image, ct, _arrivalProgress);
     }
 
     private List<NearbyMapIcon> GetMapIconsInRect(

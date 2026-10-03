@@ -59,13 +59,13 @@ public partial class PathExecutor
     private CancellationToken ct;
     private PathExecutorSuspend pathExecutorSuspend;
     private readonly PathMoveToIo _moveIo;
+    private DateTimeOffset? _moveDeadline;
     private PathingMacroSession? _pathingMacro;
 
     public PathExecutor(CancellationToken ct) : this(ct, null) { }
 
     internal PathExecutor(CancellationToken ct, PathMoveToIo? io, PathingMacroSession? macro = null)
     {
-        _trapEscaper = new(ct);
         _rotateTask = new(ct);
         this.ct = ct;
         _pathingMacro = macro;
@@ -73,6 +73,11 @@ public partial class PathExecutor
         _moveIo = io ?? new PathMoveToIo(native: true)
         {
             SwitchAvatar = async index => { await SwitchAvatar(index); },
+            SwitchGuardianAvatar = async index =>
+            {
+                var avatar = await SwitchAvatar(index, true);
+                return avatar == null ? null : new PathGuardianAvatar(avatar.Name, hold => avatar.UseSkill(hold));
+            },
             Locate = GetDirectPositionAndTime,
             LocateDirect = (screen, point) =>
             {
@@ -85,6 +90,9 @@ public partial class PathExecutor
             RotateUntil = (target, diff) => WaitUntilRotatedTo(target, diff),
             RotateStep = _rotateTask.RotateToApproach
         };
+        _rotateTask.Io = _moveIo;
+        _rotateTask.Deadline = () => _moveDeadline;
+        _trapEscaper = new(ct, _moveIo, () => _moveDeadline);
     }
 
     public PathingPartyConfig PartyConfig
@@ -402,7 +410,7 @@ public partial class PathExecutor
         using var ra = CaptureToRectArea();
 
         // 切换队伍前判断是否全队死亡 // 可能队伍切换失败导致的死亡
-        if (Bv.ClickIfInReviveModal(ra))
+        if (Bv.ClickIfInReviveModal(ra, ct))
         {
             var returnedToMainUi = await Bv.WaitForMainUi(ct);
             if (!Bv.IsReviveRecoveryConfirmed(clicked: true, returnedToMainUi))
@@ -753,7 +761,7 @@ public partial class PathExecutor
             Logger.LogInformation("当前角色血量过低，尝试七天神像恢复；回血确认后再判定能否安全重启路线");
             await RecoverAtStatueAndRestartAsync(region.FrameStamp);
         }
-        else if (ReleaseMacroBeforeRevive(region) && Bv.ClickIfInReviveModal(region))
+        else if (ReleaseMacroBeforeRevive(region) && Bv.ClickIfInReviveModal(region, ct))
         {
             var returnedToMainUi = await Bv.WaitForMainUi(ct);
             if (!Bv.IsReviveRecoveryConfirmed(clicked: true, returnedToMainUi))
@@ -864,7 +872,8 @@ public partial class PathExecutor
         }
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
         Logger.LogDebug("朝向点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
-        await WaitUntilRotatedTo(targetOrientation, 2);
+        if (!await WaitUntilRotatedTo(targetOrientation, 2))
+            throw new RetryException("朝向目标点未完成，停止后续动作");
         await Delay(500, ct);
     }
 
@@ -874,6 +883,13 @@ public partial class PathExecutor
     {
         try
         {
+        moveToStartTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
+        _moveDeadline = new DateTimeOffset(moveToStartTime, TimeSpan.Zero).AddSeconds(
+            waypoint.MoveMode == MoveModeEnum.Climb.Code ? 60 : 240);
+        using (var ready = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct))
+        {
+            ct.ThrowIfCancellationRequested();
+        }
         // 已证实变身时只能导航，不切回不存在的人形活动位。
         var transformed = false;
         if (_pathingMacro != null)
@@ -891,9 +907,9 @@ public partial class PathExecutor
 
         Point2f position;
         int additionalTimeInMs;
-        using (var initialScreen = _moveIo.Capture())
+        using (var initialScreen = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct))
         {
-            var located = await _moveIo.Locate(initialScreen, waypoint);
+            var located = await LocatePlayableAsync(initialScreen, waypoint);
             position = located.Point;
             additionalTimeInMs = located.AdditionalTimeInMs;
             if (_pathingMacro?.HasTail == true)
@@ -903,8 +919,8 @@ public partial class PathExecutor
         }
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
         _moveIo.Logger.LogDebug("粗略接近途经点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
-        await _moveIo.RotateUntil(targetOrientation, 5);
-        moveToStartTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
+        if (!await _moveIo.RotateUntil(targetOrientation, 5))
+            throw new RetryException("路径起步转向未完成，停止前进");
         var progressHeartbeat = new PathProgressHeartbeat(moveToStartTime, TimeSpan.FromSeconds(15));
         var movementWatchdog = new PathMovementWatchdog(
             () => moveToStartTime,
@@ -938,16 +954,25 @@ public partial class PathExecutor
                 throw new RetryException("路径点执行超时，放弃整条路径");
             }
 
-            using var screen = _moveIo.Capture();
+            using var screen = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct,
+                onBlocked: () => climbWindow.Clear());
             transformed = IsKnownPathTransformation(screen);
 
             _moveIo.EndJudgment(screen);
 
             // position = await GetPosition(screen, waypoint);
-             var located = await _moveIo.Locate(screen, waypoint);
+             var located = await LocatePlayableAsync(screen, waypoint);
              position = located.Point;
              additionalTimeInMs = located.AdditionalTimeInMs;
              ct.ThrowIfCancellationRequested();
+             if (!PathWorldAvailability.IsPlayable(_moveIo, screen) ||
+                 !float.IsFinite(position.X) || !float.IsFinite(position.Y))
+             {
+                 SendPathForward(KeyType.KeyUp);
+                 climbWindow.Clear();
+                 await _moveIo.Delay(150, ct);
+                 continue;
+             }
              if (_moveIo.Clock.GetUtcNow().UtcDateTime >= moveToStartTime.AddSeconds(240))
                  throw new RetryException("路径点执行超时，放弃整条路径");
              if (additionalTimeInMs>0)
@@ -1088,10 +1113,8 @@ public partial class PathExecutor
 
                             //调用脱困代码，由TrapEscaper接管移动
                             _pathingMacro?.Release();
-                            Helpers.ApplicationHostBootstrapGuard.EnsureAllowed();
                             await _trapEscaper.RotateAndMove();
                             await _trapEscaper.MoveTo(waypoint);
-                            SendPathForward(KeyType.KeyDown);
                             _moveIo.Logger.LogInformation("卡死脱离结束");
                             continue;
                         }
@@ -1111,6 +1134,12 @@ public partial class PathExecutor
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
             //执行旋转
             var diff = _moveIo.RotateStep(targetOrientation, screen);
+            if (!float.IsFinite(diff))
+            {
+                SendPathForward(KeyType.KeyUp);
+                await _moveIo.Delay(150, ct);
+                continue;
+            }
             // 进入MoveTo超过2秒且至少5帧后才启用旋转纠正（绕过起步阶段的抖动）
             if ((_moveIo.Clock.GetUtcNow().UtcDateTime - moveToStartTime).TotalSeconds > 2 && num >= 5)
             {
@@ -1134,7 +1163,8 @@ public partial class PathExecutor
                 {
                     // 松W键，站定好转向，转完重新按下W继续走
                     SendPathForward(KeyType.KeyUp);
-                    await _moveIo.RotateUntil(targetOrientation, 2);
+                    if (!await _moveIo.RotateUntil(targetOrientation, 2))
+                        throw new RetryException("路径纠偏转向未完成，停止前进");
                     SendPathForward(KeyType.KeyDown);
                 }
             }
@@ -1252,6 +1282,7 @@ public partial class PathExecutor
         {
             // Cleanup is permitted after cancellation/deadline; never leave this movement holding W.
             SendPathForward(KeyType.KeyUp);
+            _moveDeadline = null;
         }
     }
 
@@ -1259,6 +1290,7 @@ public partial class PathExecutor
     {
         var stamp = screen.FrameStamp;
         var sourceUsable = position.IsDirect && float.IsFinite(position.Point.X) && float.IsFinite(position.Point.Y)
+            && PathWorldAvailability.IsPlayable(_moveIo, screen)
             && position.Point != default && stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2))
             && (_moveIo.CombatHud(screen) || _moveIo.Transformed(screen));
         var motion = sourceUsable ? _moveIo.Motion(screen) : MotionStatus.Normal;
@@ -1268,12 +1300,19 @@ public partial class PathExecutor
         return new(stamp, position.Point, valid, motion, sourceUsable);
     }
 
+    private Task<PathPosition> LocatePlayableAsync(ImageRegion screen, WaypointForTrack waypoint, bool direct = false)
+    {
+        if (!PathWorldAvailability.IsPlayable(_moveIo, screen))
+            return Task.FromResult(new PathPosition(default, 0, false, PathPositionSource.Invalid));
+        return direct ? (_moveIo.LocateDirect ?? _moveIo.Locate)(screen, waypoint) : _moveIo.Locate(screen, waypoint);
+    }
+
     private async Task RecoverNormalClimbAsync(WaypointForTrack waypoint, CaptureFrameStamp previous)
     {
         async Task<PathMoveObservation> Observe()
         {
             using var screen = _moveIo.Capture();
-            var position = await (_moveIo.LocateDirect ?? _moveIo.Locate)(screen, waypoint);
+            var position = await LocatePlayableAsync(screen, waypoint, direct: true);
             var observation = ReadMoveObservation(screen, position, previous);
             previous = screen.FrameStamp;
             return observation;
@@ -1313,7 +1352,7 @@ public partial class PathExecutor
                     while (true)
                     {
                         using var fresh = _moveIo.Capture();
-                        var position = await (_moveIo.LocateDirect ?? _moveIo.Locate)(fresh, nearPoint!);
+                        var position = await LocatePlayableAsync(fresh, nearPoint!, direct: true);
                         operation.Check();
                         var observed = ReadMoveObservation(fresh, position, previous);
                         operation.Check();
@@ -1348,38 +1387,48 @@ public partial class PathExecutor
         catch (TimeoutException) { throw new RetryException("路径点执行超时，放弃整条路径"); }
     }
 
-    private async Task UseElementalSkill()
+    internal async Task UseElementalSkill()
     {
         if (string.IsNullOrEmpty(PartyConfig.GuardianAvatarIndex))
         {
             return;
         }
 
-        await Delay(200, ct);
+        var deadline = _moveDeadline ?? _moveIo.Clock.GetUtcNow().AddSeconds(15);
+        async Task Ready()
+        {
+            using var frame = await PathWorldAvailability.CapturePlayableAsync(_moveIo, deadline, ct);
+        }
+        await _moveIo.Delay(200, ct);
+        await Ready();
 
         // 切人
-        Logger.LogInformation("切换盾、回血角色，使用元素战技");
-        var avatar = await SwitchAvatar(PartyConfig.GuardianAvatarIndex, true);
+        _moveIo.Logger.LogInformation("切换盾、回血角色，使用元素战技");
+        var avatar = await _moveIo.SwitchGuardianAvatar(PartyConfig.GuardianAvatarIndex);
         if (avatar == null)
         {
             return;
         }
 
         // 钟离往身后放柱子
-        if (avatar.Name == "钟离")
+        await Ready();
+        if (avatar.Value.Name == "钟离")
         {
-            InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyUp);
-            await Delay(50, ct);
-            InputHub.Foreground.SimulateAction(GIActions.MoveBackward);
-            await Delay(200, ct);
+            _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+            await _moveIo.Delay(50, ct);
+            await Ready();
+            _moveIo.Send(GIActions.MoveBackward, KeyType.KeyPress);
+            await _moveIo.Delay(200, ct);
         }
 
-        avatar.UseSkill(PartyConfig.GuardianElementalSkillLongPress);
+        await Ready();
+        avatar.Value.UseSkill(PartyConfig.GuardianElementalSkillLongPress);
 
         // 钟离往身后放柱子 后继续走路
-        if (avatar.Name == "钟离")
+        if (avatar.Value.Name == "钟离")
         {
-            InputHub.Foreground.SimulateAction(GIActions.MoveForward, KeyType.KeyDown);
+            await Ready();
+            _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown);
         }
     }
 
@@ -1420,11 +1469,13 @@ public partial class PathExecutor
         while (true)
         {
             operation.Check();
-            using var screen = _moveIo.Capture();
+            using var screen = await PathWorldAvailability.CapturePlayableAsync(_moveIo,
+                _moveIo.Clock.GetUtcNow().Add(operation.Remaining), operation.Token,
+                onBlocked: () => stationary = 0);
 
             _moveIo.EndJudgment(screen);
 
-            var location = await (_moveIo.LocateDirect ?? _moveIo.Locate)(screen, waypoint);
+            var location = await LocatePlayableAsync(screen, waypoint, direct: true);
             operation.Check();
             var observation = ReadMoveObservation(screen, location, previous);
             operation.Check();
@@ -1458,7 +1509,7 @@ public partial class PathExecutor
                 async Task<PathMoveObservation> ObserveRecovery()
                 {
                     using var fresh = _moveIo.Capture();
-                    var current = await (_moveIo.LocateDirect ?? _moveIo.Locate)(fresh, waypoint);
+                    var current = await LocatePlayableAsync(fresh, waypoint, direct: true);
                     var observed = ReadMoveObservation(fresh, current, previous);
                     if (_moveIo.Transformed(fresh)) observed = observed with { Valid = false, SourceUsable = false };
                     previous = fresh.FrameStamp;
@@ -1500,9 +1551,15 @@ public partial class PathExecutor
             // 小碎步接近
             _moveIo.CheckInput();
             operation.Check();
+            using var current = await PathWorldAvailability.CapturePlayableAsync(_moveIo,
+                _moveIo.Clock.GetUtcNow().Add(operation.Remaining), operation.Token);
+            var currentLocation = await LocatePlayableAsync(current, waypoint, direct: true);
+            var currentObservation = ReadMoveObservation(current, currentLocation, previous);
+            operation.Check();
+            if (!currentObservation.Valid) { stationary = 0; await _moveIo.Delay(100, operation.Token); continue; }
             lastPulse = await PathApproachDiagnostics.RunPulseAsync(
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
-                () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, screen);
+                () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, current);
             approachDiagnostics.RecordPulse(lastPulse);
             // 松键后的识图也要等待游戏30–60ms响应；按键保持时间不能代替响应后的等待。
             // 不放宽到达距离或停滞判据，仍由下一张有效源帧确认实际位置。
@@ -1792,11 +1849,6 @@ public partial class PathExecutor
 
     private async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes = 50)
     {
-        if (await _rotateTask.WaitUntilRotatedTo(targetOrientation, maxDiff, maxTryTimes))
-        {
-            return true;
-        }
-        await ResolveAnomalies();
         return await _rotateTask.WaitUntilRotatedTo(targetOrientation, maxDiff, maxTryTimes);
     }
 

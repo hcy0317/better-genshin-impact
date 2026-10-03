@@ -241,7 +241,7 @@ public class PathMoveToClimbTests
             ? new Point2f(100, 100) : new Point2f(90, 100);
         replay.ReadCamera = () => { cameraStarted ??= replay.Clock.GetUtcNow(); replay.Clock.Advance(TimeSpan.FromMilliseconds(200)); return 17; };
         replay.OnInput = (action, _) => { if (action == GIActions.Drop) replay.MinimumWait = 0; };
-        await replay.Executor.MoveTo(replay.Point("climb"));
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveTo(replay.Point("climb")));
         Assert.NotNull(cameraStarted);
         Assert.All(replay.MouseInputs, input => Assert.True(input.At - cameraStarted.Value < TimeSpan.FromSeconds(5)));
         Assert.DoesNotContain(replay.RecoveryInputs, input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown);

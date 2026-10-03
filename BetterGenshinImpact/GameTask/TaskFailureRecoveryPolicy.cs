@@ -18,6 +18,15 @@ internal sealed class TaskFailureRecoveryException : AggregateException
 
 internal static class TaskFailureRecoveryPolicy
 {
+    internal static bool IsNoProgressFailure(Exception failure)
+    {
+        if (failure.Data["UI_NO_PROGRESS"] is true) return true;
+        if (failure is AggregateException aggregate)
+            foreach (var inner in aggregate.InnerExceptions)
+                if (IsNoProgressFailure(inner)) return true;
+        return failure.InnerException != null && IsNoProgressFailure(failure.InnerException);
+    }
+
     internal static bool IsCancellation(Exception failure)
     {
         if (failure is OperationCanceledException or NormalEndException) return true;

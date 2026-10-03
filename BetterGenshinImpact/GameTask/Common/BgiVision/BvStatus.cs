@@ -284,6 +284,9 @@ public static partial class Bv
     internal static ReviveUiState ReadReviveState(ImageRegion region)
         => CreateReviveDetector(region).Read(region);
 
+    internal static ReviveUiObservation ReadReviveObservation(ImageRegion region)
+        => CreateReviveDetector(region).Observe(region);
+
     internal static bool IsCombatHud(ImageRegion region) => CreateReviveDetector(region).IsCombatHud(region);
 
     private static ReviveUiDetector CreateReviveDetector(ImageRegion region)
@@ -301,27 +304,31 @@ public static partial class Bv
     /// </summary>
     /// <param name="region"></param>
     /// <returns></returns>
-    public static bool ClickIfInReviveModal(ImageRegion region)
+    public static bool ClickIfInReviveModal(ImageRegion region, CancellationToken ct = default)
     {
         if (ReadReviveState(region) != ReviveUiState.FullPartyDefeat) return false;
-        var list = region.FindMulti(new RecognitionObject
+        TaskControl.CheckAndSleep(0);
+        ct.ThrowIfCancellationRequested();
+        using var current = TaskControl.CaptureToRectArea();
+        var observed = ReadReviveObservation(current);
+        var bounds = observed.ButtonBounds;
+        if (observed.State != ReviveUiState.FullPartyDefeat || !observed.DefeatOverlay ||
+            !current.FrameStamp.IsAfter(region.FrameStamp) ||
+            bounds.Width <= 0 || bounds.Height <= 0 || bounds.X < current.Width / 4 ||
+            bounds.Right > current.Width * 3 / 4 || bounds.Y < current.Height * 2 / 3 || bounds.Bottom > current.Height)
+            return false;
+        using var body = current.DeriveCrop(bounds);
+        void Admit()
         {
-            RecognitionType = RecognitionTypes.Ocr,
-            RegionOfInterest = new Rect(region.Width / 4, region.Height * 2 / 3,
-                region.Width / 2, region.Height - region.Height * 2 / 3)
-        });
-
-        CultureInfo cultureInfo = new CultureInfo(TaskContext.Instance().Config.OtherConfig.GameCultureInfoName);
-        IStringLocalizer stringLocalizer = App.GetService<IStringLocalizer<BvResxHelper>>() ?? throw new Exception();
-        string revival = stringLocalizer.WithCultureGet(cultureInfo, "复苏");
-        try
-        {
-            var revivalText = list.FirstOrDefault(r => IsReviveText(r.Text, revival));
-            if (revivalText == null) return false;
-            revivalText.BackgroundClick();
-            return true;
+            ct.ThrowIfCancellationRequested();
+            Common.Ui.UiOperation.Current?.Check();
+            if (!current.FrameStamp.IsFresh(TimeProvider.System, Common.Ui.UiSnapshot.RecoveryMaximumAge))
+                throw new InvalidOperationException("Revive source expired before native input.");
         }
-        finally { foreach (var item in list) item.Dispose(); }
+        Common.Ui.DomainTipClick.Run(Admit, body.Move,
+            () => Core.Input.InputHub.Foreground.Mouse.LeftButtonDown(),
+            () => Core.Input.InputHub.Foreground.Mouse.LeftButtonUp(), Thread.Sleep);
+        return true;
     }
 
     internal static bool IsReviveFoodTitle(string? text, string? localizedRevive, string? localizedFoodTitle)

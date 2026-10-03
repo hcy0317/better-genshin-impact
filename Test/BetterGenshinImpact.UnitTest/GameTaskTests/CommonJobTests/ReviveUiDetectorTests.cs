@@ -68,14 +68,34 @@ public class ReviveUiDetectorTests
     }
 
     [Fact]
-    public void MissingHealthEvidenceCannotSuppressAReviveButton()
+    public void MissingHealthEvidenceAndReviveTextAloneCannotAuthorizeFullPartyRevival()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "Fixtures", "Ui", "inactive-zhongli-20260911.png");
         using var image = new ImageRegion(Cv2.ImRead(path), 0, 0);
         for (var x = 808; x <= 812; x++) image.SrcMat.Set(1010, x, new Vec3b(0, 0, 0));
         var detector = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", image),
             new FixedOcr("复苏"), "复苏", "使用道具复苏角色");
-        Assert.Equal(ReviveUiState.FullPartyDefeat, detector.Read(image));
+        Assert.Equal(ReviveUiState.None, detector.Read(image));
+    }
+
+    [UiRecoveryFact("full-party-defeat-20261003.png")]
+    public void ActualDefeatRequiresBothCenterTitleAndBottomButton()
+    {
+        using var image = new ImageRegion(Cv2.ImRead(UiRecoveryFixtures.PathFor("full-party-defeat-20261003.png")), 0, 0);
+        Assert.False(image.SrcMat.Empty());
+        var detector = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", image),
+            new DefeatOcr(), "复苏", "使用道具复苏角色");
+        var observed = detector.Observe(image);
+        Assert.Equal(ReviveUiState.FullPartyDefeat, observed.State);
+        Assert.True(observed.DefeatOverlay);
+        Assert.True(observed.ButtonBounds.Y > image.Height * 2 / 3);
+    }
+
+    private sealed class DefeatOcr : IOcrService
+    {
+        public string Ocr(Mat mat) => "注意敌人";
+        public string OcrWithoutDetector(Mat mat) => "注意敌人";
+        public OcrResult OcrResult(Mat mat) => new([new(new RotatedRect(new Point2f(500, 265), new Size2f(64, 30), 0), "复苏", 1)]);
     }
 
     [Fact]

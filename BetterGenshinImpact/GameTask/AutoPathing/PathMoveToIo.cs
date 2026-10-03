@@ -11,6 +11,7 @@ using BetterGenshinImpact.GameTask.Model.Area;
 using OpenCvSharp;
 using Fischless.GameCapture;
 using Microsoft.Extensions.Logging;
+using BetterGenshinImpact.GameTask.Common.Ui;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
@@ -28,12 +29,14 @@ internal sealed class PathMoveToIo
     internal Action<int, int> MouseMove { get; init; } = (_, _) => Missing<bool>(nameof(MouseMove));
     internal Func<double> Dpi { get; init; } = () => Missing<double>(nameof(Dpi));
     internal Func<string, Task> SwitchAvatar { get; init; } = null!;
+    internal Func<string, Task<PathGuardianAvatar?>> SwitchGuardianAvatar { get; init; } = null!;
     internal Action<ImageRegion> EndJudgment { get; init; } = null!;
     internal Func<ImageRegion?, CancellationToken, Task>? RecoverUi { get; init; }
     internal Func<int, int, Task<bool>> RotateUntil { get; init; } = null!;
     internal Func<float, ImageRegion, float> RotateStep { get; init; } = null!;
     internal Func<ImageRegion, MotionStatus> Motion { get; init; } = _ => Missing<MotionStatus>(nameof(Motion));
     internal Func<ImageRegion, bool> CombatHud { get; init; } = _ => Missing<bool>(nameof(CombatHud));
+    internal Func<ImageRegion, WorldFrameKind>? Availability { get; init; }
     internal Func<ImageRegion, bool> Transformed { get; init; } = _ => Missing<bool>(nameof(Transformed));
     internal Action<GIActions, KeyType> Send { get; init; } = (_, _) => Missing<bool>(nameof(Send));
     internal Func<GIActions, bool> IsDown { get; init; } = _ => Missing<bool>(nameof(IsDown));
@@ -53,6 +56,7 @@ internal sealed class PathMoveToIo
         Dpi = () => TaskContext.Instance().DpiScale;
         Motion = Bv.GetMotionStatus;
         CombatHud = Bv.IsCombatHud;
+        Availability = WorldFrameAvailability.ReadNative;
         Transformed = SaurianUiReader.IsKnownTransformation;
         Send = (action, type) => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(action, type);
         IsDown = action => BetterGenshinImpact.Core.Input.InputHub.Foreground.IsKeyDown(action.ToActionKey().ToVK());
@@ -67,3 +71,4 @@ internal enum PathPositionSource { Unknown, Direct, Cache, Fallback, Invalid }
 internal readonly record struct PathPosition(Point2f Point, int AdditionalTimeInMs, bool IsDirect,
     PathPositionSource Source = PathPositionSource.Unknown);
 internal readonly record struct PathMoveObservation(CaptureFrameStamp Stamp, Point2f Position, bool Valid, MotionStatus Motion, bool SourceUsable);
+internal readonly record struct PathGuardianAvatar(string Name, Action<bool> UseSkill);

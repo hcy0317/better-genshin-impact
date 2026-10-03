@@ -6,11 +6,18 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
+using BetterGenshinImpact.GameTask.Common.Ui;
+using BetterGenshinImpact.Core.Simulator;
+using BetterGenshinImpact.Core.Simulator.Extensions;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
 public class CameraRotateTask(CancellationToken ct)
 {
+    internal PathMoveToIo? Io { get; set; }
+    internal Func<DateTimeOffset?>? Deadline { get; set; }
+    private PathMoveToIo NativeIo => Io ??= new PathMoveToIo(native: true);
     private double Dpi => TaskContext.Instance().DpiScale;
 
     /// <summary>
@@ -24,8 +31,16 @@ public class CameraRotateTask(CancellationToken ct)
 
     private float RotateToApproach(float targetOrientation, ImageRegion imageRegion, PathRecoveryScope? scope)
     {
-        var cao = scope?.Io.CameraOrientation(imageRegion) ?? CameraOrientation.Compute(imageRegion.SrcMat);
+        var io = scope?.Io ?? NativeIo;
+        ct.ThrowIfCancellationRequested();
+        if (!PathWorldAvailability.IsPlayable(io, imageRegion)) return float.NaN;
+        var cao = io.CameraOrientation(imageRegion);
+        if (!float.IsFinite(cao) || !float.IsFinite(targetOrientation) ||
+            !imageRegion.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge)) return float.NaN;
         scope?.Check();
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        if (Deadline?.Invoke() is { } observedDeadline && io.Clock.GetUtcNow() >= observedDeadline) return float.NaN;
         var diff = (cao - targetOrientation + 180) % 360 - 180;
         diff += diff < -180 ? 360 : 0;
         if (diff == 0)
@@ -49,10 +64,13 @@ public class CameraRotateTask(CancellationToken ct)
             controlRatio = 2;
         }
 
-        var movement = (int)Math.Round(-controlRatio * diff * (scope?.Io.Dpi() ?? Dpi));
+        var movement = (int)Math.Round(-controlRatio * diff * io.Dpi());
         scope?.Check();
-        if (scope != null) scope.Io.MouseMove(movement, 0);
-        else InputHub.Foreground.Mouse.MoveMouseBy(movement, 0);
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        if (Deadline?.Invoke() is { } deadline && io.Clock.GetUtcNow() >= deadline) return float.NaN;
+        if (!imageRegion.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge)) return float.NaN;
+        io.MouseMove(movement, 0);
         return diff;
     }
 
@@ -68,30 +86,38 @@ public class CameraRotateTask(CancellationToken ct)
 
     internal async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes, PathRecoveryScope? scope)
     {
-        bool isSuccessful = false;
+        var io = scope?.Io ?? NativeIo;
+        var deadline = Deadline?.Invoke() ?? io.Clock.GetUtcNow().AddSeconds(15);
         int count = 0;
-        while (!ct.IsCancellationRequested)
+        var unchanged = 0;
+        float? previousDiff = null;
+        CaptureFrameStamp previous = default;
+        while (true)
         {
+            ct.ThrowIfCancellationRequested();
             scope?.Check();
-            using var screen = scope?.Io.Capture() ?? CaptureToRectArea();
+            using var screen = await PathWorldAvailability.CapturePlayableAsync(io, deadline, ct, () => scope?.Check());
             scope?.Check();
             if (scope != null) await scope.BeforeInputAsync();
-            if (Math.Abs(RotateToApproach(targetOrientation, screen, scope)) < maxDiff)
+            if (previous.IsKnown && !screen.FrameStamp.IsAfter(previous))
             {
-                isSuccessful = true;
-                break;
+                await io.Delay(50, ct);
+                continue;
             }
-
-            if (count >= maxTryTimes)
+            previous = screen.FrameStamp;
+            var diff = RotateToApproach(targetOrientation, screen, scope);
+            if (!float.IsFinite(diff)) return false;
+            if (Math.Abs(diff) < maxDiff) return true;
+            unchanged = previousDiff.HasValue && Math.Abs(diff - previousDiff.Value) < 0.1f ? unchanged + 1 : 0;
+            previousDiff = diff;
+            if (++count >= maxTryTimes || unchanged >= 10)
             {
-                (scope?.Io.Logger ?? Logger).LogWarning("视角转动到目标角度超时，停止转动");
-                break;
+                io.Logger.LogWarning("视角转动未收敛，停止转动与前进");
+                return false;
             }
 
             if (scope != null) await scope.DelayAsync(50);
-            else await Delay(50, ct);
-            count++;
+            else await io.Delay(50, ct);
         }
-        return isSuccessful;
     }
 }

@@ -7,6 +7,13 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
 using OpenCvSharp;
+using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.Input;
+using BetterGenshinImpact.Core.Simulator.Extensions;
+using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.Common.Job;
+using BetterGenshinImpact.Helpers;
+using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.GameTask.AutoTrackPath;
 
@@ -15,6 +22,127 @@ internal sealed class TeleportSelectionMismatchException() : InvalidOperationExc
 
 internal static class TeleportPanelConfirmation
 {
+    internal static async Task<bool> TryConfirmWithFeedbackAsync(ImageRegion image,
+        Func<ImageRegion> capture, Func<CancellationToken, Task> key,
+        Func<ImageRegion, Rect, CancellationToken, Task> click,
+        Func<int, CancellationToken, Task> delay, CancellationToken ct,
+        IOcrService? ocr = null, TimeProvider? clock = null, Action<ImageRegion>? observe = null)
+    {
+        clock ??= TimeProvider.System;
+        if (!image.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) || !Bv.IsInBigMapUi(image)) return false;
+        if (!await TryConfirmAsync(image, token =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!image.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge))
+                throw new InvalidOperationException("Teleport panel source expired before confirmation input.");
+            return key(token);
+        }, ct, ocr)) return false;
+        var fence = new CaptureFrameFence(image.FrameStamp, clock.GetTimestamp());
+        var previous = image.FrameStamp;
+        async Task<bool> WaitForMapClosed(int checks)
+        {
+            var progress = new SereniteaPotTeleportProgress();
+            for (var index = 0; index < checks; index++)
+            {
+                ct.ThrowIfCancellationRequested();
+                UiOperation.Current?.Check();
+                await delay(150, ct);
+                using var frame = capture();
+                if (!fence.Accepts(frame.FrameStamp) || !frame.FrameStamp.IsAfter(previous) ||
+                    !frame.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge)) continue;
+                previous = frame.FrameStamp;
+                observe?.Invoke(frame);
+                if (progress.Observe(Bv.IsInBigMapUi(frame))) return true;
+            }
+            return false;
+        }
+        if (await WaitForMapClosed(6)) return true;
+        using var current = capture();
+        if (!current.FrameStamp.IsAfter(previous) || !current.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) ||
+            !Bv.IsInBigMapUi(current)) return false;
+        using var button = current.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", current));
+        if (IsMarkerEditor(current, ocr) || !button.IsExist()) return false;
+        var bounds = ReadButtonBody(current, ocr ?? OcrFactory.Paddle);
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        if (bounds == default || !current.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge)) return false;
+        await click(current, bounds, ct);
+        fence = new(current.FrameStamp, clock.GetTimestamp());
+        previous = current.FrameStamp;
+        return await WaitForMapClosed(10);
+    }
+
+    internal static async Task<bool> TryConfirmNativeAsync(ImageRegion previous, CancellationToken ct,
+        TeleportArrivalProgress? arrival = null)
+    {
+        ApplicationHostBootstrapGuard.EnsureAllowed();
+        TaskControl.CheckAndSleep(0);
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        using var current = TaskControl.CaptureToRectArea();
+        if (!current.FrameStamp.IsAfter(previous.FrameStamp)) return false;
+        return await TryConfirmWithFeedbackAsync(current, () => TaskControl.CaptureToRectArea(),
+            token => { InputHub.Foreground.SimulateKeyPulse(KeyId.F, token); return Task.CompletedTask; },
+            (frame, bounds, token) =>
+            {
+                using var body = frame.DeriveCrop(bounds);
+                void Admit()
+                {
+                    token.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!frame.FrameStamp.IsFresh(TimeProvider.System, UiSnapshot.RecoveryMaximumAge))
+                        throw new InvalidOperationException("Teleport button source expired before native input.");
+                }
+                DomainTipClick.Run(Admit, body.Move, () => InputHub.Foreground.Mouse.LeftButtonDown(),
+                    () => InputHub.Foreground.Mouse.LeftButtonUp(), Thread.Sleep);
+                return Task.CompletedTask;
+            }, TaskControl.Delay, ct, observe: arrival == null ? null : frame =>
+                arrival.Observe(frame.FrameStamp, WorldFrameAvailability.ReadNative(frame)));
+    }
+
+    internal static async Task WaitForArrivalAsync(TeleportArrivalProgress arrival,
+        Func<ImageRegion> capture, Func<ImageRegion, WorldFrameKind> inspect,
+        Func<int, CancellationToken, Task> delay, CancellationToken ct, TimeSpan timeout,
+        TimeProvider? clock = null, Func<TimeSpan, Task>? whileWaiting = null)
+    {
+        clock ??= TimeProvider.System;
+        var started = clock.GetTimestamp();
+        while (clock.GetElapsedTime(started) < timeout)
+        {
+            ct.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
+            using var frame = capture();
+            var kind = inspect(frame);
+            ct.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
+            if (arrival.Observe(frame.FrameStamp, kind)) return;
+            await delay(150, ct);
+            if (arrival.LoadingObserved && kind != WorldFrameKind.Playable && whileWaiting != null)
+                await whileWaiting(clock.GetElapsedTime(started));
+        }
+        throw new TimeoutException("传送等待超时：未确认加载后连续三帧返回可操作大世界");
+    }
+
+    private static Rect ReadButtonBody(ImageRegion image, IOcrService ocr)
+    {
+        var roi = new Rect(image.Width * 80 / 100, image.Height * 88 / 100,
+            image.Width * 18 / 100, image.Height * 8 / 100);
+        var labels = image.FindMulti(RecognitionObject.Ocr(roi.X, roi.Y, roi.Width, roi.Height), ocrService: ocr);
+        try
+        {
+            Region? candidate = null;
+            foreach (var label in labels)
+            {
+                var text = label.Text.Replace(" ", "", StringComparison.Ordinal);
+                if (text is not ("传送" or "傳送" or "Teleport")) continue;
+                if (candidate != null) return default;
+                candidate = label;
+            }
+            return candidate == null ? default : new(candidate.X, candidate.Y, candidate.Width, candidate.Height);
+        }
+        finally { foreach (var label in labels) label.Dispose(); }
+    }
+
     internal static async Task<bool> TryConfirmAsync(ImageRegion image,
         Func<CancellationToken, Task> confirmInput, CancellationToken ct, IOcrService? ocr = null)
     {
