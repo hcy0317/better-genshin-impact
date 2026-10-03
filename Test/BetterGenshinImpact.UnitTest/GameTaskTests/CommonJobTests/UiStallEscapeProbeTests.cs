@@ -19,6 +19,18 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiStallEscapeProbeTests
 {
     [Fact]
+    public async Task UnchangedStallAfterTwoProbesIsNoProgressEvenWhenSelectorExhausted()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1));
+        var failure = await Assert.ThrowsAsync<TimeoutException>(() =>
+            UiRecovery.ToMainAsync(driver, default, requireOverworld: true, clock: clock));
+        Assert.True(BetterGenshinImpact.GameTask.TaskFailureRecoveryPolicy.IsNoProgressFailure(failure));
+        Assert.Equal(2, driver.Actions.Count(action => action == UiAction.EscapeProbe));
+        Assert.True(clock.GetUtcNow() - new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero) < TimeSpan.FromSeconds(20));
+    }
+
+    [Fact]
     public async Task DiagnosticEvidencePinsUnsampledUiInputFrameBeforeItIsDisposed()
     {
         var saved = new List<DiagnosticEvidence>();

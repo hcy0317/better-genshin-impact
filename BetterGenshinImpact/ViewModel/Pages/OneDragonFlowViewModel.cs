@@ -705,10 +705,14 @@ public partial class OneDragonFlowViewModel : ViewModel
         Notify.Event(NotificationEvent.DragonStart).Success("一条龙启动");
         var managedFailures = new ManagedTaskFailureCollector();
         var outcomes = new ScriptOutcomeAccumulator();
+        string activeTaskName = "一条龙";
+        try
+        {
         foreach (var task in taskListCopy)
         {
             if (task is { IsEnabled: true, Action: not null })
             {
+                activeTaskName = task.Name;
                 if (ScriptGroupsdefault.Any(defaultSg => defaultSg.Name == task.Name))
                 {
                     try
@@ -805,6 +809,20 @@ public partial class OneDragonFlowViewModel : ViewModel
                 }
             }
         }
+        }
+        catch (Exception failure) when (TaskFailureRecoveryPolicy.IsRecoveryFailure(failure) &&
+            !TaskFailureRecoveryPolicy.IsCancellation(failure))
+        {
+            await OneDragonFinalizer.RunAfterRecoveryFailureAsync(failure, () =>
+            {
+                outcomes.Add(activeTaskName, new(ScriptOutcomeKind.Failed, failure.Message));
+                var outcome = outcomes.Complete();
+                _logger.LogError(failure, "一条龙恢复失败，已汇总本轮结果 {Outcome}，停止后续游戏操作", outcome.Kind);
+                if (CancellationContext.Instance.IsManualStop is false)
+                    Notify.Event(NotificationEvent.DragonEnd).Error($"一条龙未全部完成：{outcome.Kind}，大世界恢复失败");
+            }, completionAction);
+            throw; // Finalizer preserves the original failure; no game-state-dependent reward check follows.
+        }
 
         // 检查和最终结束的任务
         try
@@ -864,7 +882,9 @@ public partial class OneDragonFlowViewModel : ViewModel
                         captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, $"{context} 一条龙任务 {taskName}"));
                     break;
                 }
-                catch (Exception recoveryFailure) when (round < RecoveryRounds && !TaskFailureRecoveryPolicy.IsCancellation(recoveryFailure))
+                catch (Exception recoveryFailure) when (round < RecoveryRounds &&
+                    !TaskFailureRecoveryPolicy.IsCancellation(recoveryFailure) &&
+                    !TaskFailureRecoveryPolicy.IsNoProgressFailure(recoveryFailure))
                 {
                     _logger.LogWarning(recoveryFailure,
                         "一条龙任务 {TaskName} 第 {Round}/{Rounds} 轮恢复未验证回到大世界主界面，使用新预算复检一次",
@@ -876,15 +896,10 @@ public partial class OneDragonFlowViewModel : ViewModel
         {
             // 用户取消优先于降级：取消必须原样停止一条龙，不能被记成"跳过该任务继续"。
             ct.ThrowIfCancellationRequested();
-            if (!_recoveryFailures.TryTolerateFailure())
-            {
-                throw;
-            }
-
             _logger.LogWarning(recoveryFailure,
-                "一条龙任务 {TaskName} 恢复失败且已连续 {Count} 次，跳过该任务并继续后续任务；本次失败仍计入本轮结果。",
-                taskName, _recoveryFailures.ConsecutiveFailures);
-            return;
+                "一条龙任务 {TaskName} 未恢复到后续游戏任务所需的大世界入口，停止后续游戏操作；仍执行既有收尾和结果汇总。",
+                taskName);
+            throw;
         }
 
         _recoveryFailures.Reset();
@@ -1311,6 +1326,13 @@ public partial class OneDragonFlowViewModel : ViewModel
 
 internal static class OneDragonFinalizer
 {
+    internal static Task RunAfterRecoveryFailureAsync(Exception failure, Action summarize, Action completionAction)
+    {
+        if (TaskFailureRecoveryPolicy.IsCancellation(failure)) return Task.FromException(failure);
+        try { summarize(); }
+        catch (Exception summaryFailure) { failure = new AggregateException("恢复失败且结果汇总失败。", failure, summaryFailure); }
+        return RunWithFailureCompletionAsync(() => Task.FromException(failure), completionAction);
+    }
     internal static async Task RunWithFailureCompletionAsync(
         Func<Task> action,
         Action completionAction)

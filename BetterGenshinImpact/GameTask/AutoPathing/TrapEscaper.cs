@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Vanara.PInvoke;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 using BetterGenshinImpact.Core.Simulator.Extensions;
+using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
@@ -19,6 +20,32 @@ public class TrapEscaper(CancellationToken ct)
     private int _lastActionIndex = 0;
     public static DateTime LastActionTime = DateTime.UtcNow;
     private static int _randomAngle = 0;
+    private PathMoveToIo? _nativeIo;
+    private PathMoveToIo NativeIo => _nativeIo ??= new PathMoveToIo(native: true)
+    {
+        Locate = (image, waypoint) => Task.FromResult(new PathPosition(
+            Navigation.GetPosition(image, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector), 0, true))
+    };
+    private DateTimeOffset? _nativeDeadline;
+    private Func<DateTimeOffset?>? _parentDeadline;
+    internal TrapEscaper(CancellationToken token, PathMoveToIo io, Func<DateTimeOffset?>? parentDeadline = null) : this(token)
+    {
+        _nativeIo = io;
+        _parentDeadline = parentDeadline;
+    }
+
+    private DateTimeOffset BeginNativeDeadline()
+    {
+        var deadline = NativeIo.Clock.GetUtcNow().AddSeconds(25);
+        if (_parentDeadline?.Invoke() is { } parent && parent < deadline) deadline = parent;
+        if (Common.Ui.UiOperation.Current is { } operation)
+        {
+            operation.Check();
+            var remainingDeadline = NativeIo.Clock.GetUtcNow().Add(operation.Remaining);
+            if (remainingDeadline < deadline) deadline = remainingDeadline;
+        }
+        return deadline;
+    }
 
     private void IncreaseRandomAngle()
     {
@@ -34,7 +61,15 @@ public class TrapEscaper(CancellationToken ct)
 
     internal async Task MoveTo(WaypointForTrack waypoint, PathRecoveryScope? scope)
     {
-        if (scope == null) { await MoveToCore(waypoint, null); return; }
+        if (scope == null)
+        {
+            _nativeDeadline = BeginNativeDeadline();
+            _rotateTask.Io = NativeIo;
+            _rotateTask.Deadline = () => _nativeDeadline;
+            try { await MoveToCore(waypoint, null); }
+            finally { NativeIo.Send(GIActions.MoveForward, KeyType.KeyUp); _nativeDeadline = null; }
+            return;
+        }
         scope.BeginMovement();
         try { await MoveToCore(waypoint, scope); }
         catch (RecoveryMovementExpired)
@@ -49,19 +84,21 @@ public class TrapEscaper(CancellationToken ct)
         var startTime = Now(scope);
         bool left = false;
         OpenCvSharp.Point2f position;
-        using (var initialScreen = (scope?.Io.Capture() ?? CaptureToRectArea()))
+        using (var initialScreen = await CapturePlayable(scope))
         {
-            position = (scope == null ? Navigation.GetPosition(initialScreen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector) : (await (scope.Io.LocateDirect ?? scope.Io.Locate)(initialScreen, waypoint)).Point);
+            var io = scope?.Io ?? NativeIo;
+            position = (await (io.LocateDirect ?? io.Locate)(initialScreen, waypoint)).Point;
         }
         LastActionTime = Now(scope);
         scope?.BeginMovementIdleWindow();
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
-        await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5, 50, scope);
+        if (!await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5, 50, scope))
+            throw new RetryException("脱困转向未完成，停止前进");
 
         // 按下w，一直走
-        await Send(scope, GIActions.MoveForward, KeyType.KeyDown);
         try
         {
+        await Send(scope, GIActions.MoveForward, KeyType.KeyDown);
         while (!ct.IsCancellationRequested)
         {
             scope?.Check();
@@ -76,8 +113,9 @@ public class TrapEscaper(CancellationToken ct)
                 break;
             }
 
-            using var screen = (scope?.Io.Capture() ?? CaptureToRectArea());
-            position = (scope == null ? Navigation.GetPosition(screen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector) : (await (scope.Io.LocateDirect ?? scope.Io.Locate)(screen, waypoint)).Point);
+            using var screen = await CapturePlayable(scope);
+            var io = scope?.Io ?? NativeIo;
+            position = (await (io.LocateDirect ?? io.Locate)(screen, waypoint)).Point;
 
             // 旋转视角
             /* 这里的角度增加了一个randomAngle角度，用来在原角度不适用的情况下修改角度以适应复杂环境
@@ -91,7 +129,8 @@ public class TrapEscaper(CancellationToken ct)
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position) + _randomAngle;
 
             //执行旋转
-            await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5, 50, scope);
+            if (!await _rotateTask.WaitUntilRotatedTo(targetOrientation, 5, 50, scope))
+                throw new RetryException("脱困转向未完成，停止前进");
             await Send(scope, GIActions.MoveForward, KeyType.KeyDown);
             //
             //这里是随机角度的归零逻辑，在脱困执行一秒后将randomAngle设为0以将实际角度重置为正面向点位的角度
@@ -111,7 +150,7 @@ public class TrapEscaper(CancellationToken ct)
             // 先排除攀爬和飞行的情况
             if (waypoint.MoveMode != MoveModeEnum.Climb.Code &&
                 waypoint.MoveMode != MoveModeEnum.Fly.Code)
-                if (Bv.GetMotionStatus(screen) == MotionStatus.Climb)
+                if (io.Motion(screen) == MotionStatus.Climb)
                 {
                     await Send(scope, GIActions.MoveForward, KeyType.KeyUp);
                     await Send(scope, GIActions.Drop);
@@ -151,6 +190,14 @@ public class TrapEscaper(CancellationToken ct)
 
     internal async Task RotateAndMove(PathRecoveryScope? scope)
     {
+        if (scope != null) { await RotateAndMoveCore(scope); return; }
+        _nativeDeadline = BeginNativeDeadline();
+        try { await RotateAndMoveCore(null); }
+        finally { _nativeDeadline = null; }
+    }
+
+    private async Task RotateAndMoveCore(PathRecoveryScope? scope)
+    {
         IncreaseRandomAngle();
         // 脱离攀爬状态
         await Send(scope, GIActions.MoveForward, KeyType.KeyUp);
@@ -159,9 +206,9 @@ public class TrapEscaper(CancellationToken ct)
         if (scope != null) await scope.ObserveAsync();
         var attacked = scope == null && LandingAttackGuard.TryAttack(() =>
         {
-            using var screen = (scope?.Io.Capture() ?? CaptureToRectArea());
-            return scope?.Io.Motion(screen) ?? Bv.GetMotionStatus(screen);
-        }, () => InputHub.Foreground.SimulateAction(GIActions.NormalAttack), ct);
+            using var screen = NativeIo.Capture();
+            return PathWorldAvailability.IsPlayable(NativeIo, screen) ? NativeIo.Motion(screen) : MotionStatus.Normal;
+        }, () => NativeIo.Send(GIActions.NormalAttack, KeyType.KeyPress), ct);
         (scope?.Io.Logger ?? Logger).LogDebug(attacked
             ? "脱困：确认飞行，执行一次下落攻击"
             : "脱困：未确认飞行，不发送普攻");
@@ -238,19 +285,42 @@ public class TrapEscaper(CancellationToken ct)
         finally { await Send(scope, GIActions.MoveRight, KeyType.KeyUp); }
         await Send(scope, GIActions.Drop);
     }
-    private static DateTime Now(PathRecoveryScope? scope) => scope?.Io.Clock.GetUtcNow().UtcDateTime ?? DateTime.UtcNow;
+    private DateTime Now(PathRecoveryScope? scope) => (scope?.Io ?? NativeIo).Clock.GetUtcNow().UtcDateTime;
 
-    private static Task Send(PathRecoveryScope? scope, GIActions action, KeyType type = KeyType.KeyPress)
+    private Task<BetterGenshinImpact.GameTask.Model.Area.ImageRegion> CapturePlayable(PathRecoveryScope? scope)
     {
-        if (scope != null) return scope.SendAsync(action, type);
-        InputHub.Foreground.SimulateAction(action, type);
-        return Task.CompletedTask;
+        var io = scope?.Io ?? NativeIo;
+        var deadline = scope != null ? io.Clock.GetUtcNow().Add(Common.Ui.UiOperation.Current!.Remaining)
+            : _nativeDeadline ?? io.Clock.GetUtcNow().AddSeconds(25);
+        return PathWorldAvailability.CapturePlayableAsync(io, deadline, ct, () => scope?.Check());
+    }
+
+    private async Task Send(PathRecoveryScope? scope, GIActions action, KeyType type = KeyType.KeyPress)
+    {
+        if (scope != null) { await scope.SendAsync(action, type); return; }
+        if (type != KeyType.KeyUp)
+        {
+            using var frame = await PathWorldAvailability.CapturePlayableAsync(NativeIo,
+                _nativeDeadline ??= NativeIo.Clock.GetUtcNow().AddSeconds(25), ct);
+            ct.ThrowIfCancellationRequested();
+        }
+        NativeIo.Send(action, type);
     }
 
     private Task Wait(PathRecoveryScope? scope, int milliseconds, bool synchronous = false)
     {
         if (scope != null) return scope.DelayAsync(milliseconds);
-        if (synchronous) { Sleep(milliseconds); return Task.CompletedTask; }
-        return Delay(milliseconds, ct);
+        return WaitNative(milliseconds);
+    }
+
+    private async Task WaitNative(int milliseconds)
+    {
+        var started = NativeIo.Clock.GetTimestamp();
+        while (NativeIo.Clock.GetElapsedTime(started).TotalMilliseconds < milliseconds)
+        {
+            await NativeIo.Delay(Math.Min(50, milliseconds), ct);
+            using var frame = await PathWorldAvailability.CapturePlayableAsync(NativeIo,
+                _nativeDeadline ??= NativeIo.Clock.GetUtcNow().AddSeconds(25), ct);
+        }
     }
 }

@@ -21,6 +21,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     private readonly NativeUiDriverIo _io;
     private readonly IDisposable _exclusive;
     private CaptureFrameFence? _inputFence;
+    private readonly KnownHandbookFrame _handbook = new();
     private bool _disposed;
 
     internal NativeUiDriver(bool inspectWorld = false) : this(NativeUiDriverIo.CreateNative(inspectWorld)) { }
@@ -33,9 +34,18 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         _exclusive = io.BeginExclusive();
     }
 
-    private UiSnapshot ReadCurrent(ImageRegion image) => Read(image, ocr: _io.Ocr(),
-        domainTipTexts: _io.Texts(), clock: _io.Clock, readScene: _io.ReadScene,
-        inspectReward: UiOperation.Current?.Name == "return-main");
+    private UiSnapshot ReadCurrent(ImageRegion image)
+    {
+        if (_handbook.Matches(image))
+            return new UiSnapshot(image.FrameStamp.Sequence) { Handbook = true }
+                .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
+        _handbook.Dispose();
+        var observed = Read(image, ocr: _io.Ocr(), domainTipTexts: _io.Texts(),
+            clock: _io.Clock, readScene: _io.ReadScene,
+            inspectReward: UiOperation.Current?.Name == "return-main");
+        _handbook.Remember(image, observed);
+        return observed;
+    }
 
     public UiSnapshot Capture()
     {
@@ -77,7 +87,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             return match.IsExist();
         }
         using var menuBack = image.Find(RecognitionAssets.Get("UseRedeemCode", "MenuBack", image));
-        var revive = reviveDetector?.Read(image) ?? Bv.ReadReviveState(image);
+        var revive = reviveDetector?.Observe(image) ?? Bv.ReadReviveObservation(image);
         var snapshot = new UiSnapshot(image.FrameStamp.Sequence)
         {
             MainHud = Has("PaimonMenu") || Has("FriendChat"),
@@ -86,8 +96,10 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             PartyList = Has("PartyBtnDelete"),
             Talk = Bv.IsInTalkUi(image),
             Prompt = Bv.IsInPromptDialog(image),
-            Revive = revive != ReviveUiState.None,
-            FullPartyDefeat = revive == ReviveUiState.FullPartyDefeat,
+            Revive = revive.State != ReviveUiState.None,
+            FullPartyDefeat = revive.State == ReviveUiState.FullPartyDefeat,
+            ReviveButtonBounds = revive.ButtonBounds,
+            DefeatOverlay = revive.DefeatOverlay,
             InDomain = Bv.IsInDomainIncludingRevivePrompt(image),
             Closable = Bv.IsInAnyClosableUi(image),
             ExitDoor = Has("BtnExitDoor"),
@@ -200,8 +212,17 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                 return Task.FromResult(Completed(true));
             case UiAction.OpenParty when observed.PartyEntryReadiness().CanProbe && current.PartyEntryReadiness().CanProbe:
                 return Task.FromResult(Completed(_io.OtherAction(action, image, () => { })));
-            case UiAction.ReviveParty when observed.FullPartyDefeat && current.FullPartyDefeat:
-                return Task.FromResult(Completed(_io.OtherAction(action, image, () => { })));
+            case UiAction.ReviveParty when observed.FullPartyDefeat && current.FullPartyDefeat && current.DefeatOverlay &&
+                current.IsAfter(observed) && UsableReviveButton(current, image):
+                void AdmitReviveInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                        throw new InvalidOperationException("Revive source expired before native input.");
+                }
+                _io.Click(image, current.ReviveButtonBounds, AdmitReviveInput);
+                return Task.FromResult(Completed(true));
             case UiAction.Escape when escapeProposed && current.IsAfter(observed) && current.CanEscape:
                 void AdmitEscapeInput()
                 {
@@ -255,6 +276,15 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _handbook.Dispose();
         _exclusive.Dispose();
+    }
+
+    private static bool UsableReviveButton(UiSnapshot current, ImageRegion image)
+    {
+        var bounds = current.ReviveButtonBounds;
+        return bounds.Width > 0 && bounds.Height > 0 && bounds.X >= image.Width / 4 &&
+            bounds.Right <= image.Width * 3 / 4 && bounds.Y >= image.Height * 2 / 3 &&
+            bounds.Bottom <= image.Height;
     }
 }

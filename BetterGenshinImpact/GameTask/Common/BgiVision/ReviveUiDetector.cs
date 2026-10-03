@@ -8,6 +8,8 @@ using OpenCvSharp;
 
 namespace BetterGenshinImpact.GameTask.Common.BgiVision;
 
+internal readonly record struct ReviveUiObservation(ReviveUiState State, Rect ButtonBounds, bool DefeatOverlay = false);
+
 /// <summary>借用当前帧与识别依赖，只返回复苏观察，不读取应用状态或发送输入。</summary>
 internal sealed class ReviveUiDetector(
     RecognitionObject confirmation,
@@ -18,7 +20,9 @@ internal sealed class ReviveUiDetector(
     internal ReviveUiDetector(RecognitionObject confirmation, IOcrService ocr,
         string revival, string foodTitle) : this(confirmation, () => ocr, revival, foodTitle) { }
 
-    internal ReviveUiState Read(ImageRegion region) => region.ReadOnce(
+    internal ReviveUiState Read(ImageRegion region) => Observe(region).State;
+
+    internal ReviveUiObservation Observe(ImageRegion region) => region.ReadOnce(
         (typeof(ReviveUiDetector), confirmation, revival, foodTitle), () => ReadCore(region));
 
     private (bool Confirmation, bool LivingHud) Inspect(ImageRegion region) => region.ReadOnce(
@@ -31,7 +35,7 @@ internal sealed class ReviveUiDetector(
 
     internal bool IsCombatHud(ImageRegion region) => Inspect(region).LivingHud;
 
-    private ReviveUiState ReadCore(ImageRegion region)
+    private ReviveUiObservation ReadCore(ImageRegion region)
     {
         var hud = Inspect(region);
         if (hud.Confirmation)
@@ -44,22 +48,36 @@ internal sealed class ReviveUiDetector(
             }, ocrService: ocr());
             try
             {
-                return Bv.ClassifyReviveEvidence(true,
-                    title.Any(item => Bv.IsReviveFoodTitle(item.Text, revival, foodTitle)), false);
+                return new(Bv.ClassifyReviveEvidence(true,
+                    title.Any(item => Bv.IsReviveFoodTitle(item.Text, revival, foodTitle)), false), default);
             }
             finally { foreach (var item in title) item.Dispose(); }
         }
 
-        if (hud.LivingHud) return ReviveUiState.None;
+        if (hud.LivingHud) return new(ReviveUiState.None, default);
 
         var buttons = region.FindMulti(RecognitionObject.Ocr(region.Width / 4d,
             region.Height * 2d / 3, region.Width / 2d, region.Height / 3d), ocrService: ocr());
         try
         {
-            return Bv.ClassifyReviveEvidence(false, false,
-                buttons.Any(item => Bv.IsReviveText(item.Text, revival)));
+            var matches = buttons.Where(item => Bv.IsReviveText(item.Text, revival)).ToArray();
+            var bounds = matches.Length == 1
+                ? new Rect(matches[0].X, matches[0].Y, matches[0].Width, matches[0].Height) : default;
+            var defeat = bounds != default && HasDefeatOverlay(region);
+            return defeat ? new(ReviveUiState.FullPartyDefeat, bounds, true) : new(ReviveUiState.None, default);
         }
         finally { foreach (var item in buttons) item.Dispose(); }
+    }
+
+    private bool HasDefeatOverlay(ImageRegion image)
+    {
+        // Independent positive evidence from the center defeat title; a missing HP bar is not proof of defeat.
+        using var title = image.DeriveCrop(new Rect(image.Width * 36 / 100, image.Height * 34 / 100,
+            image.Width * 28 / 100, image.Height * 16 / 100));
+        var text = ocr().OcrWithoutDetector(title.SrcMat).Replace(" ", "", StringComparison.Ordinal);
+        return text.Contains("注意敌人", StringComparison.Ordinal) ||
+            text.Contains("注意敵人", StringComparison.Ordinal) ||
+            text.Contains("BewareofEnemies", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool HasUnobscuredLivingHud(ImageRegion image)

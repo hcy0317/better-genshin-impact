@@ -5,6 +5,7 @@ using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.AutoTrackPath;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
 using BetterGenshinImpact.GameTask.QuickSereniteaPot;
 using BetterGenshinImpact.GameTask.QuickTeleport.Assets;
@@ -140,6 +141,7 @@ internal class GoToSereniteaPotTask
         }
 
         var teleportRequested = false;
+        var arrival = new TeleportArrivalProgress(TimeProvider.System);
         var confirmationFailures = 0;
         var teleportDiscovery = Stopwatch.StartNew();
         while (confirmationFailures < 3
@@ -150,17 +152,12 @@ internal class GoToSereniteaPotTask
             if (teleportBtn.IsExist())
             {
                 // TeleportButton 匹配的是左侧 F 键提示图标，点击图标不会触发右侧“传送”按钮。
-                // 与 TpTask 的传送确认保持一致，直接发送 F，并要求地图连续两帧关闭后才确认生效。
+                // 与普通传送共享F、正文点击和加载后的新帧验证。
                 Logger.LogDebug(
-                    "领取尘歌壶奖励: 发送 F 确认传送，尝试 {Attempt}/3。",
+                    "领取尘歌壶奖励: 确认传送（F无效时点击按钮正文），尝试 {Attempt}/3。",
                     confirmationFailures + 1);
-                BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateKeyPulse(KeyId.F, ct);
-                var progress = new SereniteaPotTeleportProgress();
-                teleportRequested = await NewRetry.WaitForAction(() =>
-                {
-                    using var buttonCapture = CaptureToRectArea();
-                    return progress.Observe(Bv.IsInBigMapUi(buttonCapture));
-                }, ct, retryTimes: 8, delayMs: 500);
+                arrival = new TeleportArrivalProgress(TimeProvider.System);
+                teleportRequested = await TeleportPanelConfirmation.TryConfirmNativeAsync(ra, ct, arrival);
                 if (teleportRequested)
                 {
                     break;
@@ -168,7 +165,7 @@ internal class GoToSereniteaPotTask
 
                 confirmationFailures++;
                 Logger.LogWarning(
-                    "领取尘歌壶奖励: F 确认传送未生效，地图仍然打开，重试 {Attempt}/3。",
+                    "领取尘歌壶奖励: 传送确认未生效，地图仍然打开，重试 {Attempt}/3。",
                     confirmationFailures);
                 continue;
             }
@@ -194,20 +191,18 @@ internal class GoToSereniteaPotTask
             return false;
         }
 
-        var enteredMainUi = await NewRetry.WaitForAction(() =>
+        try
         {
-            using var capture = CaptureToRectArea();
-            return Bv.IsInMainUi(capture);
-        }, ct, retryTimes: 45, delayMs: 1000);
-        if (enteredMainUi)
-        {
+            await TeleportPanelConfirmation.WaitForArrivalAsync(arrival, () => CaptureToRectArea(),
+                WorldFrameAvailability.ReadNative, Delay, ct, TimeSpan.FromSeconds(45));
             return true;
         }
-
-        var loadingFailure = new TimeoutException("尘歌壶地图传送已确认，但 45 秒内未进入主界面");
-        Logger.LogWarning(loadingFailure, "领取尘歌壶奖励: 等待进入尘歌壶超时");
-        TaskFailureDiagnostics.CaptureScreenshotOnce(loadingFailure, "领取尘歌壶奖励-等待进入尘歌壶超时");
-        return false;
+        catch (TimeoutException loadingFailure)
+        {
+            Logger.LogWarning(loadingFailure, "领取尘歌壶奖励: 等待进入尘歌壶超时");
+            TaskFailureDiagnostics.CaptureScreenshotOnce(loadingFailure, "领取尘歌壶奖励-等待进入尘歌壶超时");
+            return false;
+        }
     }
 
     /// <summary>

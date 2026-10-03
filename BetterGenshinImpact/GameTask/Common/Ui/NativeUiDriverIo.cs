@@ -86,8 +86,6 @@ internal sealed class NativeUiDriverIo
             case UiAction.OpenParty:
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.OpenPartySetupScreen);
                 return true;
-            case UiAction.ReviveParty:
-                return Bv.ClickIfInReviveModal(image);
             case UiAction.Escape:
             case UiAction.EscapeProbe:
                 UiEscapeInput.Run(admission,
