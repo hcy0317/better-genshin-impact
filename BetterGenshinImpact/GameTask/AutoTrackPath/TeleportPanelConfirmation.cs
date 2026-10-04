@@ -26,7 +26,8 @@ internal static class TeleportPanelConfirmation
         Func<ImageRegion> capture, Func<CancellationToken, Task> key,
         Func<ImageRegion, Rect, CancellationToken, Task> click,
         Func<int, CancellationToken, Task> delay, CancellationToken ct,
-        IOcrService? ocr = null, TimeProvider? clock = null, Action<ImageRegion>? observe = null)
+        IOcrService? ocr = null, TimeProvider? clock = null, Action<ImageRegion>? observe = null,
+        Action<CaptureFrameStamp>? mapClosed = null)
     {
         clock ??= TimeProvider.System;
         if (!image.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) || !Bv.IsInBigMapUi(image)) return false;
@@ -52,7 +53,11 @@ internal static class TeleportPanelConfirmation
                     !frame.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge)) continue;
                 previous = frame.FrameStamp;
                 observe?.Invoke(frame);
-                if (progress.Observe(Bv.IsInBigMapUi(frame))) return true;
+                if (progress.Observe(Bv.IsInBigMapUi(frame)))
+                {
+                    mapClosed?.Invoke(frame.FrameStamp);
+                    return true;
+                }
             }
             return false;
         }
@@ -97,7 +102,8 @@ internal static class TeleportPanelConfirmation
                     () => InputHub.Foreground.Mouse.LeftButtonUp(), Thread.Sleep);
                 return Task.CompletedTask;
             }, TaskControl.Delay, ct, observe: arrival == null ? null : frame =>
-                arrival.Observe(frame.FrameStamp, WorldFrameAvailability.ReadNative(frame)));
+                arrival.Observe(frame.FrameStamp, WorldFrameAvailability.ReadNative(frame)),
+            mapClosed: arrival == null ? null : arrival.ConfirmMapClosure);
     }
 
     internal static async Task WaitForArrivalAsync(TeleportArrivalProgress arrival,
@@ -115,12 +121,14 @@ internal static class TeleportPanelConfirmation
             var kind = inspect(frame);
             ct.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
-            if (arrival.Observe(frame.FrameStamp, kind)) return;
+            var arrived = arrival.Observe(frame.FrameStamp, kind);
+            UiOperation.Current?.Observe("等待传送后的可操作大世界", arrival.Describe(kind), frame.FrameStamp.Sequence);
+            if (arrived) return;
             await delay(150, ct);
-            if (arrival.LoadingObserved && kind != WorldFrameKind.Playable && whileWaiting != null)
+            if (arrival.MapClosureConfirmed && kind != WorldFrameKind.Playable && whileWaiting != null)
                 await whileWaiting(clock.GetElapsedTime(started));
         }
-        throw new TimeoutException("传送等待超时：未确认加载后连续三帧返回可操作大世界");
+        throw new TimeoutException("传送等待超时：未确认传送输入后地图关闭并稳定返回可操作大世界");
     }
 
     private static Rect ReadButtonBody(ImageRegion image, IOcrService ocr)

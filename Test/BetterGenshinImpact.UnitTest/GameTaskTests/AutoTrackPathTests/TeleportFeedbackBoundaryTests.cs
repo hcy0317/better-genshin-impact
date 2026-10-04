@@ -68,7 +68,7 @@ public class TeleportFeedbackBoundaryTests
     [UiRecoveryTheory("teapot-panel-20261003.png")]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task ConfirmationRetainsLoadingEvidenceButMapClosureAloneCannotArrive(bool loading)
+    public async Task ConfirmedTeleportArrivesEvenIfLoadingFramesAreUnclassified(bool loading)
     {
         using var panel = Cv2.ImRead(UiRecoveryFixtures.PathFor("teapot-panel-20261003.png"));
         var clock = new FakeTimeProvider();
@@ -86,12 +86,14 @@ public class TeleportFeedbackBoundaryTests
         Assert.True(await TeleportPanelConfirmation.TryConfirmWithFeedbackAsync(first, Capture,
             _ => { requested = true; return Task.CompletedTask; }, (_, _, _) => throw new InvalidOperationException("No fallback needed"),
             Delay, default, new FeedbackOcr(), clock,
-            frame => arrival.Observe(frame.FrameStamp, loading ? WorldFrameKind.Loading : WorldFrameKind.Unknown)));
+            frame => arrival.Observe(frame.FrameStamp, loading ? WorldFrameKind.Loading : WorldFrameKind.Unknown),
+            arrival.ConfirmMapClosure));
         Assert.Equal(loading, arrival.LoadingObserved);
         Task Wait() => TeleportPanelConfirmation.WaitForArrivalAsync(arrival, Capture, _ => WorldFrameKind.Playable,
             Delay, default, TimeSpan.FromSeconds(2), clock);
-        if (loading) { await Wait(); Assert.True(arrival.Arrived); }
-        else await Assert.ThrowsAsync<TimeoutException>(Wait);
+        Assert.True(arrival.MapClosureConfirmed);
+        await Wait();
+        Assert.True(arrival.Arrived);
     }
 
     private sealed class FeedbackOcr : IOcrService
