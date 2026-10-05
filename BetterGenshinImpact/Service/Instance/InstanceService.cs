@@ -27,6 +27,7 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(1);
 
     private readonly InstanceBootstrap _bootstrap;
+    private readonly IConfigService _configService;
     private readonly ILogger<InstanceService> _logger;
     private readonly InstanceMessageState _messageState = new();
     private readonly InstanceRequestHandler _requestHandler;
@@ -52,6 +53,7 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
         ILogger<InstanceService> logger)
     {
         _bootstrap = bootstrap;
+        _configService = configService;
         _logger = logger;
         _relativeMouseMessageHandler = new RelativeMouseMessageHandler(
             Context,
@@ -96,23 +98,18 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
             throw new InvalidOperationException("只有根实例可以等待桌面分身注册。");
         }
 
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (_messageState.BetterGiConnectionsBySession.TryGetValue(
-                    windowsSessionId,
-                    out var child)
-                && child.Endpoint.InstanceType == BetterGiInstanceType.ChildSession)
-            {
-                return child.Endpoint;
-            }
-
-            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
-        }
-
-        throw new TimeoutException($"等待桌面分身 Session {windowsSessionId} 注册超时。");
+        var child = await WaitForChildConnectionAsync(windowsSessionId, timeout, cancellationToken)
+            .ConfigureAwait(false);
+        return child.Endpoint;
     }
+
+    private Task<RegisteredInstanceConnection> WaitForChildConnectionAsync(int windowsSessionId,
+        TimeSpan timeout, CancellationToken cancellationToken) => InstanceRegistrationWaiter.WaitAsync(() =>
+        _messageState.BetterGiConnectionsBySession.TryGetValue(windowsSessionId, out var child) &&
+        child.Endpoint.InstanceType == BetterGiInstanceType.ChildSession &&
+        child.Connection.IsChildSessionReady &&
+        !child.Connection.Completion.IsCompleted ? child : null,
+        timeout, $"等待桌面分身 Session {windowsSessionId} 注册超时。", cancellationToken);
 
     public async Task StartOneDragonInChildAsync(
         int windowsSessionId,
@@ -125,14 +122,10 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
         {
             throw new InvalidOperationException("只有根实例可以向桌面分身下发任务。");
         }
-        if (!_messageState.BetterGiConnectionsBySession.TryGetValue(
-                windowsSessionId,
-                out var child)
-            || child.Endpoint.InstanceType != BetterGiInstanceType.ChildSession)
-        {
-            throw new InvalidOperationException(
-                $"桌面分身 Session {windowsSessionId} 当前未注册。");
-        }
+        // 首次启动的探测管道可能在根实例写 accepted 结果期间断开；等待正式连接，
+        // 不因这次短暂注销立即失败。发送请求后不自动重发，避免执行结果不明确时重复运行。
+        var child = await WaitForChildConnectionAsync(windowsSessionId, TimeSpan.FromSeconds(75), cancellationToken)
+            .ConfigureAwait(false);
 
         var response = await child.Connection.SendRequestAsync(
             InstanceOperations.TaskStartOneDragon,
@@ -313,10 +306,16 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
         InstanceIpcEnvelope request,
         CancellationToken cancellationToken)
     {
-        return await _requestHandler.HandleAsync(
+        var response = await _requestHandler.HandleAsync(
             connection,
             request,
             cancellationToken).ConfigureAwait(false);
+        if (request.Operation == InstanceOperations.RelativeMouseSubscribe && response?.Success == true &&
+            connection.RemoteEndpoint?.InstanceType == BetterGiInstanceType.ChildSession)
+        {
+            connection.MarkChildSessionReady();
+        }
+        return response;
     }
 
     internal bool ReceiveRelativeMouseBatch(
@@ -669,6 +668,8 @@ public sealed class InstanceService : IHostedService, IAsyncDisposable
         {
             await Application.Current.Dispatcher.InvokeAsync(() =>
             {
+                // A reused child also has a cached configuration; changing only config.json is insufficient.
+                ChildSessionAutomationSettings.Apply(_configService);
                 var viewModel = App.GetService<OneDragonFlowViewModel>()
                                 ?? throw new InvalidOperationException(
                                     "无法创建一条龙任务协调器。");

@@ -1,6 +1,7 @@
 using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Input.Backends.Win32;
 using BetterGenshinImpact.Core.Mask;
+using BetterGenshinImpact.Service.Instance;
 using BetterGenshinImpact.Service.Interface;
 using BetterGenshinImpact.View.Windows;
 using Fischless.GameCapture;
@@ -81,7 +82,14 @@ public sealed class Win32RuntimeProvider(
 
             var config = configService.Get();
             capture = GameCaptureFactory.Create(GetCaptureMode(config));
-            capture.Start(hWnd, GameCaptureSettings.From(config));
+            var captureSettings = GameCaptureSettings.From(config);
+            if (capture is Fischless.GameCapture.BitBlt.BitBltCapture &&
+                InstanceBootstrap.Current.Context.InstanceType == BetterGiInstanceType.ChildSession)
+            {
+                captureSettings["captureFromDesktop"] = true;
+                logger.LogInformation("桌面分身 BitBlt 使用前台游戏客户区的桌面像素，避免窗口 DC 返回纯白背景。");
+            }
+            capture.Start(hWnd, captureSettings);
             var runtime = new GameRuntime(Kind, window, capture, new Win32InputBackend(hWnd),
                 maskWindowDrawingBoard, maskWindowMapState);
 

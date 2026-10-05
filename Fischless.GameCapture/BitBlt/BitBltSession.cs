@@ -10,6 +10,7 @@ public class BitBltSession : IDisposable
 {
     // 窗口句柄
     private readonly HWND _hWnd;
+    private readonly bool _captureFromDesktop;
 
     private readonly object _lockObject = new();
 
@@ -47,11 +48,12 @@ public class BitBltSession : IDisposable
     /// <returns></returns>
     public bool Invalid => _hWnd.IsNull || _hdcSrc.IsInvalid || _hdcDest.IsInvalid || _hBitmap.IsInvalid || _bitsPtr == 0;
 
-    public BitBltSession(HWND hWnd, int w, int h)
+    public BitBltSession(HWND hWnd, int w, int h, bool captureFromDesktop = false)
     {
         if (hWnd.IsNull) throw new Exception("hWnd is invalid");
 
         _hWnd = hWnd;
+        _captureFromDesktop = captureFromDesktop;
 
         if (w <= 0 || h <= 0) throw new Exception("Invalid width or height");
 
@@ -63,7 +65,8 @@ public class BitBltSession : IDisposable
         {
             try
             {
-                _hdcSrc = User32.GetDC(_hWnd);
+                // Child Session 中 Direct3D 窗口 DC 可能只有白色背景；桌面 DC 才包含实际显示的像素。
+                _hdcSrc = User32.GetDC(_captureFromDesktop ? HWND.NULL : _hWnd);
                 if (_hdcSrc.IsInvalid) throw new Exception($"Failed to get DC for {_hWnd}");
 
                 var hdcRasterCaps = Gdi32.GetDeviceCaps(_hdcSrc, Gdi32.DeviceCap.RASTERCAPS);
@@ -152,14 +155,40 @@ public class BitBltSession : IDisposable
     /// <summary>
     ///     调用GDI复制到缓冲区并返回新Mat
     /// </summary>
-    public unsafe Mat? GetImage()
+    public Mat? GetImage() => GetImage(out _);
+
+    public unsafe Mat? GetImage(out RECT? desktopRect)
     {
+        desktopRect = null;
         lock (_lockObject)
         {
+            var origin = new POINT();
+            if (_captureFromDesktop)
+            {
+                if (User32.GetForegroundWindow() != _hWnd || User32.IsIconic(_hWnd) ||
+                    !User32.GetClientRect(_hWnd, out var clientRect) ||
+                    !User32.ClientToScreen(_hWnd, ref origin)) return null;
+                var screen = new RECT(
+                    User32.GetSystemMetrics(User32.SystemMetric.SM_XVIRTUALSCREEN),
+                    User32.GetSystemMetrics(User32.SystemMetric.SM_YVIRTUALSCREEN),
+                    User32.GetSystemMetrics(User32.SystemMetric.SM_XVIRTUALSCREEN) + User32.GetSystemMetrics(User32.SystemMetric.SM_CXVIRTUALSCREEN),
+                    User32.GetSystemMetrics(User32.SystemMetric.SM_YVIRTUALSCREEN) + User32.GetSystemMetrics(User32.SystemMetric.SM_CYVIRTUALSCREEN));
+                if (!DesktopBitBltRegion.TryCreate(origin, clientRect.Width, clientRect.Height,
+                        Width, Height, screen, out var region)) return null;
+                desktopRect = region;
+            }
             // 截图
             var success = Gdi32.BitBlt(_hdcDest, 0, 0, Width, Height,
-                _hdcSrc, 0, 0, Gdi32.RasterOperationMode.SRCCOPY);
+                _hdcSrc, origin.X, origin.Y, Gdi32.RasterOperationMode.SRCCOPY);
             if (!success || !Gdi32.GdiFlush()) return null;
+            if (_captureFromDesktop)
+            {
+                // 不发布捕获期间发生失焦、移动或缩放的画面。
+                var after = new POINT();
+                if (User32.GetForegroundWindow() != _hWnd || User32.IsIconic(_hWnd) ||
+                    !User32.ClientToScreen(_hWnd, ref after) || after.X != origin.X || after.Y != origin.Y ||
+                    !User32.GetClientRect(_hWnd, out var clientRect) || clientRect.Width != Width || clientRect.Height != Height) return null;
+            }
 
             // 新Mat
             var buffer = AcquireBuffer();

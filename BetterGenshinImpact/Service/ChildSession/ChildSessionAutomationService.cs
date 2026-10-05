@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using BetterGenshinImpact.Helpers;
 using BetterGenshinImpact.Service.Instance;
+using BetterGenshinImpact.Service.Interface;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -19,6 +20,7 @@ namespace BetterGenshinImpact.Service.ChildSession;
 public sealed class ChildSessionAutomationService(
     ChildSessionService childSessionService,
     InstanceService instanceService,
+    IConfigService configService,
     ILogger<ChildSessionAutomationService> logger)
 {
     private static readonly TimeSpan ChildRegistrationTimeout = TimeSpan.FromSeconds(75);
@@ -52,6 +54,8 @@ public sealed class ChildSessionAutomationService(
         try
         {
             await WriteStateAsync(resultPath, runId, configName, "starting", null);
+            // The root may already be running with manual-play settings cached in memory.
+            ChildSessionAutomationSettings.Apply(configService);
             await childSessionService.StartAsync();
             var childSessionId = childSessionService.ChildSessionId
                                  ?? throw new InvalidOperationException(

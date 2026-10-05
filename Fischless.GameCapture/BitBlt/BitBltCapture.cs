@@ -16,6 +16,7 @@ public class BitBltCapture : IGameCapture
     private readonly CaptureFrameSource _frameSource = new();
 
     private volatile bool _lastCaptureFailed;
+    private bool _captureFromDesktop;
 
     public void Dispose()
     {
@@ -27,8 +28,7 @@ public class BitBltCapture : IGameCapture
 
     public void Start(nint hWnd, Dictionary<string, object>? settings = null)
     {
-        if (settings == null || !settings.TryGetValue("autoFixWin11BitBlt", out var value)) return;
-        if (value is true)
+        if (settings?.TryGetValue("autoFixWin11BitBlt", out var value) == true && value is true)
         {
             BitBltRegistryHelper.SetDirectXUserGlobalSettings();
         }
@@ -36,6 +36,7 @@ public class BitBltCapture : IGameCapture
         _lockSlim.EnterWriteLock();
         try
         {
+            _captureFromDesktop = settings?.TryGetValue("captureFromDesktop", out var desktop) == true && desktop is true;
             _hWnd = hWnd;
             if (_hWnd == IntPtr.Zero)
             {
@@ -108,7 +109,7 @@ public class BitBltCapture : IGameCapture
                 _session.Dispose();
             }
 
-            _session = new BitBltSession(_hWnd, width, height);
+            _session = new BitBltSession(_hWnd, width, height, _captureFromDesktop);
             _frameSource.Restart();
         }
         catch (Exception e)
@@ -151,10 +152,10 @@ public class BitBltCapture : IGameCapture
         {
             _lockSlim.EnterReadLock();
             var stamp = _frameSource.Next();
-            var mat = Capture0();
+            var mat = Capture0(out var desktopRect);
             var result = mat == null
                 ? null
-                : new GameCaptureFrame(mat, stamp, _captureRect);
+                : new GameCaptureFrame(mat, stamp, desktopRect ?? _captureRect);
             if (result is not null)
             {
                 // 成功截图
@@ -185,11 +186,12 @@ public class BitBltCapture : IGameCapture
     /// 截图功能的实现。需要加锁后调用，一般只由 Capture 方法调用。
     /// </summary>
     /// <returns></returns>
-    private Mat? Capture0()
+    private Mat? Capture0(out RECT? desktopRect)
     {
+        desktopRect = null;
         try
         {
-            return _session?.GetImage();
+            return _session?.GetImage(out desktopRect);
         }
         catch (Exception e)
         {

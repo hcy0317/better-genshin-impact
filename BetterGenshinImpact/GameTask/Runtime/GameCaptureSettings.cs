@@ -13,7 +13,7 @@ public static class GameCaptureSettings
     {
         return new Dictionary<string, object>
         {
-            // BitBlt 必须传这个键，否则 Start 直接返回，截图器不会启动
+            // BitBlt 的 Windows 11 窗口优化修复开关。
             { "autoFixWin11BitBlt", OsVersionHelper.IsWindows11_OrGreater && config.AutoFixWin11BitBlt },
             // WGC 限流：0 = 不启用；>0 = DWM 最小推帧间隔（毫秒）
             { "MinUpdateIntervalMs", config.WgcMinUpdateIntervalMs },
