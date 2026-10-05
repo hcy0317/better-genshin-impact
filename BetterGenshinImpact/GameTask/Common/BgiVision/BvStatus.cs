@@ -370,6 +370,7 @@ public static partial class Bv
 
     internal static bool? ObserveCurrentAvatarLowHp(ImageRegion captureRa, double assetScale)
     {
+        if (CriticalHealthHud.IsKnownLowHp(captureRa)) return true;
         var mat = captureRa.SrcMat;
         if (!double.IsFinite(assetScale) || assetScale <= 0 || mat.Empty() || mat.Type() != MatType.CV_8UC3) return null;
         var x = (int)(808 * assetScale);

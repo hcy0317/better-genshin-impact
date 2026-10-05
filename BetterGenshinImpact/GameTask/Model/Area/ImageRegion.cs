@@ -41,6 +41,15 @@ public class ImageRegion : Region
         return result;
     }
 
+    internal bool TryReadObservation<T>(object key, out T observation) where T : struct
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_observations != null && _observations.TryGetValue(key, out var value) && value is T typed)
+        { observation = typed; return true; }
+        observation = default;
+        return false;
+    }
+
     public Mat CacheGreyMat
     {
         get

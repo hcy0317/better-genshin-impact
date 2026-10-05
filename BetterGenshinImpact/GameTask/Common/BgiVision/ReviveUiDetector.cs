@@ -80,7 +80,7 @@ internal sealed class ReviveUiDetector(
             text.Contains("BewareofEnemies", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool HasUnobscuredLivingHud(ImageRegion image)
+    private bool HasUnobscuredLivingHud(ImageRegion image)
     {
         var mat = image.SrcMat;
         // 不把未知布局/像素格式套进已知HUD规则；它们继续走原来的识别路径。
@@ -90,6 +90,7 @@ internal sealed class ReviveUiDetector(
         var x = (int)Math.Round(image.Width / 2d - 152 * scale);
         var y = (int)Math.Round(image.Height - 70 * scale);
         if (x < 0 || y < 0 || x + 4 >= image.Width || y >= image.Height) return false;
+        var coloredHealth = true;
         foreach (var offset in new[] { 0, 2, 4 })
         {
             byte blue, green, red;
@@ -107,14 +108,19 @@ internal sealed class ReviveUiDetector(
             // 是否被弹窗遮暗由独立HUD锚点判断，不能把正常淡出误作复苏。
             var healthy = green >= 100 && green > red * 1.2 && green > blue * 3;
             var low = red >= 150 && red > green * 1.6 && Math.Abs(green - blue) <= 15;
-            if (!healthy && !low) return false;
+            coloredHealth &= healthy || low;
         }
         using var paimon = image.Find(ElementRecognition.Get("PaimonMenu", image));
-        if (HasBrightAnchor(image, paimon)) return true;
+        var brightPaimon = HasBrightAnchor(image, paimon);
+        if (coloredHealth && brightPaimon) return true;
         using var chat = image.Find(ElementRecognition.Get("FriendChat", image));
         // 正常聊天图标的白色前景可为约230；维护公告遮住派蒙时仍须可作备用锚点。
         // 只调整已匹配的聊天图标，保留血条、确认弹窗和像素数量检查。
-        return HasBrightAnchor(image, chat, 220);
+        var brightChat = HasBrightAnchor(image, chat, 220);
+        if (coloredHealth) return brightChat;
+        // 80/46597等极低血量可能连第一个采样像素都不再有亮红填充，受伤动画还会变橙。
+        // 仅双亮锚点+明确非零极低HP文本可补足存活证据，零/模糊值仍未知。
+        return brightPaimon && brightChat && CriticalHealthHud.Read(image, ocr());
     }
 
     private static bool HasBrightAnchor(ImageRegion image, Region anchor, int minimumBrightness = 235)
