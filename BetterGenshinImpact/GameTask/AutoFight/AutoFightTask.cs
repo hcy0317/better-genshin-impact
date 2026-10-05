@@ -344,10 +344,14 @@ public class AutoFightTask : ISoloTask
             try
             {
                 FightStatusFlag = true;
+                var stall = new BetterGenshinImpact.GameTask.Common.RuntimeStallDiagnostics(
+                    Logger, "combat-host", flow.Context.BattleId.ToString());
                 
                 while (!cts2.Token.IsCancellationRequested)
                 {
+                    stall.Mark("before-advance");
                     var hostResult = await battleHost.AdvanceAsync(flow, cts2.Token);
+                    stall.Mark("after-advance");
                     lastFightName = flow.Context.LastObservedActor ?? lastFightName;
                     TraceFlowHost(_finishDetectConfig, flow, false, false, battleHost);
                     if (NativeCombatBattleHostIo.ApplyResult(battleHost, hostResult, _finishDetectConfig)) break;

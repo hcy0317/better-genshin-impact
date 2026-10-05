@@ -23,20 +23,35 @@ internal static class PathWorldAvailability
         var blocked = false;
         var stable = 0;
         CaptureFrameStamp previous = default;
+        var evidence = new PathWorldEvidence(io);
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
             check?.Invoke();
             if (io.Clock.GetUtcNow() >= deadline)
-                throw new RetryException("PATH_WORLD_UNAVAILABLE: 重连、加载或无有效新帧，路径原预算已耗尽");
-            var frame = io.Capture();
+            {
+                var error = new RetryException("PATH_WORLD_UNAVAILABLE: 重连、加载或无有效新帧，路径原预算已耗尽");
+                evidence.Failed(null, error);
+                throw error;
+            }
+            ImageRegion frame;
+            try { using (evidence.Measure("capture")) frame = io.Capture(); }
+            catch (Exception error) { evidence.Failed(null, error); throw; }
             try
             {
-                var ready = IsPlayable(io, frame);
+                WorldFrameKind kind;
+                using (evidence.Measure("world-recognition")) kind = io.Availability?.Invoke(frame) ?? WorldFrameKind.Playable;
+                var fresh = frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge);
+                var ready = kind == WorldFrameKind.Playable && fresh;
+                float? orientation = null;
                 if (blocked && ready)
-                    ready = float.IsFinite(io.CameraOrientation(frame)) &&
-                        frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge);
+                {
+                    using (evidence.Measure("camera-orientation")) orientation = io.CameraOrientation(frame);
+                    fresh = frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge);
+                    ready = float.IsFinite(orientation.Value) && fresh;
+                }
+                evidence.Observed(frame, kind, fresh, orientation, ready);
                 ct.ThrowIfCancellationRequested();
                 UiOperation.Current?.Check();
                 check?.Invoke();
@@ -44,7 +59,7 @@ internal static class PathWorldAvailability
                     throw new RetryException("PATH_WORLD_UNAVAILABLE: 页面识别已耗尽路径原预算");
                 if (ready && (!blocked || frame.FrameStamp.IsAfter(previous)))
                 {
-                    if (!blocked || ++stable >= 2) return frame;
+                    if (!blocked || ++stable >= 2) { evidence.Recovered(frame); return frame; }
                 }
                 else stable = 0;
                 previous = frame.FrameStamp;
@@ -57,7 +72,7 @@ internal static class PathWorldAvailability
                 onBlocked?.Invoke();
                 blocked = true;
             }
-            catch { frame.Dispose(); throw; }
+            catch (Exception error) { evidence.Failed(frame, error); frame.Dispose(); throw; }
             frame.Dispose();
             await io.Delay((int)Math.Max(1, Math.Min(150, (deadline - io.Clock.GetUtcNow()).TotalMilliseconds)), ct);
         }

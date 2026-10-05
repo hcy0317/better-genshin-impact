@@ -482,11 +482,14 @@ public static class AvatarRecognition
             else rejectedFrames++;
         }
         IMaskWindowDrawingBoard drawingBoard = NullMaskWindowDrawingBoard.Instance;
+        var stall = new BetterGenshinImpact.GameTask.Common.RuntimeStallDiagnostics(
+            Logger, "combat-perception", diagnosticBattleId ?? "unbound");
 
         try
         {
             while (!ct.IsCancellationRequested && !(isFightEnd?.Invoke() ?? false))
             {
+                stall.Mark("loop", lastSource.Sequence);
                 // 快速路径：排他计数 > 0 时跳过本轮，避免不必要的截图开销
                 var captureGate = PassiveCaptureGate;
                 if (!captureGate.CanCapture)
@@ -504,8 +507,10 @@ public static class AvatarRecognition
                     indicatorEpoch = observationEpoch;
                 }
                 var frameStopwatch = Stopwatch.StartNew();
+                stall.Mark("before-capture", lastSource.Sequence);
                 using (var capture = CaptureToRectArea())
                 {
+                    stall.Mark("capture-complete", capture.FrameStamp.Sequence);
                     var capturedAtUtc = capture.FrameStamp.CapturedAt.UtcDateTime;
                     lastSource = capture.FrameStamp;
                     capturedFrames++;
@@ -638,6 +643,7 @@ public static class AvatarRecognition
                 CombatRuntimeMetrics.Shared.Record(
                     "targeting.frame",
                     frameStopwatch.Elapsed);
+                stall.Mark("recognition-complete", lastSource.Sequence);
                 Trace();
 
                 // 按配置的索敌识别间隔等待

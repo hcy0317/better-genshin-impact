@@ -11,7 +11,7 @@ using BetterGenshinImpact.Core.Recognition;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
-internal enum UiOperationPhase { Check, Pause, Focus, Admission, NativeInput, ExplicitWait, Capture, SceneRecognition, AreaOcr }
+internal enum UiOperationPhase { Check, Pause, Focus, Admission, NativeInput, ExplicitWait, Capture, SceneRecognition, AreaOcr, RecognitionSessionWait, OcrInference }
 
 /// <summary>仅在当前UI调用链生效的预算与关联诊断，不建立后台观察/输入线程。</summary>
 internal sealed class UiOperation : IDisposable
@@ -26,6 +26,7 @@ internal sealed class UiOperation : IDisposable
     private readonly long _started;
     private readonly TimeSpan _budget;
     private readonly ILogger _logger;
+    private readonly RuntimeStallDiagnostics _stall;
     private readonly RecognitionExecutionScope _recognition;
     private int? _lastSignature;
     private double _lastStateLog = double.NegativeInfinity;
@@ -64,6 +65,7 @@ internal sealed class UiOperation : IDisposable
         _linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _deadline.Token, _parent?.Token ?? default);
         _recognition = new RecognitionExecutionScope(_linked.Token);
         _logger = logger ?? _parent?._logger ?? NullLogger.Instance;
+        _stall = new(_logger, "ui:" + name, Id, _clock);
         Name = name;
         RootId = _parent?.RootId ?? Id;
         Active.Value = this;
@@ -282,13 +284,20 @@ internal sealed class UiOperation : IDisposable
         private readonly UiOperation _owner;
         private readonly UiOperationPhase _phase;
         private readonly long _started;
+        private readonly RuntimeStallDiagnostics.PhaseMeasurement _stall;
         internal PhaseMeasurement(UiOperation owner, UiOperationPhase phase)
-        { _owner = owner; _phase = phase; _started = owner._clock.GetTimestamp(); }
+        {
+            _owner = owner; _phase = phase; _started = owner._clock.GetTimestamp();
+            _stall = phase is UiOperationPhase.Capture or UiOperationPhase.SceneRecognition or UiOperationPhase.AreaOcr or
+                UiOperationPhase.RecognitionSessionWait or UiOperationPhase.OcrInference
+                ? owner._stall.Measure(phase.ToString()) : default;
+        }
         public void Dispose()
         {
             var index = (int)_phase;
             _owner._phaseMilliseconds[index] = (_owner._phaseMilliseconds[index] ?? 0) +
                 _owner._clock.GetElapsedTime(_started).TotalMilliseconds;
+            _stall.Dispose();
         }
     }
 

@@ -7,6 +7,32 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class DiagnosticEvidenceTimeWindowTests
 {
+    [Fact]
+    public async Task CompletedStormTailsReleaseTheirSlotsBeforeTheRunEnds()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; },
+            maxPendingWindows: 1, queueCapacity: 256);
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var incident = 0; incident < 3; incident++)
+        {
+            for (var second = 0; second <= 18; second++)
+            {
+                frame.FrameStamp = source.Next();
+                scope.ObserveExistingFrame(frame);
+                if (second is 10 or 12)
+                    scope.RequestWindow($"storm-{incident}", "warning", frame.FrameStamp, "same");
+                clock.Advance(TimeSpan.FromSeconds(1));
+            }
+        }
+        await scope.DisposeAsync();
+        for (var incident = 0; incident < 3; incident++)
+            Assert.Contains(saved, item => item.Request == $"storm-{incident}" &&
+                item.Window is { Occurrence: "last", RelativeSeconds: 5 });
+    }
+
     [Theory]
     [InlineData(30)]
     [InlineData(60)]

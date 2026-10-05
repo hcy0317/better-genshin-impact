@@ -8,6 +8,32 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatSkillRecoveryInputTests
 {
+    [Fact]
+    public void RecoveryReceiptCannotOverwriteOriginalRequestOrFenceEvidence()
+    {
+        using var trial = new Trial();
+        var attempt = trial.Original.PendingAttempt!;
+        var original = trial.Attempts.InputEvidence(attempt.AttemptId);
+        Assert.Null(trial.Claim(trial.Ready(100)));
+        var pulse = trial.Claim(trial.Ready())!;
+        Assert.NotNull(pulse);
+        CombatSkillInput.SendRecovery(trial.Attempts, trial.Confirmation, pulse, (_, begin) =>
+        {
+            begin();
+            var started = trial.Clock.GetTimestamp();
+            trial.Clock.Advance(TimeSpan.FromMilliseconds(80));
+            return new(CombatBattleHostInputStatus.Sent, trial.Clock.GetTimestamp())
+            { NativeRequested = 2, NativeSubmitted = 2, StartedTimestamp = started };
+        }, default, trial.Clock);
+        var after = trial.Attempts.InputEvidence(attempt.AttemptId);
+        Assert.Equal(original["skill:originalSource"], after["skill:originalSource"]);
+        Assert.Equal(original["skill:originalReceipt"], after["skill:originalReceipt"]);
+        Assert.Equal(original["skill:attempt"], after["skill:attempt"]);
+        Assert.Contains(pulse.RequestId.ToString(), after["skill:recoveryReceipt"]);
+        Assert.Contains("nativeSubmitted=2", after["skill:recoveryReceipt"]);
+        Assert.Null(trial.Attempts.TakeConfirmation(attempt.Actor, attempt.Skill, attempt.CommandId, trial.Context.Now));
+    }
+
     [Theory]
     [InlineData("班尼特", "q(required)")]
     [InlineData("钟离", "e(hold,wait)")]

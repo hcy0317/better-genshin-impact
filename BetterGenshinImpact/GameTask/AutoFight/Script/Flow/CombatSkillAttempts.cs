@@ -45,14 +45,23 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         public CaptureFrameStamp RecoverySource;
         public Guid RecoveryRequest;
         public bool RecoveryDispatchStarted;
+        public CombatBattleHostInputResult? OriginalReceipt, RecoveryReceipt;
+        public CaptureFrameFence? OriginalFence;
+        public Guid? OriginalRequest;
+        public long ReceiptFrequency;
     }
 
-    internal void MarkOriginalReceipt(Guid attemptId, CombatBattleHostInputResult receipt, double now, TimeProvider clock)
+    internal void MarkOriginalReceipt(Guid attemptId, CombatBattleHostInputResult receipt, double now, TimeProvider clock,
+        Guid? requestId = null)
     {
         lock (_gate)
         {
             var slot = _slots.Values.FirstOrDefault(value => value.Attempt.AttemptId == attemptId);
             if (_closed || slot == null) return;
+            slot.OriginalReceipt = receipt;
+            slot.OriginalFence = slot.InputFence;
+            slot.OriginalRequest = requestId;
+            slot.ReceiptFrequency = clock.TimestampFrequency;
             slot.RecoveryEligible = receipt.Status == CombatBattleHostInputStatus.Sent && receipt.Error == null &&
                 receipt.NativeRequested is > 0 && receipt.NativeSubmitted == receipt.NativeRequested &&
                 receipt.StartedTimestamp is { } started && receipt.CompletedTimestamp is { } completed &&
@@ -124,15 +133,41 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         }
     }
 
-    internal void CompleteRecovery(CombatSkillRecoveryPulse pulse, CaptureFrameFence fence)
+    internal void CompleteRecovery(CombatSkillRecoveryPulse pulse, CaptureFrameFence fence, CombatBattleHostInputResult? receipt = null)
     {
         lock (_gate)
         {
             if (!_closed && _slots.TryGetValue((pulse.Attempt.Actor, pulse.Attempt.Skill), out var slot) &&
                 slot.Attempt.AttemptId == pulse.Attempt.AttemptId && slot.RecoveryRequest == pulse.RequestId)
+            {
                 slot.InputFence = fence;
+                slot.RecoveryReceipt = receipt;
+            }
         }
     }
+
+    internal IReadOnlyDictionary<string, string> InputEvidence(Guid attemptId)
+    {
+        lock (_gate)
+        {
+            var slot = _slots.Values.FirstOrDefault(value => value.Attempt.AttemptId == attemptId);
+            if (slot == null) return new Dictionary<string, string> { ["skill:input"] = "unknown:attempt-no-longer-retained" };
+            var fields = new Dictionary<string, string>
+            {
+                ["skill:attempt"] = FormattableString.Invariant($"attempt={attemptId} command={slot.Attempt.CommandId} actor={slot.Attempt.Actor} action={slot.Attempt.Skill.Alias[0]} originalRequest={slot.OriginalRequest} inputAt={slot.Attempt.InputAt:F3} deadline={slot.Attempt.Deadline:F3}"),
+                ["skill:originalSource"] = slot.OriginalFence is { } original
+                    ? $"{original.Before.SessionId}/{original.Before.Sequence} capturedTimestamp={original.Before.CapturedTimestamp} observableAfter={original.InputCompletedTimestamp} frequency={slot.ReceiptFrequency}"
+                    : "unknown:original-fence-not-retained",
+                ["skill:originalReceipt"] = DescribeReceipt(slot.OriginalReceipt),
+                ["skill:recoveryReceipt"] = $"request={slot.RecoveryRequest} " + DescribeReceipt(slot.RecoveryReceipt)
+            };
+            return fields;
+        }
+    }
+
+    private static string DescribeReceipt(CombatBattleHostInputResult? receipt) => receipt is { } value
+        ? $"status={value.Status} nativeRequested={value.NativeRequested} nativeSubmitted={value.NativeSubmitted} transportRequested={value.TransportRequested} transportAcknowledged={value.TransportAcknowledged} started={value.StartedTimestamp} completed={value.CompletedTimestamp} observableAfter={value.ObservableAfterTimestamp} error={value.Error?.GetType().Name} reason={value.Reason}"
+        : "unknown:no-receipt-recorded";
 
     internal void MarkInputCompleted(Guid attemptId, CaptureFrameFence fence)
     {

@@ -61,7 +61,7 @@ internal static class CombatSkillInput
         if (completed < before.CapturedTimestamp || completed > clock.GetTimestamp())
             throw new InvalidOperationException("技能输入回执时间边界无效");
         attempts.MarkInputCompleted(attempt.AttemptId, new(before, completed));
-        attempts.MarkOriginalReceipt(attempt.AttemptId, receipt, action.Now, clock);
+        attempts.MarkOriginalReceipt(attempt.AttemptId, receipt, action.Now, clock, request.Id);
         ct.ThrowIfCancellationRequested();
         if (receipt.Status == CombatBattleHostInputStatus.Failed)
             throw receipt.Error ?? new InvalidOperationException(receipt.Reason);
@@ -104,7 +104,7 @@ internal static class CombatSkillInput
             var completed = receipt.CompletedTimestamp ?? receipt.ObservableAfterTimestamp ?? clock.GetTimestamp();
             if (completed < pulse.Source.CapturedTimestamp || completed > clock.GetTimestamp())
                 throw new InvalidOperationException("恢复输入回执时间边界无效");
-            attempts.CompleteRecovery(pulse, new(pulse.Source, completed));
+            attempts.CompleteRecovery(pulse, new(pulse.Source, completed), receipt);
         }
         ct.ThrowIfCancellationRequested();
         if (receipt.Status == CombatBattleHostInputStatus.Failed) throw receipt.Error ?? new InvalidOperationException(receipt.Reason);

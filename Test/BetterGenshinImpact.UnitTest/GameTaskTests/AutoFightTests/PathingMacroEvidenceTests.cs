@@ -9,6 +9,72 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class PathingMacroEvidenceTests
 {
     [Fact]
+    public void MissingImageScopeStillLogsBoundedFailureAndInputScalars()
+    {
+        Assert.Null(DiagnosticEvidenceScope.Current);
+        var logger = new EvidenceLogger();
+        var evidence = new PathingMacroEvidence("node=7", "keypress(w)");
+        evidence.Mapping("VK_W", "VK_A");
+        evidence.Input(new(PathingMacroInputKind.KeyDown, Vanara.PInvoke.User32.VK.VK_A),
+            new(BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputStatus.Unknown) { NativeRequested = 1, NativeSubmitted = 0 });
+        evidence.Failed(new IOException(new string('x', 5000)), logger);
+        var message = Assert.Single(logger.Messages);
+        Assert.Contains("request=pathing-macro:", message);
+        var fields = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, string>>(
+            message[(message.IndexOf("evidence=", StringComparison.Ordinal) + "evidence=".Length)..])!;
+        Assert.Contains("physical=VK_A", fields["input:first"]);
+        Assert.Contains("status=Unknown", fields["input:first"]);
+        Assert.Equal("VK_W->VK_A", fields["macro:mapping"]);
+        Assert.Equal(512, fields["macro:failure"].Length);
+    }
+
+    private sealed class EvidenceLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        internal List<string> Messages { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel level) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel level, Microsoft.Extensions.Logging.EventId id,
+            TState state, Exception? error, Func<TState, Exception?, string> formatter) => Messages.Add(formatter(state, error));
+    }
+
+    [Fact]
+    public async Task FailureKeepsOriginalAndBoundedTailReceiptsWithLastObservationAndMapping()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var evidence = new PathingMacroEvidence("node=7", "keypress(w),keypress(ESCAPE)");
+        evidence.Mapping("VK_W", "VK_A");
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 1; i <= 12; i++)
+        {
+            evidence.Input(new(PathingMacroInputKind.KeyUp, Vanara.PInvoke.User32.VK.VK_A),
+                new(BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputStatus.Sent, clock.GetTimestamp())
+                { NativeRequested = 1, NativeSubmitted = 1 });
+            clock.Advance(TimeSpan.FromSeconds(1));
+            frame.FrameStamp = source.Next();
+            evidence.Capture(frame, "poll", new(PathingMacroScene.Unknown, frame.FrameStamp));
+        }
+        evidence.Failed(new TimeoutException("original deadline"));
+        await scope.DisposeAsync();
+        var terminal = Assert.Single(saved.Where(item => item.Phase == "macro-failed" && item.Window?.RelativeIndex == 0));
+        var fields = terminal.Fields!;
+        Assert.Contains("ordinal=1 ", fields["input:first"]);
+        Assert.Contains("ordinal=7 ", fields["input:tail:0"]);
+        Assert.Contains("ordinal=12 ", fields["input:tail:5"]);
+        Assert.Equal(6, fields.Keys.Count(key => key.StartsWith("input:tail:")));
+        Assert.Contains("VK_W->VK_A", fields["macro:mapping"]);
+        Assert.Contains("phase=poll", fields["macro:state"]);
+        Assert.Contains("inputCount=12", fields["macro:state"]);
+        Assert.Contains($"{frame.FrameStamp.SessionId}/{frame.FrameStamp.Sequence}", fields["macro:lastSource"]);
+        Assert.Contains("not a new capture", terminal.Detail);
+        Assert.All(fields, pair => { Assert.InRange(pair.Key.Length, 1, 64); Assert.InRange(pair.Value.Length, 0, 512); });
+        Assert.InRange(fields.Count, 1, 16);
+        Assert.False(frame.SrcMat.IsDisposed);
+    }
+
+    [Fact]
     public async Task UnknownBoundaryKeepsOneFrameThenTheRecognizedFrameAndIgnoresUnboundedPhases()
     {
         var saved = new List<DiagnosticEvidence>();

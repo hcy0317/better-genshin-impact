@@ -8,6 +8,24 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceScopeTests
 {
     [Fact]
+    public async Task DirectCaptureFieldsAreBoundedSnapshotsIndependentOfCallerMutation()
+    {
+        DiagnosticEvidence? saved = null;
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved = item; return Task.CompletedTask; });
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        var fields = new Dictionary<string, string> { ["source"] = "original" };
+        for (var i = 0; i < 20; i++) fields[i + new string('k', 80)] = new string('v', 800);
+        Assert.True(scope.TryCapture(frame, "attempt", "deadline", "existing frame", fields: fields));
+        fields["source"] = "changed";
+        fields.Clear();
+        await scope.DisposeAsync();
+        Assert.Equal("original", saved!.Fields!["source"]);
+        Assert.Equal(16, saved.Fields.Count);
+        Assert.All(saved.Fields, pair => { Assert.InRange(pair.Key.Length, 1, 64); Assert.InRange(pair.Value.Length, 0, 512); });
+    }
+
+    [Fact]
     public async Task RepeatedFaultPhaseDoesNotInventAnotherMissingBeforeFrame()
     {
         var logger = new EvidenceLogger();

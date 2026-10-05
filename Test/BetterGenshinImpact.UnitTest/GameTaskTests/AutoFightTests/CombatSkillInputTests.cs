@@ -10,6 +10,45 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatSkillInputTests
 {
     [Fact]
+    public async Task FailureWindowRetainsOriginalReceiptWithoutBeforeImageOrConfirmingTheSkill()
+    {
+        var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();
+        await using var evidence = new BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope((item, _) =>
+        { saved.Add(item); return Task.CompletedTask; });
+        var clock = new FakeTimeProvider();
+        var producer = new CaptureFrameSource(clock);
+        using var context = new CombatFlowContext(clock);
+        using var attempts = new CombatSkillAttempts(context.BattleId);
+        var action = new CombatFlowAction(new CombatCommand("琴", "e(required)"), context, () => true, 8);
+        var before = producer.Next();
+        Guid requestId = default;
+        CombatSkillInput.Send(attempts, action, "琴", before, (request, begin) =>
+        {
+            requestId = request.Id;
+            begin();
+            var started = clock.GetTimestamp();
+            clock.Advance(TimeSpan.FromMilliseconds(30));
+            return new(CombatBattleHostInputStatus.Sent, clock.GetTimestamp())
+            { StartedTimestamp = started, NativeRequested = 2, NativeSubmitted = 2 };
+        }, default, clock);
+        var attempt = action.PendingAttempt!;
+        var fields = attempts.InputEvidence(attempt.AttemptId);
+        Assert.Contains(requestId.ToString(), fields["skill:attempt"]);
+        Assert.Contains($"{before.SessionId}/{before.Sequence}", fields["skill:originalSource"]);
+        Assert.Contains("nativeSubmitted=2", fields["skill:originalReceipt"]);
+        Assert.Equal(CombatSkillAttemptState.Pending, attempts.GetState("琴", Method.Skill, context.Now));
+        Assert.Null(attempts.TakeConfirmation("琴", Method.Skill, action.CommandId, context.Now));
+        using var frame = new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(
+            new OpenCvSharp.Mat(2, 2, OpenCvSharp.MatType.CV_8UC3, OpenCvSharp.Scalar.Black), 0, 0)
+        { FrameStamp = producer.Next() };
+        evidence.RequestWindowFromFrame(attempt.AttemptId.ToString(), "skill-unconfirmed", frame, "no before image", fields: fields);
+        Assert.Null(attempts.TakeConfirmation("琴", Method.Skill, action.CommandId, context.Now));
+        await evidence.DisposeAsync();
+        Assert.Equal(fields["skill:originalReceipt"], Assert.Single(saved).Fields!["skill:originalReceipt"]);
+        Assert.Equal(1, context.InputAttemptRevision);
+    }
+
+    [Fact]
     public void NotSentDoesNotCreateAPendingSkillAndKeepsTheOriginalActionDeadline()
     {
         var clock = new FakeTimeProvider();

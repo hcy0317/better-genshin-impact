@@ -2095,7 +2095,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     var rect = new Rect(visual.X, visual.Y, visual.Width, visual.Height);
                     var accepted = ClassifyDirectionIndicator(closed, source, visual, source.Width, source.Height,
                         out var reason, new Point(left, top));
-                    if (reason == "bearing") unconfirmedDirection?.Invoke(visual);
+                    // 破碎实拍箭头闭合后可确认形状，但模板朝向与屏幕位置可能冲突。
+                    // 保留原始屏幕位置作有界搜索线索，不伪造可执行目标或模板方位角。
+                    if (reason is "bearing" or "screen-bearing") unconfirmedDirection?.Invoke(visual);
                     if (accepted is { IndicatorBearingDegrees: not null } && seen.Add(rect))
                         recovered.Add(accepted.Value);
                 }
@@ -2420,6 +2422,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             using var hsv = new Mat();
             using var lowHueRed = new Mat();
             using var highHueRed = new Mat();
+            using var wraparoundRed = new Mat();
             using var allRed = new Mat();
             Cv2.CvtColor(candidate, hsv, ColorConversionCodes.BGR2HSV);
             Cv2.InRange(hsv, new Scalar(0, 100, 140), new Scalar(12, 255, 255), lowHueRed);
@@ -2431,7 +2434,10 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 return false;
             }
 
-            var pinkRedShare = Cv2.CountNonZero(highHueRed) / (double)redPixels;
+            // HSV红色在0/180处环绕。现场真实箭头可落在0附近；只收165..180
+            // 会把轮廓和方向均匹配的纯红箭头过滤掉。仍排除偏橙的红叶（如Hue=10）。
+            Cv2.InRange(hsv, new Scalar(0, 100, 140), new Scalar(3, 255, 255), wraparoundRed);
+            var pinkRedShare = (Cv2.CountNonZero(highHueRed) + Cv2.CountNonZero(wraparoundRed)) / (double)redPixels;
             return pinkRedShare >= DirectionIndicatorMinPinkRedShare;
         }
 
