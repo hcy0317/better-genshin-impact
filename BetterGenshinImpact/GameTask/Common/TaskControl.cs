@@ -169,6 +169,14 @@ public class TaskControl
     {
         var window = TaskContext.Instance().Runtime?.Window;
         ThrowIfGameProcessExited();
+        CheckAndActivateGameWindow(window);
+    }
+
+    internal static void CheckAndActivateGameWindow(Runtime.IGameWindow? window)
+    {
+        // 已绑定的确切窗口在前台时无需重复查询进程名；这些查询会消耗
+        // 战斗输入的源帧新鲜度预算。失焦/最小化仍走原有恢复与暂停逻辑。
+        if (window is { Handle: not 0, IsMinimized: false, IsForeground: true }) return;
         if (window is { RequiresForeground: false })
         {
             // 输入不依赖前台的运行环境（网页版）不检查焦点、不抢前台，

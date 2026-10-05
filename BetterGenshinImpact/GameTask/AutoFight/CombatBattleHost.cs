@@ -168,6 +168,10 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             var now = Now;
             if (options.TimeoutSeconds > 0 && now >= options.TimeoutSeconds)
                 return Stop("configured-timeout");
+            // 外部秘境完成判定不拥有已创建输入请求的期限。失去新帧时也必须
+            // 收束未发送请求，不能等画面恢复后才发现几分钟前就已到期。
+            if (_inputRequestId != Guid.Empty && io.Clock.GetTimestamp() >= _inputRequestDeadline)
+                return Stop("host-input-request-deadline");
             if (_performanceRecheckDeadline is { } beforeRead && io.Clock.GetTimestamp() >= beforeRead)
                 return Stop("host-input-performance-recheck-deadline");
             var observation = ReadObservation(io.ObserveTarget);

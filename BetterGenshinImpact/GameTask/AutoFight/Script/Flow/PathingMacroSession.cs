@@ -27,6 +27,7 @@ internal interface IPathingMacroIo
     Task Delay(int milliseconds, CancellationToken ct);
     IDisposable? BeginExclusive() => null;
     void BeginEvidence(System.Collections.Generic.IReadOnlyList<CombatCommand> commands) { }
+    void FailEvidence(Exception error) { }
 }
 
 /// <summary>路径实例拥有物理键和回执，绝不从NativeGame窃取租约或持有截图。</summary>
@@ -84,6 +85,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         using var timer = new CancellationTokenSource(TimeSpan.FromSeconds(plan.BudgetSeconds), io.Clock);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timer.Token);
         var completed = false;
+        var rawSegment = false;
         try
         {
             foreach (var segment in plan.Segments)
@@ -91,7 +93,11 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 Check(end, linked.Token);
                 CombatExecutionResult result;
                 if (segment.IsRaw)
+                {
+                    rawSegment = true;
                     result = await ExecuteRawAsync(segment, end, linked.Token);
+                    rawSegment = false;
+                }
                 else
                 {
                     Release();
@@ -104,7 +110,18 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             return new(completed ? CombatExecutionKind.Completed : CombatExecutionKind.Skipped,
                 completed ? "PATHING_MACRO_INPUT_COMPLETED" : "ALL_OPTIONAL_ACTIONS_SKIPPED");
         }
-        catch { if (!_poisoned) Release(); throw; }
+        catch (Exception error)
+        {
+            var terminalError = error;
+            try { if (!_poisoned) Release(); }
+            catch (Exception releaseError) { terminalError = releaseError; throw; }
+            finally
+            {
+                // 在原清理之后冻结回执；仍保留原来的释放失败及业务异常传播。
+                if (rawSegment) { try { io.FailEvidence(terminalError); } catch { } }
+            }
+            throw;
+        }
     }
 
     private async Task<CombatExecutionResult> ExecuteRawAsync(LegacyPathingMacroPlan.Segment segment,
@@ -141,6 +158,9 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 continue;
             }
             var key = command.Method == Method.KeyPress ? User32Helper.ToVk(command.Args![0]) : default;
+            var turnsCannon = observation.Scene == PathingMacroScene.Cannon &&
+                (command.Method == Method.W || command.Method == Method.A || command.Method == Method.S || command.Method == Method.D ||
+                 key is User32.VK.VK_W or User32.VK.VK_A or User32.VK.VK_S or User32.VK.VK_D);
             if (segment.CannonProgram && key == User32.VK.VK_RETURN)
                 observation = await ObserveBoundaryAsync("before-fire", ct);
             if (observation.Scene == PathingMacroScene.Cannon)
@@ -186,6 +206,11 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             else if (command.Method == Method.KeyPress) await PressAsync(User32Helper.ToVk(command.Args![0]), ct);
             else Key(User32Helper.ToVk(command.Args![0]), command.Method == Method.KeyDown ? PathingMacroInputKind.KeyDown :
                 PathingMacroInputKind.KeyUp, ct);
+            // 方向键触发转向动画时炮台HUD会暂时消失。先释放方向键，再等
+            // 原输入栅栏后的炮台控件恢复；不能用动画前的Scene立即发送退出/下一次转向。
+            // 等待仍使用原宏期限，不重发方向键，也不把任意Unknown画面当作炮台。
+            if (turnsCannon)
+                observation = await ObserveBoundaryAsync("cannon-turn-complete", ct, PathingMacroScene.Cannon);
             if (key is User32.VK.VK_F or User32.VK.VK_ESCAPE &&
                 (segment.CannonProgram || observation.Scene is PathingMacroScene.Cannon or PathingMacroScene.World))
                 observation = await ObserveBoundaryAsync("scene-transition", ct,

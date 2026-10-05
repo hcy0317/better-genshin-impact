@@ -11,6 +11,42 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PathExecutionFailureTests
 {
+    [Theory]
+    [InlineData("钟离 d(0.2),e")]
+    [InlineData("钟离 s(0.2),e,w(0.9)")]
+    public void RecordedMiningEntryCanRestartAfterVerifiedHealing(string script)
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 4).Select(_ => replay.Point("walk")).ToList();
+        points[0].Type = "teleport";
+        points[1].Type = "path";
+        points[1].Action = "combat_script";
+        points[1].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext(script, false);
+        Assert.True(PathExecutor.CanRestartAfterHealing(points, 3));
+        replay.Executor.CurWaypoints = (0, points);
+        replay.Executor.CurWaypoint = (3, points[3]);
+        replay.Executor.StartSkipOtherOperations(afterHealing: true);
+        Assert.True(replay.Executor.ShouldExecuteWaypointAction(points[1]));
+    }
+
+    [Theory]
+    [InlineData("钟离 keypress(f)")]
+    [InlineData("钟离 attack(.3),e")]
+    [InlineData("钟离 w(8),e")]
+    [InlineData("钟离 d(.2),e", 2)]
+    [InlineData("钟离 d(.2),e", 1, 20)]
+    public void HealingCannotReplayInteractionsOrMovementAwayFromTheTeleportEntry(string script, int index = 1, double offset = 0)
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 4).Select(_ => replay.Point("walk")).ToList();
+        points[0].Type = "teleport";
+        points[index].Type = "path";
+        points[index].X += offset;
+        points[index].Action = "combat_script";
+        points[index].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext(script, false);
+        Assert.False(PathExecutor.CanRestartAfterHealing(points, 3));
+    }
+
     [Fact]
     public void ParentHealingReplanIsLimitedToAnUnstartedNonTeleportFragment()
     {

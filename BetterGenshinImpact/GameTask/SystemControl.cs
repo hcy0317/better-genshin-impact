@@ -522,7 +522,7 @@ public class SystemControl
         {
             var hWnd = User32.GetForegroundWindow();
             _ = User32.GetWindowThreadProcessId(hWnd, out var pid);
-            var p = Process.GetProcessById((int)pid);
+            using var p = Process.GetProcessById((int)pid);
             return p.ProcessName;
         }
         catch

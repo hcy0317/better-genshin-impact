@@ -22,23 +22,37 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
     private static readonly Core.Input.IInputChannel CleanupInput = new Core.Input.Backends.Win32.SendInputChannel(new InputSimulator());
     private readonly HashSet<string> _unknownReported = new(StringComparer.Ordinal);
     private PathingMacroEvidence? _evidence;
+    private RuntimeStallDiagnostics? _stall;
     public void BeginEvidence(IReadOnlyList<CombatCommand> commands)
     {
         _evidence = null;
         if (DiagnosticEvidenceScope.Current == null) return;
         _evidence = new PathingMacroEvidence(context(), string.Join(",", commands.Select(command =>
-            $"{command.Method}({string.Join(",", command.Args ?? [])})")));
+            $"{command.Method.Alias[0]}({string.Join(",", command.Args ?? [])})")));
     }
     public TimeProvider Clock => TimeProvider.System;
     public CombatInputCoordinator Coordinator => NativeCombatIo.Coordinator;
-    public User32.VK Map(User32.VK key) => KeyBindingsSettingsPageViewModel.MappingKey(key);
+    public User32.VK Map(User32.VK key)
+    {
+        var physical = KeyBindingsSettingsPageViewModel.MappingKey(key);
+        _evidence?.Mapping(key.ToString(), physical.ToString());
+        return physical;
+    }
+    public void FailEvidence(Exception error) => _evidence?.Failed(error, TaskControl.Logger);
     public Task Delay(int milliseconds, CancellationToken ct) => TaskControl.Delay(milliseconds, ct);
     public IDisposable BeginExclusive() => AvatarRecognition.BeginExclusiveOperation(allowPassiveObservation: false);
 
     public PathingMacroObservation Observe(string phase = "boundary")
     {
-        using var frame = TaskControl.CaptureToRectArea();
-        var observation = ReadScene(frame, OcrFactory.Paddle);
+        _stall ??= new(TaskControl.Logger, "pathing-macro", context());
+        ImageRegion Capture()
+        {
+            using var measured = _stall.Measure("capture:" + phase);
+            return TaskControl.CaptureToRectArea();
+        }
+        using var frame = Capture();
+        PathingMacroObservation observation;
+        using (_stall.Measure("scene:" + phase)) observation = ReadScene(frame, OcrFactory.Paddle);
         _evidence?.Capture(frame, phase, observation, TaskControl.Logger);
         var scene = observation.Scene;
         if (scene == PathingMacroScene.Unknown)
@@ -95,10 +109,12 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
         }
         catch (Exception failure) { error = failure; }
         var finished = Clock.GetTimestamp();
-        return CombatNativeInput.Classify(capture, error, finished) with
+        var result = CombatNativeInput.Classify(capture, error, finished) with
         { NativeRequested = capture.Requested, NativeSubmitted = capture.Submitted,
             TransportRequested = capture.TransportCalls, TransportAcknowledged = capture.TransportAcknowledged,
             ObservableAfterTimestamp = finished };
+        _evidence?.Input(input, result);
+        return result;
     }
 
     private static void Dispatch(PathingMacroInput input, Core.Input.IInputChannel simulator)

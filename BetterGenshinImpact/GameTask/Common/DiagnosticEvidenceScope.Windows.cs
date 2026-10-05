@@ -82,6 +82,9 @@ internal sealed partial class DiagnosticEvidenceScope
                 tail.LastAfterSeconds = elapsed;
                 tail.Complete = elapsed == WindowAfterSeconds;
             }
+            // 后窗口已齐或已越界即交给writer，不把旧故障像素钉到整轮一条龙结束。
+            // 否则若干重复故障即可耗尽暂存内存和pending槽，后续终态也无法取得锚点。
+            FlushStormTails(completedOnly: true);
             // 先交付后帧，再放入历史；窗口保存的Mat与调用方和环缓存各自独占。
             foreach (var window in _windows.ToArray())
             {
@@ -296,23 +299,31 @@ internal sealed partial class DiagnosticEvidenceScope
         _windows.Add(change);
     }
 
-    private void FlushStormTails()
+    private void FlushStormTails(bool completedOnly = false)
     {
-        foreach (var tail in _stormTails.Values)
+        foreach (var entry in _stormTails.ToArray())
         {
+            var tail = entry.Value;
+            if (completedOnly && !tail.Complete) continue;
+            _stormTails.Remove(entry.Key);
             var window = tail.Window;
-            // 最后一张是真实重复触发帧，不把结束时刻的新帧冒充最后触发。
-            var frame = tail.Frames.Single(item => item.Source == window.Anchor);
-            SaveHistory(window, frame, 0);
             var nearby = tail.Frames.Where(item => item.Source != window.Anchor).ToArray();
-            foreach (var item in nearby) SaveHistory(window, item, item.Source.IsAfter(window.Anchor) ? window.Next++ : -1);
+            // 逐张交付并释放暂存引用，避免先复制整组、最后才释放造成瞬时双倍占用。
+            // 锚点仍是真实重复触发帧，不用当前帧冒充。
+            foreach (var item in tail.Frames.OrderBy(item => item.Source == window.Anchor ? 0 : 1))
+            {
+                try
+                {
+                    SaveHistory(window, item, item.Source == window.Anchor ? 0 :
+                        item.Source.IsAfter(window.Anchor) ? window.Next++ : -1);
+                }
+                finally { ReleaseHistory(item); }
+            }
             if (!nearby.Any(item => SecondsBetween(item.Source, window.Anchor) <= -WindowBeforeSeconds))
                 MissingFrame(window.Request, window.Phase, "last-before-unavailable", window.Logger);
             if (!nearby.Any(item => SecondsBetween(item.Source, window.Anchor) >= WindowAfterSeconds))
                 MissingFrame(window.Request, window.Phase, "last-after-unavailable", window.Logger);
-            foreach (var item in tail.Frames) ReleaseHistory(item);
         }
-        _stormTails.Clear();
     }
 
     private void ReleaseHistory(HistoryFrame item)

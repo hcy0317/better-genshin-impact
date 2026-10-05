@@ -277,9 +277,11 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     }
 
     internal bool TryCapture(ImageRegion frame, string request, string phase, string detail, ILogger? logger = null,
-        string? sourceRequest = null, DiagnosticEvidencePriority priority = DiagnosticEvidencePriority.Routine)
+        string? sourceRequest = null, DiagnosticEvidencePriority priority = DiagnosticEvidencePriority.Routine,
+        IReadOnlyDictionary<string, string>? fields = null)
     {
-        var captured = TryCaptureWithReason(frame, request, phase, detail, out var reason, logger, sourceRequest, priority: priority);
+        var captured = TryCaptureWithReason(frame, request, phase, detail, out var reason, logger, sourceRequest,
+            priority: priority, fields: SnapshotFields(fields));
         if (!captured) MissingFrame(request, phase, reason, logger ?? _logger);
         return captured;
     }

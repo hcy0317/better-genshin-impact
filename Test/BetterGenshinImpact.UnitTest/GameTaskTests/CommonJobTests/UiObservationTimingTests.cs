@@ -6,6 +6,26 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class UiObservationTimingTests
 {
+    [Theory]
+    [InlineData("SceneRecognition")]
+    [InlineData("OcrInference")]
+    [InlineData("RecognitionSessionWait")]
+    public async Task LongRecognitionPhaseReportsItsActualOwnerAndStage(string phaseName)
+    {
+        var phase = Enum.Parse<UiOperationPhase>(phaseName);
+        var clock = new FakeTimeProvider();
+        var logger = new EndLogger();
+        await UiOperation.RunAsync("party-readable-frame", TimeSpan.FromSeconds(10), default, operation =>
+        {
+            using (operation.Measure(phase)) clock.Advance(TimeSpan.FromSeconds(3));
+            return Task.FromResult(true);
+        }, logger, clock);
+        var message = Assert.Single(logger.Gaps);
+        Assert.Contains("owner=ui:party-readable-frame", message);
+        Assert.Contains("from=before-" + phase + " to=after-" + phase, message);
+        Assert.Contains("elapsedMs=3000", message);
+    }
+
     [Fact]
     public async Task ObservedCostsRemainDistinctFromPhasesThatDidNotRun()
     {
@@ -25,10 +45,13 @@ public class UiObservationTimingTests
     private sealed class EndLogger : ILogger
     {
         internal Dictionary<string, object?> End { get; private set; } = [];
+        internal List<string> Gaps { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel level) => true;
         public void Log<TState>(LogLevel level, EventId id, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
+            var message = formatter(state, exception);
+            if (message.StartsWith("RUNTIME_EXECUTION_GAP")) Gaps.Add(message);
             if (formatter(state, exception).StartsWith("UI_END"))
                 End = ((IEnumerable<KeyValuePair<string, object?>>)state!).ToDictionary(pair => pair.Key, pair => pair.Value);
         }

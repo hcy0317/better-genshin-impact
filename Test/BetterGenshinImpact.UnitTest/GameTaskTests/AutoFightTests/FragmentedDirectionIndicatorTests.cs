@@ -11,6 +11,33 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 [Collection("OfflineNativeDecision")]
 public class FragmentedDirectionIndicatorTests(ITestOutputHelper output)
 {
+    [UiRecoveryFact("arrow-outline-20261005.png")]
+    public void RecordedAmbiguousArrowKeepsSearchEvidenceWithoutInventingBearing()
+    {
+        using var pixels = Cv2.ImRead(UiRecoveryFixtures.PathFor("arrow-outline-20261005.png"));
+        using var frame = new ImageRegion(pixels.Clone(), 0, 0) { FrameStamp = new CaptureFrameSource().Next() };
+        AutoFightSeek.ResetSeekState();
+        var hints = new List<EnemySeekVisual>();
+        var decision = AutoFightSeek.RecognizeSeekDecision(frame, new Scalar(255, 90, 90), null,
+            out _, out _, saveDiagnostics: false, unconfirmedDirection: hints.Add);
+        Assert.Null(decision.Visual);
+        Assert.Contains(hints, hint => hint.CenterX is >= 1420 and <= 1455 && hint.CenterY is >= 650 and <= 690);
+        Assert.All(hints, hint => Assert.Null(hint.IndicatorBearingDegrees));
+    }
+
+    [UiRecoveryFact("arrow-hue-wrap-20261004.png")]
+    public void RecordedPureRedArrowAtHueWraparoundIsRecognized()
+    {
+        using var source = Cv2.ImRead(UiRecoveryFixtures.PathFor("arrow-hue-wrap-20261004.png"));
+        using var frame = new ImageRegion(source.Clone(), 0, 0);
+        AutoFightSeek.ResetSeekState();
+        var decision = AutoFightSeek.RecognizeSeekDecision(frame, new Scalar(255, 90, 90), null,
+            out _, out _, saveDiagnostics: false);
+        Assert.Equal(SeekCueKind.DirectionIndicator, decision.Cue);
+        Assert.Equal(1313, decision.Visual!.Value.X);
+        Assert.Equal(112.5, decision.Visual.Value.IndicatorBearingDegrees);
+    }
+
     [OfflineNativeDecisionFact]
     public void RecordedFailureFrameReportsClassificationWithoutGameInput()
     {

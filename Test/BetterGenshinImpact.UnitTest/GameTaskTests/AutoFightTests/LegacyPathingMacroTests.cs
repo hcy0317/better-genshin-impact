@@ -13,6 +13,44 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class LegacyPathingMacroTests
 {
     [Fact]
+    public async Task EvidenceFailureCannotReplaceRawInputFailureOrPreventHeldKeyCleanup()
+    {
+        var original = new IOException("original dispatch");
+        var callbacks = 0;
+        var io = new MacroReplay
+        {
+            FaultAt = 1, Fault = CombatBattleHostInputStatus.Failed, FaultError = original
+        };
+        io.OnEvidenceFailure = error =>
+        {
+            callbacks++;
+            Assert.Same(original, error.InnerException);
+            Assert.Equal("KeyUp:VK_W", io.Inputs[^1]);
+            throw new IOException("diagnostics");
+        };
+        using var session = new PathingMacroSession(io);
+        var failed = await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(
+            LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext("keypress(w)", false), ["琴"]),
+            (_, _) => throw new Exception("unexpected native segment"), default));
+        Assert.Same(original, failed.InnerException);
+        Assert.Equal(1, callbacks);
+        Assert.Equal(new[] { "KeyDown:VK_W", "KeyUp:VK_W" }, io.Inputs);
+    }
+
+    [Fact]
+    public async Task NativeSegmentFailureCannotBeAttributedToPreviousSuccessfulRawSegment()
+    {
+        var original = new IOException("humanoid runner");
+        var callbacks = 0;
+        var io = new MacroReplay { OnEvidenceFailure = _ => callbacks++ };
+        using var session = new PathingMacroSession(io);
+        Assert.Same(original, await Assert.ThrowsAsync<IOException>(() => session.ExecuteAsync(
+            LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext("wait(.1);琴 q", false), ["琴"]),
+            (_, _) => throw original, default)));
+        Assert.Equal(0, callbacks);
+    }
+
+    [Fact]
     public async Task RecordedFlightPhysicalMouseSequenceNeverEntersHumanoidRunner()
     {
         var io = new MacroReplay { Scene = PathingMacroScene.Transformed };
@@ -39,6 +77,40 @@ public class LegacyPathingMacroTests
             "KeyDown:VK_W", "KeyUp:VK_W", "KeyDown:VK_RETURN", "KeyUp:VK_RETURN",
             "KeyDown:VK_ESCAPE", "KeyUp:VK_ESCAPE" }, io.Inputs);
         Assert.Equal(PathingMacroScene.World, io.Scene);
+    }
+
+    [Theory]
+    [InlineData("keypress(w)")]
+    [InlineData("d(.1)")]
+    public async Task CannonTurningAnimationMustFinishBeforeExit(string direction)
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true,
+            TwoStepCannonEntry = true, CannonAnimationMilliseconds = 1200 };
+        using var session = new PathingMacroSession(io);
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(
+            $"keypress(f),wait(.2),keypress(f),{direction},wait(.1),keypress(ESCAPE),wait(.1),keypress(f),wait(.2),keypress(f),keypress(ESCAPE)",
+            false), ["钟离"]);
+        var result = await session.ExecuteAsync(plan, (_, _) => throw new Exception("unexpected native segment"), default);
+        Assert.True(result.CanContinue);
+        Assert.Equal(2, io.Inputs.Count(x => x == "KeyDown:VK_ESCAPE"));
+        Assert.Equal(PathingMacroScene.World, io.Scene);
+    }
+
+    [Fact]
+    public async Task CannonAnimationCannotRenewDeadlineOrCauseRepeatedDirectionInput()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true,
+            TwoStepCannonEntry = true, CannonAnimationMilliseconds = int.MaxValue };
+        using var session = new PathingMacroSession(io);
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(
+            "keypress(f),wait(.2),keypress(f),keypress(w),keypress(RETURN),keypress(ESCAPE)", false), ["钟离"]);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(plan,
+            (_, _) => throw new Exception("unexpected native segment"), default));
+        Assert.Single(io.Inputs.Where(x => x == "KeyDown:VK_W"));
+        Assert.Single(io.Inputs.Where(x => x == "KeyUp:VK_W"));
+        Assert.DoesNotContain("KeyDown:VK_ESCAPE", io.Inputs);
+        Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
+        Assert.True((io.Time.GetUtcNow() - io.Start).TotalSeconds <= plan.Segments[0].RawBudgetSeconds + .1);
     }
 
     [Theory]
@@ -460,10 +532,14 @@ public class LegacyPathingMacroTests
         internal CombatBattleHostInputStatus Fault;
         internal Exception? FaultError;
         internal Action? AfterDelay;
+        internal Action<Exception>? OnEvidenceFailure;
+        public void FailEvidence(Exception error) => OnEvidenceFailure?.Invoke(error);
         internal int UnknownAt;
         internal int UnknownCount = int.MaxValue;
         internal PathingMacroScene Scene = PathingMacroScene.Transformed;
         internal bool FirePrompt = true, CrossCannonScenes, TwoStepCannonEntry;
+        internal int CannonAnimationMilliseconds;
+        private DateTimeOffset _animationUntil;
         private readonly CaptureFrameSource _source;
         internal CaptureFrameStamp NextFrame() { Time.Advance(TimeSpan.FromMilliseconds(1)); return _source.Next(); }
         public MacroReplay() { _source = new(Time); Start = Time.GetUtcNow(); }
@@ -471,6 +547,11 @@ public class LegacyPathingMacroTests
         {
             Observations++;
             Time.Advance(TimeSpan.FromMilliseconds(1));
+            if (_animationUntil != default && Time.GetUtcNow() >= _animationUntil)
+            {
+                Scene = PathingMacroScene.Cannon;
+                _animationUntil = default;
+            }
             var unknown = UnknownAt > 0 && Observations >= UnknownAt && Observations - UnknownAt < UnknownCount;
             return new(unknown ? PathingMacroScene.Unknown : Scene, _source.Next(), Scene == PathingMacroScene.Cannon && FirePrompt);
         }
@@ -478,6 +559,8 @@ public class LegacyPathingMacroTests
         public CombatBattleHostInputResult Send(PathingMacroInput input, Action admit)
         {
             admit();
+            if (_animationUntil != default && input.Kind == PathingMacroInputKind.KeyDown)
+                throw new InvalidOperationException("Input sent during cannon turning animation");
             Inputs.Add($"{input.Kind}:{input.Key}");
             if (CrossCannonScenes && input.Kind == PathingMacroInputKind.KeyUp)
             {
@@ -485,6 +568,12 @@ public class LegacyPathingMacroTests
                 if (input.Key == User32.VK.VK_F)
                     Scene = TwoStepCannonEntry && Scene == PathingMacroScene.World
                         ? PathingMacroScene.Unknown : PathingMacroScene.Cannon;
+                if (Scene == PathingMacroScene.Cannon && CannonAnimationMilliseconds > 0 &&
+                    input.Key is User32.VK.VK_W or User32.VK.VK_A or User32.VK.VK_S or User32.VK.VK_D)
+                {
+                    Scene = PathingMacroScene.Unknown;
+                    _animationUntil = Time.GetUtcNow().AddMilliseconds(CannonAnimationMilliseconds);
+                }
             }
             if (Inputs.Count == FaultAt) return new(Fault, Reason: "simulated-native-failure", Error: FaultError);
             return new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp())

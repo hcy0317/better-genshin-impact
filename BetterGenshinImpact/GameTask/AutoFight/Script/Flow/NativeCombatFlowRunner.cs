@@ -1542,7 +1542,8 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                             phase, detail, Logger);
                         _evidence?.ObserveExistingFrame(_capture);
                         _evidence?.RequestWindowFromFrame(request, phase, _capture, detail, Logger,
-                            changeKey: $"{pendingResult}:{action.DiagnosticReason}:cooling={recoverySample.CoolingDown}:ready={recoverySample.Ready}:control={recoveryControlValid}");
+                            changeKey: $"{pendingResult}:{action.DiagnosticReason}:cooling={recoverySample.CoolingDown}:ready={recoverySample.Ready}:control={recoveryControlValid}",
+                            fields: _attempts.InputEvidence(observedAttempt.AttemptId));
                     }
                     if (pendingResult is CombatFlowResult.Succeeded or CombatFlowResult.Failed)
                     {

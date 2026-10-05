@@ -447,8 +447,27 @@ public static partial class Bv
     /// <returns></returns>
     public static bool IsInPromptDialog(ImageRegion captureRa)
     {
-        using var ra = captureRa.Find(ElementRecognition.Get("PromptDialogLeftBottomStar", captureRa));
-        return ra.IsExist();
+        var template = ElementRecognition.Get("PromptDialogLeftBottomStar", captureRa);
+        using var left = captureRa.Find(template);
+        if (!left.IsExist()) return false;
+        // 选队背景的单个闪光也会命中左下角标；弹窗还须有居中面板的对称右下角。
+        var padding = Math.Max(3, (int)Math.Ceiling(6 * captureRa.Height / 1080d));
+        var x = captureRa.Width - left.Right - padding;
+        var y = left.Top - padding;
+        var bounds = new Rect(Math.Max(0, x), Math.Max(0, y), left.Width + padding * 2, left.Height + padding * 2);
+        bounds = bounds.Intersect(new Rect(0, 0, captureRa.Width, captureRa.Height));
+        if (bounds.Width < left.Width || bounds.Height < left.Height) return false;
+        using var mirrored = new Mat();
+        using var mirroredGray = new Mat();
+        Cv2.Flip(template.TemplateImageMat!, mirrored, FlipMode.Y);
+        Cv2.Flip(template.TemplateImageGreyMat!, mirroredGray, FlipMode.Y);
+        var rightTemplate = template.Clone();
+        rightTemplate.TemplateImageMat = mirrored;
+        rightTemplate.TemplateImageGreyMat = mirroredGray;
+        rightTemplate.RegionOfInterest = bounds;
+        rightTemplate.ReferenceBoundingBox = null;
+        using var right = captureRa.Find(rightTemplate);
+        return right.IsExist();
     }
     
     

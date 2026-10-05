@@ -11,6 +11,27 @@ internal static class SaurianUiReader
     internal static bool IsKnownTransformation(ImageRegion frame) =>
         frame.ReadOnce(typeof(SaurianUiReader), () => Read(frame));
 
+    // 仅用于已阻断边界/离线原图的诊断，不参与准入、不裁出新的整帧。
+    internal static string Describe(ImageRegion frame)
+    {
+        try
+        {
+            if (frame.SrcMat.Empty() || frame.Width * 9 != frame.Height * 16 ||
+                frame.SrcMat.Type() != MatType.CV_8UC3 && frame.SrcMat.Type() != MatType.CV_8UC4)
+                return "saurian=unknown:unsupported-frame";
+            var scale = frame.Width / 1920d;
+            using var bar = new Mat(frame.SrcMat, Scaled(new Rect(810, 1007, 280, 7), scale));
+            using var orange = new Mat();
+            Cv2.InRange(bar, new Scalar(40, 194, 245, 0), new Scalar(60, 214, 255, 255), orange);
+            var share = Cv2.CountNonZero(orange) / (double)(bar.Width * bar.Height);
+            var paimon = BrightAnchor(frame, "PaimonMenu", 235);
+            var chat = BrightAnchor(frame, "FriendChat", 220);
+            double Score(Rect rect, string template, bool binary = false) => Match(frame.SrcMat, rect, scale, template, binary);
+            return FormattableString.Invariant($"saurian={IsKnownTransformation(frame)} orangeHpShare={share:F4}/.28 paimon={paimon} chat={chat} exit={Score(new(1803, 974, 33, 43), SaurianUiTemplates.Exit):F4}/.85 alternateExit={Score(new(1803, 974, 33, 43), SaurianUiTemplates.AlternateExit):F4}/.85 aim={Score(new(1275, 970, 75, 55), SaurianUiTemplates.Aim, true):F4}/.88 burrow={Score(new(1586, 963, 50, 58), SaurianUiTemplates.Burrow):F4}/.85 spirit={Score(new(1686, 963, 57, 58), SaurianUiTemplates.Spirit):F4}/.85 flight={Score(new(1686, 963, 57, 58), SaurianUiTemplates.Flight):F4}/.85 alternateFlight={Score(new(1686, 963, 57, 58), SaurianUiTemplates.AlternateFlight):F4}/.85");
+        }
+        catch (Exception error) { return "saurian=unknown:diagnostic-" + error.GetType().Name; }
+    }
+
     private static bool Read(ImageRegion frame)
     {
         var pixels = frame.SrcMat;

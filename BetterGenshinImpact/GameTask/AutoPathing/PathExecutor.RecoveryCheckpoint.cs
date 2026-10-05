@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -42,9 +43,36 @@ public partial class PathExecutor
         if (resumeIndex < 0 || resumeIndex >= segment.Count) return "checkpoint-out-of-range";
         if (segment[0].Type != WaypointType.Teleport.Code) return "original-entry-not-teleport";
         for (var index = 0; index < resumeIndex; index++)
-            if (segment[index].Action == ActionEnum.CombatScript.Code && !CanSkipCompletedHealingMacro(segment[index]))
+            if (segment[index].Action == ActionEnum.CombatScript.Code && !CanSkipCompletedHealingMacro(segment[index]) &&
+                !CanReplayHealingEntryMacro(segment, index))
                 return "unsafe-macro-prefix:index=" + index;
         return null;
+    }
+
+    // 实际矿路在传送入口用短位移和一次角色战技离开锚点。回血后从同一个
+    // 传送入口重新建立这些状态；不把后续交互、攻击、匿名物理宏认作可重放前缀。
+    private static bool CanReplayHealingEntryMacro(IReadOnlyList<WaypointForTrack> segment, int index)
+    {
+        if (index != 1 || segment[index].Type != WaypointType.Path.Code ||
+            segment[index].X != segment[0].X || segment[index].Y != segment[0].Y ||
+            !Equals(segment[index].MapLayerSelector, segment[0].MapLayerSelector) ||
+            segment[index].CombatScript?.CombatCommands is not { Count: > 0 } commands) return false;
+        var actor = commands[0].Name;
+        if (string.IsNullOrWhiteSpace(actor) || actor == CombatScriptParser.CurrentAvatarName) return false;
+        var skillCount = 0;
+        var movementSeconds = 0d;
+        foreach (var command in commands)
+        {
+            if (command.Name != actor || command.RequiresFlow) return false;
+            if (command.Method == Method.Skill && command.Args is null or { Count: 0 }) skillCount++;
+            else if ((command.Method == Method.W || command.Method == Method.A || command.Method == Method.S || command.Method == Method.D) &&
+                     command.Args is { Count: 1 } args &&
+                     double.TryParse(args[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) &&
+                     double.IsFinite(seconds) && seconds is > 0 and <= 1)
+                movementSeconds += seconds;
+            else return false;
+        }
+        return skillCount == 1 && movementSeconds is > 0 and <= 2;
     }
 
     private async Task RecoverAtStatueAndRestartAsync(CaptureFrameStamp before)

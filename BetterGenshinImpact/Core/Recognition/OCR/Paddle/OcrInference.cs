@@ -7,6 +7,7 @@ internal static class OcrInference
 {
     internal static T Run<T>(Func<RunOptions, T> run)
     {
+        using var measured = GameTask.Common.Ui.UiOperation.Current?.Measure(GameTask.Common.Ui.UiOperationPhase.OcrInference);
         var token = RecognitionExecutionScope.Token;
         token.ThrowIfCancellationRequested();
         using var options = new RunOptions();

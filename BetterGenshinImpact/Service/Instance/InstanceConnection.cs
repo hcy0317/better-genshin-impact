@@ -67,6 +67,11 @@ internal sealed class InstanceConnection : IAsyncDisposable
 
     internal bool IsStarted => _receiveTask is not null;
 
+    // ConnectionOpen 也用于启动前探测；正式实例进入接收循环并完成订阅后才可接任务。
+    private int _childSessionReady;
+    internal bool IsChildSessionReady => Volatile.Read(ref _childSessionReady) != 0;
+    internal void MarkChildSessionReady() => Volatile.Write(ref _childSessionReady, 1);
+
     internal void Start(CancellationToken cancellationToken)
     {
         _linkedCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(

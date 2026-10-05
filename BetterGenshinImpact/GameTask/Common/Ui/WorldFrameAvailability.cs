@@ -64,6 +64,32 @@ internal static class WorldFrameAvailability
                 Math.Abs(value.Item1 - reference.Item1) > 8 || Math.Abs(value.Item2 - reference.Item2) > 8)) return false;
             first = value;
         }
-        return true;
+        // 岩壁等大块暗蓝背景也能通过四点采样。必须再有独立的、有界矩形
+        // 面板证据，才能让OCR失败否决正常HUD；不能把均匀世界背景当弹窗。
+        using var center = new Mat(image.SrcMat, new Rect(image.Width * 30 / 100, image.Height * 40 / 100,
+            image.Width * 40 / 100, image.Height * 20 / 100));
+        using var mask = new Mat();
+        var color = first!.Value;
+        Cv2.InRange(center, new Scalar(color.Item0 - 8, color.Item1 - 8, color.Item2 - 8, 0),
+            new Scalar(color.Item0 + 8, color.Item1 + 8, color.Item2 + 8, 255), mask);
+        using var labels = new Mat();
+        using var stats = new Mat();
+        using var centroids = new Mat();
+        var count = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centroids,
+            PixelConnectivity.Connectivity4, MatType.CV_32S);
+        for (var i = 1; i < count; i++)
+        {
+            var x = stats.At<int>(i, 0);
+            var y = stats.At<int>(i, 1);
+            var width = stats.At<int>(i, 2);
+            var height = stats.At<int>(i, 3);
+            if (x <= 0 || y <= 0 || x + width >= center.Width || y + height >= center.Height) continue;
+            if (width < image.Width * .28 || width > image.Width * .36 ||
+                height < image.Height * .06 || height > image.Height * .12) continue;
+            if (Math.Abs(x + width / 2d - center.Width / 2d) > image.Width * .02 ||
+                Math.Abs(y + height / 2d - center.Height / 2d) > image.Height * .02) continue;
+            if (stats.At<int>(i, 4) >= width * height * .75) return true;
+        }
+        return false;
     }
 }
