@@ -10,6 +10,16 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiHandoffRecoveryTests
 {
     [Fact]
+    public async Task OrdinaryClimbingMustDetachBeforeHandoff()
+    {
+        var driver = new Replay { Ordinary = true, Climbing = true, DetachSucceeds = true };
+        using var parent = UiOperation.Begin("caller", TimeSpan.FromSeconds(5), clock: driver.Time);
+        await UiHandoffRecovery.RecoverAsync(driver, _ => throw new Exception("not low hp"), default, driver.Time);
+        Assert.Equal(1, driver.DetachCalls);
+        Assert.False(driver.Climbing);
+    }
+
+    [Fact]
     public async Task OrdinaryLowHpRecoversBeforeHandoffWithoutChangingFailedOutcome()
     {
         var driver = new Replay { Ordinary = true, LowHp = true };
@@ -206,6 +216,8 @@ public class UiHandoffRecoveryTests
         internal bool Ordinary;
         internal bool UnknownIdentity, ControlMissing, Climbing, Flying, Rejected, LowHp, RepeatFrame, Breakout, Controlled;
         internal int OrdinaryFrames;
+        internal bool DetachSucceeds;
+        internal int DetachCalls;
         public Replay() => _source = new(Time);
         internal void ChangeSource() => _source = new(Time);
         public UiSnapshot Capture()
@@ -226,6 +238,12 @@ public class UiHandoffRecoveryTests
             return Task.CompletedTask;
         }
         public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
-            => throw new InvalidOperationException("No UI input expected in the recorded handoff");
+        {
+            ct.ThrowIfCancellationRequested();
+            if (action.ToString() != "DetachClimb") throw new InvalidOperationException("Unexpected UI input");
+            DetachCalls++;
+            if (DetachSucceeds) Climbing = false;
+            return Task.FromResult(true);
+        }
     }
 }

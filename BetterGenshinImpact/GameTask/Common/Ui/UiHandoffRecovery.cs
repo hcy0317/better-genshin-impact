@@ -23,6 +23,8 @@ internal static class UiHandoffRecovery
             var recoveryUsed = false;
             var ordinaryFrames = 0;
             var recoveryFrames = 0;
+            var climbingFrames = 0;
+            var detachAttempts = 0;
             while (true)
             {
                 operation.Check();
@@ -33,10 +35,25 @@ internal static class UiHandoffRecovery
                     throw new InvalidOperationException("跨脚本恢复期间采集会话改变，禁止交接");
                 var fresh = observed.SourceBound && observed.HasUsableEvidence && observed.IsAfter(last) &&
                     (fence == null || fence.Value.Accepts(observed.SourceStamp));
-                if (!fresh) { ordinaryFrames = 0; recoveryFrames = 0; }
+                if (!fresh) { ordinaryFrames = 0; recoveryFrames = 0; climbingFrames = 0; }
                 else
                 {
                     last = observed;
+                    climbingFrames = observed.CanDetachClimb ? climbingFrames + 1 : 0;
+                    if (climbingFrames >= 2 && detachAttempts < 2)
+                    {
+                        var applied = await operation.InvokeActionAsync(UiAction.DetachClimb,
+                            () => driver.ActAsync(UiAction.DetachClimb, observed, operation.Token), ++detachAttempts, 2);
+                        operation.Check();
+                        if (applied)
+                        {
+                            driver.MarkInputCompleted(observed);
+                            fence = new(observed.SourceStamp, (clock ?? TimeProvider.System).GetTimestamp());
+                        }
+                        ordinaryFrames = recoveryFrames = climbingFrames = 0;
+                        await driver.DelayAsync(300, operation.Token);
+                        continue;
+                    }
                     var world = observed.World;
                     var ready = observed.Matches(UiTarget.Overworld) && world is
                         { OrdinaryAvatarHud: true, Transformed: false, ControlObserved: true,
