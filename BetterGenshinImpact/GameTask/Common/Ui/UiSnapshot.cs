@@ -5,7 +5,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal enum UiTarget { Main, Overworld, DomainMain, Party, PartyList, PartyOrMain, Menu, Crafting }
-internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward }
+internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward, DetachClimb }
 
 internal enum UiReadinessKind { Ready, TemporarilyUnavailable, Unknown, Terminal }
 internal readonly record struct UiReadiness(UiReadinessKind Kind, string Reason, bool CanProbe = false);
@@ -97,6 +97,9 @@ internal sealed record UiSnapshot(long FrameId)
         && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook && !TimeSetting && !Cannon && !DomainTip.IsCandidate && !DomainExit.Visible && !Reward.IsCandidate;
     public bool MapReady => HasUsableEvidence && BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
         && !FullPartyDefeat && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook && !TimeSetting && !Reward.IsCandidate;
+    public bool CanDetachClimb => Matches(UiTarget.Overworld) && World is
+        { OrdinaryAvatarHud: true, Transformed: false, ControlObserved: true, KeyboardBreakout: false,
+          PartyRejected: false, Motion: MotionStatus.Climb };
     // Domain-tip words alone do not grant Escape. A reward candidate blocks
     // background-page input until the overlay is positively identified or gone.
     public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !Reward.IsCandidate && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || TimeSetting || Cannon || CanConfirmDomainExit);

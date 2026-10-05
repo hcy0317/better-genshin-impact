@@ -10,6 +10,58 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PreciseApproachRecoveryTests
 {
     [Fact]
+    public async Task GroundApproachDetachesFromPillarBeforeResumingMovement()
+    {
+        var detached = false;
+        var replay = new PathReplay { EmitReceipts = true };
+        replay.MotionAt = _ => detached ? MotionStatus.Normal : MotionStatus.Climb;
+        replay.PositionAt = _ => detached ? new Point2f(100, 100) : new Point2f(103, 100);
+        replay.OnInput = (action, type) => { if (action == GIActions.Drop && type == KeyType.KeyUp) detached = true; };
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        Assert.True(detached);
+        Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Drop && x.Type == KeyType.KeyDown));
+        Assert.Contains(300, replay.Delays);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task DetachMustLandBeforeDistanceCanConfirmArrival()
+    {
+        var detached = false;
+        var afterDrop = 0;
+        var replay = new PathReplay { EmitReceipts = true };
+        replay.MotionAt = _ => !detached ? MotionStatus.Climb : ++afterDrop <= 3 ? MotionStatus.Fly : MotionStatus.Normal;
+        replay.PositionAt = _ => detached ? new Point2f(100, 100) : new Point2f(103, 100);
+        replay.OnInput = (action, type) => { if (action == GIActions.Drop && type == KeyType.KeyUp) detached = true; };
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        Assert.True(afterDrop >= 4);
+        Assert.DoesNotContain(replay.Inputs, x => x.Action == GIActions.MoveForward && x.Type == KeyType.KeyDown);
+    }
+
+    [Fact]
+    public async Task GroundApproachCannotPulseForwardWhileStillClimbing()
+    {
+        var replay = new PathReplay { EmitReceipts = true, MotionAt = _ => MotionStatus.Climb,
+            PositionAt = _ => new Point2f(103, 100) };
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+        Assert.Equal(2, replay.Inputs.Count(x => x.Action == GIActions.Drop && x.Type == KeyType.KeyDown));
+        Assert.DoesNotContain(replay.Inputs, x => x.Action == GIActions.MoveForward && x.Type == KeyType.KeyDown);
+    }
+
+    [Fact]
+    public async Task CancelledDetachStillReleasesDropAndNeverReportsArrival()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true,
+            MotionAt = _ => MotionStatus.Climb, PositionAt = _ => new Point2f(103, 100) };
+        replay.AfterDelay = ms => { if (ms == 60) cancellation.Cancel(); };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+        Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Drop && x.Type == KeyType.KeyDown));
+        Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Drop && x.Type == KeyType.KeyUp));
+        Assert.DoesNotContain(replay.Inputs, x => x.Action == GIActions.MoveForward && x.Type == KeyType.KeyDown);
+    }
+
+    [Fact]
     public async Task NextPositionCaptureWaitsForGameResponseAfterMovementRelease()
     {
         var replay = new PathReplay { EmitReceipts = true };

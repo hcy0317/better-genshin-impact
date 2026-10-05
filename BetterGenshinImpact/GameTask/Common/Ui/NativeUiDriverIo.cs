@@ -83,6 +83,12 @@ internal sealed class NativeUiDriverIo
     {
         switch (action)
         {
+            case UiAction.DetachClimb:
+                var dropKey = GIActions.Drop.ToActionKey().ToVK();
+                UiEscapeInput.Run(admission,
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyDown(dropKey),
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(dropKey), Thread.Sleep, "攀爬脱离");
+                return true;
             case UiAction.OpenParty:
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.OpenPartySetupScreen);
                 return true;

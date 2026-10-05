@@ -184,6 +184,15 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         switch (action)
         {
+            case UiAction.DetachClimb when observed.CanDetachClimb && current.CanDetachClimb && current.IsAfter(observed):
+                void AdmitDetachInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!current.CanDetachClimb || !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                        throw new InvalidOperationException("攀爬脱离来源在输入前失效。");
+                }
+                return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitDetachInput)));
             case UiAction.DismissReward when observed.CanDismissReward && current.CanDismissReward && current.IsAfter(observed) &&
                 observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
                 current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge):

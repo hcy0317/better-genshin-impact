@@ -1459,6 +1459,9 @@ public partial class PathExecutor
         Point2f? previousPosition = null;
         PathApproachPulse lastPulse = default;
         var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
+        var climbingFrames = 0;
+        var detachAttempts = 0;
+        CaptureFrameFence? detachFence = null;
         var approachDiagnostics = new PathApproachDiagnostics(waypoint.PathingTaskFileName,
             $"segment={CurWaypoints.Item1 + 1} node={waypoint.Id} move={waypoint.MoveMode} action={waypoint.Action} " +
             $"map={waypoint.MapName} method={waypoint.MapMatchMethod} layer={waypoint.MapLayerSelector}");
@@ -1479,9 +1482,18 @@ public partial class PathExecutor
             operation.Check();
             var observation = ReadMoveObservation(screen, location, previous);
             operation.Check();
-            if (!observation.Valid)
+            if (!observation.Valid || detachFence is { } required && !required.Accepts(observation.Stamp))
             {
                 stationary = 0;
+                climbingFrames = 0;
+                await _moveIo.Delay(100, operation.Token);
+                continue;
+            }
+            if (detachFence != null && observation.Motion is not (MotionStatus.Normal or MotionStatus.Climb))
+            {
+                // 松开攀爬后的下落/未知姿态不算落地，也不消耗小碎步次数。
+                previous = observation.Stamp;
+                stationary = climbingFrames = 0;
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
@@ -1491,6 +1503,41 @@ public partial class PathExecutor
             var distance = Navigation.GetDistance(waypoint, position);
             approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, _moveIo.Logger, location.IsDirect,
                 NavigationFrameEvidence.Read(screen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector), observation.Motion.ToString(), location.Source);
+            // 地面路线误爬到岩壁/钟离柱时，继续短按W不能完成接近；不能把平面距离当落地。
+            // 只在连续两张新鲜普通角色攀爬帧上脱离，保留原步数/期限和后续到达确认。
+            if (observation.Motion == MotionStatus.Climb && waypoint.MoveMode is "walk" or "run" or "dash" &&
+                !_moveIo.Transformed(screen))
+            {
+                _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                previous = observation.Stamp;
+                stationary = 0;
+                if (++climbingFrames < 2) { await _moveIo.Delay(100, operation.Token); continue; }
+                if (detachAttempts >= 2) throw new RetryException("精确接近脱离攀爬后仍未落地，重试当前路线分段");
+                _moveIo.CheckInput();
+                operation.Check();
+                void Down()
+                {
+                    using var admission = new Fischless.WindowsInput.InputDispatchCapture(() =>
+                    {
+                        operation.Check();
+                        if (!observation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2)))
+                            throw new RetryException("攀爬脱离输入前原帧过期");
+                    });
+                    _moveIo.Send(GIActions.Drop, KeyType.KeyDown);
+                }
+                detachAttempts++;
+                var dropped = await PathApproachDiagnostics.RunPulseAsync(Down,
+                    () => _moveIo.Send(GIActions.Drop, KeyType.KeyUp), ms => _moveIo.Delay(ms, operation.Token), _moveIo.Clock, screen);
+                if (!dropped.HasCompleteReceipt) throw new RetryException("攀爬脱离输入未确认，不继续移动");
+                detachFence = new(observation.Stamp, _moveIo.Clock.GetTimestamp());
+                previousPosition = null;
+                climbingFrames = 0;
+                _moveIo.Logger.LogDebug("PATH_APPROACH_DETACH attempt={Attempt}/2 source={Session}/{Sequence}",
+                    detachAttempts, observation.Stamp.SessionId, observation.Stamp.Sequence);
+                await _moveIo.Delay(300, operation.Token);
+                continue;
+            }
+            climbingFrames = 0;
             if (distance < 2)
             {
                 _moveIo.Logger.LogDebug("已到达路径点");
