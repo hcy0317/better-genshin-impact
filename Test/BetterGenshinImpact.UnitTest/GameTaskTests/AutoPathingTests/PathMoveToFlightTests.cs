@@ -187,6 +187,8 @@ internal sealed class PathReplay
     internal Action? OnGuardianSwitch;
     internal Action<int>? BeforeCapture, AfterDelay;
     internal Action? OnCheckInput;
+    internal Action? OnRotateUntil;
+    internal Action? BeforeMouseDispatch;
     internal Action<GIActions, KeyType>? OnInput;
     internal Func<CaptureFrameStamp, CaptureFrameStamp>? StampTransform;
     private CaptureFrameStamp _stamp;
@@ -201,7 +203,7 @@ internal sealed class PathReplay
             Clock = Clock,
             CheckInput = () => OnCheckInput?.Invoke(),
             CameraOrientation = _ => ReadCamera?.Invoke() ?? CameraAngle, Dpi = () => 1,
-            MouseMove = (x, _) => { MouseInputs.Add((x, Clock.GetUtcNow())); if (!LockCamera) CameraAngle += x / (Math.Abs(x) > 360 ? 4f : Math.Abs(x) > 90 ? 3f : Math.Abs(x) > 10 ? 2f : 1f); },
+            MouseMove = (x, _) => { BeforeMouseDispatch?.Invoke(); if (EmitReceipts) new Fischless.WindowsInput.WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0).DispatchInput(new Vanara.PInvoke.User32.INPUT[1]); MouseInputs.Add((x, Clock.GetUtcNow())); if (!LockCamera) CameraAngle += x / (Math.Abs(x) > 360 ? 4f : Math.Abs(x) > 90 ? 3f : Math.Abs(x) > 10 ? 2f : 1f); },
             Capture = () => { Frames++; BeforeCapture?.Invoke(Frames); if (!_stamp.IsKnown || !Duplicate && (ProducerIntervalMilliseconds == 0 || Clock.GetElapsedTime(_stamp.CapturedTimestamp).TotalMilliseconds >= ProducerIntervalMilliseconds)) _stamp = _source.Next(); var image = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3), 0, 0) { FrameStamp = StampTransform?.Invoke(_stamp) ?? _stamp }; Images.Add(image); return image; },
             Locate = (_, _) => { LocateCalls++; return Task.FromResult(new PathPosition(PositionAt(Frames), 0, Direct)); },
             Motion = _ => MotionAt(Frames), CombatHud = _ => HudAt?.Invoke(Frames) ?? Hud,
@@ -209,7 +211,7 @@ internal sealed class PathReplay
             Availability = _ => AvailabilityAt?.Invoke(Frames) ?? WorldFrameKind.Playable,
             SwitchAvatar = _ => { SwitchCalls++; return Task.CompletedTask; }, EndJudgment = _ => { },
             SwitchGuardianAvatar = _ => { GuardianCalls++; OnGuardianSwitch?.Invoke(); return Task.FromResult<PathGuardianAvatar?>(new("钟离", _ => SkillCalls++)); },
-            RotateUntil = (_, _) => Task.FromResult(RotationSucceeds), RotateStep = (_, _) => 0,
+            RotateUntil = (_, _) => { OnRotateUntil?.Invoke(); return Task.FromResult(RotationSucceeds); }, RotateStep = (_, _) => 0,
             HurryOn = (_, _, _, _, _) => Task.FromResult(false),
             Send = (action, type) => { Inputs.Add((action, type, Clock.GetUtcNow())); if (EmitReceipts) new Fischless.WindowsInput.WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0).DispatchInput(new Vanara.PInvoke.User32.INPUT[1]); if (UiOperation.Current?.Name is "path-climb-recovery" or "path-precise-recovery") RecoveryInputs.Add((action, type, Clock.GetUtcNow())); if (type == KeyType.KeyDown) _held.Add(action); else if (type == KeyType.KeyUp) _held.Remove(action); OnInput?.Invoke(action, type); },
             IsDown = action => _held.Contains(action),

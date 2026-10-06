@@ -5,7 +5,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal enum UiTarget { Main, Overworld, DomainMain, Party, PartyList, PartyOrMain, Menu, Crafting }
-internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward, DetachClimb }
+internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward, DetachClimb, CloseParty }
 
 internal enum UiReadinessKind { Ready, TemporarilyUnavailable, Unknown, Terminal }
 internal readonly record struct UiReadiness(UiReadinessKind Kind, string Reason, bool CanProbe = false);

@@ -101,6 +101,19 @@ public partial class PathExecutor
         Trace("restore-requested", false);
         try
         {
+            var prefix = CurWaypoints.Item2.Take(resumeIndex).Select((waypoint, index) => (waypoint, index))
+                .Where(item => item.waypoint.Action == ActionEnum.CombatScript.Code).Take(8);
+            foreach (var (waypoint, index) in prefix)
+                _moveIo.Logger.LogDebug("PATH_HEALING_PREFIX request={Request} index={Index} position=({X},{Y}) entryPosition=({EntryX},{EntryY}) type={Type} checkpoint={Checkpoint} priorToCheckpoint={Prior} traversalStarted={Started} canSkip={Skip} canReplayEntry={Replay} commands={Commands}; individual action completion not recorded",
+                    request, index, waypoint.X, waypoint.Y, CurWaypoints.Item2[0].X, CurWaypoints.Item2[0].Y,
+                    waypoint.Type, resumeIndex, index < resumeIndex, _segmentHasStartedTraversal,
+                    CanSkipCompletedHealingMacro(waypoint), CanReplayHealingEntryMacro(CurWaypoints.Item2, index),
+                    string.Join(";", waypoint.CombatScript?.CombatCommands.Take(12).Select(command =>
+                        $"actor={command.Name} method={command.Method.Alias[0]} requiresFlow={command.RequiresFlow}") ?? []));
+        }
+        catch { }
+        try
+        {
             await ConfirmHealingRestartAsync(before, TpStatueOfTheSeven, () =>
             {
                 using var frame = _moveIo.Capture();

@@ -12,6 +12,7 @@ namespace BetterGenshinImpact.GameTask.Common.Map;
 
 public class CameraOrientation
 {
+    internal readonly record struct Reading(float Angle, double? Confidence, float? PrimaryAngle, bool FallbackUsed);
     private static readonly MiniMapPreprocessor _coV2 = new();
     
     /// <summary>
@@ -20,9 +21,12 @@ public class CameraOrientation
     /// <param name="mat">完整游戏截图彩色</param>
     /// <returns>角度</returns>
     public static float Compute(Mat mat)
+        => Read(mat).Angle;
+
+    internal static Reading Read(Mat mat)
     {
         using var mimiMap = new Mat(mat, MapAssets.Get(mat.Width, mat.Height).MimiMapRect);
-        return ComputeMiniMap(mimiMap);
+        return ReadMiniMap(mimiMap);
     }
 
     /// <summary>
@@ -31,15 +35,18 @@ public class CameraOrientation
     /// <param name="mat">小地图彩色图</param>
     /// <returns>角度</returns>
     public static float ComputeMiniMap(Mat mat)
+        => ReadMiniMap(mat).Angle;
+
+    private static Reading ReadMiniMap(Mat mat)
     {
        var (angle, confidence)  = _coV2.PredictRotationWithConfidence(mat);
        if (confidence < 0.2)
        {
            Debug.WriteLine($"置信度过低, {confidence}<0.2, 不可靠视角 {angle}");
            Cv2.CvtColor(mat, mat, ColorConversionCodes.BGR2GRAY);
-           return CameraOrientationFromGia.ComputeMiniMap(mat);
+           return new(CameraOrientationFromGia.ComputeMiniMap(mat), confidence, angle, true);
        }
-       return angle;
+       return new(angle, confidence, angle, false);
     }
 
     public static void DrawDirection(ImageRegion region, double angle, string name = "camera", Pen? pen = null)

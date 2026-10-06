@@ -591,7 +591,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private CombatFlowAction? _readinessAction;
         private AvatarSelectionProtocol.Result<ImageRegion>? _selectionResult;
         private bool _selectionTerminal;
-        private bool _selectionUnconfirmedCaptured, _selectionDeadlineCaptured;
+        private bool _selectionUnconfirmedCaptured, _selectionDeadlineCaptured, _selectionMismatchCaptured;
         private bool _selectionBlockedCaptured;
         private CombatControlObservation _selectionControl;
         private CaptureFrameStamp _selectionControlSource;
@@ -885,11 +885,26 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             }
             if (goal.HasSubmittedInput && state != nameof(AvatarSelectionProtocol.Outcome.Ready) && _capture != null)
             {
+                if (!_selectionMismatchCaptured && goal.ElapsedSeconds >= .35 && goal.ObservedIndex.HasValue &&
+                    goal.ObservedSource == _capture.FrameStamp && goal.CanAssistFrom(_capture.FrameStamp))
+                {
+                    _selectionMismatchCaptured = true;
+                    try
+                    {
+                        var request = "selection:" + goal.GoalId;
+                        // 不占用CaptureFault的输入前槽，也不新增热链OCR。
+                        _evidence?.TryCapture(_capture, request, "stable-mismatch", detail, Logger);
+                        _evidence?.RequestWindowFromFrame(request, "stable-mismatch", _capture, detail, Logger);
+                        Logger.LogDebug("SELECTION_BARRIER_EVIDENCE phase=stable-mismatch {Detail}", detail);
+                    }
+                    catch { }
+                }
                 var phase = action.RemainingBudget <= .2 && !_selectionDeadlineCaptured ? "deadline"
                     : goal.ElapsedSeconds >= 1.5 && !_selectionUnconfirmedCaptured ? "unconfirmed" : null;
                 if (phase != null)
                 {
                     _evidence?.CaptureFault(_capture, "selection", goal.GoalId.ToString("N"), phase, detail, Logger);
+                    try { Logger.LogDebug("SELECTION_BARRIER_EVIDENCE {Detail}", detail); } catch { }
                     _evidence?.RequestWindowFromFrame("selection:" + goal.GoalId, phase, _capture, detail, Logger);
                     if (phase == "deadline") _selectionDeadlineCaptured = true;
                     else _selectionUnconfirmedCaptured = true;
@@ -965,7 +980,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _selectionAction = null;
             _selectionActor = null;
             _selectionObservationOnly = false;
-            _selectionUnconfirmedCaptured = _selectionDeadlineCaptured = false;
+            _selectionUnconfirmedCaptured = _selectionDeadlineCaptured = _selectionMismatchCaptured = false;
             _selectionBlockedCaptured = false;
             _selectionControl = default;
             _selectionControlSource = default;

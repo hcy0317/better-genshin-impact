@@ -9,6 +9,31 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PreciseApproachRecoveryTests
 {
+    [Theory]
+    [InlineData(MotionStatus.Climb)]
+    [InlineData(MotionStatus.Fly)]
+    public async Task GroundApproachRechecksMotionAfterRotation(MotionStatus motion)
+    {
+        var rotated = false;
+        var landed = false;
+        var replay = new PathReplay { EmitReceipts = true };
+        replay.OnRotateUntil = () => rotated = true;
+        replay.MotionAt = _ => landed || !rotated ? MotionStatus.Normal : motion;
+        replay.PositionAt = _ => landed ? new Point2f(100, 100) : new Point2f(104, 100);
+        replay.OnInput = (action, type) =>
+        {
+            if (action == GIActions.MoveForward && type == KeyType.KeyDown)
+                Assert.True(landed, "转向后的新帧已攀爬/飞行，不能继续W");
+            if (action == GIActions.Drop && type == KeyType.KeyUp) landed = true;
+        };
+        replay.AfterDelay = ms => { if (motion == MotionStatus.Fly && ms == 100) landed = true; };
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        Assert.True(landed);
+        Assert.DoesNotContain(replay.Inputs, x => x.Action == GIActions.MoveForward && x.Type == KeyType.KeyDown);
+        if (motion == MotionStatus.Climb)
+            Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Drop && x.Type == KeyType.KeyDown));
+    }
+
     [Fact]
     public async Task GroundApproachDetachesFromPillarBeforeResumingMovement()
     {

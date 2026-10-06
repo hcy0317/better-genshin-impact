@@ -6,10 +6,19 @@ using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.GameTask.AutoTrackPath;
 
-internal readonly record struct AreaSelectionObservation(long FrameId, bool MapReady, bool SelectorOpen, bool HasCandidate);
+internal readonly record struct AreaSelectionObservation(long FrameId, bool MapReady, bool SelectorOpen, bool HasCandidate)
+{
+    internal bool? ContentReady { get; init; }
+    internal bool LoadedMap => MapReady && (ContentReady ?? true);
+}
 
 internal static class AreaSelectionClickController
 {
+    internal static void RequireReadyMap(UiSnapshot snapshot)
+    {
+        if (!snapshot.MapReady)
+            throw new InvalidOperationException("区域选择前未确认新鲜大地图，禁止区域识别或点击：" + snapshot.Describe());
+    }
     internal static Task<bool> TryApplyAsync(Func<AreaSelectionObservation> capture,
         Func<int, CancellationToken, Task<bool>> clickFreshCandidate,
         Func<int, CancellationToken, Task> delay, CancellationToken ct,
@@ -21,7 +30,7 @@ internal static class AreaSelectionClickController
             var lastClickAt = TimeSpan.MinValue;
             long lastFrame = 0;
             var stable = 0;
-            (bool, bool, bool)? lastState = null;
+            (bool, bool, bool, bool)? lastState = null;
             while (true)
             {
                 operation.Check();
@@ -30,13 +39,13 @@ internal static class AreaSelectionClickController
                 if (fresh)
                 {
                     lastFrame = observed.FrameId;
-                    stable = clicked && observed.MapReady && !observed.SelectorOpen ? stable + 1 : 0;
+                    stable = clicked && observed.LoadedMap && !observed.SelectorOpen ? stable + 1 : 0;
                 }
                 operation.Observe("区域已点击、选择器关闭且地图连续两帧就绪",
-                    $"mapReady={observed.MapReady},selectorOpen={observed.SelectorOpen},candidate={observed.HasCandidate},clicked={clicked},stable={stable}",
+                    $"mapReady={observed.MapReady},contentReady={observed.LoadedMap},selectorOpen={observed.SelectorOpen},candidate={observed.HasCandidate},clicked={clicked},stable={stable}",
                     observed.FrameId);
                 operation.Check();
-                var state = (observed.MapReady, observed.SelectorOpen, observed.HasCandidate);
+                var state = (observed.MapReady, observed.LoadedMap, observed.SelectorOpen, observed.HasCandidate);
                 if (lastState != state)
                 {
                     logger?.LogDebug("AREA_SELECTION op={Op} frame={Frame} mapReady={Map} selectorOpen={Selector} candidate={Candidate} clicked={Clicked} remainingMs={Remaining}",
@@ -48,7 +57,7 @@ internal static class AreaSelectionClickController
                 {
                     if (stable >= 2) return true;
                     // 先承接前次点击的迟到结果，只有新帧仍显示选择器和候选时才允许再次点击。
-                    if (observed.SelectorOpen && observed.HasCandidate && attempts < 3
+                    if (observed.MapReady && observed.SelectorOpen && observed.HasCandidate && attempts < 3
                         && (!clicked || operation.Elapsed - lastClickAt >= TimeSpan.FromMilliseconds(1500)))
                     {
                         var applied = await clickFreshCandidate(++attempts, operation.Token);

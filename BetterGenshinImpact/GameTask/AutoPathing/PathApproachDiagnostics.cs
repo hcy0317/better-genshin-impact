@@ -32,6 +32,25 @@ internal sealed class PathApproachDiagnostics(string route, string context)
     internal void RecordPulse(PathApproachPulse pulse) => _pulse = pulse;
     internal void RecordRotation(int targetAngle, bool completed) => _rotation = $"targetAngle={targetAngle} completed={completed}";
 
+    internal void Detach(ImageRegion frame, int attempt, string phase, PathMoveObservation observation,
+        PathApproachPulse pulse, string environment, CaptureFrameFence? fence, ILogger logger)
+    {
+        try
+        {
+            var fields = new System.Collections.Generic.Dictionary<string, string>
+            {
+                ["nativeInput"] = pulse.Receipt?.Describe() ?? "not-yet-submitted",
+                ["nativeInputEnvironment"] = environment,
+                ["detachFence"] = $"source={fence?.Before.SessionId}/{fence?.Before.Sequence} completed={fence?.InputCompletedTimestamp} accepted={fence?.Accepts(frame.FrameStamp)}"
+            };
+            var detail = $"route={route} {context} attempt={attempt}/2 phase={phase} position={observation.Position} motion={observation.Motion} valid={observation.Valid}";
+            DiagnosticEvidenceScope.Current?.TryCapture(frame, _request, $"detach-{attempt}-{phase}", detail, logger, fields: fields);
+            logger.LogDebug("PATH_APPROACH_DETACH_EVIDENCE request={Request} {Detail} receipt={Receipt} environment={Environment}",
+                _request, detail, fields["nativeInput"], environment);
+        }
+        catch { }
+    }
+
     internal void Exhausted(ImageRegion frame, PathPosition position, Point2f target, string motion, ILogger logger)
     {
         try

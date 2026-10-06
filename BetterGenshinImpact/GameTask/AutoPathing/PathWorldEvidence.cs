@@ -23,6 +23,8 @@ internal sealed class PathWorldEvidence
     private string? _lastSaurian;
     private int _layoutChanges;
     private CaptureFrameStamp _firstSource;
+    private string? _terminalSaurian;
+    private CaptureFrameStamp _terminalSource;
 
     internal PathWorldEvidence(PathMoveToIo io)
     {
@@ -65,7 +67,9 @@ internal sealed class PathWorldEvidence
         ["world:last"] = _last,
         ["world:firstSource"] = $"{_firstSource.SessionId}/{_firstSource.Sequence}",
         ["world:firstSaurian"] = _firstSaurian ?? "not-observed",
-        ["world:lastSaurian"] = _lastSaurian ?? "not-observed"
+        ["world:lastSaurian"] = _lastSaurian ?? "not-observed",
+        ["world:terminalSaurian"] = _terminalSaurian ?? "not-observed",
+        ["world:terminalSource"] = $"{_terminalSource.SessionId}/{_terminalSource.Sequence}"
     };
 
     internal void Recovered(ImageRegion frame)
@@ -85,6 +89,11 @@ internal sealed class PathWorldEvidence
         if (error is OperationCanceledException) return;
         try
         {
+            if (frame != null)
+            {
+                _terminalSource = frame.FrameStamp;
+                _terminalSaurian = SaurianUiReader.Describe(frame);
+            }
             var fields = Fields();
             var failure = error.GetType().Name + ":" + error.Message;
             fields["world:failure"] = failure.Length > 512 ? failure[..512] : failure;

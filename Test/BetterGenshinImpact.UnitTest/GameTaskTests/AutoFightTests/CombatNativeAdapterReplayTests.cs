@@ -1129,7 +1129,12 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         await evidence.DisposeAsync();
         Assert.DoesNotContain(saved, item => item.Phase == "selection-before-submit");
         var failures = saved.Where(item => item.Phase != "selection-before-submit").ToArray();
-        if (!blocked) Assert.Empty(failures);
+        if (!blocked)
+        {
+            // 迟于350ms才切换成功的目标也保留早期稳定不匹配现场，不是失败判定。
+            Assert.All(failures, item => Assert.Equal("stable-mismatch", item.Phase));
+            Assert.Single(failures.Where(item => item.Window == null));
+        }
         else
         {
             Assert.Empty(io.Inputs);
@@ -1163,6 +1168,17 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Contains("startedTimestamp=", before.Detail);
         Assert.Contains("completedTimestamp=", before.Detail);
         Assert.Contains(saved, item => item.Window != null && item.Detail.Contains("nativeRequested=2"));
+        var early = saved.Where(item => item.Phase == "stable-mismatch" && item.Window == null).ToArray();
+        if (uncertain) Assert.Empty(early);
+        else
+        {
+            var mismatch = Assert.Single(early);
+            Assert.Contains(io.ActiveObservations, observed => observed.Source == mismatch.Source &&
+                mismatch.Detail.Contains("actual=" + observed.Index));
+            Assert.True(mismatch.Source.IsAfter(before.Source));
+            Assert.True((mismatch.Source.CapturedAt - before.Source.CapturedAt).TotalMilliseconds >= 350);
+            Assert.Contains(saved, item => item.Phase == "unconfirmed");
+        }
         Assert.Empty(io.Inputs);
     }
 

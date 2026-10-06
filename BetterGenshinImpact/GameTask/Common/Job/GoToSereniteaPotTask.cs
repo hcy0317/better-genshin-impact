@@ -87,11 +87,9 @@ internal class GoToSereniteaPotTask
 
         await Delay(200, ct);
 
-        InputHub.Background.SimulateAction(GIActions.OpenMap); // 打开地图
-        await Delay(900, ct);
-
         // 进入 壶
         TpTask tpTask = new TpTask(ct);
+        await tpTask.OpenBigMapUi();
         await tpTask.SwitchArea("尘歌壶");
         
         // 若未找到 ElementAssets.Instance.SereniteaPotRo 就是已经在尘歌壶了

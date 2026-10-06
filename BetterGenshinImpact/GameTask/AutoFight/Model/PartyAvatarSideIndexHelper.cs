@@ -117,18 +117,20 @@ public class PartyAvatarSideIndexHelper
         return new Rect(currRect.X + (int)(126 * s), currRect.Y - (int)(194 * s), (int)(16 * s), (int)(17 * s));
     }
 
-    public static (List<Rect>, List<Rect>) GetAllIndexRects(ImageRegion imageRegion, MultiGameStatus multiGameStatus, ILogger logger, ISystemInfo systemInfo)
+    public static (List<Rect>, List<Rect>) GetAllIndexRects(ImageRegion imageRegion, MultiGameStatus multiGameStatus, ILogger logger, ISystemInfo systemInfo,
+        Action<string, Rect[], Rect?, string?>? diagnostic = null)
     {
         try
         {
             // 新的动态获取角色编号位置逻辑
-            return GetAllIndexRectsNew(imageRegion, multiGameStatus, logger, systemInfo);
+            return GetAllIndexRectsNew(imageRegion, multiGameStatus, logger, systemInfo, diagnostic);
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "使用新方法获取角色编号位置失败");
             logger.LogWarning("使用新方法获取角色编号位置失败，原因：" + ex.Message);
             logger.LogWarning("尝试使用旧的写死位置逻辑");
+            try { diagnostic?.Invoke("legacy", [], null, ex.Message); } catch { }
             // 旧的写死位置逻辑
             return GetAllIndexRectsOld(imageRegion, multiGameStatus);
         }
@@ -171,7 +173,8 @@ public class PartyAvatarSideIndexHelper
         return imageRegion.Find(ElementRecognition.Get("CurrentAvatarThreshold", imageRegion)).IsExist();
     }
 
-    public static (List<Rect>, List<Rect>) GetAllIndexRectsNew(ImageRegion imageRegion, MultiGameStatus multiGameStatus, ILogger logger, ISystemInfo systemInfo)
+    public static (List<Rect>, List<Rect>) GetAllIndexRectsNew(ImageRegion imageRegion, MultiGameStatus multiGameStatus, ILogger logger, ISystemInfo systemInfo,
+        Action<string, Rect[], Rect?, string?>? diagnostic = null)
     {
         // 找到编号块
         var i1 = imageRegion.Find(ElementRecognition.Get("Index1", imageRegion));
@@ -180,6 +183,7 @@ public class PartyAvatarSideIndexHelper
         var i4 = imageRegion.Find(ElementRecognition.Get("Index4", imageRegion));
         List<Rect> indexRectList = [i1.ToRect(), i2.ToRect(), i3.ToRect(), i4.ToRect()];
         int existNum = indexRectList.Count(indexRect => indexRect != default);
+        try { diagnostic?.Invoke("dynamic-indices", indexRectList.ToArray(), null, null); } catch { }
         if (existNum == multiGameStatus.MaxControlAvatarCount)
         {
             // 识别存在个数和当前能控制的最大角色数相等,意味者全部识别,直接返回
@@ -191,6 +195,7 @@ public class PartyAvatarSideIndexHelper
             // 为什么这里要用箭头确认一遍？因为出战角色编号框的识别率不是100%，需要用箭头来辅助确认。这也是为了保证非满队情况下的队伍识别率
             // 非出战角色编号框识别率100%
             var curr = imageRegion.Find(ElementRecognition.Get("CurrentAvatarThreshold", imageRegion)); // 当前出战角色标识
+            try { diagnostic?.Invoke("dynamic-arrow", indexRectList.ToArray(), curr.ToRect(), null); } catch { }
             if (curr.IsExist())
             {
                 var (knownIndex, knownRect) = GetKnownIndexAndRect(indexRectList);

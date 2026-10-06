@@ -9,6 +9,23 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class PathingMacroEvidenceTests
 {
     [Fact]
+    public async Task DeadlineWindowKeepsTheExactLastObservationAndOriginalBoundary()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var evidence = new PathingMacroEvidence("node=7", "keypress(f)");
+        var deadline = TimeProvider.System.GetTimestamp() + TimeProvider.System.TimestampFrequency;
+        evidence.Boundary(12, deadline, deadline - 60);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        evidence.Capture(frame, "cannon-handshake-complete", new(PathingMacroScene.World, frame.FrameStamp));
+        evidence.Failed(new InvalidOperationException("deadline crossed while waiting; no next frame"));
+        evidence.End();
+        await scope.DisposeAsync();
+        Assert.Contains(saved, item => item.Phase == "macro-last-observation" && item.Source == frame.FrameStamp);
+        Assert.Contains(saved, item => item.Fields?["macro:boundary"].Contains("commandIndex=12") == true);
+    }
+    [Fact]
     public async Task RepeatedCannonBoundariesKeepEachInputsFirstUnknownAndKnownFrame()
     {
         var saved = new List<DiagnosticEvidence>();

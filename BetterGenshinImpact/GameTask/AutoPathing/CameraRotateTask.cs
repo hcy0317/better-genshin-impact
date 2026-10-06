@@ -10,6 +10,7 @@ using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using Fischless.GameCapture;
+using BetterGenshinImpact.GameTask.Common;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
 
@@ -29,21 +30,28 @@ public class CameraRotateTask(CancellationToken ct)
     public float RotateToApproach(float targetOrientation, ImageRegion imageRegion)
         => RotateToApproach(targetOrientation, imageRegion, null);
 
-    private float RotateToApproach(float targetOrientation, ImageRegion imageRegion, PathRecoveryScope? scope)
+    private float RotateToApproach(float targetOrientation, ImageRegion imageRegion, PathRecoveryScope? scope,
+        int tolerance = 0, Action<CaptureFrameFence>? onInput = null, DateTimeOffset? waitDeadline = null)
     {
         var io = scope?.Io ?? NativeIo;
+        bool Expired() => waitDeadline is { } local && io.Clock.GetUtcNow() >= local ||
+            Deadline?.Invoke() is { } parent && io.Clock.GetUtcNow() >= parent;
         ct.ThrowIfCancellationRequested();
         if (!PathWorldAvailability.IsPlayable(io, imageRegion)) return float.NaN;
-        var cao = io.CameraOrientation(imageRegion);
+        var reading = io.CameraReading?.Invoke(imageRegion) ?? new CameraOrientation.Reading(io.CameraOrientation(imageRegion), null, null, false);
+        var cao = reading.Angle;
         if (!float.IsFinite(cao) || !float.IsFinite(targetOrientation) ||
             !imageRegion.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge)) return float.NaN;
         scope?.Check();
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
-        if (Deadline?.Invoke() is { } observedDeadline && io.Clock.GetUtcNow() >= observedDeadline) return float.NaN;
+        if (Expired()) return float.NaN;
         var diff = (cao - targetOrientation + 180) % 360 - 180;
         diff += diff < -180 ? 360 : 0;
-        if (diff == 0)
+        try { if (onInput != null) io.Logger.LogDebug("CAMERA_ROTATION_OBSERVATION source={Session}/{Sequence} angle={Angle} primaryAngle={Primary} confidence={Confidence} fallbackUsed={Fallback} target={Target} diff={Diff}",
+            imageRegion.FrameStamp.SessionId, imageRegion.FrameStamp.Sequence, cao, reading.PrimaryAngle, reading.Confidence,
+            reading.FallbackUsed, targetOrientation, diff); } catch { }
+        if (diff == 0 || Math.Abs(diff) < tolerance)
         {
             return diff;
         }
@@ -64,13 +72,39 @@ public class CameraRotateTask(CancellationToken ct)
             controlRatio = 2;
         }
 
-        var movement = (int)Math.Round(-controlRatio * diff * io.Dpi());
+        var dpi = io.Dpi();
+        var movement = (int)Math.Round(-controlRatio * diff * dpi);
         scope?.Check();
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
-        if (Deadline?.Invoke() is { } deadline && io.Clock.GetUtcNow() >= deadline) return float.NaN;
+        if (Expired()) return float.NaN;
         if (!imageRegion.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge)) return float.NaN;
-        io.MouseMove(movement, 0);
+        if (onInput == null) { io.MouseMove(movement, 0); return diff; }
+        using var input = new DiagnosticInputAttempt(io.Clock);
+        using var admission = new Fischless.WindowsInput.InputDispatchCapture(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            scope?.Check();
+            UiOperation.Current?.Check();
+            if (Expired()) throw new AutoGeniusInvokation.Exception.RetryException("视角输入准备已耗尽原期限");
+            if (!imageRegion.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge))
+                throw new AutoGeniusInvokation.Exception.RetryException("视角输入准备后原帧过期");
+        });
+        Exception? failure = null;
+        try { io.MouseMove(movement, 0); }
+        catch (Exception error) { failure = error; throw; }
+        finally
+        {
+            var receipt = input.Complete(failure == null, failure);
+            try
+            {
+                io.Logger.LogDebug("CAMERA_ROTATION_INPUT source={Session}/{Sequence} from={Angle} target={Target} diff={Diff} pixels={Pixels} dpi={Dpi} receipt={Receipt}",
+                    imageRegion.FrameStamp.SessionId, imageRegion.FrameStamp.Sequence, cao, targetOrientation, diff,
+                    movement, dpi, receipt.Describe());
+            }
+            catch { }
+        }
+        onInput?.Invoke(new(imageRegion.FrameStamp, io.Clock.GetTimestamp()));
         return diff;
     }
 
@@ -92,6 +126,7 @@ public class CameraRotateTask(CancellationToken ct)
         var unchanged = 0;
         float? previousDiff = null;
         CaptureFrameStamp previous = default;
+        CaptureFrameFence? inputFence = null;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -99,15 +134,22 @@ public class CameraRotateTask(CancellationToken ct)
             using var screen = await PathWorldAvailability.CapturePlayableAsync(io, deadline, ct, () => scope?.Check());
             scope?.Check();
             if (scope != null) await scope.BeforeInputAsync();
-            if (previous.IsKnown && !screen.FrameStamp.IsAfter(previous))
+            if (previous.IsKnown && !screen.FrameStamp.IsAfter(previous) ||
+                inputFence is { } required && !required.Accepts(screen.FrameStamp))
             {
                 await io.Delay(50, ct);
                 continue;
             }
             previous = screen.FrameStamp;
-            var diff = RotateToApproach(targetOrientation, screen, scope);
+            var diff = RotateToApproach(targetOrientation, screen, scope, maxDiff, fence => inputFence = fence, deadline);
             if (!float.IsFinite(diff)) return false;
-            if (Math.Abs(diff) < maxDiff) return true;
+            if (Math.Abs(diff) < maxDiff)
+            {
+                try { io.Logger.LogDebug("CAMERA_ROTATION_FEEDBACK source={Session}/{Sequence} target={Target} diff={Diff} inputFenceAccepted={Accepted}",
+                    screen.FrameStamp.SessionId, screen.FrameStamp.Sequence, targetOrientation, diff, inputFence?.Accepts(screen.FrameStamp)); }
+                catch { }
+                return true;
+            }
             unchanged = previousDiff.HasValue && Math.Abs(diff - previousDiff.Value) < 0.1f ? unchanged + 1 : 0;
             previousDiff = diff;
             if (++count >= maxTryTimes || unchanged >= 10)
@@ -116,8 +158,8 @@ public class CameraRotateTask(CancellationToken ct)
                 return false;
             }
 
-            if (scope != null) await scope.DelayAsync(50);
-            else await io.Delay(50, ct);
+            if (scope != null) await scope.DelayAsync(60);
+            else await io.Delay(60, ct);
         }
     }
 }

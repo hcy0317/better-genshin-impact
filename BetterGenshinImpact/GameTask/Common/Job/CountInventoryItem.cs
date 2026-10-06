@@ -192,12 +192,15 @@ namespace BetterGenshinImpact.GameTask.Common.Job
             GridScreen gridScreen = new GridScreen(CreateGridParams(page), logger, ct);
             var diagnosticRequest = "inventory:" + Guid.NewGuid().ToString("N");
             var diagnosticPage = 0;
+            Fischless.GameCapture.CaptureFrameStamp diagnosticSource = default;
             gridScreen.OnPageCaptured += frame =>
             {
                 try
                 {
                     diagnosticPage++;
                     DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
+                    diagnosticSource = frame.FrameStamp;
+                    DiagnosticEvidenceScope.Current?.RememberExactFrame("inventory", diagnosticRequest, frame);
                     if (diagnosticPage <= 12)
                         DiagnosticEvidenceScope.Current?.TryCapture(frame, diagnosticRequest, "page-" + diagnosticPage,
                             $"grid={page} page={diagnosticPage} targetCount={pageItemNames.Count}; original scan page", logger);
@@ -212,7 +215,7 @@ namespace BetterGenshinImpact.GameTask.Common.Job
 
             // 本页尚未找到的目标物品
             List<string> notFound = pageItemNames.Where(name => !results.ContainsKey(name)).ToList();
-
+            Exception? scanFailure = null;
             try
             {
                 // 如果包含武器页的武器经验道具，直接翻页到最底部
@@ -263,21 +266,50 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                     }
                 }
             }
+            catch (Exception error) { scanFailure = error; throw; }
             finally
             {
-                TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll();
+                try
+                {
+                    try { observation?.FinishPage(); }
+                    catch (Exception error)
+                    {
+                        if (scanFailure == null) { scanFailure = error; throw; }
+                        // 终页收束失败不覆盖原扫描异常。
+                    }
+                    finally
+                    {
+                        try
+                        {
+                            var termination = scanFailure is OperationCanceledException ? "scan-cancelled"
+                                : scanFailure != null ? "scan-failed:" + scanFailure.GetType().Name : "scan-loop-ended";
+                            var snapshot = evidence?.Finish(results, scanFailure == null ? null : termination);
+                            var fields = new Dictionary<string, string>
+                            {
+                                ["inventory:termination"] = termination,
+                                ["inventory:coverageComplete"] = snapshot?.CoverageComplete.ToString() ?? "not-evaluated",
+                                ["inventory:coverageReason"] = snapshot?.Reason ?? "not-evaluated",
+                                ["inventory:unrecognizedSlots"] = snapshot?.UnrecognizedSlots.ToString() ?? "not-evaluated"
+                            };
+                            DiagnosticEvidenceScope.Current?.CaptureExactWindow("inventory", diagnosticRequest, diagnosticSource,
+                                "scan-terminal", $"grid={page} pages={diagnosticPage}; last actual scan page, no new capture", logger, fields);
+                            logger.LogDebug("INVENTORY_SCAN_EVIDENCE request={Request} grid={Grid} pages={Pages} missing={Missing} unknownCounts={Unknown} coverageMode={Coverage} coverageComplete={Complete} reason={Reason} unrecognizedSlots={Unrecognized} termination={Termination}",
+                                diagnosticRequest, page, diagnosticPage, notFound.Count,
+                                results.Count(pair => pageItemNames.Contains(pair.Key) && pair.Value < 0), evidence != null,
+                                snapshot?.CoverageComplete, snapshot?.Reason ?? "not-evaluated", snapshot?.UnrecognizedSlots, termination);
+                            if (notFound.Count > 0)
+                                DiagnosticEvidenceScope.Current?.RequestLatestWindow(diagnosticRequest, "inventory-unresolved",
+                                    $"grid={page} pages={diagnosticPage} missingCount={notFound.Count}; unknown remains unknown", logger, fields);
+                        }
+                        catch { }
+                    }
+                }
+                finally
+                {
+                    DiagnosticEvidenceScope.Current?.ForgetExactFrame("inventory", diagnosticRequest);
+                    TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll();
+                }
             }
-            observation?.FinishPage();
-            try
-            {
-                logger.LogDebug("INVENTORY_SCAN_EVIDENCE request={Request} grid={Grid} pages={Pages} missing={Missing} unknownCounts={Unknown} coverageMode={Coverage}",
-                    diagnosticRequest, page, diagnosticPage, notFound.Count,
-                    results.Count(pair => pageItemNames.Contains(pair.Key) && pair.Value < 0), evidence != null);
-                if (notFound.Count > 0)
-                    DiagnosticEvidenceScope.Current?.RequestLatestWindow(diagnosticRequest, "inventory-unresolved",
-                        $"grid={page} pages={diagnosticPage} missingCount={notFound.Count}; last retained frame, not a new capture; unknown remains unknown", logger);
-            }
-            catch { }
         }
 
         private int? ComputeMaxSortOfItem(GridScreenName page, List<string> pageItemNames)

@@ -23,6 +23,9 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     private CaptureFrameFence? _inputFence;
     private readonly KnownHandbookFrame _handbook = new();
     private bool _disposed;
+    private string? _feedbackRequest;
+    private UiAction _feedbackAction;
+    private bool _feedbackCaptured;
 
     internal NativeUiDriver(bool inspectWorld = false) : this(NativeUiDriverIo.CreateNative(inspectWorld)) { }
 
@@ -58,6 +61,17 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         using var image = CaptureMeasured();
         var snapshot = ReadCurrent(image);
+        if (!_feedbackCaptured && _feedbackRequest != null && _inputFence is { } feedbackFence &&
+            feedbackFence.Accepts(image.FrameStamp) && snapshot.HasUsableEvidence)
+        {
+            _feedbackCaptured = true;
+            try
+            {
+                DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(_feedbackRequest, "ui-action-feedback", image,
+                    $"action={_feedbackAction}; {snapshot.Describe()}; inputCompleted={feedbackFence.InputCompletedTimestamp}; observed feedback, not action success");
+            }
+            catch { }
+        }
         return _inputFence is { } fence ? snapshot.AfterInput(fence) : snapshot;
     }
 
@@ -179,11 +193,34 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             (_inputFence is { } fence && !fence.Accepts(current.SourceStamp))) return Task.FromResult(false);
         bool Completed(bool applied)
         {
-            if (applied) MarkInputCompleted(current);
+            if (applied)
+            {
+                MarkInputCompleted(current);
+                if (UiOperation.Current?.Name == "return-main")
+                { _feedbackRequest = "ui-action:" + Guid.NewGuid().ToString("N"); _feedbackAction = action; _feedbackCaptured = false; }
+            }
             return applied;
         }
         switch (action)
         {
+            case UiAction.CloseParty when observed.Matches(UiTarget.Party) && observed.Closable &&
+                current.Matches(UiTarget.Party) && current.Closable && current.IsAfter(observed):
+                using (var close = image.Find(RecognitionAssets.Get("QuickTeleport", "MapCloseButton", image)))
+                {
+                    if (!close.IsExist() || close.X < image.Width * 7 / 8 || close.Y < 0 ||
+                        close.Y + close.Height > image.Height / 8 || close.X + close.Width > image.Width)
+                        return Task.FromResult(false);
+                    void AdmitPartyClose()
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        UiOperation.Current?.Check();
+                        if (!current.Matches(UiTarget.Party) ||
+                            !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                            throw new InvalidOperationException("队伍页关闭按钮来源在输入前失效。");
+                    }
+                    _io.Click(image, new(close.X, close.Y, close.Width, close.Height), AdmitPartyClose);
+                    return Task.FromResult(Completed(true));
+                }
             case UiAction.DetachClimb when observed.CanDetachClimb && current.CanDetachClimb && current.IsAfter(observed):
                 void AdmitDetachInput()
                 {

@@ -7,6 +7,39 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class RuntimeStallDiagnosticsTests
 {
     [Fact]
+    public void SlowReportsSampleSelfProcessWithExplicitWindowAndFastPhasesDoNotSample()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLog();
+        var samples = 0;
+        var probe = new RuntimeStallDiagnostics(logger, "ocr", "scope", clock, () => TimeSpan.Zero,
+            () => new(clock.GetTimestamp(), ++samples * 12, samples * 100, samples * 80));
+        using (probe.Measure("fast")) clock.Advance(TimeSpan.FromMilliseconds(30));
+        Assert.Equal(0, samples);
+        using (probe.Measure("slow")) clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.Contains("unknown:no-earlier-sample", logger.Messages[0]);
+        using (probe.Measure("slow")) clock.Advance(TimeSpan.FromSeconds(3));
+        Assert.Equal(2, samples);
+        Assert.Contains("selfProcessWindowMs=3000", logger.Messages[1]);
+        Assert.Contains("selfCpuDeltaMs=12", logger.Messages[1]);
+        Assert.Contains("selfPrivateBytesDelta=100", logger.Messages[1]);
+        Assert.Contains("selfWorkingSetDelta=80", logger.Messages[1]);
+    }
+
+    [Fact]
+    public void FailedProcessSampleStillReportsOriginalSlowPhase()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLog();
+        var probe = new RuntimeStallDiagnostics(logger, "ocr", "scope", clock, () => TimeSpan.Zero,
+            () => throw new InvalidOperationException("offline sampler failure"));
+        using (probe.Measure("slow")) clock.Advance(TimeSpan.FromSeconds(214));
+        var message = Assert.Single(logger.Messages);
+        Assert.Contains("elapsedMs=214000", message);
+        Assert.Contains("unavailable:sample-failed", message);
+    }
+
+    [Fact]
     public void ActiveWatchReportsBeforeReturnIsBoundedAndStopsOnDispose()
     {
         var clock = new FakeTimeProvider();
