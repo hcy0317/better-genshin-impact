@@ -11,7 +11,7 @@ internal readonly record struct CombatNativeInputRequest(Guid Id, CaptureFrameSt
 internal sealed class CombatInputNotAdmittedException() : Exception("原动作未准入物理输入");
 
 /// <summary>在真正的SendInput边界验证首个输入，并以原生返回数量产生回执；不拥有调度或恢复。</summary>
-internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Action prepare)
+internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Action prepare, Func<string>? observeEnvironment = null)
 {
     internal CombatBattleHostInputResult Submit(CombatNativeInputRequest request, string kind,
         Action send, CancellationToken ct, Action? beforeFirstNative = null)
@@ -19,6 +19,7 @@ internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Acti
         var requestedAt = clock.GetTimestamp();
         long? startedAt = null;
         Exception? failure = null;
+        string environment = "unknown:not-observed";
         void CheckAdmission()
         {
             ct.ThrowIfCancellationRequested();
@@ -36,6 +37,7 @@ internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Acti
             beforeFirstNative?.Invoke();
             CheckAdmission();
             startedAt = clock.GetTimestamp();
+            try { if (observeEnvironment != null) environment = observeEnvironment(); } catch { environment = "unknown:observation-failed"; }
         });
         try
         {
@@ -54,6 +56,9 @@ internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Acti
         };
         try
         {
+            if (observeEnvironment != null) logger.LogDebug("NATIVE_INPUT_ENVIRONMENT request={Request} source={Session}/{Sequence} at={At} context={Context}; submission context, not gameplay acceptance",
+                request.Id, request.Source.SessionId, request.Source.Sequence, startedAt,
+                environment.Length <= 512 ? environment : environment[..512]);
             logger.LogDebug("NATIVE_INPUT_RESULT request={Request} kind={Kind} status={Status} sourceSequence={Source} requested={Requested} submitted={Submitted} uncertain={Uncertain} startedAt={StartedAt} completedAt={CompletedAt} elapsedMs={Elapsed:F3} decisionMs={Decision} reason={Reason} errorType={ErrorType}",
                 request.Id, kind, result.Status, request.Source.Sequence, capture.Requested, capture.Submitted,
                 capture.Uncertain, startedAt, result.CompletedTimestamp, clock.GetElapsedTime(requestedAt).TotalMilliseconds,

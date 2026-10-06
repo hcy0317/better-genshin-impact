@@ -14,6 +14,7 @@ internal sealed class RecognitionExecutionScope : IDisposable
 
     internal static LockLease Enter(object gate)
     {
+        using var pending = GameTask.Common.Ui.UiOperation.Current?.WatchRecognition("ocr-session-lock");
         using var measured = GameTask.Common.Ui.UiOperation.Current?.Measure(GameTask.Common.Ui.UiOperationPhase.RecognitionSessionWait);
         var token = Token;
         token.ThrowIfCancellationRequested();

@@ -507,6 +507,7 @@ public static class AvatarRecognition
                     indicatorEpoch = observationEpoch;
                 }
                 var frameStopwatch = Stopwatch.StartNew();
+                using var activeObservation = stall.Watch("combat-perception-capture-and-recognition");
                 stall.Mark("before-capture", lastSource.Sequence);
                 using (var capture = CaptureToRectArea())
                 {

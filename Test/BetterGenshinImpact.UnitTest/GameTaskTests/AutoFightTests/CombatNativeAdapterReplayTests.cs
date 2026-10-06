@@ -1184,6 +1184,39 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     }
 
     [Theory]
+    [InlineData(1, true)]
+    [InlineData(20, false)]
+    public async Task TemporaryHudLossAfterConfirmedBurstDoesNotFinishTheFragment(double hiddenSeconds, bool completes)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var program = LoadProgram("那维莱特 q(required),attack(.1)");
+        var logger = new SourceIdentityLogger();
+        using var io = new PhysicalReplay(clock, true, 50, program) { Logger = logger, OnSelectionRecovery = () => { } };
+        var hideUntil = double.NaN;
+        var sawCooldown = false;
+        io.AfterBurstCooldownRead = () =>
+        {
+            var now = clock.GetElapsedTime(started).TotalSeconds;
+            if (!sawCooldown) { sawCooldown = true; hideUntil = now + hiddenSeconds; }
+        };
+        io.CombatHudProbe = () => !sawCooldown || clock.GetElapsedTime(started).TotalSeconds >= hideUntil;
+        using var runner = NativeCombatFlowRunner.Create(
+            CombatScriptParser.ParseLineCommands("q,attack(.1)", "那维莱特"), io, false);
+        CombatFlowResult? result = null;
+        var failure = await Record.ExceptionAsync(async () => result = await runner.RunRoundAsync(default));
+        runner.Dispose();
+        AssertNoHostBootstrapFailure(failure);
+        if (completes) { Assert.Null(failure); Assert.Equal(CombatFlowResult.Succeeded, result); }
+        else { Assert.NotEqual(CombatFlowResult.Succeeded, result); Assert.False(double.IsFinite(io.FirstAttack)); }
+        Assert.Contains(logger.Messages, x => x.Contains("HUD暂不可用"));
+        Assert.True(sawCooldown);
+        Assert.Single(io.Inputs.Where(x => x.Skill == Method.Burst));
+        Assert.True(clock.GetElapsedTime(started).TotalSeconds < 12);
+        if (completes) { Assert.True(double.IsFinite(io.FirstAttack)); Assert.True(io.FirstAttack >= hideUntil); }
+    }
+
+    [Theory]
     [InlineData(.5)]
     [InlineData(2.0)]
     public async Task BurstHudDisappearanceWaitsForConfirmationWithoutResending(double hiddenSeconds)
@@ -3758,8 +3791,11 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             var actor = Actors.FirstOrDefault(item => item.Name == sample.Actor);
             if (actor?.Name == "香菱" && !EnergyFull(actor, sample.At) && !Cooling(actor, Method.Burst, sample.At))
                 FirstRockDemandAt = Math.Min(FirstRockDemandAt, sample.At);
-            return active && actor != null ? new(EnergyFull(actor, sample.At), Cooling(actor, Method.Burst, sample.At)) : default;
+            var result = active && actor != null ? new BurstObservation(EnergyFull(actor, sample.At), Cooling(actor, Method.Burst, sample.At)) : default;
+            if (result.CoolingDown == true) AfterBurstCooldownRead?.Invoke();
+            return result;
         }
+        public Action? AfterBurstCooldownRead { get; set; }
         public bool? ReadLowHp(ImageRegion frame)
         {
             var sample = Frame(frame);
@@ -3820,8 +3856,13 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             else Advance(milliseconds);
             ct.ThrowIfCancellationRequested();
         }
-        public void ResolveSelectionRecovery(NativeCombatActor actor, AvatarSelectionProtocol.Result<ImageRegion> selection, CancellationToken ct) =>
-            throw new InvalidOperationException("健康回放意外进入非战斗恢复");
+        public Action? OnSelectionRecovery { get; init; }
+        public void ResolveSelectionRecovery(NativeCombatActor actor, AvatarSelectionProtocol.Result<ImageRegion> selection, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (OnSelectionRecovery == null) throw new InvalidOperationException("健康回放意外进入非战斗恢复");
+            OnSelectionRecovery();
+        }
         public void CheckDefeated(ImageRegion frame, CancellationToken ct) { ct.ThrowIfCancellationRequested(); }
         private void Send(NativeCombatActor actor, Method skill, bool hold)
         {

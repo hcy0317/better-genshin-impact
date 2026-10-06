@@ -5,6 +5,18 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatScriptBagTests
 {
     [Fact]
+    public void NoMatchPreservesFailureAndIncludesBoundedCandidateEvidence()
+    {
+        var bag = new CombatScriptBag(Enumerable.Range(0, 30).Select(i => CreateScript("candidate" + i, "A")).ToList());
+        var error = Assert.Throws<Exception>(() => bag.SelectCombatScript(["B"]));
+        Assert.Equal("未匹配到任何战斗脚本", error.Message);
+        var detail = Assert.IsType<string>(error.Data["combatScriptSelection"]);
+        Assert.Contains("actualParty=[B] candidates=30", detail);
+        Assert.Contains("required=[A] matched=0", detail);
+        Assert.DoesNotContain("candidate=12", detail);
+    }
+
+    [Fact]
     public void MissingEnhancedActorNeverFallsBackToPartialFlowCommands()
     {
         var enhanced = new CombatScript(new() { "A", "B" },

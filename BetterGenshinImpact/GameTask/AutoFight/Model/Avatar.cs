@@ -347,7 +347,19 @@ public partial class Avatar
         if (target == null)
             return new ReviveRecoveryFrame(frame.FrameStamp.Sequence, Bv.IsInMainUi(frame), Bv.ReadReviveState(frame), -1, new Dictionary<int, string>())
                 .WithSource(frame.FrameStamp, TimeProvider.System);
-        try { return target.Scene.ReadRecoveryFrame(frame, target.Identity); }
+        try
+        {
+            var observed = target.Scene.ReadRecoveryFrame(frame, target.Identity);
+            try
+            {
+                BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope.Current?.TryCapture(frame, "statue-confirm:" + UiOperation.Current?.Id,
+                    $"state-{observed.Revive}-{observed.ActiveIndex}",
+                    $"target={target.Identity.Name} slot={target.Identity.Index} active={observed.ActiveIndex} hud={observed.MainReady} revive={observed.Revive}; 原始恢复判定帧",
+                    Logger);
+            }
+            catch { }
+            return observed;
+        }
         catch (Exception error) when (error is not OperationCanceledException and not CombatNotFinishedException and not CombatActionInterruptedException)
         {
             Logger.LogDebug(error, "神像恢复角色身份读取失败，保留未知");
@@ -492,7 +504,8 @@ public partial class Avatar
 
     internal CombatBattleHostInputResult SubmitSwitchAction(int index, CombatNativeInputRequest request, CancellationToken ct)
     {
-        var receipt = new CombatNativeInput(TimeProvider.System, Logger, () => CheckAndSleep(0))
+        var receipt = new CombatNativeInput(TimeProvider.System, Logger, () => CheckAndSleep(0),
+            () => BetterGenshinImpact.GameTask.Common.NativeInputEnvironment.Read((Vanara.PInvoke.User32.VK)((int)Vanara.PInvoke.User32.VK.VK_1 + index - 1)))
             .Submit(request, "switch", () => SimulateSwitchAction(index), ct);
         if (receipt.Status == CombatBattleHostInputStatus.Unknown ||
             receipt.Status == CombatBattleHostInputStatus.Failed && receipt.NativeSubmitted > 0)

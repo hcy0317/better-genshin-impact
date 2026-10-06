@@ -82,9 +82,31 @@ public class CombatScriptBag(List<CombatScript> combatScripts)
         if (bestFlow != null) return (bestFlow, bestFlowMatchCount);
         if (bestScript == null)
         {
-            throw new Exception("未匹配到任何战斗脚本");
+            var error = new Exception("未匹配到任何战斗脚本");
+            // 不改变异常类型/文案与候选顺序；Data供调用方核对真实候选和队伍识别结果。
+            var detail = DescribeNoMatch(avatarNames);
+            error.Data["combatScriptSelection"] = detail;
+            try
+            {
+                GameTask.Common.DiagnosticEvidenceScope.Current?.RequestLatestWindow("strategy:no-match", "strategy-unmatched",
+                    detail + "; latest retained source, not a new team capture");
+            }
+            catch { }
+            throw error;
         }
 
         return (bestScript, bestMatchCount);
+    }
+
+    internal string DescribeNoMatch(IReadOnlyCollection<string> avatars)
+    {
+        static string Safe(string name)
+        {
+            var value = (name ?? "unknown").Replace("\r", "").Replace("\n", "");
+            return value[..Math.Min(value.Length, 40)];
+        }
+        return $"actualParty=[{string.Join(",", avatars.Take(8).Select(Safe))}] candidates={CombatScripts.Count} " +
+            string.Join(";", CombatScripts.Take(12).Select((script, index) =>
+                $"candidate={index} flow={script.HasFlowCommands} required=[{string.Join(",", script.AvatarNames.Take(8).Select(Safe))}] matched={script.AvatarNames.Count(avatars.Contains)}"));
     }
 }

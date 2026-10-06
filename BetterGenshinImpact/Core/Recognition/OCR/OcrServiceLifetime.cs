@@ -110,7 +110,9 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
         else initialization = GetInitialization();
         var token = RecognitionExecutionScope.Token;
         token.ThrowIfCancellationRequested();
-        var instance = initialization.WaitAsync(token).GetAwaiter().GetResult(); // 只取消等待，不取消共享初始化。
+        IOcrService instance;
+        using (GameTask.Common.Ui.UiOperation.Current?.WatchRecognition("ocr-initialization-wait"))
+            instance = initialization.WaitAsync(token).GetAwaiter().GetResult(); // 只取消等待，不取消共享初始化。
         var entered = false;
         try
         {
@@ -121,6 +123,7 @@ internal sealed class OcrServiceLifetime : IDisposable, IAsyncDisposable
             }
             else
             {
+                using var pending = GameTask.Common.Ui.UiOperation.Current?.WatchRecognition("ocr-borrow-lock");
                 while (!System.Threading.Monitor.TryEnter(_recognitionGate, 25)) token.ThrowIfCancellationRequested();
                 entered = true;
             }

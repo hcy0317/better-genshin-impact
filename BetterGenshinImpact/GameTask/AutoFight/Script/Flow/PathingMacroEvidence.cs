@@ -81,7 +81,9 @@ internal sealed class PathingMacroEvidence(string context, string commands)
             if (phase is not ("entry" or "post" or "scene-transition" or "before-fire" or
                 "before-cannon-handshake" or "cannon-handshake-complete" or "cannon-turn-complete")) return;
             var evidencePhase = observation.Scene == PathingMacroScene.Unknown ? phase + "-unknown" : phase;
-            DiagnosticEvidenceScope.Current?.TryCapture(frame, _request, evidencePhase,
+            // 循环炮台宏会多次到达同名边界；按输入序号分组，避免只剩第一次成功的原图。
+            var request = phase is "entry" or "post" ? _request : _request + ":input-" + _inputCount;
+            DiagnosticEvidenceScope.Current?.TryCapture(frame, request, evidencePhase,
                 $"{context}; scene={observation.Scene}; canFire={observation.CanFire}; phase observation only, not completion proof; commands={commands}",
                 logger, fields: Fields());
         }

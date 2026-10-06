@@ -7,6 +7,39 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class RuntimeStallDiagnosticsTests
 {
     [Fact]
+    public void ActiveWatchReportsBeforeReturnIsBoundedAndStopsOnDispose()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLog();
+        var probe = new RuntimeStallDiagnostics(logger, "ocr", "operation", clock, () => TimeSpan.Zero);
+        var watch = probe.Watch("session-lock");
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.Empty(logger.Messages);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.Contains(logger.Messages, message => message.Contains("session-lock-still-running"));
+        clock.Advance(TimeSpan.FromSeconds(502));
+        Assert.Equal(4, logger.Messages.Count);
+        watch.Dispose();
+        Assert.Equal(5, logger.Messages.Count);
+        clock.Advance(TimeSpan.FromMinutes(5));
+        watch.Dispose();
+        Assert.Equal(5, logger.Messages.Count);
+    }
+
+    [Fact]
+    public void FastWatchAndThrowingSinkHaveNoBusinessEffect()
+    {
+        var clock = new FakeTimeProvider();
+        var logger = new RecordingLog();
+        var probe = new RuntimeStallDiagnostics(logger, "ocr", "scope", clock);
+        using (probe.Watch("run")) clock.Advance(TimeSpan.FromMilliseconds(10));
+        clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.Empty(logger.Messages);
+        using (new RuntimeStallDiagnostics(new RecordingLog { Throw = true }, "ocr", "scope", clock).Watch("run"))
+            clock.Advance(TimeSpan.FromSeconds(214));
+    }
+
+    [Fact]
     public void IsolatedSlowPhaseExcludesIdleTimeAndRetainsGcEvidence()
     {
         var clock = new FakeTimeProvider();

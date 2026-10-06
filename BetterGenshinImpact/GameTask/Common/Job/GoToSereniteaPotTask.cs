@@ -144,11 +144,14 @@ internal class GoToSereniteaPotTask
         var arrival = new TeleportArrivalProgress(TimeProvider.System);
         var confirmationFailures = 0;
         var teleportDiscovery = Stopwatch.StartNew();
+        var evidenceRequest = "teapot:" + Guid.NewGuid().ToString("N");
         while (confirmationFailures < 3
                && teleportDiscovery.Elapsed < TimeSpan.FromSeconds(30))
         {
             using var ra = CaptureToRectArea();
             var teleportBtn = ra.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", ra));
+            DiagnosticEvidenceScope.Current?.TryCapture(ra, evidenceRequest, "discovery-" + confirmationFailures + "-" + teleportBtn.IsExist(),
+                $"confirmationFailures={confirmationFailures} teleportButton={teleportBtn.IsExist()} elapsedMs={teleportDiscovery.ElapsedMilliseconds}; original teapot discovery frame", Logger);
             if (teleportBtn.IsExist())
             {
                 // TeleportButton 匹配的是左侧 F 键提示图标，点击图标不会触发右侧“传送”按钮。
@@ -194,7 +197,13 @@ internal class GoToSereniteaPotTask
         try
         {
             await TeleportPanelConfirmation.WaitForArrivalAsync(arrival, () => CaptureToRectArea(),
-                WorldFrameAvailability.ReadNative, Delay, ct, TimeSpan.FromSeconds(45));
+                frame =>
+                {
+                    var kind = WorldFrameAvailability.ReadNative(frame);
+                    DiagnosticEvidenceScope.Current?.TryCapture(frame, evidenceRequest, "arrival-" + kind,
+                        arrival.Describe(kind), Logger);
+                    return kind;
+                }, Delay, ct, TimeSpan.FromSeconds(45));
             return true;
         }
         catch (TimeoutException loadingFailure)

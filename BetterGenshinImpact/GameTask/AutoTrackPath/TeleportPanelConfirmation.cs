@@ -14,6 +14,7 @@ using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.Job;
 using BetterGenshinImpact.Helpers;
 using Fischless.GameCapture;
+using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.GameTask.AutoTrackPath;
 
@@ -86,9 +87,25 @@ internal static class TeleportPanelConfirmation
         UiOperation.Current?.Check();
         using var current = TaskControl.CaptureToRectArea();
         if (!current.FrameStamp.IsAfter(previous.FrameStamp)) return false;
+        var request = "teleport:" + Guid.NewGuid().ToString("N");
+        async Task TraceInput(string phase, Func<Task> send)
+        {
+            using var attempt = new DiagnosticInputAttempt(TimeProvider.System);
+            Exception? failure = null;
+            try { await send(); }
+            catch (Exception error) { failure = error; throw; }
+            finally
+            {
+                try { TaskControl.Logger.LogDebug("TELEPORT_INPUT_EVIDENCE request={Request} phase={Phase} receipt={Receipt}",
+                    request, phase, attempt.Complete(failure == null, failure).Describe()); }
+                catch { }
+            }
+        }
+        DiagnosticEvidenceScope.Current?.TryCapture(current, request, "before-confirm",
+            "传送确认输入前原帧，不代表游戏已接受", TaskControl.Logger);
         return await TryConfirmWithFeedbackAsync(current, () => TaskControl.CaptureToRectArea(),
-            token => { InputHub.Foreground.SimulateKeyPulse(KeyId.F, token); return Task.CompletedTask; },
-            (frame, bounds, token) =>
+            token => TraceInput("confirm-f", () => { InputHub.Foreground.SimulateKeyPulse(KeyId.F, token); return Task.CompletedTask; }),
+            (frame, bounds, token) => TraceInput("confirm-click", () =>
             {
                 using var body = frame.DeriveCrop(bounds);
                 void Admit()
@@ -101,8 +118,14 @@ internal static class TeleportPanelConfirmation
                 DomainTipClick.Run(Admit, body.Move, () => InputHub.Foreground.Mouse.LeftButtonDown(),
                     () => InputHub.Foreground.Mouse.LeftButtonUp(), Thread.Sleep);
                 return Task.CompletedTask;
-            }, TaskControl.Delay, ct, observe: arrival == null ? null : frame =>
-                arrival.Observe(frame.FrameStamp, WorldFrameAvailability.ReadNative(frame)),
+            }), TaskControl.Delay, ct, observe: frame =>
+            {
+                TeleportRejection.Check(frame, request);
+                var world = WorldFrameAvailability.ReadNative(frame);
+                DiagnosticEvidenceScope.Current?.TryCapture(frame, request, "feedback-" + world,
+                    "传送输入反馈原帧；world=" + world, TaskControl.Logger);
+                arrival?.Observe(frame.FrameStamp, world);
+            },
             mapClosed: arrival == null ? null : arrival.ConfirmMapClosure);
     }
 

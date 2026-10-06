@@ -9,6 +9,22 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class CombatNativeInputTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ContextProbeRunsAtDispatchWithoutChangingReceiptEvenIfItFails(bool fails)
+    {
+        var clock = new FakeTimeProvider();
+        var request = new CombatNativeInputRequest(Guid.NewGuid(), new CaptureFrameSource(clock).Next(), clock.GetTimestamp() + clock.TimestampFrequency * 3);
+        var observed = 0;
+        var native = new WindowsInputMessageDispatcher(null, input => { Assert.Equal(1, observed); return (uint)input.Length; }, () => 0);
+        var result = new CombatNativeInput(clock, NullLogger.Instance, () => { }, () =>
+        { observed++; if (fails) throw new IOException("probe"); return "foregroundIsGame=False physical=VK_E"; })
+            .Submit(request, "test", () => native.DispatchInput(new User32.INPUT[2]), default);
+        Assert.Equal(CombatBattleHostInputStatus.Sent, result.Status);
+        Assert.Equal(2, result.NativeSubmitted);
+    }
+
     [Fact]
     public void CompleteNativeSubmissionRemainsSentWhenSubsequentManagedWorkFails()
     {

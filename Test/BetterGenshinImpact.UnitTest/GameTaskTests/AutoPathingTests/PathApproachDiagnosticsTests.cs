@@ -13,6 +13,26 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PathApproachDiagnosticsTests
 {
     [Fact]
+    public async Task ExhaustedAttemptsKeepDistinctOriginalFramesAndDoNotOwnCallerPixels()
+    {
+        var records = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { records.Add(item); return Task.CompletedTask; });
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        var source = new CaptureFrameSource();
+        for (var i = 0; i < 2; i++)
+        {
+            frame.FrameStamp = source.Next();
+            new PathApproachDiagnostics("same-route", "node=14").Exhausted(frame,
+                new PathPosition(new(3, 4), 0, true), new(5, 6), "Normal", NullLogger.Instance);
+        }
+        await scope.DisposeAsync();
+        Assert.Equal(2, records.Count);
+        Assert.Equal(2, records.Select(x => x.Request).Distinct().Count());
+        Assert.All(records, x => Assert.Equal("precise-exhausted", x.Phase));
+        Assert.False(frame.SrcMat.IsDisposed);
+    }
+
+    [Fact]
     public async Task FailedPulsePinsTheUnsampledInputFrameAndKeepsTheOriginalException()
     {
         var saved = new List<DiagnosticEvidence>();
