@@ -82,7 +82,8 @@ public class MapContentReadinessTests
         {
             ++sequence;
             if (sequence >= 5) grey.SetTo(new Scalar(75));
-            return new(sequence, MapContentReadiness.IsReady(true, grey), sequence == 1, sequence == 1);
+            return new(sequence, true, sequence == 1, sequence == 1)
+            { ContentReady = MapContentReadiness.IsReady(true, grey) };
         }, (_, _) => { clicks++; return Task.FromResult(true); },
             (ms, _) => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, default, clock);
         Assert.True(result);

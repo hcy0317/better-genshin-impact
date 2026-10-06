@@ -6,6 +6,33 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoTrackPathTests;
 
 public class AreaSelectionClickControllerTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MapEntryRequiresAReadySourceEvenIfTheMapFeatureExists(bool expired)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new Fischless.GameCapture.CaptureFrameSource(clock);
+        var snapshot = new UiSnapshot(1) { BigMap = true };
+        snapshot = snapshot.WithSource(source.Next(), clock, UiSnapshot.RecoveryMaximumAge);
+        if (expired) clock.Advance(TimeSpan.FromSeconds(3));
+        if (expired) Assert.Throws<InvalidOperationException>(() => AreaSelectionClickController.RequireReadyMap(snapshot));
+        else AreaSelectionClickController.RequireReadyMap(snapshot);
+        Assert.Throws<InvalidOperationException>(() => AreaSelectionClickController.RequireReadyMap(new(1) { MainHud = true }));
+    }
+    [Fact]
+    public async Task AreaTextWithoutAReadyMapCannotAuthorizeClicks()
+    {
+        var clock = new FakeTimeProvider();
+        long frame = 0;
+        var clicks = 0;
+        await Assert.ThrowsAsync<TimeoutException>(() => AreaSelectionClickController.TryApplyAsync(
+            () => new(++frame, false, true, true),
+            (_, _) => { clicks++; return Task.FromResult(true); },
+            (ms, _) => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; },
+            default, clock: clock));
+        Assert.Equal(0, clicks);
+    }
 
 
 

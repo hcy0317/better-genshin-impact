@@ -26,6 +26,7 @@ internal sealed class PathMoveToIo
     internal Func<ImageRegion, WaypointForTrack, Task<PathPosition>> Locate { get; init; } = null!;
     internal Func<ImageRegion, WaypointForTrack, Task<PathPosition>>? LocateDirect { get; init; }
     internal Func<ImageRegion, float> CameraOrientation { get; init; } = _ => Missing<float>(nameof(CameraOrientation));
+    internal Func<ImageRegion, Common.Map.CameraOrientation.Reading>? CameraReading { get; init; }
     internal Action<int, int> MouseMove { get; init; } = (_, _) => Missing<bool>(nameof(MouseMove));
     internal Func<double> Dpi { get; init; } = () => Missing<double>(nameof(Dpi));
     internal Func<string, Task> SwitchAvatar { get; init; } = null!;
@@ -39,6 +40,7 @@ internal sealed class PathMoveToIo
     internal Func<ImageRegion, WorldFrameKind>? Availability { get; init; }
     internal Func<ImageRegion, bool> Transformed { get; init; } = _ => Missing<bool>(nameof(Transformed));
     internal Action<GIActions, KeyType> Send { get; init; } = (_, _) => Missing<bool>(nameof(Send));
+    internal Func<GIActions, string>? InputEnvironment { get; init; }
     internal Func<GIActions, bool> IsDown { get; init; } = _ => Missing<bool>(nameof(IsDown));
     internal Func<int, CancellationToken, Task> Delay { get; init; } = (_, _) => Missing<Task>(nameof(Delay));
     internal Action CheckInput { get; init; } = () => Missing<bool>(nameof(CheckInput));
@@ -52,6 +54,7 @@ internal sealed class PathMoveToIo
         LoggerFactory = () => Common.TaskControl.Logger;
         Capture = () => Common.TaskControl.CaptureToRectArea();
         CameraOrientation = image => Common.Map.CameraOrientation.Compute(image.SrcMat);
+        CameraReading = image => Common.Map.CameraOrientation.Read(image.SrcMat);
         MouseMove = (x, y) => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.MoveMouseBy(x, y);
         Dpi = () => TaskContext.Instance().DpiScale;
         Motion = Bv.GetMotionStatus;
@@ -59,6 +62,7 @@ internal sealed class PathMoveToIo
         Availability = WorldFrameAvailability.ReadNative;
         Transformed = SaurianUiReader.IsKnownTransformation;
         Send = (action, type) => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(action, type);
+        InputEnvironment = action => NativeInputEnvironment.Read(action.ToActionKey().ToVK());
         IsDown = action => BetterGenshinImpact.Core.Input.InputHub.Foreground.IsKeyDown(action.ToActionKey().ToVK());
         Delay = Common.TaskControl.Delay;
         CheckInput = () => Common.TaskControl.CheckAndSleep(0);

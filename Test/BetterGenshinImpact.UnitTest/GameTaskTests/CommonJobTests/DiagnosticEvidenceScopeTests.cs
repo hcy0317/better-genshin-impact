@@ -8,6 +8,36 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceScopeTests
 {
     [Fact]
+    public async Task NewerSparseHistoryCannotReplaceAnExactOlderDecisionImage()
+    {
+        var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();
+        await using var scope = new DiagnosticEvidenceScope((item, image) =>
+        { saved.Add((item, image.At<Vec3b>(0, 0).Item0)); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        using var decision = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(7, 0, 0)), 0, 0) { FrameStamp = source.Next() };
+        scope.RememberExactFrame("party", "probe", decision);
+        using var newer = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(9, 0, 0)), 0, 0) { FrameStamp = source.Next() };
+        scope.ObserveExistingFrame(newer);
+        Assert.True(scope.CaptureExactWindow("party", "probe", decision.FrameStamp, "party-terminal", "exact decision"));
+        await scope.DisposeAsync();
+        Assert.Contains(saved, sample => sample.Evidence.Source == decision.FrameStamp && sample.Pixel == 7);
+    }
+    [Fact]
+    public async Task ExactRetentionReplacementPreservesSourceOwnershipAndMemoryBudget()
+    {
+        var source = new CaptureFrameSource();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask, maximumMemoryBytes: 32);
+        using var first = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        using var tooLarge = new ImageRegion(new Mat(4, 4, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        scope.RememberExactFrame("macro", "a", first);
+        scope.RememberExactFrame("macro", "a", tooLarge);
+        Assert.False(scope.CaptureExactWindow("macro", "a", tooLarge.FrameStamp, "terminal", "must not relabel old pixels"));
+        scope.ForgetExactFrame("macro", "a");
+        Assert.False(scope.CaptureExactWindow("macro", "a", first.FrameStamp, "terminal", "released"));
+        Assert.False(first.SrcMat.IsDisposed);
+        Assert.False(tooLarge.SrcMat.IsDisposed);
+    }
+    [Fact]
     public async Task DirectCaptureFieldsAreBoundedSnapshotsIndependentOfCallerMutation()
     {
         DiagnosticEvidence? saved = null;

@@ -941,7 +941,13 @@ public class TpTask
                 }
                 return;
             }
-
+            try
+            {
+                DiagnosticEvidenceScope.Current?.TryCapture(clickCapture, evidenceRequest, "target-not-admitted-" + attempt,
+                    FormattableString.Invariant($"map={currentClickView.MapName} targetId={target.TargetTp.Id} force={target.Force} target=({currentClickView.TargetX},{currentClickView.TargetY}) correctedClick=({clickX},{clickY}) zoom={currentClickView.ZoomLevel} attempt={attempt + 1} reason={failureReason}; original registration frame, no target click sent"),
+                    Logger, priority: DiagnosticEvidencePriority.Warning);
+            }
+            catch { }
             if (attempt + 1 >= AbsoluteMapClickRetryCount)
             {
                 break;
@@ -960,7 +966,7 @@ public class TpTask
         }
 
         Logger.LogWarning("目标传送点绝对坐标定位失败：{Reason}", failureReason);
-        throw new TpPointNotActivate(failureReason);
+        throw new TeleportTargetLocalizationException(failureReason);
     }
 
     private double GetTeleportFinalClickZoomLevel(double nearestTpDistance, string mapName)
@@ -2473,7 +2479,18 @@ public class TpTask
         {
             CheckAndSleep(0);
             operation.Check();
-            GameCaptureRegion.GameRegionClick((rect, scale) => (rect.Width - 160 * scale, rect.Height - 60 * scale));
+            using (var map = CaptureToRectArea(forceNew: true))
+            {
+                var snapshot = NativeUiDriver.Read(map);
+                MapContentReadiness.Record(map, "area-entry", $"area={areaName}; {snapshot.Describe()}", Logger);
+                AreaSelectionClickController.RequireReadyMap(snapshot);
+                var captureScale = Math.Min(map.Width / 1920d, map.Height / 1080d);
+                DomainTipClick.Run(() =>
+                { operation.Check(); AreaSelectionClickController.RequireReadyMap(snapshot); },
+                    () => map.MoveTo((int)(map.Width - 160 * captureScale), (int)(map.Height - 60 * captureScale)),
+                    () => InputHub.Foreground.Mouse.LeftButtonDown(),
+                    () => InputHub.Foreground.Mouse.LeftButtonUp(), Thread.Sleep);
+            }
             await Delay(50, operation.Token);
             var localized = stringLocalizer.WithCultureGet(cultureInfo, areaName);
             var areaLabels = MapLazyAssets.Get().CountryPositions.Keys.Append(areaName)
@@ -2496,30 +2513,47 @@ public class TpTask
             {
                 using var capture = CaptureAreaFrame();
                 MapContentReadiness.Record(capture, "area-observe", $"area={areaName}; before OCR", Logger);
-                var list = FindSwitchAreaCandidates(capture);
-                candidatesText = FormatSwitchAreaCandidateTexts(list);
                 var snapshot = NativeUiDriver.Read(capture);
+                if (!snapshot.MapReady) return new AreaSelectionObservation(snapshot.FrameId, false, false, false);
+                var list = FindSwitchAreaCandidates(capture);
+                try
+                {
+                candidatesText = FormatSwitchAreaCandidateTexts(list);
                 var selectorOpen = SelectorVisible(list, capture.Height);
                 var contentReady = MapContentReadiness.IsReady(snapshot.MapReady, capture.CacheGreyMat);
                 MapContentReadiness.Record(capture, selectorOpen ? "area-selector" : contentReady ? "area-ready" : "area-waiting",
                     $"area={areaName}; mapReady={snapshot.MapReady}; contentReady={contentReady}; selectorOpen={selectorOpen}", Logger);
-                return new AreaSelectionObservation(snapshot.FrameId, contentReady,
-                    selectorOpen, FindCandidate(list, capture.Height) != null);
+                return new AreaSelectionObservation(snapshot.FrameId, snapshot.MapReady,
+                    selectorOpen, FindCandidate(list, capture.Height) != null) { ContentReady = contentReady };
+                }
+                finally { foreach (var label in list) label.Dispose(); }
             }, (attempt, token) =>
             {
                 CheckAndSleep(0);
                 token.ThrowIfCancellationRequested();
                 operation.Check();
                 using var capture = CaptureAreaFrame();
+                var snapshot = NativeUiDriver.Read(capture);
+                if (!snapshot.MapReady) return Task.FromResult(false);
                 var list = FindSwitchAreaCandidates(capture);
+                try
+                {
                 var candidate = FindCandidate(list, capture.Height);
                 if (candidate == null || !SelectorVisible(list, capture.Height)) return Task.FromResult(false);
                 MapContentReadiness.Record(capture, "area-before-click", $"area={areaName}; attempt={attempt}; candidates={candidatesText}", Logger);
                 operation.Check();
-                candidate.Click();
+                DomainTipClick.Run(() =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    operation.Check();
+                    AreaSelectionClickController.RequireReadyMap(snapshot);
+                }, candidate.Move, () => InputHub.Foreground.Mouse.LeftButtonDown(),
+                    () => InputHub.Foreground.Mouse.LeftButtonUp(), Thread.Sleep);
                 Logger.LogDebug("区域选择新帧点击：{Country}，attempt={Attempt}，候选={Candidates}",
                     areaName, attempt, candidatesText);
                 return Task.FromResult(true);
+                }
+                finally { foreach (var label in list) label.Dispose(); }
             }, Delay, operation.Token, logger: Logger);
             if (applied)
             {
@@ -2858,6 +2892,12 @@ public class TpTask
 
         var uncertainty = GetAbsoluteMapClickUncertainty(alignment);
         var targetCorrection = GetDistance(clickView.ClickX, clickView.ClickY, clickX, clickY);
+        var targetPair = alignment.Pairs.FirstOrDefault(pair => pair.Expected.Tp.Id == target.TargetTp.Id);
+        var targetIconTypes = GetMapIconTypesForTargetType(target.TargetTp.Type ?? string.Empty);
+        var compatibleIcons = observedIcons.Where(icon => icon.IconTypes.Overlaps(targetIconTypes))
+            .Select(icon => icon.Rect).ToArray();
+        var targetVisible = MapTargetClickAdmission.Accepts(target.Force, clickX, clickY,
+            targetPair?.Observed.Rect, compatibleIcons);
         var maxAllowedUncertainty = IsFinite(clickView.NearestNeighborScreenDistance) &&
                                     clickView.NearestNeighborScreenDistance > 0
             ? Math.Max(8d * _zoomOutMax1080PRatio,
@@ -2876,12 +2916,31 @@ public class TpTask
         {
             failureReason = $"地图校正量超过相邻点安全距离：correction={targetCorrection:0.0}, allowed={maxAllowedUncertainty:0.0}";
         }
+        else if (!targetVisible)
+        {
+            failureReason = "目标传送图标不可见或校正点击未落在目标图标内";
+        }
         else
         {
             failureReason = string.Empty;
         }
 
         var success = failureReason.Length == 0;
+        try
+        {
+            var targetAnchored = targetPair != null;
+            var targetClickX = clickX;
+            var targetClickY = clickY;
+            var nearest = observedIcons.OrderBy(icon => GetDistance(icon.CenterX, icon.CenterY, targetClickX, targetClickY)).FirstOrDefault();
+            Logger.LogDebug("MAP_TARGET_ANCHOR_EVIDENCE source={Session}/{Sequence} map={Map} targetId={TargetId} type={Type} force={Force} " +
+                "targetAnchored={Anchored} correctedClick=({X:F2},{Y:F2}) nearestObserved=({NearestX},{NearestY}) nearestDistance={Distance} " +
+                "registrationAccepted={Accepted} targetClickAdmitted={TargetVisible} targetMatchError={MatchError} targetIconRect={TargetRect}",
+                imageRegion.FrameStamp.SessionId, imageRegion.FrameStamp.Sequence, target.MapName, target.TargetTp.Id, target.TargetTp.Type, target.Force,
+                targetAnchored, clickX, clickY, nearest?.CenterX, nearest?.CenterY,
+                nearest == null ? (double?)null : GetDistance(nearest.CenterX, nearest.CenterY, clickX, clickY), success, targetVisible,
+                targetPair?.Error, targetPair?.Observed.Rect);
+        }
+        catch { /* 诊断不能改变目标准入或失败结果。 */ }
         Logger.LogInformation(
             "大地图绝对坐标匹配 #{Attempt}：{Target}，预期点={ExpectedCount}，识别图标={ObservedCount}，有效锚点={MatchedCount}，理论点击=({RawX:0.0},{RawY:0.0})，校正点击=({ClickX:0.0},{ClickY:0.0})，偏移=({OffsetX:0.0},{OffsetY:0.0})，校正量={TargetCorrection:0.0}，缩放=({ScaleX:0.000},{ScaleY:0.000})，残差={Error:0.0}，不确定度={Uncertainty:0.0}/{AllowedUncertainty:0.0}，耗时={TotalElapsedMs}ms（投影={ProjectionElapsedMs}ms，模板识别={RecognitionElapsedMs}ms，全局配准={AlignmentElapsedMs}ms），结果={Result}",
             attempt,

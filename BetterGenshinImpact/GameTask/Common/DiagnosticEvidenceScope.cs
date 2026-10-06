@@ -510,6 +510,8 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 CloseWindows("no-next-frame-before-run-end");
                 ClearHistory();
                 ClearRetainedFrame();
+                foreach (var exact in _exactFrames.Values) exact.Frame.Dispose();
+                _exactFrames.Clear();
                 foreach (var before in _before.Values) before.Frame.Dispose();
                 _before.Clear();
                 _phases.Clear();

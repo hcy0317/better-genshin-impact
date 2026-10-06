@@ -1462,6 +1462,9 @@ public partial class PathExecutor
         var climbingFrames = 0;
         var detachAttempts = 0;
         CaptureFrameFence? detachFence = null;
+        PathApproachPulse detachPulse = default;
+        var detachEnvironment = "not-yet-submitted";
+        var detachFeedbackCaptured = true;
         var approachDiagnostics = new PathApproachDiagnostics(waypoint.PathingTaskFileName,
             $"segment={CurWaypoints.Item1 + 1} node={waypoint.Id} move={waypoint.MoveMode} action={waypoint.Action} " +
             $"map={waypoint.MapName} method={waypoint.MapMatchMethod} layer={waypoint.MapLayerSelector}");
@@ -1489,7 +1492,14 @@ public partial class PathExecutor
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
-            if (detachFence != null && observation.Motion is not (MotionStatus.Normal or MotionStatus.Climb))
+            if (!detachFeedbackCaptured)
+            {
+                detachFeedbackCaptured = true;
+                approachDiagnostics.Detach(screen, detachAttempts, "first-valid-feedback", observation,
+                    detachPulse, detachEnvironment, detachFence, _moveIo.Logger);
+            }
+            if ((detachFence != null || waypoint.MoveMode is "walk" or "run" or "dash") &&
+                observation.Motion is not (MotionStatus.Normal or MotionStatus.Climb))
             {
                 // 松开攀爬后的下落/未知姿态不算落地，也不消耗小碎步次数。
                 previous = observation.Stamp;
@@ -1515,7 +1525,12 @@ public partial class PathExecutor
                 previous = observation.Stamp;
                 stationary = 0;
                 if (++climbingFrames < 2) { await _moveIo.Delay(100, operation.Token); continue; }
-                if (detachAttempts >= 2) throw new RetryException("精确接近脱离攀爬后仍未落地，重试当前路线分段");
+                if (detachAttempts >= 2)
+                {
+                    approachDiagnostics.Detach(screen, detachAttempts, "still-climbing", observation,
+                        detachPulse, detachEnvironment, detachFence, _moveIo.Logger);
+                    throw new RetryException("精确接近脱离攀爬后仍未落地，重试当前路线分段");
+                }
                 _moveIo.CheckInput();
                 operation.Check();
                 void Down()
@@ -1525,14 +1540,23 @@ public partial class PathExecutor
                         operation.Check();
                         if (!observation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2)))
                             throw new RetryException("攀爬脱离输入前原帧过期");
+                        try { detachEnvironment = _moveIo.InputEnvironment?.Invoke(GIActions.Drop) ?? "not-exposed-by-io"; }
+                        catch { detachEnvironment = "unknown:observation-failed"; }
                     });
                     _moveIo.Send(GIActions.Drop, KeyType.KeyDown);
                 }
                 detachAttempts++;
+                approachDiagnostics.Detach(screen, detachAttempts, "before", observation, default,
+                    "not-yet-submitted", detachFence, _moveIo.Logger);
                 var dropped = await PathApproachDiagnostics.RunPulseAsync(Down,
                     () => _moveIo.Send(GIActions.Drop, KeyType.KeyUp), ms => _moveIo.Delay(ms, operation.Token), _moveIo.Clock, screen);
+                detachPulse = dropped;
+                var attemptedFence = new CaptureFrameFence(observation.Stamp, _moveIo.Clock.GetTimestamp());
+                approachDiagnostics.Detach(screen, detachAttempts, "input-result", observation,
+                    dropped, detachEnvironment, attemptedFence, _moveIo.Logger);
                 if (!dropped.HasCompleteReceipt) throw new RetryException("攀爬脱离输入未确认，不继续移动");
-                detachFence = new(observation.Stamp, _moveIo.Clock.GetTimestamp());
+                detachFence = attemptedFence;
+                detachFeedbackCaptured = false;
                 previousPosition = null;
                 climbingFrames = 0;
                 _moveIo.Logger.LogDebug("PATH_APPROACH_DETACH attempt={Attempt}/2 source={Session}/{Sequence}",
@@ -1607,7 +1631,15 @@ public partial class PathExecutor
             var currentLocation = await LocatePlayableAsync(current, waypoint, direct: true);
             var currentObservation = ReadMoveObservation(current, currentLocation, previous);
             operation.Check();
-            if (!currentObservation.Valid) { stationary = 0; await _moveIo.Delay(100, operation.Token); continue; }
+            if (!currentObservation.Valid || detachFence is { } currentFence && !currentFence.Accepts(currentObservation.Stamp) ||
+                waypoint.MoveMode is "walk" or "run" or "dash" &&
+                (currentObservation.Motion != MotionStatus.Normal || _moveIo.Transformed(current)))
+            {
+                // 转向期间也可能爬上障碍物；回到原脱离分支，不能继续W或用平面距离判落地。
+                stationary = 0;
+                await _moveIo.Delay(100, operation.Token);
+                continue;
+            }
             lastPulse = await PathApproachDiagnostics.RunPulseAsync(
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, current);

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 
@@ -6,14 +7,42 @@ namespace BetterGenshinImpact.GameTask.Common;
 
 // 单循环所有者；不采图、不访问App或进程服务。Measure/Mark报告恢复后耗时，Watch有界报告仍在执行的阶段。
 internal sealed class RuntimeStallDiagnostics(ILogger logger, string owner, string run,
-    TimeProvider? clock = null, Func<TimeSpan>? gcPause = null)
+    TimeProvider? clock = null, Func<TimeSpan>? gcPause = null, Func<RuntimeStallDiagnostics.ProcessSnapshot>? processSample = null)
 {
+    internal readonly record struct ProcessSnapshot(long Timestamp, double CpuMilliseconds, long PrivateBytes, long WorkingSet);
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly Func<TimeSpan> _gcPause = gcPause ?? GC.GetTotalPauseDuration;
     private long? _previous;
     private TimeSpan _previousGcPause;
     private string? _previousPhase;
     private long _previousSource;
+    private readonly object _processGate = new();
+    private ProcessSnapshot? _previousProcess;
+
+    private string ReadProcessWindow()
+    {
+        try
+        {
+            ProcessSnapshot sample;
+            if (processSample != null) sample = processSample();
+            else
+            {
+                using var process = Process.GetCurrentProcess();
+                sample = new(_clock.GetTimestamp(), process.TotalProcessorTime.TotalMilliseconds,
+                    process.PrivateMemorySize64, process.WorkingSet64);
+            }
+            lock (_processGate)
+            {
+                var before = _previousProcess;
+                if (before == null || sample.Timestamp > before.Value.Timestamp) _previousProcess = sample;
+                var values = FormattableString.Invariant($"selfProcessSampleTimestamp={sample.Timestamp} selfCpuMs={sample.CpuMilliseconds:F1} selfPrivateBytes={sample.PrivateBytes} selfWorkingSetBytes={sample.WorkingSet}");
+                if (before is not { } previous || sample.Timestamp <= previous.Timestamp)
+                    return values + " selfProcessWindow=unknown:no-earlier-sample";
+                return values + FormattableString.Invariant($" selfProcessWindowMs={_clock.GetElapsedTime(previous.Timestamp, sample.Timestamp).TotalMilliseconds:F1} selfCpuDeltaMs={sample.CpuMilliseconds - previous.CpuMilliseconds:F1} selfPrivateBytesDelta={sample.PrivateBytes - previous.PrivateBytes} selfWorkingSetDelta={sample.WorkingSet - previous.WorkingSet}");
+            }
+        }
+        catch { return "selfProcessWindow=unavailable:sample-failed"; }
+    }
 
     internal PhaseMeasurement Measure(string phase)
     {
@@ -84,10 +113,12 @@ internal sealed class RuntimeStallDiagnostics(ILogger logger, string owner, stri
         {
             var elapsed = _clock.GetElapsedTime(started).TotalMilliseconds;
             if (elapsed < 2000) return;
-            logger.LogWarning("RUNTIME_EXECUTION_GAP owner={Owner} run={Run} from={BeforePhase} to={Phase} elapsedMs={Elapsed:F1} gcPauseDeltaMs={GcPause:F1} pendingWorkItems={Pending} threadPoolThreads={Threads} sourceBefore={BeforeSource} sourceAfter={Source} observation={Observation}; not proof of a specific cause",
+            // 仅在既有慢阶段报送时采样自身，普通快阶段无进程读取开销。
+            var process = ReadProcessWindow();
+            logger.LogWarning("RUNTIME_EXECUTION_GAP owner={Owner} run={Run} from={BeforePhase} to={Phase} elapsedMs={Elapsed:F1} gcPauseDeltaMs={GcPause:F1} pendingWorkItems={Pending} threadPoolThreads={Threads} sourceBefore={BeforeSource} sourceAfter={Source} observation={Observation} {Process}; not proof of a specific cause",
                 owner, run, beforePhase, phase, elapsed,
                 Math.Max(0, (_gcPause() - beforePause).TotalMilliseconds), ThreadPool.PendingWorkItemCount,
-                ThreadPool.ThreadCount, beforeSource, sourceSequence, active ? "still-running-threadpool-watch" : "resumed");
+                ThreadPool.ThreadCount, beforeSource, sourceSequence, active ? "still-running-threadpool-watch" : "resumed", process);
         }
         catch { /* 取证失败不改变业务调用。 */ }
     }

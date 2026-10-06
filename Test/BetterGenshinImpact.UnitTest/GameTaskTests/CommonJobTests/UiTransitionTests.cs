@@ -10,6 +10,28 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiTransitionTests
 {
     [Fact]
+    public async Task UnchangedPartyPageUsesItsCloseButtonAfterEscape()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new(1) { Party = true, Closable = true },
+            new(2) { Party = true, Closable = true }, new(3) { MainHud = true }, new(4) { MainHud = true });
+        var result = await UiRecovery.ToMainAsync(driver, default, clock: clock);
+        Assert.True(result.MainReady);
+        Assert.Equal(new[] { "Escape", "CloseParty" }, driver.Actions.Select(action => action.ToString()));
+    }
+
+    [Fact]
+    public async Task UnchangedPartyCloseRemainsBoundedAndDoesNotClaimMain()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { Party = true, Closable = true });
+        var started = clock.GetUtcNow();
+        await Assert.ThrowsAsync<TimeoutException>(() => UiRecovery.ToMainAsync(driver, default, clock: clock));
+        Assert.Equal(new[] { "Escape", "CloseParty", "CloseParty" }, driver.Actions.Select(action => action.ToString()));
+        Assert.True(clock.GetUtcNow() - started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public async Task UnchangedDefeatStopsAfterTwoSubmittedReviveAttempts()
     {
         var clock = new FakeTimeProvider();

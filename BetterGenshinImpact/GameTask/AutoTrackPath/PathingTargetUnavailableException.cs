@@ -15,7 +15,7 @@ internal sealed class PathingTargetUnavailableException(Exception original)
     internal static bool IsUnavailableTarget(Exception error)
     {
         if (TaskFailureRecoveryPolicy.IsTerminalFailure(error)) return false;
-        if (error is PathingTargetUnavailableException or TpPointNotActivate or TeleportSelectionMismatchException)
+        if (error is PathingTargetUnavailableException or TpPointNotActivate or TeleportSelectionMismatchException or TeleportTargetLocalizationException)
             return error.InnerException == null || IsUnavailableTarget(error.InnerException);
         if (error is AggregateException aggregate)
             return aggregate.InnerExceptions.Count > 0 && aggregate.InnerExceptions.All(IsUnavailableTarget);

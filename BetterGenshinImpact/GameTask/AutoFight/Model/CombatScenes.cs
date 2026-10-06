@@ -142,8 +142,16 @@ public class CombatScenes : IDisposable
         // 判断联机状态
         CurrentMultiGameStatus = PartyAvatarSideIndexHelper.DetectedMultiGameStatus(imageRegion, _autoFightAssets, _logger);
         // 队伍角色编号和侧面头像位置
-        var (avatarIndexRectList, avatarSideIconRectList) = PartyAvatarSideIndexHelper.GetAllIndexRects(imageRegion, CurrentMultiGameStatus, _logger, _systemInfo);
+        var teamFields = new Dictionary<string, string>();
+        var (avatarIndexRectList, avatarSideIconRectList) = PartyAvatarSideIndexHelper.GetAllIndexRects(imageRegion, CurrentMultiGameStatus, _logger, _systemInfo,
+            (mode, indices, arrow, reason) =>
+            {
+                teamFields["team:layout"] = mode.StartsWith("dynamic", StringComparison.Ordinal) ? "dynamic" : "legacy";
+                teamFields["team:layout-" + mode] = $"indices=[{string.Join(";", indices)}] arrow={arrow?.ToString() ?? "not-evaluated"} fallback={reason ?? "none"}";
+            });
+        teamFields["team:source"] = $"source={imageRegion.FrameStamp.SessionId}/{imageRegion.FrameStamp.Sequence} size={imageRegion.Width}x{imageRegion.Height} assetScale={_systemInfo.AssetScale} captured={imageRegion.FrameStamp.CapturedTimestamp} frequency={imageRegion.FrameStamp.TimestampFrequency} hud=not-evaluated";
         ExpectedTeamAvatarNum = avatarIndexRectList.Count;
+        teamFields["team:co-op"] = $"inMultiGame={CurrentMultiGameStatus.IsInMultiGame} host={CurrentMultiGameStatus.IsHost} players={CurrentMultiGameStatus.PlayerCount} expectedSlots={ExpectedTeamAvatarNum}";
 
         // 识别队伍
         var names = new string[avatarSideIconRectList.Count];
@@ -152,10 +160,12 @@ public class CombatScenes : IDisposable
         {
             for (var i = 0; i < avatarSideIconRectList.Count; i++)
             {
+                var slotField = $"indexRoi={avatarIndexRectList[i]} iconRoi={avatarSideIconRectList[i]} model=not-returned ocr=not-evaluated";
                 using var ra = imageRegion.DeriveCrop(avatarSideIconRectList[i]);
                 try
                 {
-                    var pair = ClassifyAvatarCnName(ra.CacheImage, i + 1);
+                    var pair = ClassifyAvatarCnName(ra.CacheImage, i + 1, (label, confidence, threshold, accepted) =>
+                        slotField = FormattableString.Invariant($"indexRoi={avatarIndexRectList[i]} iconRoi={avatarSideIconRectList[i]} modelTop={label} confidence={confidence:R} threshold={threshold:R} accepted={accepted} ocr=not-evaluated"));
                     names[i] = pair.Item1;
                     if (!string.IsNullOrEmpty(pair.Item2))
                     {
@@ -178,9 +188,11 @@ public class CombatScenes : IDisposable
                     // 失败则使用 OCR 兜底
                     var s = _systemInfo.AssetScale;
                     var indexRect = avatarIndexRectList[i];
-                    using var ra2 = imageRegion.DeriveCrop(new Rect(indexRect.X - (int)(240 * s), indexRect.Y - indexRect.Height, (int)(240 * s), indexRect.Height * 3));
+                    var ocrRect = new Rect(indexRect.X - (int)(240 * s), indexRect.Y - indexRect.Height, (int)(240 * s), indexRect.Height * 3);
+                    using var ra2 = imageRegion.DeriveCrop(ocrRect);
                     var rName = ra2.Find(RecognitionObject.OcrThis);
                     var name = StringUtils.ExtractChinese(rName.Text);
+                    slotField += $" ocrRoi={ocrRect} rawOcr={rName.Text} extracted={name} ocrAccepted={IsGenshinAvatarName(name)}";
                     if (IsGenshinAvatarName(name))
                     {
                         names[i] = name;
@@ -193,15 +205,21 @@ public class CombatScenes : IDisposable
                         displayNames[i] = "未知角色";
                     }
                 }
-
+                teamFields["team:slot-" + (i + 1)] = "finalName=" + names[i] + " " + slotField;
             }
 
             _logger.LogInformation("识别到的队伍角色:{Text}", string.Join(",", displayNames));
             try
             {
+                var sourceClock = TimeProvider.System;
+                var now = sourceClock.GetTimestamp();
+                teamFields["team:sourceAgeMs"] = imageRegion.FrameStamp.IsKnown &&
+                    imageRegion.FrameStamp.TimestampFrequency == sourceClock.TimestampFrequency && now >= imageRegion.FrameStamp.CapturedTimestamp
+                    ? sourceClock.GetElapsedTime(imageRegion.FrameStamp.CapturedTimestamp, now).TotalMilliseconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                    : "unknown:clock-or-source";
                 BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope.Current?.TryCapture(imageRegion,
                     "team:" + Guid.NewGuid().ToString("N"), "team-recognized",
-                    $"expectedSlots={ExpectedTeamAvatarNum} names=[{string.Join(",", names)}]; original team recognition frame", _logger);
+                    $"expectedSlots={ExpectedTeamAvatarNum} names=[{string.Join(",", names)}]; original team recognition frame", _logger, fields: teamFields);
             }
             catch { }
             Avatars = BuildAvatars([.. names], null, avatarIndexRectList, autoFightConfig);
@@ -353,9 +371,10 @@ public class CombatScenes : IDisposable
     // }
 
 
-    public (string, string) ClassifyAvatarCnName(Image<Rgb24> img, int index)
+    public (string, string) ClassifyAvatarCnName(Image<Rgb24> img, int index,
+        Action<string, double, double, bool>? diagnostic = null)
     {
-        var className = ClassifyAvatarName(img, index);
+        var className = ClassifyAvatarName(img, index, diagnostic);
 
         var nameEn = className;
         var costumeName = "";
@@ -370,7 +389,8 @@ public class CombatScenes : IDisposable
         return (avatar.Name, costumeName);
     }
 
-    public string ClassifyAvatarName(Image<Rgb24> img, int index)
+    public string ClassifyAvatarName(Image<Rgb24> img, int index,
+        Action<string, double, double, bool>? diagnostic = null)
     {
         SpeedTimer speedTimer = new();
         speedTimer.Record("角色侧面头像图像转换");
@@ -379,6 +399,8 @@ public class CombatScenes : IDisposable
         Debug.WriteLine($"角色侧面头像识别结果：{result}");
         speedTimer.DebugPrint();
         var topClass = result.GetTopClass();
+        var threshold = topClass.Name.Name.StartsWith("Qin") || topClass.Name.Name.Contains("Costume") ? .51 : .7;
+        try { diagnostic?.Invoke(topClass.Name.Name, topClass.Confidence, threshold, topClass.Confidence >= threshold); } catch { }
         if (topClass.Name.Name.StartsWith("Qin") || topClass.Name.Name.Contains("Costume"))
         {
             // 降低琴和衣装角色的识别率要求

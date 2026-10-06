@@ -15,6 +15,13 @@ internal sealed class PathingMacroEvidence(string context, string commands)
     private long _inputCount, _observations;
     private string _lastPhase = "not-observed";
     private PathingMacroObservation _last;
+    private int _commandIndex = -1;
+    private long _deadline, _inputFence;
+
+    internal void Boundary(int commandIndex, long deadline, long inputFence)
+    { _commandIndex = commandIndex; _deadline = deadline; _inputFence = inputFence; }
+
+    internal void End() => DiagnosticEvidenceScope.Current?.ForgetExactFrame("pathing-macro", _request);
 
     internal void Mapping(string logical, string physical)
     {
@@ -42,6 +49,7 @@ internal sealed class PathingMacroEvidence(string context, string commands)
         {
             ["macro:state"] = $"phase={_lastPhase} scene={_last.Scene} canFire={_last.CanFire} observations={_observations} inputCount={_inputCount}",
             ["macro:lastSource"] = $"{_last.Source.SessionId}/{_last.Source.Sequence} capturedTimestamp={_last.Source.CapturedTimestamp} frequency={_last.Source.TimestampFrequency}",
+            ["macro:boundary"] = $"commandIndex={_commandIndex} originalDeadline={_deadline} inputFence={_inputFence}",
             ["macro:mapping"] = string.Join(",", System.Linq.Enumerable.Select(_mapping, pair => pair.Key + "->" + pair.Value)),
             ["input:first"] = _firstReceipt ?? "not-submitted"
         };
@@ -59,6 +67,8 @@ internal sealed class PathingMacroEvidence(string context, string commands)
         {
             var fields = Fields();
             fields["macro:failure"] = Bounded(error.GetType().Name + ":" + error.Message);
+            DiagnosticEvidenceScope.Current?.CaptureExactWindow("pathing-macro", _request, _last.Source,
+                "macro-last-observation", $"{context}; phase={_lastPhase}; exact last existing observation before failure, no new capture", logger, fields);
             logger?.LogWarning("PATH_RAW_END {Context} request={Request} phase={Phase} scene={Scene} observations={Observations} inputs={Inputs} error={Error} evidence={Evidence}",
                 context, _request, _lastPhase, _last.Scene, _observations, _inputCount, error.GetType().Name,
                 Newtonsoft.Json.JsonConvert.SerializeObject(fields));
@@ -77,9 +87,10 @@ internal sealed class PathingMacroEvidence(string context, string commands)
             _lastPhase = phase;
             _observations++;
             DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
+            DiagnosticEvidenceScope.Current?.RememberExactFrame("pathing-macro", _request, frame);
             // 只保存既有边界观察；同一阶段首次unknown与首次已识别各一帧，不逐帧输出。
             if (phase is not ("entry" or "post" or "scene-transition" or "before-fire" or
-                "before-cannon-handshake" or "cannon-handshake-complete" or "cannon-turn-complete")) return;
+                "before-cannon-handshake" or "cannon-handshake-first-f" or "cannon-handshake-complete" or "cannon-turn-complete")) return;
             var evidencePhase = observation.Scene == PathingMacroScene.Unknown ? phase + "-unknown" : phase;
             // 循环炮台宏会多次到达同名边界；按输入序号分组，避免只剩第一次成功的原图。
             var request = phase is "entry" or "post" ? _request : _request + ":input-" + _inputCount;

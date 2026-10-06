@@ -25,6 +25,7 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
     private RuntimeStallDiagnostics? _stall;
     public void BeginEvidence(IReadOnlyList<CombatCommand> commands)
     {
+        _evidence?.End();
         _evidence = null;
         if (DiagnosticEvidenceScope.Current == null) return;
         _evidence = new PathingMacroEvidence(context(), string.Join(",", commands.Select(command =>
@@ -39,6 +40,9 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
         return physical;
     }
     public void FailEvidence(Exception error) => _evidence?.Failed(error, TaskControl.Logger);
+    public void EvidenceBoundary(int commandIndex, long deadline, long inputFence) =>
+        _evidence?.Boundary(commandIndex, deadline, inputFence);
+    public void EndEvidence() { _evidence?.End(); _evidence = null; }
     public Task Delay(int milliseconds, CancellationToken ct) => TaskControl.Delay(milliseconds, ct);
     public IDisposable BeginExclusive() => AvatarRecognition.BeginExclusiveOperation(allowPassiveObservation: false);
 

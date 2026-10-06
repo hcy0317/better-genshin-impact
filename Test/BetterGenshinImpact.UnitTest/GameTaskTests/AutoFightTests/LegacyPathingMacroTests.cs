@@ -13,6 +13,72 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class LegacyPathingMacroTests
 {
     [Fact]
+    public async Task DeadlineCrossedInDelayStillSavesTheLastObservedPixelsWithoutAnotherCapture()
+    {
+        var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();
+        await using var evidenceScope = new BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope(
+            (item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var evidence = new PathingMacroEvidence("node=7", "keypress(f)");
+        var io = new MacroReplay { Scene = PathingMacroScene.World };
+        CaptureFrameStamp last = default;
+        var waiting = false;
+        io.OnObservation = (phase, observation) =>
+        {
+            using var frame = new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(
+                new OpenCvSharp.Mat(2, 2, OpenCvSharp.MatType.CV_8UC3, OpenCvSharp.Scalar.Black), 0, 0)
+            { FrameStamp = observation.Source };
+            evidence.Capture(frame, phase, observation);
+            last = observation.Source;
+            waiting = phase == "cannon-handshake-complete";
+            return observation;
+        };
+        io.AfterDelay = () => { if (waiting) io.Time.Advance(TimeSpan.FromHours(1)); };
+        io.OnEvidenceFailure = error => evidence.Failed(error);
+        using var session = new PathingMacroSession(io);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("keypress(f),wait(.2),keypress(f),keypress(RETURN),keypress(ESCAPE)", false), ["钟离"]),
+            (_, _) => throw new Exception("unexpected native segment"), default));
+        evidence.End();
+        await evidenceScope.DisposeAsync();
+        Assert.Contains(saved, item => item.Phase == "macro-last-observation" && item.Source == last);
+        Assert.Equal(4, io.Observations); // entry, before-handshake, first-F, one completion observation
+        Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
+    }
+    [Fact]
+    public async Task FirstInteractionAlreadyInCannonDoesNotSendAnotherInteraction()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true };
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(
+            "keypress(f),wait(.2),keypress(f),keypress(RETURN),keypress(ESCAPE)", false), ["钟离"]),
+            (_, _) => throw new Exception("unexpected native segment"), default);
+        Assert.True(result.CanContinue);
+        Assert.Single(io.Inputs.Where(input => input == "KeyDown:VK_F"));
+        Assert.Equal(PathingMacroScene.World, io.Scene);
+    }
+
+    [Theory]
+    [InlineData("stale")]
+    [InlineData("foreign")]
+    [InlineData("before-input")]
+    [InlineData("transformed")]
+    public async Task InvalidFirstInteractionFeedbackCannotAuthorizeAnotherKey(string fault)
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true };
+        io.OnObservation = (phase, frame) => phase != "cannon-handshake-first-f" ? frame : fault switch
+        {
+            "stale" => frame with { Source = frame.Source with { CapturedTimestamp = frame.Source.CapturedTimestamp - io.Time.TimestampFrequency } },
+            "foreign" => frame with { Source = frame.Source with { SessionId = Guid.NewGuid() } },
+            "before-input" => frame with { Source = frame.Source with { CapturedTimestamp = 0 } },
+            _ => frame with { Scene = PathingMacroScene.Transformed }
+        };
+        using var session = new PathingMacroSession(io);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("keypress(f),wait(.2),keypress(f),keypress(RETURN),keypress(ESCAPE)", false), ["钟离"]),
+            (_, _) => throw new Exception("unexpected native segment"), default));
+        Assert.Equal(new[] { "KeyDown:VK_F", "KeyUp:VK_F" }, io.Inputs);
+    }
+    [Fact]
     public async Task EvidenceFailureCannotReplaceRawInputFailureOrPreventHeldKeyCleanup()
     {
         var original = new IOException("original dispatch");
@@ -527,6 +593,7 @@ public class LegacyPathingMacroTests
         internal DateTimeOffset Start;
         internal List<string> Inputs { get; } = [];
         internal int Observations;
+        internal Func<string, PathingMacroObservation, PathingMacroObservation>? OnObservation;
         internal Func<User32.VK, User32.VK> Mapping = key => key;
         internal int FaultAt;
         internal CombatBattleHostInputStatus Fault;
@@ -553,7 +620,8 @@ public class LegacyPathingMacroTests
                 _animationUntil = default;
             }
             var unknown = UnknownAt > 0 && Observations >= UnknownAt && Observations - UnknownAt < UnknownCount;
-            return new(unknown ? PathingMacroScene.Unknown : Scene, _source.Next(), Scene == PathingMacroScene.Cannon && FirePrompt);
+            var observation = new PathingMacroObservation(unknown ? PathingMacroScene.Unknown : Scene, _source.Next(), Scene == PathingMacroScene.Cannon && FirePrompt);
+            return OnObservation?.Invoke(phase, observation) ?? observation;
         }
         public User32.VK Map(User32.VK key) => Mapping(key);
         public CombatBattleHostInputResult Send(PathingMacroInput input, Action admit)

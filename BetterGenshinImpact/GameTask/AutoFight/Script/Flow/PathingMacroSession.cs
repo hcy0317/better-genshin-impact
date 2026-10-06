@@ -28,6 +28,8 @@ internal interface IPathingMacroIo
     IDisposable? BeginExclusive() => null;
     void BeginEvidence(System.Collections.Generic.IReadOnlyList<CombatCommand> commands) { }
     void FailEvidence(Exception error) { }
+    void EvidenceBoundary(int commandIndex, long deadline, long inputFence) { }
+    void EndEvidence() { }
 }
 
 /// <summary>路径实例拥有物理键和回执，绝不从NativeGame窃取租约或持有截图。</summary>
@@ -44,6 +46,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
     private bool _leftHeld;
     internal bool HasTail => _held.Count != 0;
     private bool _navigation;
+    private int _commandIndex = -1;
 
     internal void AdoptNavigation(PathingMacroObservation observation, bool validPosition, CancellationToken ct)
     {
@@ -122,6 +125,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             }
             throw;
         }
+        finally { try { io.EndEvidence(); } catch { } }
     }
 
     private async Task<CombatExecutionResult> ExecuteRawAsync(LegacyPathingMacroPlan.Segment segment,
@@ -130,6 +134,8 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         try { io.BeginEvidence(segment.Commands); }
         catch { /* 取证初始化失败不改变业务执行。 */ }
         _deadline = Math.Min(overallDeadline, Deadline(segment.RawBudgetSeconds));
+        _commandIndex = -1;
+        _fence = 0;
         _lease = io.Coordinator.TryAcquire(Guid.NewGuid(), ReleasePhysical)
             ?? throw new InvalidOperationException("路径宏无法取得输入所有权");
         using var exclusive = io.BeginExclusive();
@@ -139,6 +145,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         for (var commandIndex = 0; commandIndex < segment.Commands.Count; commandIndex++)
         {
             var command = segment.Commands[commandIndex];
+            _commandIndex = commandIndex;
             Check(_deadline, ct);
             // 两个原定F是一次交互握手；第一F可能只隐藏HUD，不能在两者之间等待炮台UI。
             // 仅保留已识别炮台程序中的原短等待，不新增重试或扩大Unknown入口准入。
@@ -150,9 +157,20 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                     throw new InvalidOperationException("炮台交互按键映射与原握手不一致");
                 await PressAsync(User32.VK.VK_F, ct);
                 await WaitAsync(Milliseconds(segment.Commands[commandIndex + 1].Args![0]), ct);
+                var firstResponseDelay = 60 - io.Clock.GetElapsedTime(_fence).TotalMilliseconds;
+                if (firstResponseDelay > 0) await WaitAsync((int)Math.Ceiling(firstResponseDelay), ct);
+                SetEvidenceBoundary();
+                var feedback = io.Observe("cannon-handshake-first-f");
+                Check(_deadline, ct);
+                if (!feedback.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) ||
+                    !new CaptureFrameFence(_entry, _fence).Accepts(feedback.Source) ||
+                    feedback.Scene == PathingMacroScene.Transformed)
+                    throw new InvalidOperationException("炮台首次交互反馈源失效，不继续发送第二次交互");
                 if (io.Map(User32.VK.VK_F) != User32.VK.VK_F)
                     throw new InvalidOperationException("炮台交互期间按键映射改变");
-                await PressAsync(User32.VK.VK_F, ct);
+                // 首F已经取得炮台能力时，第二F会成为多余的交互。Unknown只保留原定第二F，
+                // 不在两F之间等待Cannon，也不增加输入或延长宏期限。
+                if (feedback.Scene != PathingMacroScene.Cannon) await PressAsync(User32.VK.VK_F, ct);
                 observation = await ObserveBoundaryAsync("cannon-handshake-complete", ct, PathingMacroScene.Cannon);
                 commandIndex += 2;
                 continue;
@@ -310,6 +328,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         while (true)
         {
             Check(_deadline, ct);
+            SetEvidenceBoundary();
             var observation = io.Observe(phase);
             Check(_deadline, ct);
             if (observation.Source.IsKnown)
@@ -331,6 +350,12 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         var seconds = double.Parse(value, CultureInfo.InvariantCulture);
         if (!double.IsFinite(seconds) || seconds < 0) throw new ArgumentOutOfRangeException(nameof(value));
         return checked((int)Math.Ceiling(seconds * 1000));
+    }
+
+    private void SetEvidenceBoundary()
+    {
+        try { io.EvidenceBoundary(_commandIndex, _deadline, _fence); }
+        catch { /* 边界诊断失败不改变原输入和期限。 */ }
     }
 
     private async Task PressAsync(User32.VK key, CancellationToken ct)

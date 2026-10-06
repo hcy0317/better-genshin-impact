@@ -13,6 +13,7 @@ using Microsoft.Extensions.Logging;
 using Fischless.GameCapture;
 using Fischless.WindowsInput;
 using BetterGenshinImpact.GameTask.Common.Ui;
+using BetterGenshinImpact.GameTask.Model.Area;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
 
@@ -27,6 +28,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     private bool _partyRequested, _partyEvidence;
     private CaptureFrameFence? _partyFence;
     private CaptureFrameStamp _partyEvidenceSource;
+    private Guid _partyInputRequest;
+    private CaptureFrameStamp _lastAdmittedPartySource;
     public TimeProvider Clock => _device.Clock;
     public Guid BattleId => _flow.Context.BattleId;
 
@@ -64,20 +67,67 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     public PartySetupFinishObservation ObservePartyBar()
     {
-        PartySetupFinishObservation ReadNative()
-        {
-            using var capture = _vision?.Capture();
-            if (capture != null) DiagnosticEvidenceScope.Current?.CaptureRequestedFrames(BattleId.ToString("N"), capture);
-            return capture == null ? default : AutoFightTask.ObservePartySetupBar(capture, capture.FrameStamp.Sequence);
-        }
-        var observed = _partyObservation?.Invoke() ?? ReadNative();
-        if (_partyRequested && observed.BarVisible && observed.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) &&
-                 _partyFence?.Accepts(observed.Source) == true)
+        using var capture = _partyObservation == null ? _vision?.Capture() : null;
+        var observed = _partyObservation?.Invoke() ?? (capture == null ? default :
+            AutoFightTask.ObservePartySetupBar(capture, capture.FrameStamp.Sequence));
+        var admitted = _partyRequested && observed.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) &&
+                 _partyFence?.Accepts(observed.Source) == true;
+        if (admitted) _lastAdmittedPartySource = observed.Source;
+        if (admitted && observed.BarVisible)
         {
             _partyEvidence = true;
             _partyEvidenceSource = observed.Source;
         }
+        if (capture != null)
+        {
+            DiagnosticEvidenceScope.Current?.CaptureRequestedFrames(BattleId.ToString("N"), capture);
+            CapturePartyProbe(capture, observed, _partyRequested, _partyInputRequest, _partyFence, Clock, _device.Logger, BattleId, admitted);
+        }
         return observed;
+    }
+
+    internal static void CapturePartyProbe(ImageRegion frame, PartySetupFinishObservation observed, bool requested,
+        Guid request, CaptureFrameFence? fence, TimeProvider clock, ILogger logger, Guid battle, bool? admittedAtDecision = null)
+    {
+        try
+        {
+            // 输入前每场仅一帧，输入后按原请求去重；不另抓截图或改变完成规则。
+            if (requested && request == Guid.Empty) return;
+            var detail = $"battle={battle} inputRequest={(requested ? request.ToString() : "not-submitted")} barVisible={observed.BarVisible} " +
+                $"fresh={observed.Source.IsFresh(clock, TimeSpan.FromMilliseconds(150))} " +
+                $"fenceAccepted={fence?.Accepts(observed.Source) == true} inputCompleted={fence?.InputCompletedTimestamp}; party probe observation, not completion";
+            var admitted = observed.Source == frame.FrameStamp && (admittedAtDecision ??
+                (observed.Source.IsFresh(clock, TimeSpan.FromMilliseconds(150)) && fence?.Accepts(observed.Source) == true));
+            detail += $" admittedAtDecision={admitted}";
+            var evidence = DiagnosticEvidenceScope.Current;
+            if (requested)
+            {
+                evidence?.RememberExactFrame("party-probe", request.ToString("N"), frame);
+                if (admitted) evidence?.RememberExactFrame("party-probe-admitted", request.ToString("N"), frame);
+            }
+            evidence?.TryCapture(frame, "party-probe:" + (requested ? request : battle).ToString("N"),
+                !requested ? "before-party-input" : !admitted ? "post-input-invalid-source" : observed.BarVisible ? "bar-visible" : "bar-not-visible", detail, logger);
+        }
+        catch { /* 精确原帧取证失败不改变结束判定。 */ }
+    }
+
+    internal static void CapturePartyTerminal(Guid request, CaptureFrameStamp finalSource,
+        CaptureFrameStamp lastAdmittedSource, string detail, ILogger logger, IReadOnlyDictionary<string, string>? fields = null)
+    {
+        var evidence = DiagnosticEvidenceScope.Current;
+        var identity = request.ToString("N");
+        try
+        {
+            evidence?.CaptureExactWindow("party-probe", identity, finalSource, "party-terminal", detail, logger, fields);
+            if (lastAdmittedSource.IsKnown && lastAdmittedSource != finalSource)
+                evidence?.CaptureExactWindow("party-probe-admitted", identity, lastAdmittedSource, "party-last-admitted",
+                    detail + "; previous admitted sample; final decision uses a different source", logger, fields);
+        }
+        catch { }
+        finally
+        {
+            try { evidence?.ForgetExactFrame("party-probe", identity); evidence?.ForgetExactFrame("party-probe-admitted", identity); } catch { }
+        }
     }
 
     public ValueTask<CombatBattleHostInputResult> SendAsync(CombatBattleHostInput input, CancellationToken ct) =>
@@ -106,6 +156,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 trace.PartyReason ?? "not-observed", frame.Recognition?.ToCompactString() ?? "not-observed");
         if (trace.CapturePhase is not { } phase) return;
         var evidence = DiagnosticEvidenceScope.Current;
+        if (phase == "terminal" && _partyInputRequest != Guid.Empty)
+            CapturePartyTerminal(_partyInputRequest, trace.PartySample.Source, _lastAdmittedPartySource, detail, _device.Logger, EvidenceFields(trace));
         if (evidence == null)
             _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase={Phase} reason=no-run-scope", BattleId, phase);
         else
@@ -346,12 +398,16 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             if (input.Kind == CombatBattleHostInputKind.OpenParty)
             {
                 _partyRequested = true;
+                _partyInputRequest = input.RequestId;
+                _lastAdmittedPartySource = default;
                 _partyEvidence = false;
                 AutoFightTask.LastFightFinishCheckTime = DateTime.Now;
                 _partyFence = new(input.Source, result.CompletedTimestamp!.Value);
             }
             else if (input.Kind == CombatBattleHostInputKind.CloseParty)
             {
+                try { DiagnosticEvidenceScope.Current?.ForgetExactFrame("party-probe", _partyInputRequest.ToString("N")); } catch { }
+                try { DiagnosticEvidenceScope.Current?.ForgetExactFrame("party-probe-admitted", _partyInputRequest.ToString("N")); } catch { }
                 _partyRequested = _partyEvidence = false;
                 _partyFence = null;
                 _partyEvidenceSource = default;

@@ -64,6 +64,9 @@ internal static class UiTransition
                 last = null;
                 confirmed = 0;
                 confirmedSignature = null;
+                previousAction = null;
+                actionSignature = null;
+                unchangedActions = 0;
             }
             if (!observed.HasUsableEvidence)
             {
@@ -83,7 +86,7 @@ internal static class UiTransition
                 {
                     confirmed = 0;
                     confirmedSignature = null;
-                    if (previousAction is UiAction.ReviveParty or UiAction.Escape or UiAction.EscapeProbe &&
+                    if (previousAction is UiAction.ReviveParty or UiAction.Escape or UiAction.EscapeProbe or UiAction.CloseParty &&
                         actionSignature == observed.Signature && unchangedActions >= 2)
                     {
                         var error = new TimeoutException($"界面转换超时：{operation.Name}，期望={target}，实际={observed.Describe()}；恢复无进展：{previousAction} 已提交两次，页面仍未变化");

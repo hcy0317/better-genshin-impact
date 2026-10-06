@@ -121,6 +121,7 @@ internal static class UiRecovery
         Action<Exception, string>? captureFailure = null)
     {
         var domainPromptHandled = false;
+        UiSnapshot? escapedParty = null;
         // 恢复边界是"世界在、UI 全无"空转的唯一出口：宽限期内既未命中目标、又无任何可执行动作时，兜底探测一次 Escape。
         var stallProbe = requireOverworld ? new UiStallEscapeProbe(TimeSpan.FromSeconds(6), 2, clock) : null;
         return UiTransition.WaitAsync("return-main", requireOverworld ? UiTarget.Overworld : UiTarget.Main,
@@ -128,12 +129,20 @@ internal static class UiRecovery
             // 退出门图标只能证明菜单存在，不能证明点击会返回HUD；使用已知的关闭动作。
             observed => observed.CanDismissReward ? UiAction.DismissReward : observed.Reward.IsCandidate ? null : observed.CanConfirmDomainExit
                 ? domainPromptHandled ? null : requireOverworld ? UiAction.ConfirmDomainExit : UiAction.Escape
-                : observed.FullPartyDefeat ? UiAction.ReviveParty : observed.CanEscape ? UiAction.Escape :
+                : observed.FullPartyDefeat ? UiAction.ReviveParty :
+                escapedParty != null && observed.Matches(UiTarget.Party) && observed.Closable &&
+                observed.Signature == escapedParty.Signature && observed.IsAfter(escapedParty)
+                    ? UiAction.CloseParty : observed.CanEscape ? UiAction.Escape :
                 observed.CanDismissDomainTip ? UiAction.DismissDomainTip :
                 stallProbe?.ShouldProbe(observed) == true ? UiAction.EscapeProbe : null,
             logger: logger, clock: clock, captureFailure: captureFailure,
-            actionCompleted: (_, applied, observed) =>
-            { if (applied && observed.CanConfirmDomainExit) domainPromptHandled = true; });
+            actionCompleted: (action, applied, observed) =>
+            {
+                if (applied && observed.CanConfirmDomainExit) domainPromptHandled = true;
+                // IsAfter also enforces the capture session; a new session cannot inherit the fallback.
+                if (applied && action == UiAction.Escape && observed.Matches(UiTarget.Party))
+                    escapedParty = observed;
+            });
     }
 
     internal static Task<UiSnapshot> ExitDomainAsync(IUiDriver driver, CancellationToken ct,

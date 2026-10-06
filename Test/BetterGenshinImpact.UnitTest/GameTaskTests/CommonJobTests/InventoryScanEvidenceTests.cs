@@ -66,6 +66,21 @@ public class InventoryScanEvidenceTests
     }
 
     [Theory]
+    [InlineData("scan-cancelled")]
+    [InlineData("scan-failed:IOException")]
+    public void InterruptedScanCannotPublishCompleteCoverageEvenWhenLastPageIsAtBottom(string termination)
+    {
+        var source = new CaptureFrameSource();
+        var evidence = new InventoryScanEvidence(["fragile", "transient"], 8);
+        evidence.ObservePage(source.Next(), new(true, 122, 940, true, true), Items(0, 8), true);
+        var snapshot = evidence.Finish(new Dictionary<string, int> { ["fragile"] = -2 }, termination);
+        Assert.False(snapshot.CoverageComplete);
+        Assert.Equal(termination, snapshot.Reason);
+        Assert.Equal(-2, snapshot.Counts["fragile"]);
+        Assert.Equal(-1, snapshot.Counts["transient"]);
+    }
+
+    [Theory]
     [InlineData("not-top")]
     [InlineData("not-bottom")]
     [InlineData("skipped-page")]
