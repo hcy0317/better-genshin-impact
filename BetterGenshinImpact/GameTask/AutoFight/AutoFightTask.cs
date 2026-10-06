@@ -350,6 +350,7 @@ public class AutoFightTask : ISoloTask
                 while (!cts2.Token.IsCancellationRequested)
                 {
                     stall.Mark("before-advance");
+                    using var activeStep = stall.Watch("combat-host-advance");
                     var hostResult = await battleHost.AdvanceAsync(flow, cts2.Token);
                     stall.Mark("after-advance");
                     lastFightName = flow.Context.LastObservedActor ?? lastFightName;

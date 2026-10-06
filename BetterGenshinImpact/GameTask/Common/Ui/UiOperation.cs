@@ -279,15 +279,19 @@ internal sealed class UiOperation : IDisposable
 
     // 未进入的阶段保持null；零只表示实际测量到了零，不能伪造未执行的输入/等待。
     public PhaseMeasurement Measure(UiOperationPhase phase) => new(this, phase);
+    internal IDisposable WatchRecognition(string phase) => _stall.Watch(phase);
     internal readonly struct PhaseMeasurement : IDisposable
     {
         private readonly UiOperation _owner;
         private readonly UiOperationPhase _phase;
         private readonly long _started;
         private readonly RuntimeStallDiagnostics.PhaseMeasurement _stall;
+        private readonly IDisposable? _activePhase;
         internal PhaseMeasurement(UiOperation owner, UiOperationPhase phase)
         {
             _owner = owner; _phase = phase; _started = owner._clock.GetTimestamp();
+            _activePhase = phase is UiOperationPhase.Capture or UiOperationPhase.SceneRecognition or UiOperationPhase.AreaOcr
+                ? owner._stall.Watch(phase.ToString()) : null;
             _stall = phase is UiOperationPhase.Capture or UiOperationPhase.SceneRecognition or UiOperationPhase.AreaOcr or
                 UiOperationPhase.RecognitionSessionWait or UiOperationPhase.OcrInference
                 ? owner._stall.Measure(phase.ToString()) : default;
@@ -298,6 +302,7 @@ internal sealed class UiOperation : IDisposable
             _owner._phaseMilliseconds[index] = (_owner._phaseMilliseconds[index] ?? 0) +
                 _owner._clock.GetElapsedTime(_started).TotalMilliseconds;
             _stall.Dispose();
+            _activePhase?.Dispose();
         }
     }
 

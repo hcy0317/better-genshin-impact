@@ -67,6 +67,7 @@ public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgi
             UnclipRatio,
             MinSize,
             UseDilation);
+        using var pending = GameTask.Common.Ui.UiOperation.Current?.WatchRecognition("ocr-det-postprocess");
         return postProcessor.Run(roi, src.Size());
     }
 

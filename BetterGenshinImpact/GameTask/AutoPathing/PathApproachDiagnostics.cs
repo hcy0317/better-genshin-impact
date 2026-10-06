@@ -26,8 +26,24 @@ internal sealed class PathApproachDiagnostics(string route, string context)
     private int _stationary;
     private bool _captured;
     private PathApproachPulse _pulse;
+    private string _rotation = "not-observed";
+    private readonly string _request = "path-approach:" + Guid.NewGuid().ToString("N");
 
     internal void RecordPulse(PathApproachPulse pulse) => _pulse = pulse;
+    internal void RecordRotation(int targetAngle, bool completed) => _rotation = $"targetAngle={targetAngle} completed={completed}";
+
+    internal void Exhausted(ImageRegion frame, PathPosition position, Point2f target, string motion, ILogger logger)
+    {
+        try
+        {
+            DiagnosticEvidenceScope.Current?.TryCapture(frame, _request, "precise-exhausted",
+                $"route={route} {context} target={target} current={position.Point} locationSource={position.Source} motion={motion}; 25步耗尽的实际判定帧，不是恢复后截图",
+                logger, fields: new System.Collections.Generic.Dictionary<string, string>
+                { ["nativeInput"] = _pulse.Receipt?.Describe() ?? "unknown:no-pulse-observed", ["rotation"] = _rotation },
+                priority: DiagnosticEvidencePriority.Warning);
+        }
+        catch { }
+    }
 
     internal void Observe(ImageRegion frame, Point2f position, Point2f target, double distance, int step, ILogger logger,
         bool? directPosition = null, NavigationFrameEvidence navigation = default, string? motion = null,
@@ -52,7 +68,7 @@ internal sealed class PathApproachDiagnostics(string route, string context)
                 : directPosition == true ? "direct" : "unknown";
             var detail = FormattableString.Invariant($"{context} step={step}/25 target=({target.X:F2},{target.Y:F2}) current=({position.X:F2},{position.Y:F2}) distance={distance:F2} stationary={_stationary} locationSource={sourceKind} requested={_pulse.Requested} submitted={_pulse.Submitted} uncertain={_pulse.Uncertain} holdRequestedMs=60 pulseElapsedMs={_pulse.ElapsedMilliseconds:F2} sourceAdvanced={sourceAdvanced} sourceAgeMs={age:F2}; diagnostic only, stale/duplicate frames retained as such; no arrival-policy change");
             detail += $" previous=({previousPosition?.X},{previousPosition?.Y}) observedMotion={motion ?? "unknown:not-observed"} " + navigation.Describe();
-            DiagnosticEvidenceScope.Current?.RequestWindowFromFrame("path-approach:" + route + ":" + context, "precise-stall", frame, detail, logger,
+            DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(_request, "precise-stall", frame, "route=" + route + " " + detail, logger,
                 fields: new System.Collections.Generic.Dictionary<string, string>
                 { ["nativeInput"] = _pulse.Receipt?.Describe() ?? "unknown:no-pulse-observed" });
             logger.LogWarning("PATH_APPROACH_STALL {Route} {Detail}", route, detail);

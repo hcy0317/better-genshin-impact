@@ -741,7 +741,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     try
                     {
                         if (result.BorrowFrame is { } recoveryFrame)
-                            _evidence?.TryCapture(recoveryFrame, "selection:" + _selection.GoalId,
+                            _evidence?.TryCapture(recoveryFrame, "selection-recovery:" + action.CommandId,
                                 "hud-unavailable-before-recovery",
                                 $"battle={action.BattleId} target={_selectionActor} submitted={_selection.HasSubmittedInput} reason={_selection.Reason} purpose={Purpose}; original frame before non-combat recovery; no input authorization", Logger);
                     }
@@ -1194,7 +1194,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     if (selection.AwaitingObservation) return CombatObservationPreparation.AwaitingObservation;
                     if (selection.NeedsRecovery)
                     {
-                        return CombatObservationPreparation.Unavailable;
+                        return CombatObservationPreparation.AwaitingObservation;
                     }
                     if (selection.Confirmed)
                     {
@@ -1547,6 +1547,10 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                     if (pendingResult is CombatFlowResult.Succeeded or CombatFlowResult.Failed)
                     {
+                        if (_capture != null && (pendingResult == CombatFlowResult.Failed || action.Now - observedAttempt.InputAt >= 1))
+                            _evidence?.TryCapture(_capture, request, "skill-terminal-" + pendingResult,
+                                $"battle={action.BattleId} command={action.CommandId} actor={name} {pendingObservation}; original reconciliation frame",
+                                Logger, fields: _attempts.InputEvidence(observedAttempt.AttemptId));
                         _evidence?.ForgetBefore("skill", request);
                         _evidenceAttempts.Remove(observedAttempt.AttemptId);
                     }
@@ -1581,8 +1585,10 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                     if (selection.NeedsRecovery)
                     {
-                        action.DiagnosticReason = "异常HUD已移交非战斗观察，尚未确认恢复";
-                        return CombatFlowResult.Deferred;
+                        // 例如上一条Q已由冷却确认，但特写尚未结束。恢复入口已消费原帧；
+                        // 返回Deferred会结束一次性策略，丢掉剩余普攻。保留原命令及期限等新帧。
+                        action.DiagnosticReason = "HUD暂不可用，已完成非战斗检查，在原命令期限内等待新帧";
+                        return CombatFlowResult.AwaitingObservation;
                     }
                     if (!selection.Confirmed)
                     {

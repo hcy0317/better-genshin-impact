@@ -20,6 +20,8 @@ internal sealed class PathWorldEvidence
     private long _count;
     private string _last = "not-observed";
     private string? _firstSaurian;
+    private string? _lastSaurian;
+    private int _layoutChanges;
     private CaptureFrameStamp _firstSource;
 
     internal PathWorldEvidence(PathMoveToIo io)
@@ -42,6 +44,12 @@ internal sealed class PathWorldEvidence
             var evidence = DiagnosticEvidenceScope.Current;
             if (ready && !_blocked) return;
             evidence?.ObserveExistingFrame(frame);
+            if (_blocked && !ready && _count % 30 == 0 && _layoutChanges < 3)
+            {
+                _lastSaurian = SaurianUiReader.Describe(frame);
+                evidence?.TryCapture(frame, _request, "layout-followup-" + ++_layoutChanges,
+                    _last, SafeLogger(io), fields: Fields());
+            }
             if (_blocked || ready) return;
             _blocked = true;
             _firstSource = frame.FrameStamp;
@@ -56,7 +64,8 @@ internal sealed class PathWorldEvidence
     {
         ["world:last"] = _last,
         ["world:firstSource"] = $"{_firstSource.SessionId}/{_firstSource.Sequence}",
-        ["world:firstSaurian"] = _firstSaurian ?? "not-observed"
+        ["world:firstSaurian"] = _firstSaurian ?? "not-observed",
+        ["world:lastSaurian"] = _lastSaurian ?? "not-observed"
     };
 
     internal void Recovered(ImageRegion frame)

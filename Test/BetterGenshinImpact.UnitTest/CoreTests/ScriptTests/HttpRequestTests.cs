@@ -5,6 +5,41 @@ namespace BetterGenshinImpact.UnitTest.CoreTests.ScriptTests;
 public class HttpRequestTests
 {
     [Fact]
+    public async Task NestedBusyRetainsOpaqueLeaseIdentityWithoutLeakingBody()
+    {
+        var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();
+        await using var scope = new BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var frame = new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(new OpenCvSharp.Mat(2, 2, OpenCvSharp.MatType.CV_8UC3, OpenCvSharp.Scalar.Black), 0, 0)
+            { FrameStamp = new Fischless.GameCapture.CaptureFrameSource().Next() };
+        scope.ObserveExistingFrame(frame);
+        const string body = "{\"code\":200,\"data\":{\"status\":\"BUSY\",\"actionId\":\"private-action\",\"lockHolder\":\"inventory-private-uid\",\"revision\":8,\"token\":\"secret\",\"message\":\"secret\"}}";
+        Http.RecordResponseEvidence(Guid.NewGuid(), "https://example.com/private?token=secret", new() { status_code = 200, body = body }, 20,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        await scope.DisposeAsync();
+        Assert.NotEmpty(saved);
+        var record = saved.First();
+        Assert.Contains("busy=True", record.Detail);
+        Assert.Equal("BUSY", record.Fields!["businessStatus"]);
+        Assert.StartsWith("opaque:", record.Fields["lockHolder"]);
+        var all = Newtonsoft.Json.JsonConvert.SerializeObject(saved);
+        Assert.DoesNotContain("private-action", all);
+        Assert.DoesNotContain("private-uid", all);
+        Assert.DoesNotContain("secret", all);
+        Assert.Equal(HttpBusinessEvidence.Read(body)["actionId"], record.Fields["actionId"]);
+    }
+
+    [Theory]
+    [InlineData("{}", "unknown:not-returned")]
+    [InlineData("not-json", "unknown:invalid-json")]
+    [InlineData("{\"data\":{\"status\":\"secret\"}}", "unknown:other-status")]
+    public void MissingOwnerAndUntrustedStatusesRemainExplicitlyUnknown(string body, string status)
+    {
+        var fields = HttpBusinessEvidence.Read(body);
+        Assert.Equal(status, fields["businessStatus"]);
+        Assert.Equal("unknown:not-returned", fields["lockHolder"]);
+    }
+
+    [Fact]
     public async Task ScriptEvidenceKeepsKnownPhasesAndOpaqueDistinctRequestsWithOnlyWhitelistedFields()
     {
         var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();

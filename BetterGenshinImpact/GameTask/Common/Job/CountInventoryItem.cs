@@ -190,6 +190,20 @@ namespace BetterGenshinImpact.GameTask.Common.Job
         private async Task ScanPageForTargets(IItemIconRecognizer iconRecognizer, GridScreenName page, List<string> pageItemNames, Dictionary<string, int> results, InventoryScanEvidence? evidence = null)
         {
             GridScreen gridScreen = new GridScreen(CreateGridParams(page), logger, ct);
+            var diagnosticRequest = "inventory:" + Guid.NewGuid().ToString("N");
+            var diagnosticPage = 0;
+            gridScreen.OnPageCaptured += frame =>
+            {
+                try
+                {
+                    diagnosticPage++;
+                    DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
+                    if (diagnosticPage <= 12)
+                        DiagnosticEvidenceScope.Current?.TryCapture(frame, diagnosticRequest, "page-" + diagnosticPage,
+                            $"grid={page} page={diagnosticPage} targetCount={pageItemNames.Count}; original scan page", logger);
+                }
+                catch { }
+            };
             gridScreen.OnAfterTurnToNewPage += GridScreen.DrawItemsAfterTurnToNewPage;
             gridScreen.OnBeforeScroll += () => TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll();
 
@@ -219,6 +233,8 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                     observation?.RecordItem(predName);
                     if (predName == null)
                     {
+                        DiagnosticEvidenceScope.Current?.TryCapture(pageRegion, diagnosticRequest, "unknown-icon",
+                            $"grid={page} page={diagnosticPage} itemRect={itemRect}; classifier returned unknown, not zero", logger);
                         continue;
                     }
 
@@ -234,6 +250,9 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                     if (pageItemNames.Contains(predName) && !results.ContainsKey(predName))
                     {
                         int count = ReadItemCount(itemRegion);
+                        if (count < 0)
+                            DiagnosticEvidenceScope.Current?.TryCapture(pageRegion, diagnosticRequest, "unknown-count",
+                                $"grid={page} page={diagnosticPage} itemRect={itemRect} item={predName} count={count}; original count decision", logger);
                         results.TryAdd(predName, count);
                         notFound.RemoveAll(n => n == predName);
 
@@ -249,6 +268,16 @@ namespace BetterGenshinImpact.GameTask.Common.Job
                 TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll();
             }
             observation?.FinishPage();
+            try
+            {
+                logger.LogDebug("INVENTORY_SCAN_EVIDENCE request={Request} grid={Grid} pages={Pages} missing={Missing} unknownCounts={Unknown} coverageMode={Coverage}",
+                    diagnosticRequest, page, diagnosticPage, notFound.Count,
+                    results.Count(pair => pageItemNames.Contains(pair.Key) && pair.Value < 0), evidence != null);
+                if (notFound.Count > 0)
+                    DiagnosticEvidenceScope.Current?.RequestLatestWindow(diagnosticRequest, "inventory-unresolved",
+                        $"grid={page} pages={diagnosticPage} missingCount={notFound.Count}; last retained frame, not a new capture; unknown remains unknown", logger);
+            }
+            catch { }
         }
 
         private int? ComputeMaxSortOfItem(GridScreenName page, List<string> pageItemNames)

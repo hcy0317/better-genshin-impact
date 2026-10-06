@@ -9,6 +9,28 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class PathingMacroEvidenceTests
 {
     [Fact]
+    public async Task RepeatedCannonBoundariesKeepEachInputsFirstUnknownAndKnownFrame()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var evidence = new PathingMacroEvidence("node=7", "keypress(f),keypress(f)");
+        var source = new CaptureFrameSource();
+        for (var input = 0; input < 2; input++)
+        {
+            evidence.Input(new(PathingMacroInputKind.KeyUp, Vanara.PInvoke.User32.VK.VK_F),
+                new(BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputStatus.Sent));
+            foreach (var scene in new[] { PathingMacroScene.Unknown, PathingMacroScene.Unknown, PathingMacroScene.Cannon })
+            {
+                using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+                evidence.Capture(frame, "cannon-handshake-complete", new(scene, frame.FrameStamp));
+            }
+        }
+        await scope.DisposeAsync();
+        Assert.Equal(4, saved.Count);
+        Assert.Equal(2, saved.Select(x => x.Request).Distinct().Count());
+    }
+
+    [Fact]
     public void MissingImageScopeStillLogsBoundedFailureAndInputScalars()
     {
         Assert.Null(DiagnosticEvidenceScope.Current);

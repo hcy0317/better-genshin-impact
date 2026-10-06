@@ -1498,7 +1498,10 @@ public partial class PathExecutor
                 continue;
             }
             if (++stepsTaken > 25)
+            {
+                approachDiagnostics.Exhausted(screen, location, new((float)waypoint.X, (float)waypoint.Y), observation.Motion.ToString(), _moveIo.Logger);
                 throw new RetryException("精确接近目标点超时，重试当前路线分段");
+            }
             position = location.Point;
             var distance = Navigation.GetDistance(waypoint, position);
             approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, _moveIo.Logger, location.IsDirect,
@@ -1578,6 +1581,7 @@ public partial class PathExecutor
 
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
             var rotated = await _moveIo.RotateUntil(targetOrientation, 2);
+            approachDiagnostics.RecordRotation(targetOrientation, rotated);
             operation.Check();
             var rotationFailed = rotationPolicy.Observe(rotated);
             if (stepsTaken == 1 || stepsTaken % 5 == 0 || !rotated)

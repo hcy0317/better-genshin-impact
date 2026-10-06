@@ -108,7 +108,9 @@ public class Http
         try
         {
             long? code = null;
+            var business = HttpBusinessEvidence.Read(response.body);
             var busy = response.status_code is 429 or 503;
+            busy |= business["businessStatus"] == "BUSY";
             var codeState = response.body.Length > 65536 ? "payload-too-large" : "no-numeric-code";
             if (response.body.Length <= 65536)
             {
@@ -127,13 +129,14 @@ public class Http
                 }
                 catch (JsonException) { codeState = "non-json-response"; }
             }
-            var detail = FormattableString.Invariant($"requestId={requestId} endpoint={SafeAddress(url)} httpStatus={response.status_code} businessCode={code?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown:" + codeState} busy={busy} elapsedMs={elapsedMs:F1} lockHolder=unknown:not-exposed-by-script-http-bridge lockConflict=unknown:not-exposed-by-script-http-bridge");
+            var detail = FormattableString.Invariant($"requestId={requestId} endpoint={SafeAddress(url)} httpStatus={response.status_code} businessCode={code?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown:" + codeState} busy={busy} elapsedMs={elapsedMs:F1} lockHolder={business["lockHolder"]} lockConflict={business["lockConflict"]}");
+            detail += " business=" + JsonSerializer.Serialize(business);
             logger.LogDebug("HTTP_RESPONSE_EVIDENCE {Detail}", detail);
             if (busy || response.status_code >= 400)
             {
                 logger.LogWarning("HTTP_FAILURE_EVIDENCE {Detail}", detail);
                 DiagnosticEvidenceScope.Current?.RequestLatestWindow(IncidentKey(url), "http-failed", detail, logger,
-                    changeKey: $"httpStatus={response.status_code};businessCode={code};busy={busy}");
+                    fields: business, changeKey: $"httpStatus={response.status_code};businessCode={code};busy={busy};status={business["businessStatus"]}");
             }
         }
         catch { /* 不读取完整请求/响应到日志，不重试或改变接口返回值。 */ }

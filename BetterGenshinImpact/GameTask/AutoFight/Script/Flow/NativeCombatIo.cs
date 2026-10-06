@@ -166,7 +166,8 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     private CombatBattleHostInputResult SubmitCore(CombatCommand command, CombatNativeInputRequest request,
         Action beforeFirstNative, CancellationToken ct, Action send)
     {
-        var receipt = new CombatNativeInput(Clock, Logger, () => TaskControl.CheckAndSleep(0)).Submit(request,
+        var receipt = new CombatNativeInput(Clock, Logger, () => TaskControl.CheckAndSleep(0), () => NativeInputEnvironment.Read(
+            command.Method == Method.Skill ? Vanara.PInvoke.User32.VK.VK_E : command.Method == Method.Burst ? Vanara.PInvoke.User32.VK.VK_Q : null)).Submit(request,
             command.Method.Alias[0], send, ct, beforeFirstNative);
         if (receipt.Status == CombatBattleHostInputStatus.Unknown)
         {

@@ -909,6 +909,7 @@ public class TpTask
         TeleportClickView clickView)
     {
         var currentClickView = clickView;
+        var evidenceRequest = "map-target:" + Guid.NewGuid().ToString("N");
         string failureReason = "地图图标绝对坐标匹配失败";
         for (var attempt = 0; attempt < AbsoluteMapClickRetryCount; attempt++)
         {
@@ -922,7 +923,22 @@ public class TpTask
                     out var clickY,
                     out failureReason))
             {
-                clickCapture.ClickTo(clickX, clickY);
+                try
+                {
+                    DiagnosticEvidenceScope.Current?.TryCapture(clickCapture, evidenceRequest, "before-click-" + attempt,
+                        FormattableString.Invariant($"map={currentClickView.MapName} target=({currentClickView.TargetX},{currentClickView.TargetY}) click=({clickX},{clickY}) zoom={currentClickView.ZoomLevel} mapRect={currentClickView.BigMapInAllMapRect} neighborDistance={currentClickView.NearestNeighborScreenDistance} attempt={attempt + 1}; original registration frame"), Logger);
+                }
+                catch { }
+                using var inputEvidence = new DiagnosticInputAttempt(TimeProvider.System);
+                Exception? inputFailure = null;
+                try { clickCapture.ClickTo(clickX, clickY); }
+                catch (Exception error) { inputFailure = error; throw; }
+                finally
+                {
+                    try { Logger.LogDebug("MAP_TARGET_INPUT request={Request} attempt={Attempt} receipt={Receipt}",
+                        evidenceRequest, attempt + 1, inputEvidence.Complete(inputFailure == null, inputFailure).Describe()); }
+                    catch { }
+                }
                 return;
             }
 
@@ -1065,9 +1081,17 @@ public class TpTask
     private async Task WaitForTeleportCompletion()
     {
         long nextBlessingCheckAt = BlessingCheckIntervalMs;
+        var request = "teleport-arrival:" + Guid.NewGuid().ToString("N");
         await TeleportPanelConfirmation.WaitForArrivalAsync(
             _arrivalProgress ?? new TeleportArrivalProgress(TimeProvider.System),
-            () => CaptureToRectArea(), WorldFrameAvailability.ReadNative, Delay, ct,
+            () => CaptureToRectArea(), frame =>
+            {
+                TeleportRejection.Check(frame, request);
+                var world = WorldFrameAvailability.ReadNative(frame);
+                DiagnosticEvidenceScope.Current?.TryCapture(frame, request, "arrival-" + world,
+                    "传送到达判定原帧；world=" + world, Logger);
+                return world;
+            }, Delay, ct,
             TimeSpan.FromMilliseconds(TeleportTimeoutMs), whileWaiting: async elapsed =>
         {
             // 打开大地图期间推送的月卡会在传送之后直接显示，导致检测不到传送完成。

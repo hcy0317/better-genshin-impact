@@ -197,6 +197,13 @@ public class CombatScenes : IDisposable
             }
 
             _logger.LogInformation("识别到的队伍角色:{Text}", string.Join(",", displayNames));
+            try
+            {
+                BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope.Current?.TryCapture(imageRegion,
+                    "team:" + Guid.NewGuid().ToString("N"), "team-recognized",
+                    $"expectedSlots={ExpectedTeamAvatarNum} names=[{string.Join(",", names)}]; original team recognition frame", _logger);
+            }
+            catch { }
             Avatars = BuildAvatars([.. names], null, avatarIndexRectList, autoFightConfig);
         }
         catch (Exception e) // todo 此处catch把错误吞了不便排查

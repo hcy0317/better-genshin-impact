@@ -7,6 +7,7 @@ internal static class OcrInference
 {
     internal static T Run<T>(Func<RunOptions, T> run)
     {
+        using var pending = GameTask.Common.Ui.UiOperation.Current?.WatchRecognition("ocr-native-run-and-output-copy");
         using var measured = GameTask.Common.Ui.UiOperation.Current?.Measure(GameTask.Common.Ui.UiOperationPhase.OcrInference);
         var token = RecognitionExecutionScope.Token;
         token.ThrowIfCancellationRequested();

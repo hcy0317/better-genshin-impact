@@ -27,7 +27,7 @@ internal static class SaurianUiReader
             var paimon = BrightAnchor(frame, "PaimonMenu", 235);
             var chat = BrightAnchor(frame, "FriendChat", 220);
             double Score(Rect rect, string template, bool binary = false) => Match(frame.SrcMat, rect, scale, template, binary);
-            return FormattableString.Invariant($"saurian={IsKnownTransformation(frame)} orangeHpShare={share:F4}/.28 paimon={paimon} chat={chat} exit={Score(new(1803, 974, 33, 43), SaurianUiTemplates.Exit):F4}/.85 alternateExit={Score(new(1803, 974, 33, 43), SaurianUiTemplates.AlternateExit):F4}/.85 aim={Score(new(1275, 970, 75, 55), SaurianUiTemplates.Aim, true):F4}/.88 burrow={Score(new(1586, 963, 50, 58), SaurianUiTemplates.Burrow):F4}/.85 spirit={Score(new(1686, 963, 57, 58), SaurianUiTemplates.Spirit):F4}/.85 flight={Score(new(1686, 963, 57, 58), SaurianUiTemplates.Flight):F4}/.85 alternateFlight={Score(new(1686, 963, 57, 58), SaurianUiTemplates.AlternateFlight):F4}/.85");
+            return FormattableString.Invariant($"saurian={IsKnownTransformation(frame)} orangeHpShare={share:F4}/.28 paimon={paimon} chat={chat} exit={Score(new(1803, 974, 33, 43), SaurianUiTemplates.Exit):F4}/.85 alternateExit={Score(new(1803, 974, 33, 43), SaurianUiTemplates.AlternateExit):F4}/.85 aim={Score(new(1275, 970, 75, 55), SaurianUiTemplates.Aim, true):F4}/.88 burrow={Score(new(1586, 963, 50, 58), SaurianUiTemplates.Burrow):F4}/.85 spirit={Score(new(1686, 963, 57, 58), SaurianUiTemplates.Spirit):F4}/.85 flight={Score(new(1686, 963, 57, 58), SaurianUiTemplates.Flight):F4}/.85 alternateFlight={Score(new(1686, 963, 57, 58), SaurianUiTemplates.AlternateFlight):F4}/.85 travelExit={Score(new(1803, 974, 33, 43), SaurianTravelTemplate.Exit):F4}/.85");
         }
         catch (Exception error) { return "saurian=unknown:diagnostic-" + error.GetType().Name; }
     }
@@ -44,6 +44,9 @@ internal static class SaurianUiReader
         Cv2.InRange(bar, new Scalar(40, 194, 245, 0), new Scalar(60, 214, 255, 255), orange);
         if (Cv2.CountNonZero(orange) < bar.Width * bar.Height * .28) return false;
         if (!BrightAnchor(frame, "PaimonMenu", 235) && !BrightAnchor(frame, "FriendChat", 220)) return false;
+        if (Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianTravelTemplate.Exit, binary: false) >= .85 &&
+            Match(pixels, new Rect(1586, 963, 50, 58), scale, SaurianUiTemplates.Burrow, binary: false) >= .85)
+            return true;
         // S74三键布局须同时匹配自身的退出和Space图标，不借用别种变身的技能证据。
         if (Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianUiTemplates.AlternateExit, binary: false) >= .85 &&
             Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.AlternateFlight, binary: false) >= .85)
