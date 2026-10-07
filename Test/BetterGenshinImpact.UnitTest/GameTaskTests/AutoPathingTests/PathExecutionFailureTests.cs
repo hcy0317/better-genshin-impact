@@ -11,6 +11,68 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PathExecutionFailureTests
 {
+    [Fact]
+    public async Task VerifiedRevivalUsesTheSharedHealingBudgetAfterSafePrefixValidation()
+    {
+        var attempts = 0;
+        var retries = new List<Exception>();
+        var validationCalls = 0;
+        var ended = await PathExecutor.ExecuteSegmentWithRetriesAsync(async () =>
+        {
+            if (++attempts <= 2)
+                await CombatRecoveryCompletedException.RecoverVerifiedAsync(() => Task.CompletedTask,
+                    () => Task.CompletedTask, default);
+        }, retries.Add, () => { }, default, canRestartAfterCombatRecovery: () => { validationCalls++; return true; });
+        Assert.False(ended);
+        Assert.Equal(3, attempts);
+        Assert.Equal(2, validationCalls);
+        Assert.All(retries, error => Assert.IsType<PathExecutor.HealingRecoveryCompletedException>(error));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RevivalCannotReplayAnUnsafeOrUnobservedPrefix(bool provideValidator)
+    {
+        var retries = 0;
+        var releases = 0;
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => PathExecutor.ExecuteSegmentWithRetriesAsync(
+            () => CombatRecoveryCompletedException.RecoverVerifiedAsync(() => Task.CompletedTask, () => Task.CompletedTask, default),
+            _ => retries++, () => releases++, default, provideValidator ? () => false : null));
+        Assert.IsType<CombatRecoveryCompletedException>(error.InnerException);
+        Assert.Equal(0, retries);
+        Assert.Equal(1, releases);
+    }
+
+    [Fact]
+    public async Task LowHpAndRevivalShareTwoRestartsAndPreserveTheOrdinaryRetry()
+    {
+        var attempts = 0;
+        var retries = 0;
+        Assert.False(await PathExecutor.ExecuteSegmentWithRetriesAsync(async () =>
+        {
+            switch (++attempts)
+            {
+                case 1: throw new RetryException("ordinary path failure");
+                case 2: throw new PathExecutor.HealingRecoveryCompletedException();
+                case 3: await CombatRecoveryCompletedException.RecoverVerifiedAsync(() => Task.CompletedTask, () => Task.CompletedTask, default); break;
+            }
+        }, _ => retries++, () => { }, default, () => true));
+        Assert.Equal(4, attempts);
+        Assert.Equal(3, retries);
+    }
+
+    [Fact]
+    public async Task ThirdVerifiedRevivalCannotExpandTheHealingBudget()
+    {
+        var attempts = 0;
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => PathExecutor.ExecuteSegmentWithRetriesAsync(
+            () => { attempts++; return CombatRecoveryCompletedException.RecoverVerifiedAsync(() => Task.CompletedTask, () => Task.CompletedTask, default); },
+            _ => { }, () => { }, default, () => true));
+        Assert.Equal(3, attempts);
+        Assert.IsType<CombatRecoveryCompletedException>(error.InnerException);
+    }
+
     [Theory]
     [InlineData("钟离 d(0.2),e")]
     [InlineData("钟离 s(0.2),e,w(0.9)")]

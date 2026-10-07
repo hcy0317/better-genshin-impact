@@ -49,6 +49,7 @@ public class TpTask
     private readonly BlessingOfTheWelkinMoonTask _blessingOfTheWelkinMoonTask = new();
     private RouteMapContext _routeMapContext;
     private TeleportArrivalProgress? _arrivalProgress;
+    private string? _mapTargetEvidenceRequest;
 
     private readonly CancellationToken ct;
     private readonly CultureInfo cultureInfo;
@@ -910,6 +911,7 @@ public class TpTask
     {
         var currentClickView = clickView;
         var evidenceRequest = "map-target:" + Guid.NewGuid().ToString("N");
+        _mapTargetEvidenceRequest = evidenceRequest;
         string failureReason = "地图图标绝对坐标匹配失败";
         for (var attempt = 0; attempt < AbsoluteMapClickRetryCount; attempt++)
         {
@@ -931,12 +933,26 @@ public class TpTask
                 catch { }
                 using var inputEvidence = new DiagnosticInputAttempt(TimeProvider.System);
                 Exception? inputFailure = null;
+                var environment = "not-dispatched";
+                using var inputEnvironment = new Fischless.WindowsInput.InputDispatchCapture(() =>
+                {
+                    if (environment != "not-dispatched") return;
+                    try { environment = NativeInputEnvironment.Read() + "; sample=first-native-dispatch"; }
+                    catch { environment = "unknown:observation-failed"; }
+                });
                 try { clickCapture.ClickTo(clickX, clickY); }
                 catch (Exception error) { inputFailure = error; throw; }
                 finally
                 {
-                    try { Logger.LogDebug("MAP_TARGET_INPUT request={Request} attempt={Attempt} receipt={Receipt}",
-                        evidenceRequest, attempt + 1, inputEvidence.Complete(inputFailure == null, inputFailure).Describe()); }
+                    try
+                    {
+                        var receipt = inputEvidence.Complete(inputFailure == null, inputFailure).Describe();
+                        Logger.LogDebug("MAP_TARGET_INPUT request={Request} attempt={Attempt} receipt={Receipt} environment={Environment}",
+                            evidenceRequest, attempt + 1, receipt, environment);
+                        DiagnosticEvidenceScope.Current?.TryCapture(clickCapture, evidenceRequest, "input-result-" + attempt,
+                            "目标点击回执；像素仍为输入前配准帧，不代表输入后反馈", Logger,
+                            fields: new Dictionary<string, string> { ["nativeInput"] = receipt, ["nativeInputEnvironment"] = environment });
+                    }
                     catch { }
                 }
                 return;
@@ -1276,7 +1292,7 @@ public class TpTask
     {
         return UiRecovery.RunWithRecoveryAsync(_ => TpOnce(tpX, tpY, mapContext, force),
             _ => CloseBigMapAfterTeleportFailure(), ct,
-            canRetry: error => error is not TeleportPanelNotOpenedException,
+            canRetry: error => error is not (TeleportPanelNotOpenedException or TeleportConfirmationUnconfirmedException),
             minimumRetryBudget: TimeSpan.FromSeconds(10),
             logger: Logger,
             captureFailure: error => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
@@ -2769,10 +2785,17 @@ public class TpTask
         return TeleportPanelResult.RetryPoint;
     }
 
-    private Task<bool> ConfirmTeleportPanel(ImageRegion image)
+    private async Task<bool> ConfirmTeleportPanel(ImageRegion image)
     {
         _arrivalProgress = new TeleportArrivalProgress(TimeProvider.System);
-        return TeleportPanelConfirmation.TryConfirmNativeAsync(image, ct, _arrivalProgress);
+        var confirmed = await TeleportPanelConfirmation.TryConfirmNativeAsync(image, ct, _arrivalProgress);
+        if (!confirmed && _mapTargetEvidenceRequest != null)
+        {
+            try { DiagnosticEvidenceScope.Current?.TryCapture(image, _mapTargetEvidenceRequest, "panel-unconfirmed",
+                "目标点击后尚无可确认面板；本帧未发送传送确认，不代表目标未激活", Logger,
+                priority: DiagnosticEvidencePriority.Warning); } catch { }
+        }
+        return confirmed;
     }
 
     private List<NearbyMapIcon> GetMapIconsInRect(

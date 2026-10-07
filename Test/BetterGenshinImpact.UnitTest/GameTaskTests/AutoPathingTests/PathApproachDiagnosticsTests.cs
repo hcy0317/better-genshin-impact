@@ -13,6 +13,64 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PathApproachDiagnosticsTests
 {
     [Fact]
+    public async Task RecoveryTerminalKeepsTheWholeInputChainAndOriginalPosition()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var probe = new PathApproachDiagnostics("pillar", "node=21");
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        probe.Recovery(frame, new(frame.FrameStamp, new(3, 4), true, BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Normal, true), "before", NullLogger.Instance);
+        var first = new DiagnosticInputReceipt(Guid.NewGuid(), 0, 0, 1, clock.TimestampFrequency, 1, 1, DiagnosticInputStatus.Sent, "observed");
+        probe.RecordRecoveryInput(BetterGenshinImpact.Core.Simulator.Extensions.GIActions.MoveBackward,
+            BetterGenshinImpact.Core.Simulator.Extensions.KeyType.KeyDown, first, "fixture");
+        var release = first with { RequestId = Guid.NewGuid(), CompletedAt = 2 };
+        probe.RecordRecoveryInput(BetterGenshinImpact.Core.Simulator.Extensions.GIActions.MoveBackward,
+            BetterGenshinImpact.Core.Simulator.Extensions.KeyType.KeyUp, release, "fixture");
+        clock.Advance(TimeSpan.FromMilliseconds(60));
+        frame.FrameStamp = source.Next();
+        probe.Recovery(frame, new(frame.FrameStamp, new(6, 8), true, BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Normal, true), "terminal-returned", NullLogger.Instance);
+        await evidence.DisposeAsync();
+        var terminal = Assert.Single(saved.Where(item => item.Phase == "ground-recovery-terminal-returned"));
+        Assert.Contains(first.RequestId.ToString("N"), terminal.Fields!["recoveryInputs"]);
+        Assert.Contains(release.RequestId.ToString("N"), terminal.Fields["recoveryInputs"]);
+        Assert.Contains("position=(3,4)", terminal.Fields["recoveryStart"]);
+        Assert.Contains("position=(6,8)", terminal.Fields["recoveryEnd"]);
+    }
+
+    [Fact]
+    public async Task GroundRecoveryRetainsTheInterruptedSourceAndActualInputReceiptOnce()
+    {
+        var records = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { records.Add(item); return Task.CompletedTask; });
+        var probe = new PathApproachDiagnostics("wooden-pillar", "node=21");
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        probe.Recovery(frame, new(frame.FrameStamp, new(3, 4), true, BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Normal, true), "before", NullLogger.Instance);
+        using var input = new DiagnosticInputAttempt(clock);
+        new WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0).DispatchInput(new User32.INPUT[2]);
+        probe.RecordRecoveryInput(BetterGenshinImpact.Core.Simulator.Extensions.GIActions.Jump,
+            BetterGenshinImpact.Core.Simulator.Extensions.KeyType.KeyPress, input.Complete(true), "backend=fixture foregroundIsGame=True");
+        clock.Advance(TimeSpan.FromMilliseconds(60));
+        frame.FrameStamp = source.Next();
+        var interrupted = frame.FrameStamp;
+        probe.Recovery(frame, new(interrupted, new(3, 4), true, BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Fly, true), "interrupted", NullLogger.Instance);
+        clock.Advance(TimeSpan.FromMilliseconds(60));
+        frame.FrameStamp = source.Next();
+        probe.Recovery(frame, new(frame.FrameStamp, new(3, 4), true, BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Fly, true), "interrupted", NullLogger.Instance);
+        await evidence.DisposeAsync();
+        Assert.Equal(2, records.Count);
+        var original = Assert.Single(records.Where(item => item.Phase == "ground-recovery-interrupted"));
+        Assert.Equal(interrupted, original.Source);
+        Assert.Contains("action=Jump", original.Fields!["nativeInput"]);
+        Assert.Contains("nativeRequested=2 nativeSubmitted=2", original.Fields["nativeInput"]);
+        Assert.Contains("foregroundIsGame=True", original.Fields["nativeInputEnvironment"]);
+        Assert.False(frame.SrcMat.IsDisposed);
+    }
+
+    [Fact]
     public async Task ExhaustedAttemptsKeepDistinctOriginalFramesAndDoNotOwnCallerPixels()
     {
         var records = new List<DiagnosticEvidence>();

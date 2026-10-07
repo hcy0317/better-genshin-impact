@@ -20,10 +20,12 @@ public class UiObservationTimingTests
             using (operation.Measure(phase)) clock.Advance(TimeSpan.FromSeconds(3));
             return Task.FromResult(true);
         }, logger, clock);
-        var message = Assert.Single(logger.Gaps);
+        var message = Assert.Single(logger.Gaps.Where(item => item.Contains("from=before-" + phase + " to=after-" + phase, StringComparison.Ordinal)));
         Assert.Contains("owner=ui:party-readable-frame", message);
         Assert.Contains("from=before-" + phase + " to=after-" + phase, message);
         Assert.Contains("elapsedMs=3000", message);
+        if (phase == UiOperationPhase.SceneRecognition)
+            Assert.Contains(logger.Gaps, item => item.Contains("SceneRecognition-still-running", StringComparison.Ordinal));
     }
 
     [Fact]
