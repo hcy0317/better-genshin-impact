@@ -9,6 +9,31 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PreciseApproachRecoveryTests
 {
+    [Fact]
+    public async Task RecoveryCannotUseAQueuedPreInputFrameToSendTheNextAction()
+    {
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(104, 100) };
+        long? inputCompleted = null;
+        GIActions? movement = null;
+        replay.OnInput = (action, type) =>
+        {
+            if (UiOperation.Current?.Name != "path-precise-recovery" ||
+                action is not (GIActions.MoveBackward or GIActions.MoveLeft or GIActions.MoveRight) || type != KeyType.KeyDown) return;
+            movement = action;
+            replay.Clock.Advance(TimeSpan.FromMilliseconds(5));
+            inputCompleted = replay.Clock.GetTimestamp();
+        };
+        replay.StampTransform = stamp => inputCompleted is { } completed && UiOperation.Current?.Name == "path-precise-recovery"
+            ? stamp with { CapturedTimestamp = completed - 1,
+                CapturedAt = replay.Clock.GetUtcNow() - replay.Clock.GetElapsedTime(completed - 1) }
+            : stamp;
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+        Assert.DoesNotContain(replay.RecoveryInputs, input => input.Action == GIActions.Jump);
+        Assert.NotNull(movement);
+        Assert.Contains(replay.RecoveryInputs, input => input.Action == movement && input.Type == KeyType.KeyUp);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
     [Theory]
     [InlineData(MotionStatus.Climb)]
     [InlineData(MotionStatus.Fly)]

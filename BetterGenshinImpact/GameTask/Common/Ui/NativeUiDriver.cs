@@ -26,6 +26,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     private string? _feedbackRequest;
     private UiAction _feedbackAction;
     private bool _feedbackCaptured;
+    private bool _rejectionCaptured;
 
     internal NativeUiDriver(bool inspectWorld = false) : this(NativeUiDriverIo.CreateNative(inspectWorld)) { }
 
@@ -61,6 +62,13 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         using var image = CaptureMeasured();
         var snapshot = ReadCurrent(image);
+        if (!_rejectionCaptured && _feedbackRequest != null && _inputFence is { } rejectionFence &&
+            rejectionFence.Accepts(image.FrameStamp) && snapshot.HasUsableEvidence && snapshot.World?.PartyRejected == true)
+        {
+            _rejectionCaptured = true;
+            try { DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(_feedbackRequest, "ui-action-rejected", image,
+                $"action={_feedbackAction}; {snapshot.Describe()}; 游戏拒绝来自本帧已有OCR结果，不增加识别"); } catch { }
+        }
         if (!_feedbackCaptured && _feedbackRequest != null && _inputFence is { } feedbackFence &&
             feedbackFence.Accepts(image.FrameStamp) && snapshot.HasUsableEvidence)
         {
@@ -196,8 +204,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             if (applied)
             {
                 MarkInputCompleted(current);
-                if (UiOperation.Current?.Name == "return-main")
-                { _feedbackRequest = "ui-action:" + Guid.NewGuid().ToString("N"); _feedbackAction = action; _feedbackCaptured = false; }
+                if (UiOperation.Current?.Name == "return-main" || action == UiAction.OpenParty)
+                { _feedbackRequest = "ui-action:" + Guid.NewGuid().ToString("N"); _feedbackAction = action; _feedbackCaptured = _rejectionCaptured = false; }
             }
             return applied;
         }

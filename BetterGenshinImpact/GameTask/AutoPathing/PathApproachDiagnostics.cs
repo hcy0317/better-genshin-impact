@@ -1,5 +1,8 @@
 using System;
 using System.Runtime.ExceptionServices;
+using System.Collections.Generic;
+using System.Linq;
+using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area;
 using Fischless.GameCapture;
@@ -27,10 +30,84 @@ internal sealed class PathApproachDiagnostics(string route, string context)
     private bool _captured;
     private PathApproachPulse _pulse;
     private string _rotation = "not-observed";
+    private string _recoveryInput = "not-submitted";
+    private string _recoveryEnvironment = "not-observed";
+    private const int MaximumRecoveryInputs = 8;
+    private readonly List<(GIActions Action, KeyType Type, DiagnosticInputReceipt Receipt, string Environment)> _recoveryInputs = new();
+    private int _recoveryInputCount, _recoveryFeedbackInput;
+    private PathMoveObservation? _recoveryStart, _recoveryEnd;
+    private DiagnosticInputReceipt? _lastRecoveryReceipt;
+    private string _recoveryOutcome = "in-progress";
     private readonly string _request = "path-approach:" + Guid.NewGuid().ToString("N");
 
     internal void RecordPulse(PathApproachPulse pulse) => _pulse = pulse;
     internal void RecordRotation(int targetAngle, bool completed) => _rotation = $"targetAngle={targetAngle} completed={completed}";
+
+    internal void RecordRecoveryInput(GIActions action, KeyType type,
+        DiagnosticInputReceipt receipt, string environment)
+    {
+        _recoveryInput = $"action={action} type={type}; {receipt.Describe()}";
+        _recoveryEnvironment = environment;
+        _lastRecoveryReceipt = receipt;
+        _recoveryInputCount++;
+        if (_recoveryInputs.Count < MaximumRecoveryInputs) _recoveryInputs.Add((action, type, receipt, environment));
+    }
+
+    private static string DescribeRecovery(PathMoveObservation? observation) => observation is { } value
+        ? FormattableString.Invariant($"position=({value.Position.X},{value.Position.Y}) source={value.Stamp.SessionId}/{value.Stamp.Sequence} motion={value.Motion} valid={value.Valid} sourceUsable={value.SourceUsable}")
+        : "unknown:no-observation";
+
+    private Dictionary<string, string> RecoveryFields()
+    {
+        var fields = new Dictionary<string, string>
+        {
+            ["nativeInput"] = _recoveryInput, ["nativeInputEnvironment"] = _recoveryEnvironment, ["rotation"] = _rotation,
+            ["recoveryStart"] = DescribeRecovery(_recoveryStart), ["recoveryEnd"] = DescribeRecovery(_recoveryEnd),
+            ["recoveryOutcome"] = _recoveryOutcome,
+            ["recoveryInputs"] = string.Join(";", _recoveryInputs.Select((item, index) => $"{index + 1}:{item.Receipt.RequestId:N}")),
+            ["recoveryInputCoverage"] = $"total={_recoveryInputCount} recorded={_recoveryInputs.Count} omitted={_recoveryInputCount - _recoveryInputs.Count} limit={MaximumRecoveryInputs}"
+        };
+        for (var index = 0; index < _recoveryInputs.Count; index++)
+            fields["recoveryInput" + (index + 1)] = $"action={_recoveryInputs[index].Action} type={_recoveryInputs[index].Type}; {_recoveryInputs[index].Receipt.Describe()}; {_recoveryInputs[index].Environment}";
+        return fields;
+    }
+
+    internal void RecoveryFeedback(ImageRegion frame, PathMoveObservation observation, ILogger logger)
+    {
+        _recoveryEnd = observation;
+        if (_recoveryFeedbackInput == _recoveryInputCount || _recoveryInputCount > MaximumRecoveryInputs ||
+            _lastRecoveryReceipt is not { } input || frame.FrameStamp.TimestampFrequency != input.Frequency ||
+            frame.FrameStamp.CapturedTimestamp - input.CompletedAt < input.Frequency * .06 ||
+            _recoveryStart is not { } start || !frame.FrameStamp.IsAfter(start.Stamp)) return;
+        _recoveryFeedbackInput = _recoveryInputCount;
+        Recovery(frame, observation, "feedback-input-" + _recoveryInputCount, logger);
+    }
+
+    internal void RecoveryFinished(string outcome, ILogger logger)
+    {
+        _recoveryOutcome = outcome;
+        try
+        {
+            var detail = $"route={route} {context} outcome={outcome}; last existing observation, not a new terminal screenshot; start={DescribeRecovery(_recoveryStart)} end={DescribeRecovery(_recoveryEnd)}";
+            logger.LogDebug("PATH_APPROACH_RECOVERY_END request={Request} {Detail} inputs={Inputs}", _request, detail, RecoveryFields()["recoveryInputs"]);
+            DiagnosticEvidenceScope.Current?.RequestLatestWindow(_request, "ground-recovery-end", detail, logger, RecoveryFields());
+        }
+        catch { }
+    }
+
+    internal void Recovery(ImageRegion frame, PathMoveObservation observation, string phase, ILogger logger)
+    {
+        try
+        {
+            if (phase == "before") _recoveryStart = observation;
+            _recoveryEnd = observation;
+            DiagnosticEvidenceScope.Current?.TryCapture(frame, _request, "ground-recovery-" + phase,
+                $"route={route} {context} phase={phase} position={observation.Position} motion={observation.Motion} valid={observation.Valid} sourceUsable={observation.SourceUsable}; observed recovery, not arrival",
+                logger, fields: RecoveryFields(),
+                priority: DiagnosticEvidencePriority.Warning);
+        }
+        catch { }
+    }
 
     internal void Detach(ImageRegion frame, int attempt, string phase, PathMoveObservation observation,
         PathApproachPulse pulse, string environment, CaptureFrameFence? fence, ILogger logger)
@@ -58,7 +135,9 @@ internal sealed class PathApproachDiagnostics(string route, string context)
             DiagnosticEvidenceScope.Current?.TryCapture(frame, _request, "precise-exhausted",
                 $"route={route} {context} target={target} current={position.Point} locationSource={position.Source} motion={motion}; 25步耗尽的实际判定帧，不是恢复后截图",
                 logger, fields: new System.Collections.Generic.Dictionary<string, string>
-                { ["nativeInput"] = _pulse.Receipt?.Describe() ?? "unknown:no-pulse-observed", ["rotation"] = _rotation },
+                { ["nativeInput"] = _pulse.Receipt?.Describe() ?? "unknown:no-pulse-observed", ["rotation"] = _rotation,
+                    ["recoveryOutcome"] = _recoveryOutcome, ["recoveryInputs"] = RecoveryFields()["recoveryInputs"],
+                    ["recoveryStart"] = DescribeRecovery(_recoveryStart), ["recoveryEnd"] = DescribeRecovery(_recoveryEnd) },
                 priority: DiagnosticEvidencePriority.Warning);
         }
         catch { }

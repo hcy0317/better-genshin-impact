@@ -471,6 +471,7 @@ public static class AvatarRecognition
         long indicatorEpoch = -1;
         var diagnostics = new CombatDecisionDiagnostics(Logger);
         var battleId = Guid.TryParse(diagnosticBattleId, out var boundBattle) ? boundBattle : Guid.Empty;
+        using var targetEvidence = new CombatTargetLossEvidence(battleId, TimeProvider.System, Logger);
         CaptureFrameStamp lastSource = default;
         CombatControlObservation lastControl = default;
         long suppressedFrames = 0, capturedFrames = 0, publishedFrames = 0, rejectedFrames = 0, nonMainFrames = 0;
@@ -511,6 +512,7 @@ public static class AvatarRecognition
                 stall.Mark("before-capture", lastSource.Sequence);
                 using (var capture = CaptureToRectArea())
                 {
+                    Action<PassiveTargetObservation> recordEvidence = observed => targetEvidence.ObservePublished(capture, observed);
                     stall.Mark("capture-complete", capture.FrameStamp.Sequence);
                     var capturedAtUtc = capture.FrameStamp.CapturedAt.UtcDateTime;
                     lastSource = capture.FrameStamp;
@@ -523,9 +525,9 @@ public static class AvatarRecognition
                     if (!Bv.IsCombatHud(capture))
                     {
                         lastControl = default;
-                        PublishPassiveObservation(false, false, null, capture.Width, capture.Height,
+                        RecordPublication(PublishPassiveObservation(false, false, null, capture.Width, capture.Height,
                             capturedAtUtc, observationEpoch, source: capture.FrameStamp, battleId: battleId,
-                            quality: CombatObservationQuality.Unavailable);
+                            quality: CombatObservationQuality.Unavailable, evidence: recordEvidence));
                         nonMainFrames++;
                         Trace();
                         CombatRuntimeMetrics.Shared.Record(
@@ -548,7 +550,7 @@ public static class AvatarRecognition
                         indicatorCandidate = null;
                         RecordPublication(PublishPassiveObservation(false, false, fixedVisual, capture.Width, capture.Height,
                             capturedAtUtc, observationEpoch, target, capture.FrameStamp, battleId, motion: motion, control: control,
-                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth));
+                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth, evidence: recordEvidence));
                     }
                     else if (target is { Cue: SeekCueKind.HealthBar, Visual: { } nearest })
                     {
@@ -561,7 +563,7 @@ public static class AvatarRecognition
                             capture.Height,
                             capturedAtUtc,
                             observationEpoch, source: capture.FrameStamp, battleId: battleId, motion: motion, control: control,
-                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth));
+                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth, evidence: recordEvidence));
 
                         if (drawResults)
                         {
@@ -587,7 +589,7 @@ public static class AvatarRecognition
                                 observationEpoch, source: capture.FrameStamp, battleId: battleId,
                                 cueFingerprint: FingerprintDamageCue(capture, damageVisual), motion: motion, control: control,
                                 recognition: targetRead.Diagnostics, damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, true),
-                                fixedTopHealth: target.FixedTopHealth));
+                                fixedTopHealth: target.FixedTopHealth, evidence: recordEvidence));
 
                             // 叠加层：伤害数字区域绿色框
                             if (drawResults)
@@ -633,7 +635,7 @@ public static class AvatarRecognition
                                     targetRead.Diagnostics.Accepted == 0 ? "all-visual-candidates-filtered" : "target-selection-empty",
                                 damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, false),
                                 searchHint: confirmedIndicator == null ? targetRead.Hint : null,
-                                fixedTopHealth: target.FixedTopHealth));
+                                fixedTopHealth: target.FixedTopHealth, evidence: recordEvidence));
                         }
                     }
 
@@ -681,7 +683,7 @@ public static class AvatarRecognition
             return (decision, diagnostics, hint);
         });
 
-    private static bool PublishPassiveObservation(
+    internal static bool PublishPassiveObservation(
         bool hasNormalHealthBar,
         bool hasDamageCue,
         EnemySeekVisual? visual,
@@ -694,8 +696,14 @@ public static class AvatarRecognition
         CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0, MotionStatus motion = MotionStatus.Unknown,
         CombatControlObservation control = default, SeekRecognitionDiagnostics? recognition = null,
         string? absenceReason = null, string? damageFallback = null, UnconfirmedSearchHint? searchHint = null,
-        EnemySeekVisual? fixedTopHealth = null)
+        EnemySeekVisual? fixedTopHealth = null, Action<PassiveTargetObservation>? evidence = null)
     {
+        var observation = new PassiveTargetObservation(hasNormalHealthBar, hasDamageCue, capturedAtUtc,
+            visual, imageWidth, imageHeight, indicatorDecision)
+        { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
+            CueFingerprint = cueFingerprint, Motion = motion, Control = control,
+            Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback,
+            SearchHint = searchHint, FixedTopHealth = fixedTopHealth };
         lock (_seekLock)
         {
             if (!CanPublishPassiveObservation(
@@ -707,21 +715,12 @@ public static class AvatarRecognition
             }
             lock (PassiveObservationLock)
             {
-                _latestPassiveObservation = new PassiveTargetObservation(
-                    hasNormalHealthBar,
-                    hasDamageCue,
-                    capturedAtUtc,
-                    visual,
-                    imageWidth,
-                    imageHeight,
-                    indicatorDecision)
-                { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
-                    CueFingerprint = cueFingerprint, Motion = motion, Control = control,
-                    Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback,
-                    SearchHint = searchHint, FixedTopHealth = fixedTopHealth };
+                _latestPassiveObservation = observation;
             }
-            return true;
         }
+        // 固定此次实际发布值，不能再读可能被其他执行链清空的latest；取证在排他锁外。
+        try { evidence?.Invoke(observation); } catch { }
+        return true;
     }
 
     internal static bool CanPublishPassiveObservation(

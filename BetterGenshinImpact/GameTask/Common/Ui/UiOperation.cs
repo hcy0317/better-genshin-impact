@@ -292,8 +292,8 @@ internal sealed class UiOperation : IDisposable
             _owner = owner; _phase = phase; _started = owner._clock.GetTimestamp();
             _activePhase = phase is UiOperationPhase.Capture or UiOperationPhase.SceneRecognition or UiOperationPhase.AreaOcr
                 ? owner._stall.Watch(phase.ToString()) : null;
-            _stall = phase is UiOperationPhase.Capture or UiOperationPhase.SceneRecognition or UiOperationPhase.AreaOcr or
-                UiOperationPhase.RecognitionSessionWait or UiOperationPhase.OcrInference
+            // Watch已报告仍在执行及最终耗时；不能再由Measure重复签发同一结束日志。
+            _stall = _activePhase == null && phase is UiOperationPhase.RecognitionSessionWait or UiOperationPhase.OcrInference
                 ? owner._stall.Measure(phase.ToString()) : default;
         }
         public void Dispose()

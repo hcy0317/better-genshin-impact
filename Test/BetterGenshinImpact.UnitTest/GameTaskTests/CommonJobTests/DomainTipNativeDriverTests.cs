@@ -16,6 +16,29 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DomainTipNativeDriverTests
 {
     [Fact]
+    public async Task PartyRejectionPinsTheFirstPostInputDecisionFrameWithoutResending()
+    {
+        var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();
+        await using var evidence = new BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope(
+            (item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var fixture = new DomainTipNativeFixture { Title = false, Footer = false,
+            Scene = new(1) { MainHud = true, World = new(false, false, false) }, OnAction = _ => true };
+        using var operation = UiOperation.Begin("party-entry", TimeSpan.FromSeconds(8.4), clock: fixture.Clock);
+        var before = fixture.Driver.Capture();
+        Assert.True(await fixture.Driver.ActAsync(UiAction.OpenParty, before, default));
+        await fixture.Driver.DelayAsync(100, default);
+        fixture.Scene = fixture.Scene with { World = new(false, false, true) };
+        var rejected = fixture.Driver.Capture();
+        await fixture.Driver.DelayAsync(100, default);
+        fixture.Driver.Capture();
+        await evidence.DisposeAsync();
+        var anchor = Assert.Single(saved.Where(item => item.Phase == "ui-action-rejected" && item.Window?.RelativeIndex == 0));
+        Assert.Equal(rejected.SourceStamp, anchor.Source);
+        Assert.Contains("partyReadiness=party-rejected", anchor.Detail);
+        Assert.Equal(new[] { UiAction.OpenParty }, fixture.Actions);
+    }
+
+    [Fact]
     public async Task DismissRechecksAfterFocusAndClicksOnlyTheNewClientRectangle()
     {
         using var fixture = new DomainTipNativeFixture();

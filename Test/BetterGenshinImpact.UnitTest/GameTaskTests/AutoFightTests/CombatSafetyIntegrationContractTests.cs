@@ -18,7 +18,7 @@ public class CombatSafetyIntegrationContractTests
         var loop = Slice(
             source,
             "public static Task ContinuousTargetingLoopAsync",
-            "private static bool PublishPassiveObservation");
+            "static bool PublishPassiveObservation");
 
         Assert.DoesNotContain("MoveMouseBy", loop, StringComparison.Ordinal);
         Assert.DoesNotContain("ReleaseAllKey", loop, StringComparison.Ordinal);

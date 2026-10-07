@@ -37,6 +37,43 @@ public partial class PathExecutor
     internal static bool CanRestartAfterHealing(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex) =>
         HealingRestartRejection(segment, resumeIndex) == null;
 
+    private int HealingResumeIndex() => RecordWaypoints == CurWaypoints && _skipOtherOperations
+        ? Math.Max(CurWaypoint.Item1, RecordWaypoint.Item1) : CurWaypoint.Item1;
+
+    private bool CanRestartAfterCombatRecovery()
+    {
+        var resumeIndex = HealingResumeIndex();
+        var request = "revive-resume:" + Guid.NewGuid().ToString("N");
+        TraceHealingPrefix(request, resumeIndex);
+        var rejection = HealingRestartRejection(CurWaypoints.Item2, resumeIndex);
+        try
+        {
+            _moveIo.Logger.LogDebug("PATH_REVIVE_RESUME request={Request} node={Node} checkpoint={Checkpoint} rejection={Rejection}", request, CurWaypoint.Item1, resumeIndex, rejection ?? "none");
+            if (rejection != null) DiagnosticEvidenceScope.Current?.RequestLatestWindow(request, "revive-resume-rejected",
+                $"route={CurWaypoint.Item2.PathingTaskFileName} node={CurWaypoint.Item1} checkpoint={resumeIndex} rejection={rejection}; latest existing frame, no replay authorized", _moveIo.Logger);
+        }
+        catch { }
+        return rejection == null;
+    }
+
+    private void TraceHealingPrefix(string request, int resumeIndex)
+    {
+        try
+        {
+            var prefix = CurWaypoints.Item2.Take(resumeIndex).Select((waypoint, index) => (waypoint, index))
+                .Where(item => item.waypoint.Action == ActionEnum.CombatScript.Code).Take(8);
+            foreach (var (waypoint, index) in prefix)
+                _moveIo.Logger.LogDebug("PATH_HEALING_PREFIX request={Request} index={Index} position=({X},{Y}) entryPosition=({EntryX},{EntryY}) type={Type} checkpoint={Checkpoint} priorToCheckpoint={Prior} traversalStarted={Started} canSkip={Skip} canReplayEntry={Replay} handlerCompletedBeforeRecovery={Completed} commands={Commands}; handler completion does not authorize replay or prove every game effect",
+                    request, index, waypoint.X, waypoint.Y, CurWaypoints.Item2[0].X, CurWaypoints.Item2[0].Y,
+                    waypoint.Type, resumeIndex, index < resumeIndex, _segmentHasStartedTraversal,
+                    CanSkipCompletedHealingMacro(waypoint), CanReplayHealingEntryMacro(CurWaypoints.Item2, index),
+                    _completedWaypointActions.Contains(index),
+                    string.Join(";", waypoint.CombatScript?.CombatCommands.Take(12).Select(command =>
+                        $"actor={command.Name} method={command.Method.Alias[0]} args={string.Join(",", command.Args?.Take(4).Select(value => value.Length > 32 ? value[..32] + "[truncated]" : value) ?? [])} requiresFlow={command.RequiresFlow}") ?? []));
+        }
+        catch { }
+    }
+
     internal static string? HealingRestartRejection(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex)
     {
         if (segment is not { Count: > 0 }) return "segment-unavailable";
@@ -77,8 +114,7 @@ public partial class PathExecutor
 
     private async Task RecoverAtStatueAndRestartAsync(CaptureFrameStamp before)
     {
-        var resumeIndex = RecordWaypoints == CurWaypoints && _skipOtherOperations
-            ? Math.Max(CurWaypoint.Item1, RecordWaypoint.Item1) : CurWaypoint.Item1;
+        var resumeIndex = HealingResumeIndex();
         // 能否重放只决定恢复后的路线处理，不能阻止当前低血角色先安全回血。
         var canRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex);
         var allowParentReplan = CanRequestParentHealingReplan(CurWaypoints.Item2, resumeIndex, _segmentHasStartedTraversal);
@@ -99,19 +135,7 @@ public partial class PathExecutor
             catch { /* 诊断不能改变回血结果或失败传播。 */ }
         }
         Trace("restore-requested", false);
-        try
-        {
-            var prefix = CurWaypoints.Item2.Take(resumeIndex).Select((waypoint, index) => (waypoint, index))
-                .Where(item => item.waypoint.Action == ActionEnum.CombatScript.Code).Take(8);
-            foreach (var (waypoint, index) in prefix)
-                _moveIo.Logger.LogDebug("PATH_HEALING_PREFIX request={Request} index={Index} position=({X},{Y}) entryPosition=({EntryX},{EntryY}) type={Type} checkpoint={Checkpoint} priorToCheckpoint={Prior} traversalStarted={Started} canSkip={Skip} canReplayEntry={Replay} commands={Commands}; individual action completion not recorded",
-                    request, index, waypoint.X, waypoint.Y, CurWaypoints.Item2[0].X, CurWaypoints.Item2[0].Y,
-                    waypoint.Type, resumeIndex, index < resumeIndex, _segmentHasStartedTraversal,
-                    CanSkipCompletedHealingMacro(waypoint), CanReplayHealingEntryMacro(CurWaypoints.Item2, index),
-                    string.Join(";", waypoint.CombatScript?.CombatCommands.Take(12).Select(command =>
-                        $"actor={command.Name} method={command.Method.Alias[0]} requiresFlow={command.RequiresFlow}") ?? []));
-        }
-        catch { }
+        TraceHealingPrefix(request, resumeIndex);
         try
         {
             await ConfirmHealingRestartAsync(before, TpStatueOfTheSeven, () =>

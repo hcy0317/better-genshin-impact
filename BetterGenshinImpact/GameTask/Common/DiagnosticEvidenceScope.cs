@@ -379,7 +379,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     }
 
     internal void CaptureFault(ImageRegion frame, string channel, string request, string phase, string detail, ILogger? logger = null,
-        bool allowPreviousRequest = false)
+        bool allowPreviousRequest = false, IReadOnlyDictionary<string, string>? fields = null)
     {
         lock (_gate)
         {
@@ -407,7 +407,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 _missingBefore++;
                 MissingFrame(request, "before-" + channel, "before-unavailable", logger ?? _logger);
             }
-            TryCapture(frame, request, phase, detail, logger, priority: DiagnosticEvidencePriority.Warning);
+            TryCapture(frame, request, phase, detail, logger, priority: DiagnosticEvidencePriority.Warning, fields: fields);
         }
     }
 

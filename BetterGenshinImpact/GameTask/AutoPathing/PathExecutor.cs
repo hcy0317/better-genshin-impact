@@ -61,6 +61,7 @@ public partial class PathExecutor
     private readonly PathMoveToIo _moveIo;
     private DateTimeOffset? _moveDeadline;
     private PathingMacroSession? _pathingMacro;
+    private readonly HashSet<int> _completedWaypointActions = new();
 
     public PathExecutor(CancellationToken ct) : this(ct, null) { }
 
@@ -218,6 +219,7 @@ public partial class PathExecutor
         foreach (var waypoints in waypointsList) // 按传送点分割的路径
         {
             CurWaypoints = (waypointsList.FindIndex(wps => wps == waypoints), waypoints);
+            _completedWaypointActions.Clear();
             _segmentHasStartedTraversal = false;
             var capturedRetryFailure = false;
             var endedEarly = await ExecuteSegmentWithRetriesAsync(async () =>
@@ -290,6 +292,9 @@ public partial class PathExecutor
 
                             // 执行 action
                             await AfterMoveToTarget(waypoint);
+                            ct.ThrowIfCancellationRequested();
+                            TaskExecutionScope.ThrowIfFailed();
+                            _completedWaypointActions.Add(CurWaypoint.Item1);
                         }
                     }
                 }
@@ -311,7 +316,7 @@ public partial class PathExecutor
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(User32.VK.VK_W);
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.RightButtonUp();
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
-            }, ct);
+            }, ct, canRestartAfterCombatRecovery: CanRestartAfterCombatRecovery);
             if (endedEarly)
             {
                 SuccessEnd = true;
@@ -326,7 +331,8 @@ public partial class PathExecutor
 
     /// <summary>正常完成返回 false；仅显式结束条件返回 true；失败或取消始终向调用方传播。</summary>
     internal static async Task<bool> ExecuteSegmentWithRetriesAsync(Func<Task> execute,
-        Action<Exception> onRetry, Action releaseInput, CancellationToken ct)
+        Action<Exception> onRetry, Action releaseInput, CancellationToken ct,
+        Func<bool>? canRestartAfterCombatRecovery = null)
     {
         var healingRestarts = 0;
         var relocationRestarts = 0;
@@ -350,6 +356,22 @@ public partial class PathExecutor
             catch (HandledException exception)
             {
                 throw new InvalidOperationException("地图追踪未完整完成：" + exception.Message, exception);
+            }
+            catch (CombatRecoveryCompletedException exception)
+            {
+                ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                UiOperation.Current?.Check();
+                // 选角触发的复苏和低血回血共用原有两次恢复预算；仍须验证同一
+                // 传送入口及完整前缀，不能把复苏成功直接当作可重放路线的授权。
+                if (canRestartAfterCombatRecovery?.Invoke() != true)
+                    throw new InvalidOperationException("已确认复苏，但缺少可安全回放的原传送入口或前缀；路线未完成，不重放路径宏", exception);
+                UiOperation.Current?.Check();
+                ct.ThrowIfCancellationRequested();
+                if (++healingRestarts > 2)
+                    throw new InvalidOperationException("当前分段已使用两次已验证回血或复苏重启，停止而不扩大重试", exception);
+                onRetry(new HealingRecoveryCompletedException());
+                attempt--;
             }
             catch (HealingRecoveryCompletedException exception)
             {
@@ -1455,6 +1477,7 @@ public partial class PathExecutor
         var stepsTaken = 0;
         var stationary = 0;
         var recoveryUsed = false;
+        string? recoveryTerminal = null;
         CaptureFrameStamp previous = default;
         Point2f? previousPosition = null;
         PathApproachPulse lastPulse = default;
@@ -1485,6 +1508,11 @@ public partial class PathExecutor
             operation.Check();
             var observation = ReadMoveObservation(screen, location, previous);
             operation.Check();
+            if (recoveryTerminal != null)
+            {
+                approachDiagnostics.Recovery(screen, observation, "terminal-" + recoveryTerminal, _moveIo.Logger);
+                recoveryTerminal = null;
+            }
             if (!observation.Valid || detachFence is { } required && !required.Accepts(observation.Stamp))
             {
                 stationary = 0;
@@ -1580,12 +1608,16 @@ public partial class PathExecutor
             {
                 recoveryUsed = true;
                 _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                approachDiagnostics.Recovery(screen, observation, "before", _moveIo.Logger);
                 async Task<PathMoveObservation> ObserveRecovery()
                 {
                     using var fresh = _moveIo.Capture();
                     var current = await LocatePlayableAsync(fresh, waypoint, direct: true);
                     var observed = ReadMoveObservation(fresh, current, previous);
                     if (_moveIo.Transformed(fresh)) observed = observed with { Valid = false, SourceUsable = false };
+                    approachDiagnostics.RecoveryFeedback(fresh, observed, _moveIo.Logger);
+                    if (!observed.Valid || observed.Motion != MotionStatus.Normal)
+                        approachDiagnostics.Recovery(fresh, observed, "interrupted", _moveIo.Logger);
                     previous = fresh.FrameStamp;
                     return observed;
                 }
@@ -1593,12 +1625,21 @@ public partial class PathExecutor
                 {
                     await UiOperation.RunAsync("path-precise-recovery", TimeSpan.FromSeconds(10), operation.Token, async recovery =>
                     {
-                        using var scope = new PathRecoveryScope(_moveIo, recovery, recovery.Token, previous, ObserveRecovery);
+                        using var scope = new PathRecoveryScope(_moveIo, recovery, recovery.Token, previous, ObserveRecovery,
+                            (action, type, receipt, environment) =>
+                            {
+                                approachDiagnostics.RecordRecoveryInput(action, type, receipt, environment);
+                            });
                         await _trapEscaper.RotateAndMove(scope);
                         return true;
                     }, clock: _moveIo.Clock);
+                    recoveryTerminal = "returned";
                 }
-                catch (RecoveryObservationChanged) { /* 只返回原节点重观测，不能把恢复当到达。 */ }
+                catch (RecoveryObservationChanged) { recoveryTerminal = "interrupted"; }
+                catch (Exception error) { approachDiagnostics.RecoveryFinished(error.GetType().Name, _moveIo.Logger); throw; }
+                approachDiagnostics.RecoveryFinished(recoveryTerminal, _moveIo.Logger);
+                // 最后一次释放输入后也须等待游戏响应，再进入原节点观察。
+                await _moveIo.Delay(60, operation.Token);
                 stationary = 0;
                 continue;
             }

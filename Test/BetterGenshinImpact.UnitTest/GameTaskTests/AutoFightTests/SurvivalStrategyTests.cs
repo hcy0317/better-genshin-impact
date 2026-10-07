@@ -54,7 +54,7 @@ public class SurvivalStrategyTests
         var start = source.IndexOf("catch (GuardianCoverageException)", StringComparison.Ordinal);
         var end = source.IndexOf("catch (RetryException", start, StringComparison.Ordinal);
         Assert.True(start >= 0 && end > start);
-        Assert.Contains("ReleaseAllKey", source[start..end]);
+        Assert.Contains("InputHub.ReleaseAll()", source[start..end]);
         Assert.Contains("throw;", source[start..end]);
     }
 

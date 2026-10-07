@@ -21,6 +21,9 @@ namespace BetterGenshinImpact.GameTask.AutoTrackPath;
 internal sealed class TeleportSelectionMismatchException() : InvalidOperationException(
     "点击落入地图标记编辑页，不是传送面板；未发送传送或保存标记的确认输入");
 
+internal sealed class TeleportConfirmationUnconfirmedException() : InvalidOperationException(
+    "已尝试发送传送确认，但输入后的地图关闭反馈未确认；禁止重复确认或改报未发送");
+
 internal static class TeleportPanelConfirmation
 {
     internal static async Task<bool> TryConfirmWithFeedbackAsync(ImageRegion image,
@@ -28,7 +31,7 @@ internal static class TeleportPanelConfirmation
         Func<ImageRegion, Rect, CancellationToken, Task> click,
         Func<int, CancellationToken, Task> delay, CancellationToken ct,
         IOcrService? ocr = null, TimeProvider? clock = null, Action<ImageRegion>? observe = null,
-        Action<CaptureFrameStamp>? mapClosed = null)
+        Action<CaptureFrameStamp>? mapClosed = null, Func<ImageRegion, bool>? loading = null)
     {
         clock ??= TimeProvider.System;
         if (!image.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) || !Bv.IsInBigMapUi(image)) return false;
@@ -41,9 +44,9 @@ internal static class TeleportPanelConfirmation
         }, ct, ocr)) return false;
         var fence = new CaptureFrameFence(image.FrameStamp, clock.GetTimestamp());
         var previous = image.FrameStamp;
+        var progress = new SereniteaPotTeleportProgress();
         async Task<bool> WaitForMapClosed(int checks)
         {
-            var progress = new SereniteaPotTeleportProgress();
             for (var index = 0; index < checks; index++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -64,8 +67,12 @@ internal static class TeleportPanelConfirmation
         }
         if (await WaitForMapClosed(6)) return true;
         using var current = capture();
-        if (!current.FrameStamp.IsAfter(previous) || !current.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) ||
-            !Bv.IsInBigMapUi(current)) return false;
+        if (!fence.Accepts(current.FrameStamp) || !current.FrameStamp.IsAfter(previous) ||
+            !current.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge)) return false;
+        // 已进入淡出/加载时只观察同一次输入。沿用按钮兜底的十次反馈预算，不能
+        // 在旧地图控件尚未消失时重发确认，也不能退回“未发送”的面板分支。
+        if (!Bv.IsInBigMapUi(current) || loading?.Invoke(current) == true)
+            return await WaitForMapClosed(10);
         using var button = current.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", current));
         if (IsMarkerEditor(current, ocr) || !button.IsExist()) return false;
         var bounds = ReadButtonBody(current, ocr ?? OcrFactory.Paddle);
@@ -75,6 +82,7 @@ internal static class TeleportPanelConfirmation
         await click(current, bounds, ct);
         fence = new(current.FrameStamp, clock.GetTimestamp());
         previous = current.FrameStamp;
+        progress = new SereniteaPotTeleportProgress();
         return await WaitForMapClosed(10);
     }
 
@@ -88,8 +96,15 @@ internal static class TeleportPanelConfirmation
         using var current = TaskControl.CaptureToRectArea();
         if (!current.FrameStamp.IsAfter(previous.FrameStamp)) return false;
         var request = "teleport:" + Guid.NewGuid().ToString("N");
+        var confirmationAttempted = false;
         async Task TraceInput(string phase, Func<Task> send)
         {
+            if (!confirmationAttempted)
+            {
+                try { DiagnosticEvidenceScope.Current?.TryCapture(current, request, "before-confirm",
+                    "传送确认输入前原帧，不代表游戏已接受", TaskControl.Logger); } catch { }
+            }
+            confirmationAttempted = true;
             using var attempt = new DiagnosticInputAttempt(TimeProvider.System);
             Exception? failure = null;
             try { await send(); }
@@ -101,9 +116,7 @@ internal static class TeleportPanelConfirmation
                 catch { }
             }
         }
-        DiagnosticEvidenceScope.Current?.TryCapture(current, request, "before-confirm",
-            "传送确认输入前原帧，不代表游戏已接受", TaskControl.Logger);
-        return await TryConfirmWithFeedbackAsync(current, () => TaskControl.CaptureToRectArea(),
+        var confirmed = await TryConfirmWithFeedbackAsync(current, () => TaskControl.CaptureToRectArea(),
             token => TraceInput("confirm-f", () => { InputHub.Foreground.SimulateKeyPulse(KeyId.F, token); return Task.CompletedTask; }),
             (frame, bounds, token) => TraceInput("confirm-click", () =>
             {
@@ -126,7 +139,10 @@ internal static class TeleportPanelConfirmation
                     "传送输入反馈原帧；world=" + world, TaskControl.Logger);
                 arrival?.Observe(frame.FrameStamp, world);
             },
-            mapClosed: arrival == null ? null : arrival.ConfirmMapClosure);
+            mapClosed: arrival == null ? null : arrival.ConfirmMapClosure,
+            loading: frame => WorldFrameAvailability.ReadNative(frame) == WorldFrameKind.Loading);
+        if (!confirmed && confirmationAttempted) throw new TeleportConfirmationUnconfirmedException();
+        return confirmed;
     }
 
     internal static async Task WaitForArrivalAsync(TeleportArrivalProgress arrival,
