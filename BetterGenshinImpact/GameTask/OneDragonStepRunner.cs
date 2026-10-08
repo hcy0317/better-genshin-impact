@@ -1,5 +1,6 @@
 using System;
 using System.Threading.Tasks;
+using BetterGenshinImpact.GameTask.Common.Ui;
 
 namespace BetterGenshinImpact.GameTask;
 
@@ -9,14 +10,28 @@ internal static class OneDragonStepRunner
     internal static async Task<Exception?> RunAsync(bool reportFailure,
         Func<Func<Task>, bool, Task> runOwned, Func<Task> action, Func<Exception, Task> recover)
     {
+        Exception? retryFailure = null;
+        for (var restart = 0; ; restart++)
+        {
+            try { return await RunAttemptAsync(reportFailure, runOwned, action, recover, retryFailure); }
+            catch (NetworkTaskRetryException error) when (restart < 2) { retryFailure = error.InnerException ?? error; }
+        }
+    }
+
+    private static async Task<Exception?> RunAttemptAsync(bool reportFailure,
+        Func<Func<Task>, bool, Task> runOwned, Func<Task> action, Func<Exception, Task> recover, Exception? retryFailure)
+    {
         Exception? recoveredFailure = null;
         try
         {
             // 两种入口都必须看到异常；否则底层 runner 会先吞错，跳过恢复。
             await runOwned(async () =>
             {
+                // After the old scope has unwound, verify the normal safe handoff under
+                // new task ownership before allowing any replayed business action.
+                if (retryFailure != null) await recover(retryFailure);
                 try { await action(); TaskExecutionScope.ThrowIfFailed(); }
-                catch (Exception error) when (!TaskFailureRecoveryPolicy.IsTerminalFailure(error))
+                catch (Exception error) when (error is not NetworkTaskRetryException && !TaskFailureRecoveryPolicy.IsTerminalFailure(error))
                 {
                     await recover(error);
                     recoveredFailure = error;

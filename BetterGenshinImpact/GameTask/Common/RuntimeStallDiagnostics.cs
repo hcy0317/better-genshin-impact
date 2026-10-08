@@ -44,16 +44,16 @@ internal sealed class RuntimeStallDiagnostics(ILogger logger, string owner, stri
         catch { return "selfProcessWindow=unavailable:sample-failed"; }
     }
 
-    internal PhaseMeasurement Measure(string phase)
+    internal PhaseMeasurement Measure(string phase, long sourceSequence = 0)
     {
-        try { return new(this, phase, _clock.GetTimestamp(), _gcPause()); }
+        try { return new(this, phase, _clock.GetTimestamp(), _gcPause(), sourceSequence); }
         catch { return default; }
     }
 
     // 只报告仍在进行的阶段；不截图、不发输入、不取消原调用。最多4次，正常快调用静默。
-    internal IDisposable Watch(string phase)
+    internal IDisposable Watch(string phase, long sourceSequence = 0)
     {
-        try { return new ActivePhase(this, phase); }
+        try { return new ActivePhase(this, phase, sourceSequence); }
         catch { return NoObservation.Instance; }
     }
     private sealed class NoObservation : IDisposable
@@ -69,10 +69,12 @@ internal sealed class RuntimeStallDiagnostics(ILogger logger, string owner, stri
         private readonly long _started;
         private readonly TimeSpan _pause;
         private readonly int _thread = Environment.CurrentManagedThreadId;
+        private readonly long _sourceSequence;
         private ITimer? _timer;
         private int _closed, _reports;
-        internal ActivePhase(RuntimeStallDiagnostics owner, string phase)
+        internal ActivePhase(RuntimeStallDiagnostics owner, string phase, long sourceSequence)
         {
+            _sourceSequence = sourceSequence;
             _owner = owner; _phase = phase; _started = owner._clock.GetTimestamp();
             try
             {
@@ -90,7 +92,7 @@ internal sealed class RuntimeStallDiagnostics(ILogger logger, string owner, stri
             if (Volatile.Read(ref _closed) != 0 || Interlocked.Increment(ref _reports) > 4) return;
             try
             {
-                _owner.Report(_started, _pause, "active-thread-" + _thread, _phase + "-still-running", 0, 0, active: true);
+                _owner.Report(_started, _pause, "active-thread-" + _thread, _phase + "-still-running", _sourceSequence, _sourceSequence, active: true);
             }
             catch { }
         }
@@ -98,13 +100,13 @@ internal sealed class RuntimeStallDiagnostics(ILogger logger, string owner, stri
         {
             if (Interlocked.Exchange(ref _closed, 1) != 0) return;
             _timer?.Dispose();
-            _owner.Report(_started, _pause, "before-" + _phase, "after-" + _phase, 0, 0);
+            _owner.Report(_started, _pause, "before-" + _phase, "after-" + _phase, _sourceSequence, _sourceSequence);
         }
     }
 
-    internal readonly struct PhaseMeasurement(RuntimeStallDiagnostics? owner, string phase, long started, TimeSpan pause) : IDisposable
+    internal readonly struct PhaseMeasurement(RuntimeStallDiagnostics? owner, string phase, long started, TimeSpan pause, long sourceSequence) : IDisposable
     {
-        public void Dispose() => owner?.Report(started, pause, "before-" + phase, "after-" + phase, 0, 0);
+        public void Dispose() => owner?.Report(started, pause, "before-" + phase, "after-" + phase, sourceSequence, sourceSequence);
     }
 
     private void Report(long started, TimeSpan beforePause, string? beforePhase, string phase, long beforeSource, long sourceSequence, bool active = false)

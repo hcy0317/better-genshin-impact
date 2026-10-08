@@ -47,7 +47,7 @@ internal sealed class PathingMacroEvidence(string context, string commands)
     {
         var fields = new Dictionary<string, string>
         {
-            ["macro:state"] = $"phase={_lastPhase} scene={_last.Scene} canFire={_last.CanFire} observations={_observations} inputCount={_inputCount}",
+            ["macro:state"] = $"phase={_lastPhase} scene={_last.Scene} canFire={_last.CanFire} observations={_observations} inputCount={_inputCount} activationRejection={_last.ActivationRejection ?? "none"}",
             ["macro:lastSource"] = $"{_last.Source.SessionId}/{_last.Source.Sequence} capturedTimestamp={_last.Source.CapturedTimestamp} frequency={_last.Source.TimestampFrequency}",
             ["macro:boundary"] = $"commandIndex={_commandIndex} originalDeadline={_deadline} inputFence={_inputFence}",
             ["macro:mapping"] = string.Join(",", System.Linq.Enumerable.Select(_mapping, pair => pair.Key + "->" + pair.Value)),

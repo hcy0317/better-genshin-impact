@@ -11,7 +11,7 @@ using BetterGenshinImpact.Core.Recognition;
 
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
-internal enum UiOperationPhase { Check, Pause, Focus, Admission, NativeInput, ExplicitWait, Capture, SceneRecognition, AreaOcr, RecognitionSessionWait, OcrInference }
+internal enum UiOperationPhase { Check, Pause, Focus, Admission, NativeInput, ExplicitWait, Capture, SceneRecognition, AreaOcr, RecognitionSessionWait, OcrInference, ReviveRecognition }
 
 /// <summary>仅在当前UI调用链生效的预算与关联诊断，不建立后台观察/输入线程。</summary>
 internal sealed class UiOperation : IDisposable
@@ -40,12 +40,24 @@ internal sealed class UiOperation : IDisposable
     private readonly double?[] _phaseMilliseconds = new double?[Enum.GetValues<UiOperationPhase>().Length];
     private double _constructionMilliseconds, _logProducerMilliseconds;
     private double? _firstCheckAtMilliseconds, _dispatchMilliseconds;
+    private long _capturedSequence;
 
     public static UiOperation? Current => Active.Value;
+    internal void RecordCapturedSource(Fischless.GameCapture.CaptureFrameStamp source)
+    {
+        _capturedSequence = source.IsKnown ? source.Sequence : 0;
+        RememberMilestone("recognition-source", $"source={source.SessionId}/{source.Sequence} capturedTimestamp={source.CapturedTimestamp} frequency={source.TimestampFrequency}");
+    }
     public string Id { get; }
     public string RootId { get; }
     public string Name { get; }
     public CancellationToken Token => _linked.Token;
+    internal CancellationToken CancellationForRecovery(CancellationToken caller)
+    {
+        for (var operation = this; operation != null; operation = operation._parent)
+            if (caller == operation.Token) return _userToken;
+        return caller; // Independent caller/lifetime cancellation must not be dropped.
+    }
     public TimeSpan Elapsed => _clock.GetElapsedTime(_started);
     public TimeSpan Remaining => TimeSpan.FromMilliseconds(Math.Max(0, (_budget - Elapsed).TotalMilliseconds));
     public string Expected { get; private set; } = "operation-complete";
@@ -279,7 +291,7 @@ internal sealed class UiOperation : IDisposable
 
     // 未进入的阶段保持null；零只表示实际测量到了零，不能伪造未执行的输入/等待。
     public PhaseMeasurement Measure(UiOperationPhase phase) => new(this, phase);
-    internal IDisposable WatchRecognition(string phase) => _stall.Watch(phase);
+    internal IDisposable WatchRecognition(string phase) => _stall.Watch(phase, _capturedSequence);
     internal readonly struct PhaseMeasurement : IDisposable
     {
         private readonly UiOperation _owner;
@@ -290,11 +302,12 @@ internal sealed class UiOperation : IDisposable
         internal PhaseMeasurement(UiOperation owner, UiOperationPhase phase)
         {
             _owner = owner; _phase = phase; _started = owner._clock.GetTimestamp();
-            _activePhase = phase is UiOperationPhase.Capture or UiOperationPhase.SceneRecognition or UiOperationPhase.AreaOcr
-                ? owner._stall.Watch(phase.ToString()) : null;
+            var source = phase == UiOperationPhase.Capture ? 0 : owner._capturedSequence;
+            _activePhase = phase is UiOperationPhase.Capture or UiOperationPhase.SceneRecognition or UiOperationPhase.AreaOcr or UiOperationPhase.ReviveRecognition
+                ? owner._stall.Watch(phase.ToString(), source) : null;
             // Watch已报告仍在执行及最终耗时；不能再由Measure重复签发同一结束日志。
             _stall = _activePhase == null && phase is UiOperationPhase.RecognitionSessionWait or UiOperationPhase.OcrInference
-                ? owner._stall.Measure(phase.ToString()) : default;
+                ? owner._stall.Measure(phase.ToString(), source) : default;
         }
         public void Dispose()
         {

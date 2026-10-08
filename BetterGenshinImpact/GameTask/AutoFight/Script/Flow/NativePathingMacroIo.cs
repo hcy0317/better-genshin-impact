@@ -56,7 +56,8 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
         }
         using var frame = Capture();
         PathingMacroObservation observation;
-        using (_stall.Measure("scene:" + phase)) observation = ReadScene(frame, OcrFactory.Paddle);
+        using (_stall.Measure("scene:" + phase)) observation = ReadScene(frame, OcrFactory.Paddle,
+            inspectCannonRejection: phase.StartsWith("cannon-handshake", StringComparison.Ordinal));
         _evidence?.Capture(frame, phase, observation, TaskControl.Logger);
         var scene = observation.Scene;
         if (scene == PathingMacroScene.Unknown)
@@ -78,13 +79,18 @@ internal sealed class NativePathingMacroIo(Func<string> context, Action<PathingM
         return observation;
     }
 
-    internal static PathingMacroObservation ReadScene(ImageRegion frame, IOcrService ocr, ReviveUiDetector? revive = null)
+    internal static PathingMacroObservation ReadScene(ImageRegion frame, IOcrService ocr, ReviveUiDetector? revive = null,
+        bool inspectCannonRejection = false)
     {
         var scene = SaurianUiReader.IsKnownTransformation(frame) ? PathingMacroScene.Transformed :
             (revive?.IsCombatHud(frame) ?? Bv.IsCombatHud(frame)) ? PathingMacroScene.World : PathingMacroScene.Unknown;
         var cannon = scene == PathingMacroScene.Unknown ? CannonUiReader.Read(frame, ocr) : default;
         if (cannon.IsFor(frame.FrameStamp) && cannon.CanExit) scene = PathingMacroScene.Cannon;
-        return new(scene, frame.FrameStamp, cannon.IsFor(frame.FrameStamp) && cannon.CanFire);
+        return new(scene, frame.FrameStamp, cannon.IsFor(frame.FrameStamp) && cannon.CanFire)
+        {
+            ActivationRejection = inspectCannonRejection && scene == PathingMacroScene.World
+                ? CannonUiReader.ReadActivationRejection(frame, ocr) : null
+        };
     }
 
     // raw段已经做过场景准入。每个真正SendInput只查原期限/取消/lease；不伪造150ms源帧。

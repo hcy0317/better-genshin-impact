@@ -37,7 +37,7 @@ internal static class TaskFailureRecoveryPolicy
     }
 
     internal static bool IsTerminalFailure(Exception failure) =>
-        IsCancellation(failure) || IsRecoveryFailure(failure) || TaskExecutionScope.IsUnconfirmedCombat(failure);
+        failure is NetworkTaskRetryException || IsCancellation(failure) || IsRecoveryFailure(failure) || TaskExecutionScope.IsUnconfirmedCombat(failure);
 
     internal static bool IsRecoveryFailure(Exception failure)
     {
@@ -78,6 +78,8 @@ internal static class TaskFailureRecoveryPolicy
         catch (Exception recoveryFailure) when (
             recoveryFailure is not OperationCanceledException and not NormalEndException)
         {
+            if (recoveryFailure is NetworkTaskRetryException && !TaskExecutionScope.IsUnconfirmedCombat(taskFailure))
+                throw new NetworkTaskRetryException(taskFailure);
             throw new TaskFailureRecoveryException(taskFailure, recoveryFailure);
         }
     }

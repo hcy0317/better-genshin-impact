@@ -10,20 +10,28 @@ internal enum WorldFrameKind { Unknown, Playable, Reconnecting, Loading }
 
 internal static class WorldFrameAvailability
 {
-    internal static WorldFrameKind ReadNative(ImageRegion image) => ReadWorld(image,
-        SaurianUiReader.IsKnownTransformation, Bv.IsCombatHud, Bv.IsInBigMapUi, OcrFactory.Paddle);
+    internal static WorldFrameKind ReadNative(ImageRegion image) =>
+        !System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable() ? WorldFrameKind.Reconnecting : ReadWorld(image,
+            SaurianUiReader.IsKnownTransformation, Bv.IsCombatHud, Bv.IsInBigMapUi, OcrFactory.Paddle);
 
     internal static WorldFrameKind ReadWorld(ImageRegion image, Func<ImageRegion, bool> transformed,
         Func<ImageRegion, bool> ordinaryHud, Func<ImageRegion, bool> bigMap, IOcrService ocr) =>
         image.ReadOnce(typeof(WorldFrameAvailability), () =>
+        {
+            // Waiting must be checked before the more expensive HUD/transform readers.
+            var wait = ReadConnectionWait(image, ocr);
+            if (wait != null) return wait == "reconnect-panel" ? WorldFrameKind.Reconnecting
+                : wait == "server-wait" ? WorldFrameKind.Loading : WorldFrameKind.Unknown;
             // Both readers positively confirm unobscured world anchors. A transformed avatar has no ordinary HP bar.
-            Read(image, (transformed(image) || ordinaryHud(image)) && !bigMap(image), ocr));
+            return Read(image, (transformed(image) || ordinaryHud(image)) && !bigMap(image), ocr);
+        });
 
     internal static WorldFrameKind Read(ImageRegion image, bool playableHud, IOcrService ocr)
     {
         if (image.SrcMat.Empty() || image.Width * 9 != image.Height * 16 ||
             image.SrcMat.Type() != MatType.CV_8UC3 && image.SrcMat.Type() != MatType.CV_8UC4)
             return WorldFrameKind.Unknown;
+        if (HasServerWaitSpinner(image)) return WorldFrameKind.Loading;
         if (HasReconnectPanel(image))
         {
             var bounds = new Rect(image.Width * 39 / 100, image.Height * 47 / 100,
@@ -46,6 +54,59 @@ internal static class WorldFrameAvailability
         Cv2.MeanStdDev(gray, out Scalar mean, out Scalar deviation);
         return (mean.Val0 < 10 || mean.Val0 > 240) && deviation.Val0 < 12
             ? WorldFrameKind.Loading : WorldFrameKind.Unknown;
+    }
+
+    internal static string? ReadConnectionWait(ImageRegion image, IOcrService ocr) => ReadConnectionWait(image, () => ocr);
+
+    internal static string? ReadConnectionWait(ImageRegion image, Func<IOcrService> ocr)
+    {
+        if (image.SrcMat.Empty() || image.Width * 9 != image.Height * 16 ||
+            image.SrcMat.Type() != MatType.CV_8UC3 && image.SrcMat.Type() != MatType.CV_8UC4) return null;
+        if (HasServerWaitSpinner(image)) return "server-wait";
+        // A centered panel is a candidate until its existing text check confirms reconnecting.
+        if (!HasReconnectPanel(image)) return null;
+        return Read(image, false, ocr()) == WorldFrameKind.Reconnecting
+            ? "reconnect-panel" : "connection-panel-unconfirmed";
+    }
+
+    internal static bool HasServerWaitSpinner(ImageRegion image)
+    {
+        if (image.SrcMat.Empty() || image.Width * 9 != image.Height * 16 ||
+            image.SrcMat.Type() != MatType.CV_8UC3 && image.SrcMat.Type() != MatType.CV_8UC4) return false;
+        // The recorded waiting animation has three small golden dots close to screen center.
+        // It indicates a pending server response, not proof of an Internet outage.
+        using var center = new Mat(image.SrcMat, new Rect(image.Width * 46 / 100, image.Height * 45 / 100,
+            image.Width * 8 / 100, image.Height * 12 / 100));
+        using var bgr = new Mat();
+        if (center.Channels() == 4) Cv2.CvtColor(center, bgr, ColorConversionCodes.BGRA2BGR);
+        else center.CopyTo(bgr);
+        using var hsv = new Mat();
+        using var mask = new Mat();
+        Cv2.CvtColor(bgr, hsv, ColorConversionCodes.BGR2HSV);
+        Cv2.InRange(hsv, new Scalar(15, 80, 245), new Scalar(40, 255, 255), mask);
+        using var labels = new Mat();
+        using var stats = new Mat();
+        using var centroids = new Mat();
+        var count = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centroids);
+        var dots = new System.Collections.Generic.List<Point2d>();
+        var scale = image.Height / 1080d;
+        for (var i = 1; i < count; i++)
+        {
+            var width = stats.At<int>(i, 2);
+            var height = stats.At<int>(i, 3);
+            var area = stats.At<int>(i, 4);
+            if (width < 7 * scale || width > 25 * scale || height < 7 * scale || height > 25 * scale ||
+                width / (double)height is < .65 or > 1.5 || area < width * height * .55) continue;
+            dots.Add(new(centroids.At<double>(i, 0), centroids.At<double>(i, 1)));
+        }
+        if (dots.Count != 3) return false;
+        for (var i = 0; i < dots.Count; i++)
+            for (var j = i + 1; j < dots.Count; j++)
+            {
+                var distance = dots[i].DistanceTo(dots[j]);
+                if (distance < 12 * scale || distance > 75 * scale) return false;
+            }
+        return true;
     }
 
     private static bool HasReconnectPanel(ImageRegion image)
