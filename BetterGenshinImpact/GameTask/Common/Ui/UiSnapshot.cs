@@ -92,6 +92,7 @@ internal sealed record UiSnapshot(long FrameId)
         if (world.Controlled) return new(UiReadinessKind.TemporarilyUnavailable, "control-interrupted");
         if (world.LowHp) return new(UiReadinessKind.TemporarilyUnavailable, "low-hp");
         if (world.PartyRejected) return new(UiReadinessKind.TemporarilyUnavailable, "party-rejected");
+        if (world.Motion == MotionStatus.Swim) return new(UiReadinessKind.TemporarilyUnavailable, "swimming");
         // 只有进入菜单后的新帧才能证明就绪；当前只允许一次无消费探测。
         return new(UiReadinessKind.Unknown, "awaiting-party-page", CanProbe: true);
     }

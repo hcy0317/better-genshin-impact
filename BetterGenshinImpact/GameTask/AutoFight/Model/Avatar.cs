@@ -304,16 +304,8 @@ public partial class Avatar
     private static bool SwimmingConfirm(Region region)
     {
         var imageRegion = region.ToImageRegion();
-        using var cropped = imageRegion.DeriveCrop(1819, 1025, 9, 11);
-        using var mask = OpenCvCommonHelper.Threshold(cropped.SrcMat, new Scalar(242, 223, 39), new Scalar(255, 233, 44));
-        using var labels = new Mat();
-        using var stats = new Mat();
-        using var centroids = new Mat();
-
-        var numLabels = Cv2.ConnectedComponentsWithStats(mask, labels, stats, centroids,
-            connectivity: PixelConnectivity.Connectivity4, ltype: MatType.CV_32S);
-
-        return numLabels > 1;
+        try { return SwimmingMotionReader.IsSwimming(imageRegion); }
+        finally { if (!ReferenceEquals(imageRegion, region)) imageRegion.Dispose(); }
     }
 
     /// <summary>

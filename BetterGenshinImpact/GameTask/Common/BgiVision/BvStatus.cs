@@ -255,6 +255,7 @@ public static partial class Bv
 
     public static MotionStatus GetMotionStatus(ImageRegion captureRa)
     {
+        if (SwimmingMotionReader.IsSwimming(captureRa)) return MotionStatus.Swim;
         using var spaceRa = captureRa.Find(ElementRecognition.Get("SpaceKey", captureRa));
         var spaceExist = spaceRa.IsExist();
         using var xRa = captureRa.Find(ElementRecognition.Get("XKey", captureRa));
@@ -515,4 +516,5 @@ public enum MotionStatus
     Fly, // 飞行
     Climb, // 攀爬
     Unknown, // 没有足够的姿态证据，不能授权战斗移动
+    Swim, // 游泳提示的正证据，不能当作地面或飞行到达
 }

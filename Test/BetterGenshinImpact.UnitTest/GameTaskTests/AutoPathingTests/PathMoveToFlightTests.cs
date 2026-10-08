@@ -16,6 +16,37 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PathMoveToFlightTests
 {
+    [Theory]
+    [InlineData("fly")]
+    [InlineData("climb")]
+    public async Task SwimmingAtTheSameXyMustRetryWithoutJumpingOrReportingArrival(string mode)
+    {
+        var replay = new PathReplay { MotionAt = _ => MotionStatus.Swim };
+        var error = await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveTo(replay.Point(mode)));
+        Assert.Contains("游泳", error.Message);
+        Assert.DoesNotContain(replay.Inputs, x => x.Action == GIActions.Jump);
+        Assert.True(replay.Clock.GetUtcNow() - replay.Started < TimeSpan.FromSeconds(1));
+        Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task SwimmingInPreciseGroundApproachMustRetryBeforeCountingArrival()
+    {
+        var replay = new PathReplay { MotionAt = _ => MotionStatus.Swim };
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+        Assert.True(replay.Clock.GetUtcNow() - replay.Started < TimeSpan.FromSeconds(1));
+        Assert.DoesNotContain(replay.Inputs, x => x.Type != KeyType.KeyUp);
+    }
+
+    [Fact]
+    public async Task ExplicitSwimmingRouteStillAllowsSwimmingArrival()
+    {
+        var replay = new PathReplay { MotionAt = _ => MotionStatus.Swim };
+        await replay.Executor.MoveTo(replay.Point("swim"));
+        await replay.Executor.MoveCloseTo(replay.Point("swim"));
+    }
+
     [Fact]
     public async Task SameXyMustObserveFlightBeforeCompleting()
     {

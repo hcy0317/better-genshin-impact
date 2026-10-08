@@ -39,6 +39,7 @@ internal static class CombatMotionReader
     {
         // 挣脱提示位于画面中右，和右下角飞行/攀爬提示是不同证据区域。
         if (HasKeyboardBreakoutPrompt(frame, ocr)) return new(MotionStatus.Unknown, true);
+        if (SwimmingMotionReader.IsSwimming(frame)) return new(MotionStatus.Swim, false);
         using var space = frame.Find(ElementRecognition.Get("SpaceKey", frame));
         using var drop = frame.Find(ElementRecognition.Get("XKey", frame));
         if (space.IsExist()) return new(drop.IsExist() ? MotionStatus.Climb : MotionStatus.Fly, false);

@@ -1517,8 +1517,7 @@ public partial class PathExecutor
         bool ownRegion = fullRegion != region;
         try
         {
-            return HasColoredBlob(fullRegion, 1819, 1028, 9, 7,
-                new Scalar(242, 223, 39), new Scalar(255, 233, 44), 4);
+            return SwimmingMotionReader.IsSwimming(fullRegion);
         }
         finally
         {

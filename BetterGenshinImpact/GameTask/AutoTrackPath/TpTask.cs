@@ -1,4 +1,5 @@
 using BetterGenshinImpact.Core.Input;
+using BetterGenshinImpact.Core.Config;
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OpenCv;
 using BetterGenshinImpact.Core.Script.Dependence;
@@ -61,7 +62,6 @@ public class TpTask
     private const int DefaultBigMapOpenTimeoutMs = 5000;
     private const int MoonCanonBigMapOpenTimeoutMs = 8000;
     private const int UiRecognitionPollIntervalMs = 80;
-    private const int BigMapOpenCheckIntervalMs = UiRecognitionPollIntervalMs;
     private const int BigMapFailureDetectionTimeoutMs = 300;
     private const int BigMapCloseTimeoutMs = 1000;
     private const double TeleportMaxZoomLevel = 6.0;
@@ -1231,36 +1231,27 @@ public class TpTask
     /// </summary>
     private async Task<bool> TryToOpenBigMapUi(string? mapName)
     {
-        if (IsInBigMapUi())
+        var request = "map-open:" + Guid.NewGuid().ToString("N");
+        var result = BigMapOpenOutcome.SourceUnavailable;
+        Exception? interruption = null;
+        try
         {
-            return true;
+            result = await BigMapOpenAttempt.RunAsync(() => CaptureToRectArea(), Bv.IsInBigMapUi,
+                image => !System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable() ? "network-interface-offline" :
+                    WorldFrameAvailability.ReadConnectionWait(image, () => BetterGenshinImpact.Core.Recognition.OCR.OcrFactory.Paddle),
+                () => CheckAndSleep(0), () => InputHub.Foreground.SimulateActionPulse(GIActions.OpenMap), Delay, ct,
+                TimeSpan.FromMilliseconds(GetBigMapOpenTimeoutMilliseconds(mapName)), TimeProvider.System,
+                () => NativeInputEnvironment.Read(GIActions.OpenMap.ToActionKey().ToVK()),
+                (phase, image, detail) =>
+                {
+                    Logger.LogDebug("MAP_OPEN_EVIDENCE request={Request} phase={Phase} source={Source} detail={Detail}",
+                        request, phase, image.FrameStamp, detail);
+                    if (phase is "failure-before" or "timeout" or "input-failed" or "network-wait" or "source-unavailable" or "input-unconfirmed")
+                        DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(request, "map-open-" + phase, image, detail);
+                });
         }
-
-        InputHub.Foreground.SimulateAction(GIActions.OpenMap);
-        await Delay(100, ct);
-        return await WaitForBigMapUiAppear(GetBigMapOpenTimeoutMilliseconds(mapName));
-    }
-
-    private bool IsInBigMapUi()
-    {
-        using var capture = CaptureToRectArea();
-        return Bv.IsInBigMapUi(capture);
-    }
-
-    private async Task<bool> WaitForBigMapUiAppear(int timeoutMilliseconds)
-    {
-        var stopwatch = Stopwatch.StartNew();
-        for (var i = 0; i == 0 || stopwatch.ElapsedMilliseconds < timeoutMilliseconds; i++)
-        {
-            if (IsInBigMapUi())
-            {
-                return true;
-            }
-
-            await Delay(BigMapOpenCheckIntervalMs, ct);
-        }
-
-        return false;
+        catch (NetworkInterruptionException error) { interruption = error; }
+        return await BigMapOpenAttempt.CompleteAsync(result, interruption, ReturnMainUiTask.WaitForNetworkAsync, ct);
     }
 
     internal static bool ShouldCloseBigMapAfterTeleportFailure(bool isInBigMapUi)
@@ -3814,7 +3805,7 @@ public class TpTask
 
     private static bool IsTaskStopException(Exception exception)
     {
-        return exception is NormalEndException or OperationCanceledException;
+        return TaskFailureRecoveryPolicy.IsTerminalFailure(exception);
     }
 
     /// <summary>
