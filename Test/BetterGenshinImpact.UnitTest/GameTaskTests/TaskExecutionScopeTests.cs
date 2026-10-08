@@ -13,6 +13,46 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests;
 public class TaskExecutionScopeTests
 {
     [Fact]
+    public void RecoveryFailureIsScopedAndPreservesBothCausesEvenWhenCombatIsOneCause()
+    {
+        var combat = new CombatNotFinishedException("battle-unconfirmed");
+        var original = new TaskFailureRecoveryException(combat, new TimeoutException("recovery-deadline"));
+        var previous = TaskExecutionScope.BeginOwned();
+        var old = TaskExecutionScope.Capture();
+        old.Report(original);
+        Assert.Same(original, Assert.Throws<TaskFailureRecoveryException>(TaskExecutionScope.ThrowIfFailed));
+        previous.Dispose();
+        using var current = TaskExecutionScope.BeginOwned();
+        old.Report(original);
+        Assert.Null(TaskExecutionScope.Failure);
+        TaskExecutionScope.ThrowIfFailed();
+    }
+
+    [Fact]
+    public async Task RecoveryFailureSurvivesJavascriptCatchAndBlocksTheNextRoute()
+    {
+        using var owned = TaskExecutionScope.BeginOwned();
+        var attempts = 0;
+        var taskFailure = new IOException("teleport-panel-unconfirmed");
+        var recoveryFailure = new TimeoutException("return-main-observation-deadline");
+        var original = new TaskFailureRecoveryException(taskFailure, recoveryFailure);
+        var api = new AutoPathingScript(Path.GetTempPath(), null, new LimitedFile(Path.GetTempPath()),
+            (_, _) => { }, (_, _) => { attempts++; throw original; }, captureFailure: (_, _) => { });
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        engine.AddHostObject("pathing", api);
+        var error = await Assert.ThrowsAsync<TaskFailureRecoveryException>(() => TaskExecutionScope.RunCheckedAsync(
+            async () => await (Task)engine.Evaluate("""
+                (async () => {
+                    try { await pathing.Run('{}'); } catch (e) { try { throw new Error(e.message); } catch (_) {} }
+                    try { await pathing.Run('{}'); } catch (_) {}
+                })()
+                """)));
+        Assert.Same(original, error);
+        Assert.Equal(new Exception[] { taskFailure, recoveryFailure }, error.InnerExceptions);
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
     public void PathCancellationProbePropagatesTerminalCombatFailureInsteadOfAllowingCatchToContinue()
     {
         using var owned = TaskExecutionScope.BeginOwned();

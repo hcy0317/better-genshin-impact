@@ -14,7 +14,8 @@ internal static class UiHandoffRecovery
         CancellationToken ct, TimeProvider? clock = null) =>
         UiOperation.RunAsync("script-handoff", Budget, ct, async operation =>
         {
-            var before = await UiRecovery.ToMainAsync(driver, operation.Token, requireOverworld: true, clock: clock);
+            var before = await UiRecovery.ToMainAsync(driver, operation.Token, requireOverworld: true, clock: clock,
+                budget: operation.Remaining);
             if (!before.SourceBound || !before.SourceStamp.IsKnown)
                 throw new InvalidOperationException("跨脚本恢复缺少已绑定的采集来源");
             var session = before.SourceStamp.SessionId;

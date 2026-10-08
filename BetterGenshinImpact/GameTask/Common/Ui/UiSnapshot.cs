@@ -28,8 +28,9 @@ internal sealed record UiSnapshot(long FrameId)
     private bool MeetsInputFence { get; init; } = true;
     public CaptureFrameStamp SourceStamp { get; private init; }
     public bool SourceBound => EvidenceClock != null;
+    public string? ObservationFailure { get; init; }
     // 未绑定的特征用于逻辑回放；原生驱动必须绑定，未知来源不能授予输入。
-    public bool HasUsableEvidence => MeetsInputFence && (SourceBound
+    public bool HasUsableEvidence => ObservationFailure == null && MeetsInputFence && (SourceBound
         ? SourceStamp.IsFresh(EvidenceClock!, MaximumAge)
         : FrameId > 0);
 
@@ -122,5 +123,6 @@ internal sealed record UiSnapshot(long FrameId)
         | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0) | (Cannon ? 32768 : 0)
         | (DomainTip.IsCandidate ? 65536 : 0) | (DomainTip.CanDismiss ? 131072 : 0) | (TimeSetting ? 262144 : 0) | (DomainExit.Visible ? 524288 : 0)
         | (Reward.IsCandidate ? 1048576 : 0) | (CanDismissReward ? 2097152 : 0);
-    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},timeSetting={TimeSetting},cannon={Cannon},reward={Reward.IsCandidate},rewardDismiss={CanDismissReward},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},domainExit={DomainExit.Visible},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason},ordinaryAvatar={World?.OrdinaryAvatarHud},transformed={World?.Transformed},controlObserved={World?.ControlObserved},motion={World?.Motion}";
+    public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},timeSetting={TimeSetting},cannon={Cannon},reward={Reward.IsCandidate},rewardDismiss={CanDismissReward},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},domainExit={DomainExit.Visible},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason},ordinaryAvatar={World?.OrdinaryAvatarHud},transformed={World?.Transformed},controlObserved={World?.ControlObserved},motion={World?.Motion}"
+        + (ObservationFailure == null ? "" : $",observationFailure={ObservationFailure}");
 }

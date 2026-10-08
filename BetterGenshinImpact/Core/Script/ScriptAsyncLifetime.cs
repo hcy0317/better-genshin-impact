@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.ClearScript;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using BetterGenshinImpact.GameTask.Common;
 
 namespace BetterGenshinImpact.Core.Script;
 
@@ -15,6 +16,7 @@ internal sealed class ScriptAsyncLifetime : IDisposable
     private readonly CancellationTokenSource _cancellation;
     private readonly ILogger _logger;
     private readonly Guid _id = Guid.NewGuid();
+    private readonly RuntimeStallDiagnostics _retirement;
     private object? _controller;
     private Task? _closing;
     private volatile bool _closed;
@@ -27,6 +29,7 @@ internal sealed class ScriptAsyncLifetime : IDisposable
     internal ScriptAsyncLifetime(CancellationToken parent, ILogger? logger = null)
     {
         _logger = logger ?? NullLogger.Instance;
+        _retirement = new(_logger, "script-retirement", _id.ToString("N"));
         _previous = Active.Value;
         _previous?.Check();
         _cancellation = _previous == null ? CancellationTokenSource.CreateLinkedTokenSource(parent)
@@ -103,15 +106,21 @@ internal sealed class ScriptAsyncLifetime : IDisposable
     private async Task CloseCoreAsync()
     {
         Trace("retiring");
-        if (_controller is { } value) ((dynamic)value).close();
+        using (_retirement.Watch("close-admission"))
+            if (_controller is { } value) ((dynamic)value).close();
         Exception? cancellationFailure = null;
-        try { await _cancellation.CancelAsync().ConfigureAwait(false); }
-        catch (Exception failure) { cancellationFailure = failure; }
+        using (_retirement.Watch("cancel-callbacks"))
+        {
+            try { await _cancellation.CancelAsync().ConfigureAwait(false); }
+            catch (Exception failure) { cancellationFailure = failure; }
+        }
         if (_controller is { } controller)
         {
-            var drain = ((dynamic)controller).drain();
+            object? drain;
+            using (_retirement.Watch("promise-drain-call")) drain = ((dynamic)controller).drain();
             if (drain is Task pending)
             {
+                using var observedDrain = _retirement.Watch("promise-drain-wait");
                 using var warningCancellation = new CancellationTokenSource();
                 var warning = Task.Delay(TimeSpan.FromSeconds(10), warningCancellation.Token);
                 try
@@ -128,8 +137,8 @@ internal sealed class ScriptAsyncLifetime : IDisposable
                 }
             }
             else if (drain != null) throw new InvalidOperationException("异步脚本宿主未启用Task/Promise转换，无法确认退休");
-            ((dynamic)controller).restore();
-            (_controller as IDisposable)?.Dispose();
+            using (_retirement.Watch("restore-bindings")) ((dynamic)controller).restore();
+            using (_retirement.Watch("release-controller")) (_controller as IDisposable)?.Dispose();
             _controller = null;
         }
         Trace("retired");

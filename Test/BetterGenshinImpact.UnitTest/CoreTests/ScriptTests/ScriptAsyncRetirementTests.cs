@@ -13,6 +13,49 @@ public class ScriptAsyncRetirementCollection;
 public class ScriptAsyncRetirementTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     [Fact]
+    public async Task CancellationCallbacksHaveAVisibleRetirementPhaseBeforeTheyReturn()
+    {
+        var logger = new RetirementLogger();
+        using var lifetime = new ScriptAsyncLifetime(default, logger);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var callback = lifetime.Token.Register(() =>
+        {
+            entered.TrySetResult();
+            release.Task.GetAwaiter().GetResult();
+        });
+        var closing = lifetime.CloseAsync();
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var reported = await Task.WhenAny(logger.SlowCancellation.Task, Task.Delay(3500));
+            Assert.Same(logger.SlowCancellation.Task, reported);
+            Assert.False(closing.IsCompleted);
+        }
+        finally
+        {
+            release.TrySetResult();
+            await closing.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.Contains(logger.Messages, message => message.Contains("to=after-cancel-callbacks", StringComparison.Ordinal));
+    }
+
+    private sealed class RetirementLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        internal System.Collections.Concurrent.ConcurrentQueue<string> Messages { get; } = new();
+        internal TaskCompletionSource SlowCancellation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel level) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel level, Microsoft.Extensions.Logging.EventId id,
+            TState state, Exception? error, Func<TState, Exception?, string> format)
+        {
+            var message = format(state, error);
+            Messages.Enqueue(message);
+            if (message.Contains("cancel-callbacks-still-running", StringComparison.Ordinal)) SlowCancellation.TrySetResult();
+        }
+    }
+
+    [Fact]
     public async Task HostJoinTimeoutDoesNotCancelOrPretendToCompleteTheOriginalWork()
     {
         var cancellation = CancellationContext.Instance;
