@@ -27,6 +27,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     private UiAction _feedbackAction;
     private bool _feedbackCaptured;
     private bool _rejectionCaptured;
+    private readonly string _observationOwner = Guid.NewGuid().ToString("N");
+    private string? _unavailableObservationRequest;
 
     internal NativeUiDriver(bool inspectWorld = false) : this(NativeUiDriverIo.CreateNative(inspectWorld)) { }
 
@@ -39,6 +41,49 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     }
 
     private UiSnapshot ReadCurrent(ImageRegion image)
+    {
+        var caller = RecognitionExecutionScope.Token;
+        caller.ThrowIfCancellationRequested();
+        var budget = UiSnapshot.RecoveryMaximumAge - TimeSpan.FromMilliseconds(100);
+        if (UiOperation.Current is { } operation && operation.Remaining < budget) budget = operation.Remaining;
+        UiOperation.Current?.Check();
+        var started = _io.Clock.GetTimestamp();
+        using var deadline = new CancellationTokenSource(budget, _io.Clock);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, deadline.Token);
+        using var recognition = new RecognitionExecutionScope(linked.Token);
+        try
+        {
+            var snapshot = ReadFeatures(image);
+            caller.ThrowIfCancellationRequested();
+            if (!deadline.IsCancellationRequested && _io.Clock.GetElapsedTime(started) < budget) return snapshot;
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !caller.IsCancellationRequested)
+        {
+            // Only this observation expired. User/parent cancellation propagates
+            // unchanged, and native inference is never abandoned while running.
+        }
+        return UnavailableObservation(image, started);
+    }
+
+    private UiSnapshot UnavailableObservation(ImageRegion image, long started)
+    {
+        const string reason = "recognition-budget-exhausted";
+        var request = "ui-observation:" + (UiOperation.Current?.Id ?? _observationOwner);
+        if (_unavailableObservationRequest != request)
+        {
+            _unavailableObservationRequest = request;
+            try
+            {
+                DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(request, "observation-unavailable", image,
+                    $"reason={reason} elapsedMs={_io.Clock.GetElapsedTime(started).TotalMilliseconds:F1}; original observation pixels, no input permission");
+            }
+            catch { /* Diagnostic collection cannot replace the observation result. */ }
+        }
+        return new UiSnapshot(image.FrameStamp.Sequence) { ObservationFailure = reason }
+            .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
+    }
+
+    private UiSnapshot ReadFeatures(ImageRegion image)
     {
         if (_handbook.Matches(image))
             return new UiSnapshot(image.FrameStamp.Sequence) { Handbook = true }

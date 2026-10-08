@@ -112,7 +112,10 @@ internal sealed class TaskExecutionScope : IDisposable
         internal void Report(Exception error)
         {
             var owner = state ?? Active.Value;
-            if (owner == null || FindCombatFailure(error) is not { } terminal) return;
+            // ClearScript can expose only GetBaseException to JS. Keep the typed
+            // recovery failure in its real owner before catch/repackaging loses it.
+            var terminal = TaskFailureRecoveryPolicy.IsRecoveryFailure(error) ? error : FindCombatFailure(error);
+            if (owner == null || terminal == null) return;
             lock (owner.Gate)
                 if (!owner.Closed) owner.Failure ??= ExceptionDispatchInfo.Capture(terminal);
         }

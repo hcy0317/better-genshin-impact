@@ -349,6 +349,11 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     private static (string Channel, string Request) BeforeKey(string channel, string request) =>
         (channel, channel == "path" ? "" : request);
 
+    // Navigation and the last target remain live while selection/skill requests
+    // are pending. Their two bounded context slots cannot consume either of the
+    // two action slots; all four still share the existing byte/memory budgets.
+    private static bool IsBeforeContext(string channel) => channel is "path" or "combat-target-positive";
+
     internal bool RememberBefore(ImageRegion frame, string channel, string request, string detail)
     {
         ImageRegion? owned = null;
@@ -359,7 +364,8 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 if (_closed || !frame.FrameStamp.IsKnown)
                 { MissingFrame(request, "before-" + channel, _closed ? "scope-closed" : "source-unknown", _logger); return false; }
                 var key = BeforeKey(channel, request);
-                if (ImageLimitReached || !_before.ContainsKey(key) && _before.Count >= 2)
+                if (ImageLimitReached || !_before.ContainsKey(key) &&
+                    _before.Keys.Count(item => IsBeforeContext(item.Channel) == IsBeforeContext(channel)) >= 2)
                 { MissingFrame(request, "before-" + channel, ImageLimitReached ? "run-budget" : "before-slots-full", _logger); return false; }
                 var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
                 if (!FitsByteLimit(bytes, _before.GetValueOrDefault(key).Bytes))

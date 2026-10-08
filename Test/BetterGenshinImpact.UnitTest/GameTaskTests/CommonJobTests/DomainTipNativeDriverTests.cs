@@ -16,6 +16,47 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DomainTipNativeDriverTests
 {
     [Fact]
+    public void UserCancellationDuringRecognitionCannotBecomeAnUnavailableObservation()
+    {
+        using var caller = new CancellationTokenSource();
+        using var fixture = new DomainTipNativeFixture { Title = false, Footer = false };
+        using var operation = UiOperation.Begin("return-main", TimeSpan.FromSeconds(90), caller.Token, clock: fixture.Clock);
+        fixture.OnOcr = () =>
+        {
+            caller.Cancel();
+            BetterGenshinImpact.Core.Recognition.RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
+        };
+        Assert.ThrowsAny<OperationCanceledException>(() => fixture.Driver.Capture());
+        Assert.Empty(fixture.Actions);
+        Assert.All(fixture.Frames, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task SlowObservationRetainsItsOriginalFrameWithoutAuthorizingInput()
+    {
+        var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();
+        await using var evidence = new BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope(
+            (item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var fixture = new DomainTipNativeFixture { Title = false, Footer = false,
+            Scene = new(1) { MainHud = true } };
+        using var operation = UiOperation.Begin("return-main", TimeSpan.FromSeconds(90), clock: fixture.Clock);
+        fixture.OnOcr = () =>
+        {
+            fixture.Clock.Advance(TimeSpan.FromSeconds(2.1));
+            BetterGenshinImpact.Core.Recognition.RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
+        };
+        var observed = fixture.Driver.Capture();
+        Assert.False(observed.Matches(UiTarget.Main));
+        Assert.False(await fixture.Driver.ActAsync(UiAction.OpenParty, observed, default));
+        Assert.Empty(fixture.Actions);
+        await evidence.DisposeAsync();
+        var unavailable = Assert.Single(saved.Where(item => item.Phase == "observation-unavailable" && item.Window?.RelativeIndex == 0));
+        Assert.Equal(fixture.Frames[0].FrameStamp, unavailable.Source);
+        Assert.Contains("recognition-budget-exhausted", unavailable.Detail);
+        Assert.All(fixture.Frames, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
     public async Task PartyRejectionPinsTheFirstPostInputDecisionFrameWithoutResending()
     {
         var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();

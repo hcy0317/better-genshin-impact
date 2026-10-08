@@ -8,6 +8,35 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceScopeTests
 {
     [Fact]
+    public async Task NavigationAndTargetContextDoNotDisplaceTwoActionBeforeFrames()
+    {
+        var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();
+        await using var scope = new DiagnosticEvidenceScope((item, image) =>
+        { saved.Add((item, image.At<Vec3b>(0, 0).Item0)); return Task.CompletedTask; });
+        var source = new CaptureFrameSource();
+        ImageRegion Frame(byte pixel) => new(new Mat(2, 2, MatType.CV_8UC3, new Scalar(pixel, 0, 0)), 0, 0)
+        { FrameStamp = source.Next() };
+        using var path = Frame(1);
+        using var target = Frame(2);
+        using var pending = Frame(3);
+        using var maintenance = Frame(4);
+        Assert.True(scope.RememberBefore(path, "path", "node", "navigation"));
+        Assert.True(scope.RememberBefore(target, "combat-target-positive", "battle", "target crop"));
+        Assert.True(scope.RememberBefore(pending, "skill", "pending", "pending input"));
+        Assert.True(scope.RememberBefore(maintenance, "skill", "maintenance", "maintenance input"));
+        Assert.False(scope.RememberBefore(maintenance, "selection", "overflow", "no eviction"));
+        scope.CaptureFault(path, "path", "node", "path-failure", "");
+        scope.CaptureFault(target, "combat-target-positive", "battle", "target-loss", "");
+        scope.CaptureFault(pending, "skill", "pending", "pending-failure", "");
+        scope.CaptureFault(maintenance, "skill", "maintenance", "maintenance-failure", "");
+        await scope.DisposeAsync();
+        Assert.Contains(saved, item => item.Evidence.Phase == "before-path" && item.Pixel == 1);
+        Assert.Contains(saved, item => item.Evidence.Phase == "before-combat-target-positive" && item.Pixel == 2);
+        Assert.Contains(saved, item => item.Evidence.Request == "pending" && item.Evidence.Phase == "before-skill" && item.Pixel == 3);
+        Assert.Contains(saved, item => item.Evidence.Request == "maintenance" && item.Evidence.Phase == "before-skill" && item.Pixel == 4);
+    }
+
+    [Fact]
     public async Task NewerSparseHistoryCannotReplaceAnExactOlderDecisionImage()
     {
         var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();

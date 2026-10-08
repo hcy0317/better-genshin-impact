@@ -118,14 +118,14 @@ internal static class UiRecovery
 
     internal static Task<UiSnapshot> ToMainAsync(IUiDriver driver, CancellationToken ct,
         bool requireOverworld = false, ILogger? logger = null, TimeProvider? clock = null,
-        Action<Exception, string>? captureFailure = null)
+        Action<Exception, string>? captureFailure = null, TimeSpan? budget = null)
     {
         var domainPromptHandled = false;
         UiSnapshot? escapedParty = null;
         // 恢复边界是"世界在、UI 全无"空转的唯一出口：宽限期内既未命中目标、又无任何可执行动作时，兜底探测一次 Escape。
         var stallProbe = requireOverworld ? new UiStallEscapeProbe(TimeSpan.FromSeconds(6), 2, clock) : null;
         return UiTransition.WaitAsync("return-main", requireOverworld ? UiTarget.Overworld : UiTarget.Main,
-            driver, ct, TimeSpan.FromSeconds(20),
+            driver, ct, budget ?? TimeSpan.FromSeconds(20),
             // 退出门图标只能证明菜单存在，不能证明点击会返回HUD；使用已知的关闭动作。
             observed => observed.CanDismissReward ? UiAction.DismissReward : observed.Reward.IsCandidate ? null : observed.CanConfirmDomainExit
                 ? domainPromptHandled ? null : requireOverworld ? UiAction.ConfirmDomainExit : UiAction.Escape

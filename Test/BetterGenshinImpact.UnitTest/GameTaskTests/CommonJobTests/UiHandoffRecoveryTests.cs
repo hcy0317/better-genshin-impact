@@ -10,6 +10,20 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiHandoffRecoveryTests
 {
     [Fact]
+    public async Task ScriptHandoffUsesItsParentBudgetWhenEarlyObservationsAreUnavailable()
+    {
+        var driver = new Replay { Ordinary = true, InitialUnavailable = TimeSpan.FromSeconds(25) };
+        using var parent = UiOperation.Begin("script-attempt", UiHandoffRecovery.Budget, clock: driver.Time);
+        var result = await ScriptStepOutcomeRunner.RunAsync(
+            () => Task.FromResult(new ScriptExecutionResult(ScriptOutcomeKind.Failed, "original-route-failure")),
+            _ => UiHandoffRecovery.RecoverAsync(driver, _ => throw new Exception("healthy world"), default, driver.Time),
+            default, recoveryBudget: UiHandoffRecovery.Budget);
+        Assert.Equal(ScriptOutcomeKind.Failed, result.Outcome.Kind);
+        Assert.Equal("original-route-failure", result.Outcome.Reason);
+        Assert.True(driver.OrdinaryFrames >= 4);
+    }
+
+    [Fact]
     public async Task OrdinaryClimbingMustDetachBeforeHandoff()
     {
         var driver = new Replay { Ordinary = true, Climbing = true, DetachSucceeds = true };
@@ -211,6 +225,8 @@ public class UiHandoffRecoveryTests
     private sealed class Replay : IUiDriver
     {
         internal FakeTimeProvider Time { get; } = new();
+        private DateTimeOffset? _firstRead;
+        internal TimeSpan InitialUnavailable;
         private CaptureFrameSource _source;
         private CaptureFrameStamp _last;
         internal bool Ordinary;
@@ -223,6 +239,9 @@ public class UiHandoffRecoveryTests
         public UiSnapshot Capture()
         {
             Time.Advance(TimeSpan.FromMilliseconds(1));
+            _firstRead ??= Time.GetUtcNow();
+            if (Time.GetUtcNow() - _firstRead.Value < InitialUnavailable)
+                return new UiSnapshot(0).WithSource(default, Time, UiSnapshot.RecoveryMaximumAge);
             if (Ordinary) OrdinaryFrames++;
             if (!RepeatFrame || !_last.IsKnown) _last = _source.Next();
             return new UiSnapshot(1) { MainHud = true, World = new(Climbing || Flying || Breakout || Controlled, LowHp, Rejected)
