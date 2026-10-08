@@ -59,14 +59,14 @@ internal static class UiHandoffRecovery
                     var ready = observed.Matches(UiTarget.Overworld) && world is
                         { OrdinaryAvatarHud: true, Transformed: false, ControlObserved: true,
                           Controlled: false, KeyboardBreakout: false, LowHp: false, PartyRejected: false } &&
-                        world.Value.Motion is not (MotionStatus.Fly or MotionStatus.Climb);
+                        world.Value.Motion is not (MotionStatus.Fly or MotionStatus.Climb or MotionStatus.Swim);
                     ordinaryFrames = ready ? ordinaryFrames + 1 : 0;
                     if (ordinaryFrames >= 2) return true;
                     var canRecover = !recoveryUsed && observed.Matches(UiTarget.Overworld) &&
                         world is { ControlObserved: true, KeyboardBreakout: false, PartyRejected: false } &&
                         world.Value.Motion != MotionStatus.Climb &&
                         (!world.Value.Controlled || world.Value.Motion == MotionStatus.Fly) &&
-                        (world.Value.Transformed || world.Value.Motion == MotionStatus.Fly ||
+                        (world.Value.Transformed || world.Value.Motion is MotionStatus.Fly or MotionStatus.Swim ||
                          world is { OrdinaryAvatarHud: true, Transformed: false, LowHp: true });
                     recoveryFrames = canRecover ? recoveryFrames + 1 : 0;
                     if (recoveryFrames >= 2)

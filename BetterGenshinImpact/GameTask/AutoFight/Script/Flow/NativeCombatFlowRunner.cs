@@ -482,7 +482,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             if (!io.IsCombatHud(frame)) throw Rejected("hud-unavailable");
             if (ReadActive(frame) != actor.Index) throw Rejected("actor-unconfirmed");
             var control = frame.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(frame));
-            if (!control.IsObserved || control.KeyboardBreakoutRequested || control.Motion is MotionStatus.Climb or MotionStatus.Fly)
+            if (!control.IsObserved || control.KeyboardBreakoutRequested || control.Motion is MotionStatus.Climb or MotionStatus.Fly or MotionStatus.Swim)
                 throw Rejected("control-unavailable");
             if (!frame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge))
                 throw Rejected("recognition-stale");
@@ -849,7 +849,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             _selectionControl = control;
             _selectionControlSource = frame.FrameStamp;
             var allowed = control.IsObserved && !control.KeyboardBreakoutRequested &&
-                control.Motion != MotionStatus.Climb && (control.Motion != MotionStatus.Fly || _selectionObservationOnly);
+                control.Motion is not (MotionStatus.Climb or MotionStatus.Swim) && (control.Motion != MotionStatus.Fly || _selectionObservationOnly);
             if (!allowed && _selection is { HasSubmittedInput: false } goal && _selectionAction is { } action)
             {
                 var phase = action.RemainingBudget <= .2 && !_selectionDeadlineCaptured ? "deadline"
@@ -1538,7 +1538,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     recoverySample = sample;
                     var control = capture.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(capture));
                     recoveryControlValid = control.IsObserved && !control.KeyboardBreakoutRequested &&
-                        control.Motion is not (MotionStatus.Climb or MotionStatus.Fly);
+                        control.Motion is not (MotionStatus.Climb or MotionStatus.Fly or MotionStatus.Swim);
                     pendingObservation += $" cd={observedCd:F3} cooling={sample.CoolingDown} ready={sample.Ready}";
                     action.Trace("pending-observation", pendingObservation);
                     return GatePendingSkillObservation(sample, active);
@@ -1659,7 +1659,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                             var readinessControl = _capture.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(_capture));
                             action.IsAwaitingUnsentBurstReadiness = readinessControl.IsObserved &&
                                 !readinessControl.KeyboardBreakoutRequested &&
-                                readinessControl.Motion is not (MotionStatus.Fly or MotionStatus.Climb);
+                                readinessControl.Motion is not (MotionStatus.Fly or MotionStatus.Climb or MotionStatus.Swim);
                         }
                         var detail = $"gate={gate} ready={ready ?? "unknown"} active={activeIndex} target={avatar.Index} " +
                             $"cooldown={skillCooldown ?? "unknown"} burstCooling={burstCooling ?? "unknown"} energyLow={energyLow ?? "unknown"} " +
@@ -1796,7 +1796,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                         primitiveFrame.FrameStamp.SessionId != _confirmedSource.SessionId ||
                         primitiveFrame.FrameStamp != _confirmedSource && !primitiveFrame.FrameStamp.IsAfter(_confirmedSource) ||
                         !primitiveFrame.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge) || !control.IsObserved ||
-                        control.KeyboardBreakoutRequested || control.Motion == MotionStatus.Climb)
+                        control.KeyboardBreakoutRequested || control.Motion is MotionStatus.Climb or MotionStatus.Swim)
                     {
                         action.ObservationOnlyActorConfirmed = false;
                         return CombatFlowResult.AwaitingObservation;

@@ -57,7 +57,7 @@ public class ReturnMainUiTask
         }
     }
 
-    private static async Task<bool> WaitForNetworkAsync(Exception failure, CancellationToken ct)
+    internal static async Task<bool> WaitForNetworkAsync(Exception failure, CancellationToken ct)
     {
         // The failed UI operation keeps its original deadline. The separate passive wait
         // owns no inputs, and uses the actual user token rather than that expired deadline.

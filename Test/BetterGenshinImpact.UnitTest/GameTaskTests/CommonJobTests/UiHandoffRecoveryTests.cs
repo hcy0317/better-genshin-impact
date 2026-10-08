@@ -123,6 +123,25 @@ public class UiHandoffRecoveryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task SwimmingNeedsOneRecoveryAndFreshNonSwimmingFrames(bool staysSwimming)
+    {
+        var driver = new Replay { Ordinary = true, Swimming = true };
+        using var parent = UiOperation.Begin("caller", TimeSpan.FromSeconds(4), clock: driver.Time);
+        var calls = 0;
+        var error = await Record.ExceptionAsync(() => UiHandoffRecovery.RecoverAsync(driver, _ =>
+        {
+            calls++;
+            driver.Swimming = staysSwimming;
+            return Task.CompletedTask;
+        }, default, driver.Time));
+        Assert.Equal(1, calls);
+        if (staysSwimming) Assert.IsType<TimeoutException>(error);
+        else Assert.Null(error);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task TransformationNeverOverridesClimbingOrBreakoutVeto(bool climbing)
     {
         var driver = new Replay { Climbing = climbing, Breakout = !climbing };
@@ -230,7 +249,7 @@ public class UiHandoffRecoveryTests
         private CaptureFrameSource _source;
         private CaptureFrameStamp _last;
         internal bool Ordinary;
-        internal bool UnknownIdentity, ControlMissing, Climbing, Flying, Rejected, LowHp, RepeatFrame, Breakout, Controlled;
+        internal bool UnknownIdentity, ControlMissing, Climbing, Flying, Swimming, Rejected, LowHp, RepeatFrame, Breakout, Controlled;
         internal int OrdinaryFrames;
         internal bool DetachSucceeds;
         internal int DetachCalls;
@@ -247,7 +266,7 @@ public class UiHandoffRecoveryTests
             return new UiSnapshot(1) { MainHud = true, World = new(Climbing || Flying || Breakout || Controlled, LowHp, Rejected)
                 { OrdinaryAvatarHud = Ordinary && !UnknownIdentity, Transformed = !Ordinary && !UnknownIdentity,
                     ControlObserved = !ControlMissing, KeyboardBreakout = Breakout,
-                    Motion = Climbing ? MotionStatus.Climb : Flying ? MotionStatus.Fly : MotionStatus.Unknown } }
+                    Motion = Climbing ? MotionStatus.Climb : Flying ? MotionStatus.Fly : Swimming ? MotionStatus.Swim : MotionStatus.Unknown } }
                 .WithSource(_last, Time, UiSnapshot.RecoveryMaximumAge);
         }
         public Task DelayAsync(int milliseconds, CancellationToken ct)

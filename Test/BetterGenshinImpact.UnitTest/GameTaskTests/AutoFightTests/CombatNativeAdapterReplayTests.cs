@@ -715,6 +715,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     [InlineData("combat")]
     [InlineData("atomic")]
     [InlineData("climb")]
+    [InlineData("swim")]
     [InlineData("control-unknown")]
     [InlineData("stale")]
     [InlineData("repeated")]
@@ -734,7 +735,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var script = CombatScriptParser.ParseContext(text, false);
         using var io = new PhysicalReplay(clock, false, 50, CombatFlowProgram.Compile(script))
         {
-            ObservedMotion = boundary == "climb" ? MotionStatus.Climb : MotionStatus.Fly,
+            ObservedMotion = boundary == "climb" ? MotionStatus.Climb : boundary == "swim" ? MotionStatus.Swim : MotionStatus.Fly,
             ControlOverride = boundary == "control-unknown" ? _ => default : null,
             InitialFrameFault = boundary is "stale" or "repeated" or "cross-session" ? boundary : null
         };
@@ -877,6 +878,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     [Theory]
     [InlineData(MotionStatus.Climb)]
     [InlineData(MotionStatus.Fly)]
+    [InlineData(MotionStatus.Swim)]
     public async Task BlockedSelectionBeforeAnyInputStillCapturesItsControlReasonAndSource(MotionStatus motion)
     {
         var saved = new List<DiagnosticEvidence>();

@@ -959,6 +959,7 @@ public partial class PathExecutor
         var flightObserved = false;
         var plainFlightTransit = waypoint.Type == WaypointType.Path.Code && string.IsNullOrWhiteSpace(waypoint.Action);
         var climbWindow = new PathClimbProgressWindow();
+        var swimmingFrames = 0;
         CaptureFrameStamp lastMoveFrame = default;
 
         // 按下w，一直走
@@ -977,7 +978,7 @@ public partial class PathExecutor
             }
 
             using var screen = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct,
-                onBlocked: () => climbWindow.Clear());
+                onBlocked: () => { climbWindow.Clear(); swimmingFrames = 0; });
             transformed = IsKnownPathTransformation(screen);
 
             _moveIo.EndJudgment(screen);
@@ -1015,6 +1016,22 @@ public partial class PathExecutor
             if (waypoint.MoveMode == MoveModeEnum.Climb.Code && progressObservedAt >= moveToStartTime.AddSeconds(60))
                 throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
             lastMoveFrame = screen.FrameStamp;
+            // 战斗游泳检测不会进入寻路飞行分支。两张同源新鲜游泳帧后回到既有
+            // 分段重试/传送入口，不能把同一XY当作飞行到达，也不能持续发送起跳。
+            if (observation.SourceUsable && observation.Motion == MotionStatus.Swim)
+            {
+                SendPathForward(KeyType.KeyUp);
+                swimmingFrames = observation.Valid ? swimmingFrames + 1 : 0;
+                if (swimmingFrames >= 2)
+                {
+                    try { DiagnosticEvidenceScope.Current?.RequestWindowFromFrame("path-swim:" + waypoint.Id,
+                        "unexpected-swimming", screen, $"node={waypoint.Id} move={waypoint.MoveMode}; 非游泳路线不授予飞行/攀爬到达，重试原分段"); } catch { }
+                    throw new RetryException("飞行/攀爬途经点连续检测到游泳，重试原路线分段");
+                }
+                await _moveIo.Delay(100, ct);
+                continue;
+            }
+            swimmingFrames = 0;
             if (waypoint.MoveMode == MoveModeEnum.Fly.Code && observation.Valid && observation.Motion == MotionStatus.Fly)
                 flightObserved = true;
             Debug.WriteLine($"接近目标点中，距离为{distance}");
@@ -1483,6 +1500,7 @@ public partial class PathExecutor
         PathApproachPulse lastPulse = default;
         var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
         var climbingFrames = 0;
+        var swimmingFrames = 0;
         var detachAttempts = 0;
         CaptureFrameFence? detachFence = null;
         PathApproachPulse detachPulse = default;
@@ -1515,7 +1533,7 @@ public partial class PathExecutor
             }
             if (!observation.Valid || detachFence is { } required && !required.Accepts(observation.Stamp))
             {
-                stationary = 0;
+                stationary = swimmingFrames = 0;
                 climbingFrames = 0;
                 await _moveIo.Delay(100, operation.Token);
                 continue;
@@ -1526,6 +1544,19 @@ public partial class PathExecutor
                 approachDiagnostics.Detach(screen, detachAttempts, "first-valid-feedback", observation,
                     detachPulse, detachEnvironment, detachFence, _moveIo.Logger);
             }
+            if (observation.Motion == MotionStatus.Swim && waypoint.MoveMode != MoveModeEnum.Swim.Code)
+            {
+                _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
+                previous = observation.Stamp;
+                if (++swimmingFrames >= 2)
+                {
+                    approachDiagnostics.Recovery(screen, observation, "unexpected-swimming", _moveIo.Logger);
+                    throw new RetryException("精确接近连续检测到游泳，不能记录地面到达，重试原路线分段");
+                }
+                await _moveIo.Delay(100, operation.Token);
+                continue;
+            }
+            swimmingFrames = 0;
             if ((detachFence != null || waypoint.MoveMode is "walk" or "run" or "dash") &&
                 observation.Motion is not (MotionStatus.Normal or MotionStatus.Climb))
             {
