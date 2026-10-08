@@ -12,7 +12,10 @@ using Vanara.PInvoke;
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 internal enum PathingMacroScene { Unknown, World, Transformed, Cannon }
-internal readonly record struct PathingMacroObservation(PathingMacroScene Scene, CaptureFrameStamp Source, bool CanFire = false);
+internal readonly record struct PathingMacroObservation(PathingMacroScene Scene, CaptureFrameStamp Source, bool CanFire = false)
+{
+    internal string? ActivationRejection { get; init; }
+}
 internal enum PathingMacroInputKind { KeyDown, KeyUp, MoveBy, MiddleDown, MiddleUp, LeftDown, LeftUp }
 internal readonly record struct PathingMacroInput(PathingMacroInputKind Kind, User32.VK Key = default, int X = 0, int Y = 0);
 
@@ -166,6 +169,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                     !new CaptureFrameFence(_entry, _fence).Accepts(feedback.Source) ||
                     feedback.Scene == PathingMacroScene.Transformed)
                     throw new InvalidOperationException("炮台首次交互反馈源失效，不继续发送第二次交互");
+                ThrowIfCannonActivationRejected(feedback);
                 if (io.Map(User32.VK.VK_F) != User32.VK.VK_F)
                     throw new InvalidOperationException("炮台交互期间按键映射改变");
                 // 首F已经取得炮台能力时，第二F会成为多余的交互。Unknown只保留原定第二F，
@@ -337,6 +341,10 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                     throw new InvalidOperationException("路径宏待稳期间采集源改变，不继续输入");
                 session = observation.Source.SessionId;
             }
+            if (phase.StartsWith("cannon-handshake", StringComparison.Ordinal) && observation.ActivationRejection != null &&
+                observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
+                (fence == null || fence.Value.Accepts(observation.Source)))
+                ThrowIfCannonActivationRejected(observation);
             if (observation.Scene != PathingMacroScene.Unknown && (expected == null || observation.Scene == expected) &&
                 observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
                 (fence == null || fence.Value.Accepts(observation.Source))) return observation;
@@ -350,6 +358,12 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         var seconds = double.Parse(value, CultureInfo.InvariantCulture);
         if (!double.IsFinite(seconds) || seconds < 0) throw new ArgumentOutOfRangeException(nameof(value));
         return checked((int)Math.Ceiling(seconds * 1000));
+    }
+
+    private static void ThrowIfCannonActivationRejected(PathingMacroObservation observation)
+    {
+        if (observation.ActivationRejection != null)
+            throw new InvalidOperationException("[BGI_CANNON_PREREQUISITE] 炮台拒绝激活：角色需要雷元素附着或雷种子；停止本宏，不重发交互或发射键");
     }
 
     private void SetEvidenceBoundary()
@@ -379,6 +393,10 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
     {
         Check(_deadline, ct);
         using var operation = _lease!.EnterOperation();
+        if (input.Kind == PathingMacroInputKind.LeftDown ||
+            input.Kind == PathingMacroInputKind.KeyDown && input.Key == User32.VK.VK_RETURN)
+            TaskExecutionScope.MarkUnsafeNetworkReplay(input.Kind == PathingMacroInputKind.LeftDown
+                ? "路径宏已尝试射击，游戏效果不能因重连重放" : "炮台已尝试发射，游戏效果不能因重连重放");
         var receipt = io.Send(input, () => Check(_deadline, ct));
         _fence = Math.Max(_fence, receipt.ObservableAfterTimestamp ?? io.Clock.GetTimestamp());
         ct.ThrowIfCancellationRequested();

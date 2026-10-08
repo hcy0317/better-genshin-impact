@@ -19,6 +19,8 @@ internal sealed class TaskExecutionScope : IDisposable
         internal readonly object Gate = new();
         internal bool Closed;
         internal ExceptionDispatchInfo? Failure;
+        internal ExceptionDispatchInfo? NetworkRetry;
+        internal string? UnsafeNetworkReplay;
     }
 
     private static readonly AsyncLocal<State?> Active = new();
@@ -38,6 +40,41 @@ internal sealed class TaskExecutionScope : IDisposable
     internal static Guard Capture() => new(Active.Value);
     internal static void ThrowIfFailed() => Capture().Check();
     internal static Exception? Failure => Active.Value?.Failure?.SourceException;
+    internal static void BeginScriptReplayBoundary()
+    {
+        ThrowIfFailed();
+        if (Active.Value is not { } state) return;
+        lock (state.Gate) state.UnsafeNetworkReplay = null;
+    }
+
+    internal static void MarkUnsafeNetworkReplay(string reason)
+    {
+        if (Active.Value is not { } state) return;
+        lock (state.Gate)
+            if (!state.Closed) state.UnsafeNetworkReplay ??= reason;
+    }
+
+    internal static void EnsureNetworkReplaySafe(Exception original)
+    {
+        if (Active.Value is not { } state) return;
+        string? reason;
+        lock (state.Gate) reason = state.UnsafeNetworkReplay;
+        if (reason != null)
+            throw new TaskFailureRecoveryException(original,
+                new InvalidOperationException("[BGI_NETWORK_REPLAY_UNSAFE] 当前脚本已有副作用输入，重连后不自动重放：" + reason));
+    }
+    // Only the host's completed script boundary consumes this recovered-network marker.
+    // Ordinary terminal failures remain latched and cannot be cleared by retry or JS catch.
+    internal static void ConsumeNetworkRetry()
+    {
+        if (Active.Value is not { } state) return;
+        lock (state.Gate)
+        {
+            if (state.Closed) throw new OperationCanceledException("所属任务已结束");
+            state.Failure?.Throw();
+            state.NetworkRetry = null;
+        }
+    }
 
     internal static void StopUnconfirmedCombat(string reason)
     {
@@ -104,7 +141,7 @@ internal sealed class TaskExecutionScope : IDisposable
             lock (owner.Gate)
             {
                 if (owner.Closed) throw new OperationCanceledException("所属自动化任务已结束，拒绝迟到的游戏操作");
-                failure = owner.Failure;
+                failure = owner.Failure ?? owner.NetworkRetry;
             }
             failure?.Throw();
         }
@@ -112,6 +149,22 @@ internal sealed class TaskExecutionScope : IDisposable
         internal void Report(Exception error)
         {
             var owner = state ?? Active.Value;
+            if (owner != null && error is AggregateException)
+            {
+                lock (owner.Gate)
+                    if (!owner.Closed && owner.NetworkRetry != null)
+                    {
+                        // Cleanup/infrastructure failures must not be replaced by a pending replay marker.
+                        owner.Failure ??= ExceptionDispatchInfo.Capture(error);
+                        return;
+                    }
+            }
+            if (error is GameTask.Common.Ui.NetworkTaskRetryException && owner != null)
+            {
+                lock (owner.Gate)
+                    if (!owner.Closed) owner.NetworkRetry ??= ExceptionDispatchInfo.Capture(error);
+                return;
+            }
             // ClearScript can expose only GetBaseException to JS. Keep the typed
             // recovery failure in its real owner before catch/repackaging loses it.
             var terminal = TaskFailureRecoveryPolicy.IsRecoveryFailure(error) ? error : FindCombatFailure(error);

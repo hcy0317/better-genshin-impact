@@ -726,7 +726,8 @@ public partial class OneDragonFlowViewModel : ViewModel
                                 taskCancellationToken = CancellationContext.Instance.GetTokenOrNone();
                                 await task.Action();
                                 await Task.Delay(1000, taskCancellationToken);
-                            }, exception => RecoverOneDragonStepAsync(exception, task.Name, taskCancellationToken));
+                            }, exception => RecoverOneDragonStepAsync(exception, task.Name,
+                                CancellationContext.Instance.GetTokenOrNone()));
                         taskCancellationToken.ThrowIfCancellationRequested();
                         outcomes.Add(task.Name, recoveredFailure == null
                             ? new(ScriptOutcomeKind.Completed, "NATIVE_TASK_COMPLETED")
@@ -883,6 +884,7 @@ public partial class OneDragonFlowViewModel : ViewModel
                     break;
                 }
                 catch (Exception recoveryFailure) when (round < RecoveryRounds &&
+                    recoveryFailure is not BetterGenshinImpact.GameTask.Common.Ui.NetworkTaskRetryException &&
                     !TaskFailureRecoveryPolicy.IsCancellation(recoveryFailure) &&
                     !TaskFailureRecoveryPolicy.IsNoProgressFailure(recoveryFailure))
                 {

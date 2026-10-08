@@ -13,6 +13,22 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class LegacyPathingMacroTests
 {
     [Fact]
+    public async Task CannonActivationRejectionStopsBeforeSecondInteractionOrFiring()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true, TwoStepCannonEntry = true };
+        io.OnObservation = (phase, observation) => phase.StartsWith("cannon-handshake", StringComparison.Ordinal)
+            ? observation with { ActivationRejection = "requires-electro-or-electrogranum" } : observation;
+        using var session = new PathingMacroSession(io);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(LegacyPathingMacroPlan.Create(
+            CombatScriptParser.ParseContext("keypress(f),wait(.2),keypress(f),keypress(RETURN),keypress(ESCAPE)", false), ["钟离"]),
+            (_, _) => throw new InvalidOperationException(), default));
+        Assert.Contains("BGI_CANNON_PREREQUISITE", error.Message);
+        Assert.Single(io.Inputs.Where(x => x == "KeyDown:VK_F"));
+        Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
+        Assert.True((io.Time.GetUtcNow() - io.Start).TotalSeconds < 1);
+    }
+
+    [Fact]
     public async Task DeadlineCrossedInDelayStillSavesTheLastObservedPixelsWithoutAnotherCapture()
     {
         var saved = new List<BetterGenshinImpact.GameTask.Common.DiagnosticEvidence>();

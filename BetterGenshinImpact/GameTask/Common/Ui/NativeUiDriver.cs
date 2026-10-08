@@ -42,6 +42,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
 
     private UiSnapshot ReadCurrent(ImageRegion image)
     {
+        UiOperation.Current?.RecordCapturedSource(image.FrameStamp);
         var caller = RecognitionExecutionScope.Token;
         caller.ThrowIfCancellationRequested();
         var budget = UiSnapshot.RecoveryMaximumAge - TimeSpan.FromMilliseconds(100);
@@ -85,6 +86,11 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
 
     private UiSnapshot ReadFeatures(ImageRegion image)
     {
+        var waiting = !_io.NetworkAvailable() ? "network-interface-offline"
+            : WorldFrameAvailability.ReadConnectionWait(image, _io.Ocr);
+        if (waiting != null)
+            return new UiSnapshot(image.FrameStamp.Sequence) { NetworkWaitReason = waiting }
+                .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
         if (_handbook.Matches(image))
             return new UiSnapshot(image.FrameStamp.Sequence) { Handbook = true }
                 .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
@@ -154,7 +160,9 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             return match.IsExist();
         }
         using var menuBack = image.Find(RecognitionAssets.Get("UseRedeemCode", "MenuBack", image));
-        var revive = reviveDetector?.Observe(image) ?? Bv.ReadReviveObservation(image);
+        ReviveUiObservation revive;
+        using (UiOperation.Current?.Measure(UiOperationPhase.ReviveRecognition))
+            revive = reviveDetector?.Observe(image) ?? Bv.ReadReviveObservation(image);
         var snapshot = new UiSnapshot(image.FrameStamp.Sequence)
         {
             MainHud = Has("PaimonMenu") || Has("FriendChat"),

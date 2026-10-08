@@ -57,6 +57,8 @@ internal static class UiTransition
             var observed = driver.Capture();
             operation.Check();
             operation.Observe(observed, target);
+            if (observed.NetworkWaitReason != null && observed.HasFreshSource)
+                throw new NetworkInterruptionException(observed.NetworkWaitReason);
             validateObservation?.Invoke(observed);
             if (last is { SourceBound: true } && observed.SourceBound &&
                 last.SourceStamp.SessionId != observed.SourceStamp.SessionId)

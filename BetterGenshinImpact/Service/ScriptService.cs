@@ -383,7 +383,8 @@ public partial class ScriptService : IScriptService
                                 }, projectCancellationToken, _logger,
                                     (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error,
                                         $"{context} 配置组 {groupName} / 脚本 {exeProject.Name}"),
-                                    recoveryBudget: TimeSpan.FromSeconds(90));
+                                    recoveryBudget: TimeSpan.FromSeconds(90),
+                                    verifyNetworkRestart: token => new ReturnMainUiTask().RecoverForNextScript(token));
                                 var outcome = step.Outcome;
                                 attemptOutcome = outcome.Kind;
                                 outcomes.Add(exeProject.Name, outcome);

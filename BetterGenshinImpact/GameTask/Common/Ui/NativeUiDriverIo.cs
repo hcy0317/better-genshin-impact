@@ -30,6 +30,7 @@ internal sealed class NativeUiDriverIo
     internal Func<int, CancellationToken, Task> Delay { get; init; } = null!;
     internal TimeProvider Clock { get; init; } = null!;
     internal Func<IDisposable> BeginExclusive { get; init; } = null!;
+    internal Func<bool> NetworkAvailable { get; init; } = () => true;
 
     internal void Validate()
     {
@@ -52,6 +53,7 @@ internal sealed class NativeUiDriverIo
         return new()
         {
             Capture = () => TaskControl.CaptureToRectArea(),
+            NetworkAvailable = System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable,
             Focus = () => TaskControl.CheckAndSleep(0),
             ReadScene = image => NativeUiDriver.ReadNativeScene(image, inspectWorld),
             Ocr = () => OcrFactory.Paddle,

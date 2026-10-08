@@ -10,6 +10,7 @@ public class UiObservationTimingTests
     [InlineData("SceneRecognition")]
     [InlineData("OcrInference")]
     [InlineData("RecognitionSessionWait")]
+    [InlineData("ReviveRecognition")]
     public async Task LongRecognitionPhaseReportsItsActualOwnerAndStage(string phaseName)
     {
         var phase = Enum.Parse<UiOperationPhase>(phaseName);
@@ -17,6 +18,8 @@ public class UiObservationTimingTests
         var logger = new EndLogger();
         await UiOperation.RunAsync("party-readable-frame", TimeSpan.FromSeconds(10), default, operation =>
         {
+            clock.Advance(TimeSpan.FromMilliseconds(1));
+            operation.RecordCapturedSource(new Fischless.GameCapture.CaptureFrameSource(clock).Next());
             using (operation.Measure(phase)) clock.Advance(TimeSpan.FromSeconds(3));
             return Task.FromResult(true);
         }, logger, clock);
@@ -24,6 +27,7 @@ public class UiObservationTimingTests
         Assert.Contains("owner=ui:party-readable-frame", message);
         Assert.Contains("from=before-" + phase + " to=after-" + phase, message);
         Assert.Contains("elapsedMs=3000", message);
+        Assert.Contains("sourceBefore=1 sourceAfter=1", message);
         if (phase == UiOperationPhase.SceneRecognition)
             Assert.Contains(logger.Gaps, item => item.Contains("SceneRecognition-still-running", StringComparison.Ordinal));
     }

@@ -20,6 +20,18 @@ internal readonly record struct CannonUiObservation(CaptureFrameStamp Source, in
 /// <summary>只识别当前帧的具体大炮交互能力；不点击、不授权普通确认页或战斗技能。</summary>
 internal static class CannonUiReader
 {
+    internal static string? ReadActivationRejection(ImageRegion frame, IOcrService ocr)
+    {
+        if (frame.SrcMat.Empty() || frame.Width * 9 != frame.Height * 16) return null;
+        using var title = frame.DeriveCrop(new Rect(frame.Width * 30 / 100, frame.Height * 17 / 100,
+            frame.Width * 45 / 100, frame.Height * 6 / 100));
+        var text = Normalize(ocr.OcrWithoutDetector(title.SrcMat));
+        return (text.Contains("雷元素附着", StringComparison.Ordinal) || text.Contains("雷種子", StringComparison.Ordinal) ||
+                text.Contains("雷种子", StringComparison.Ordinal)) &&
+               (text.Contains("可激活", StringComparison.Ordinal) || text.Contains("可啟動", StringComparison.Ordinal))
+            ? "requires-electro-or-electrogranum" : null;
+    }
+
     internal static CannonUiObservation Read(ImageRegion frame, IOcrService ocr) =>
         frame.ReadOnce(typeof(CannonUiReader), () => ReadFrame(frame, ocr));
 
