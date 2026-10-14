@@ -33,7 +33,8 @@ param(
     [string]$ShowLogBox,
     [string]$ShowStatus,
     [string]$AutoPickKey,
-    [string]$CpuOcr
+    [string]$CpuOcr,
+    [switch]$NoChange
 )
 [PSCustomObject]@{
     betterGIRoot = $BetterGIRoot
@@ -42,6 +43,7 @@ param(
     showStatus = $ShowStatus
     autoPickKey = $AutoPickKey
     cpuOcr = $CpuOcr
+    noChange = [bool]$NoChange
 } | ConvertTo-Json | Set-Content -LiteralPath $env:BETTERGI_STARTUP_TEST_CAPTURE_RECORD -Encoding UTF8
 'capture settings recorded'
 '@ | Set-Content -LiteralPath (Join-Path $schedulerRoot 'Set-BetterGICaptureMode.ps1') -Encoding UTF8
@@ -80,9 +82,11 @@ function Stop-BetterGIRdpSession {
 
     $configPath = Join-Path $oneDragonRoot '每日自动化总控.json'
     [IO.File]::WriteAllText($configPath, 'user-owned content that is intentionally not parsed', [Text.UTF8Encoding]::new($false))
+    $isolatedLock = 'Local\BetterGI-StartupContract-' + [guid]::NewGuid().ToString('N')
     $beforeHash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
 
     $resultText = & $launcherPath `
+        -OneDragonLaunchLockName $isolatedLock `
         -ConfigName '每日自动化总控' `
         -NoLaunch `
         -EnableRdpLifecycle $false `
@@ -105,7 +109,8 @@ function Stop-BetterGIRdpSession {
         $captureRecord.showLogBox -ne 'True' -or
         $captureRecord.showStatus -ne 'True' -or
         $captureRecord.autoPickKey -ne 'F' -or
-        $captureRecord.cpuOcr -ne 'True') {
+        $captureRecord.cpuOcr -ne 'True' -or
+        -not $captureRecord.noChange) {
         throw 'Capture-mode synchronization did not receive the five stable BetterGI settings.'
     }
 
@@ -118,6 +123,7 @@ function Stop-BetterGIRdpSession {
     $missingConfigFailure = $null
     try {
         & $launcherPath `
+            -OneDragonLaunchLockName $isolatedLock `
             -ConfigName '每日自动化总控' `
             -NoLaunch `
             -EnableRdpLifecycle $false `

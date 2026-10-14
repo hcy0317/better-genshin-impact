@@ -200,7 +200,7 @@ function Wait-ChildSessionAutomationResult {
         [string]$Path,
         [string]$RunId,
         [int]$TimeoutSeconds,
-        [System.Diagnostics.Process]$BetterGIProcess,
+        [object]$BetterGIProcess,
         [int]$ProcessExitResultGraceSeconds = 3
     )
 
@@ -227,6 +227,7 @@ function Wait-ChildSessionAutomationResult {
 
         if ($null -ne $BetterGIProcess) {
             $BetterGIProcess.Refresh()
+            # 历史进度不能证明实际执行器仍存活；退出后只给原子终态写入留短宽限。
             if ($BetterGIProcess.HasExited) {
                 if ($null -eq $processExitObservedAt) {
                     $processExitObservedAt = Get-Date
@@ -285,20 +286,21 @@ try {
     }
     Write-RunLog ("Verified OneDragon config exists without inspecting user-owned content: {0}" -f $OneDragonConfigPath)
 
-    $oneDragonLaunchMutex = [System.Threading.Mutex]::new($false, $OneDragonLaunchLockName)
-    Write-RunLog ("Waiting for one-dragon launch lock '{0}' for up to {1} minute(s)." -f $OneDragonLaunchLockName, $OneDragonLaunchLockTimeoutMinutes)
-    try {
-        $oneDragonLaunchLockTaken = $oneDragonLaunchMutex.WaitOne([TimeSpan]::FromMinutes($OneDragonLaunchLockTimeoutMinutes))
+    if (-not $NoLaunch) {
+        $oneDragonLaunchMutex = [System.Threading.Mutex]::new($false, $OneDragonLaunchLockName)
+        Write-RunLog ("Waiting for one-dragon launch lock '{0}' for up to {1} minute(s)." -f $OneDragonLaunchLockName, $OneDragonLaunchLockTimeoutMinutes)
+        try {
+            $oneDragonLaunchLockTaken = $oneDragonLaunchMutex.WaitOne([TimeSpan]::FromMinutes($OneDragonLaunchLockTimeoutMinutes))
+        }
+        catch [System.Threading.AbandonedMutexException] {
+            $oneDragonLaunchLockTaken = $true
+            Write-RunLog ("Recovered abandoned one-dragon launch lock '{0}' from a previous terminated launcher." -f $OneDragonLaunchLockName)
+        }
+        if (-not $oneDragonLaunchLockTaken) {
+            throw "Timed out waiting for one-dragon launch lock '$OneDragonLaunchLockName'. Another BetterGI one-dragon launcher is still running."
+        }
+        Write-RunLog ("Acquired one-dragon launch lock '{0}'." -f $OneDragonLaunchLockName)
     }
-    catch [System.Threading.AbandonedMutexException] {
-        $oneDragonLaunchLockTaken = $true
-        Write-RunLog ("Recovered abandoned one-dragon launch lock '{0}' from a previous terminated launcher." -f $OneDragonLaunchLockName)
-    }
-    if (-not $oneDragonLaunchLockTaken) {
-        throw "Timed out waiting for one-dragon launch lock '$OneDragonLaunchLockName'. Another BetterGI one-dragon launcher is still running."
-    }
-    Write-RunLog ("Acquired one-dragon launch lock '{0}'." -f $OneDragonLaunchLockName)
-
     $rdpSession = Start-BetterGIRdpSession `
         -RdpFilePath $RdpFilePath `
         -TargetAddress $RdpTargetAddress `
@@ -324,7 +326,8 @@ try {
         -ShowLogBox $RequiredShowLogBox `
         -ShowStatus $RequiredShowStatus `
         -AutoPickKey $RequiredAutoPickKey `
-        -CpuOcr $RequiredCpuOcr |
+        -CpuOcr $RequiredCpuOcr `
+        -NoChange:$NoLaunch |
         ForEach-Object { Write-RunLog ("Capture mode sync: {0}" -f $_) }
 
     $existingBetterGI = @(Get-Process -Name 'BetterGI' -ErrorAction SilentlyContinue)
