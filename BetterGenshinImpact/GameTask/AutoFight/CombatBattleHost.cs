@@ -55,6 +55,7 @@ internal readonly record struct CombatBattleHostInputResult(CombatBattleHostInpu
 {
     public int? NativeRequested { get; init; }
     public int? NativeSubmitted { get; init; }
+    public bool NativeUncertain { get; init; }
     public int TransportRequested { get; init; }
     public int TransportAcknowledged { get; init; }
     public bool HasCompleteReceipt => Status == CombatBattleHostInputStatus.Sent &&
@@ -76,6 +77,11 @@ internal interface ICombatBattleHostIo
     ValueTask DelayAsync(int milliseconds, CancellationToken ct);
     void ReleaseInput();
     void Trace(CombatBattleHostTrace observation) { }
+    bool PrepareInputEvidence(CombatBattleHostInput input, CancellationToken ct) => true;
+    bool InputEvidenceInvalidated => false;
+    void ConfirmInputFeedback(CombatBattleObservation observation) { }
+    void EndInputEvidence(string reason, Exception? error = null) { }
+    void CancelInputEvidence() { }
 }
 
 internal sealed record CombatBattleHostOptions
@@ -124,8 +130,14 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private int _detachPulses;
     private Guid _inputRequestId;
     private long _inputRequestDeadline;
-    private (Phase Phase, CombatBattleHostInputKind Kind, Guid? SelectionGoal) _inputRequestIntent;
+    private (Phase Phase, CombatBattleHostInputKind Kind, Guid? SelectionGoal, int X, int Y) _inputRequestIntent;
+    private readonly record struct CandidateDecision(EnemySeekDecision? Target, MotionStatus Motion,
+        CombatControlObservation Control, int Width, int Height, EnemySeekVisual? Hint);
+    private CandidateDecision _inputRequestDecision;
+    private static CandidateDecision DecisionFor(CombatBattleObservation observation) =>
+        new(observation.Target, observation.Motion, observation.Control, observation.Width, observation.Height, observation.SearchHint?.Visual);
     private long? _performanceRecheckDeadline;
+    private long _performanceRecheckNotBefore;
     private bool UsesPartyFinish => options.FinishDetectionEnabled && !options.ExternalCompletionAuthority;
     private CombatBattleHostResult _result;
     private CombatBattleObservation _diagnosticObservation;
@@ -158,10 +170,12 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         var previousCamera = CameraRequests;
         var previousApproach = ApproachRequests;
         string? exceptionReason = null;
+        var feedbackAccepted = false;
         try
         {
             ct.ThrowIfCancellationRequested();
             TaskExecutionScope.ThrowIfFailed();
+            Common.Ui.UiOperation.Current?.Check();
             if (flow.Context.BattleId != io.BattleId) throw new InvalidOperationException("战斗宿主不能消费另一场运行");
             if (_result != CombatBattleHostResult.Continue) return _result;
             _finishRequested |= flow.TakeFinishCheckRequest();
@@ -177,13 +191,24 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             var observation = ReadObservation(io.ObserveTarget);
             _diagnosticObservation = observation;
             var fresh = Accept(observation, out var newEvidence, out _traceObservationGate);
+            feedbackAccepted = fresh && newEvidence &&
+                (_performanceRecheckDeadline == null || observation.Source.CapturedTimestamp >= _performanceRecheckNotBefore);
+            if (_inputRequestId != Guid.Empty &&
+                _inputRequestIntent.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.Approach &&
+                fresh && newEvidence && _inputRequestDecision != DecisionFor(observation))
+            {
+                CancelPendingCandidate();
+                Reason = "host-input-candidate-changed";
+                await io.DelayAsync(50, ct);
+                return _result; // New target/control evidence may only establish a new candidate next turn.
+            }
             if (_performanceRecheckDeadline is { } recheckDeadline)
             {
                 // 先于控制/busy分支：已完整送达的辅助不能用旧画面继续切人或发第二次脉冲。
                 Common.Ui.UiOperation.Current?.Check();
                 if (io.Clock.GetTimestamp() >= recheckDeadline)
                     return Stop("host-input-performance-recheck-deadline");
-                if (!fresh || !newEvidence)
+                if (!fresh || !newEvidence || observation.Source.CapturedTimestamp < _performanceRecheckNotBefore)
                 {
                     Reason = "host-input-performance-awaiting-fresh-evidence";
                     await io.DelayAsync(50, ct);
@@ -348,6 +373,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         {
             exceptionReason = error is OperationCanceledException ? "cancelled" :
                 "exception:" + (error.Data["CombatFailureCode"] as string ?? error.GetType().Name);
+            try { io.EndInputEvidence(exceptionReason, error); } catch { }
             try { io.ReleaseInput(); } catch { /* 不遮蔽原始取消/视觉/输入异常。 */ }
             throw;
         }
@@ -383,6 +409,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             }
             catch { /* 诊断失败不得改变动作、取消或清理结果。 */ }
             _closedEvidenceEpisode = null;
+            if (_result == CombatBattleHostResult.Continue && exceptionReason == null && feedbackAccepted)
+                try { io.ConfirmInputFeedback(_diagnosticObservation); } catch { }
             flow.RecordHostStep(Stopwatch.GetElapsedTime(started));
         }
     }
@@ -578,8 +606,13 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 // 未确认箭头朝向只能提供屏幕位置线索，不能成为目标或进展证据。
                 var hintOffset = AutoFightSeek.GetIndicatorCameraOffset(EnemyIndicatorDirection.None,
                     hint.Visual with { IndicatorBearingDegrees = null }, observation.Width, observation.Height);
-                if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(hintOffset, -120, 120)), ct))
+                // 位置线索只修正水平扫描；持续模糊箭头不能饿死原有上下轨道。
+                var hintVerticalTarget = AutoFightSeek.GetSeekCameraVerticalTargetOffset(observation.Height,
+                    _scanPulses / 4, _scanPulses % 4 + 1);
+                if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(hintOffset, -120, 120),
+                        hintVerticalTarget - _searchVerticalOffset), ct))
                     return _result;
+                _searchVerticalOffset = hintVerticalTarget;
                 _scanPulses++;
                 Reason = "scan-unconfirmed-direction-hint";
                 return _result;
@@ -770,22 +803,28 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         CaptureFrameStamp source, CancellationToken ct, TimeSpan? remaining = null)
     {
         ct.ThrowIfCancellationRequested();
-        var intent = (_phase, input.Kind, input.SelectionGoal);
+        var intent = (_phase, input.Kind, input.SelectionGoal, input.X, input.Y);
         // 只有NotSent会留下可继续的请求。不同动作/阶段/选角目标不能继承它的身份和期限；
         // 同一意图等待新帧则必须保留原期限，不能靠每次重试续命。
         if (_inputRequestId != Guid.Empty && _inputRequestIntent != intent)
         {
-            _inputRequestId = Guid.Empty;
-            _inputRequestDeadline = 0;
+            CancelPendingCandidate();
+            Reason = "host-input-candidate-changed";
+            await io.DelayAsync(50, ct);
+            return new(CombatBattleHostInputStatus.NotSent, Reason: Reason);
         }
         if (_inputRequestId == Guid.Empty)
         {
             _inputRequestId = Guid.NewGuid();
             _inputRequestIntent = intent;
+            _inputRequestDecision = DecisionFor(_diagnosticObservation);
             var seconds = Math.Min(ObservationDeadline, remaining?.TotalSeconds ?? ObservationDeadline);
             if (options.TimeoutSeconds > 0) seconds = Math.Min(seconds, options.TimeoutSeconds - Now);
             _inputRequestDeadline = io.Clock.GetTimestamp() + (long)(Math.Max(0, seconds) * io.Clock.TimestampFrequency);
             if (input.SelectionGoal != null) _inputRequestDeadline = Math.Min(_inputRequestDeadline, input.DeadlineTimestamp);
+            if (Common.Ui.UiOperation.Current is { } parent)
+                _inputRequestDeadline = Math.Min(_inputRequestDeadline, io.Clock.GetTimestamp() +
+                    (long)Math.Floor(parent.Remaining.TotalSeconds * io.Clock.TimestampFrequency));
         }
         if (io.Clock.GetTimestamp() >= _inputRequestDeadline)
         {
@@ -799,7 +838,14 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         _traceInputStatus = null;
         var started = Stopwatch.GetTimestamp();
         CombatBattleHostInputResult result;
-        try { result = await io.SendAsync(input, ct); }
+        try
+        {
+            // Yield before native/exclusive admission. A later Advance recomputes the action
+            // from the reserved observation while keeping this request's original deadline.
+            result = io.PrepareInputEvidence(input, ct)
+                ? await io.SendAsync(input, ct)
+                : new(CombatBattleHostInputStatus.NotSent, Reason: "awaiting-reserved-decision-frame");
+        }
         finally { CombatRuntimeMetrics.Shared.Record("host.input", Stopwatch.GetElapsedTime(started)); }
         _traceInputStatus = result.Status;
         ct.ThrowIfCancellationRequested();
@@ -815,8 +861,10 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 }
                 if (result.PerformanceRecheck is { } recheck)
                 {
-                    if (input.Kind != CombatBattleHostInputKind.Approach || result.Error != null ||
-                        result.NativeRequested is not >= 2 || result.NativeSubmitted != result.NativeRequested ||
+                    if (input.Kind is not (CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.Camera) ||
+                        result.Error != null || result.NativeUncertain ||
+                        result.NativeRequested < (input.Kind == CombatBattleHostInputKind.Approach ? 2 : 1) ||
+                        result.NativeRequested == null || result.NativeSubmitted != result.NativeRequested ||
                         recheck.RequestId != input.RequestId || recheck.Source != source ||
                         recheck.SelectionGoal != input.SelectionGoal || recheck.DeadlineTimestamp > _inputRequestDeadline ||
                         recheck.DeadlineTimestamp <= io.Clock.GetTimestamp())
@@ -825,6 +873,9 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                         return result;
                     }
                     _performanceRecheckDeadline = recheck.DeadlineTimestamp;
+                    _performanceRecheckNotBefore = input.Kind == CombatBattleHostInputKind.Camera
+                        ? Math.Max(completed, result.ObservableAfterTimestamp ?? completed) + io.Clock.TimestampFrequency * 60 / 1000
+                        : completed;
                     Reason = "host-input-performance-awaiting-fresh-evidence";
                 }
                 _inputRequestId = Guid.Empty;
@@ -833,6 +884,14 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 _inputRequestDeadline = 0;
                 break;
             case CombatBattleHostInputStatus.NotSent:
+                if (io.InputEvidenceInvalidated)
+                {
+                    // Cancel this candidate. The next Advance must observe and recompute a new request;
+                    // this failed request can never bypass its established evidence contract.
+                    io.EndInputEvidence("evidence-unavailable:invalidated-candidate");
+                    _inputRequestId = Guid.Empty;
+                    _inputRequestDeadline = 0;
+                }
                 Reason = result.Reason ?? "host-input-awaiting-observation";
                 // 不置fence，不增加已发送计数；让原请求等下一帧而不忙轮询。
                 await io.DelayAsync(50, ct);
@@ -850,9 +909,17 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         return result;
     }
 
+    private void CancelPendingCandidate()
+    {
+        io.CancelInputEvidence();
+        _inputRequestId = Guid.Empty;
+        _inputRequestDeadline = 0;
+    }
+
     private CombatBattleHostResult Stop(string reason)
     {
         Reason = reason;
+        try { io.EndInputEvidence(reason); } catch { }
         io.ReleaseInput();
         return _result = CombatBattleHostResult.Unconfirmed;
     }

@@ -106,7 +106,8 @@ public partial class CombatBattleHostTests
         Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
         var cameras = io.Inputs.Where(x => x.Kind == CombatBattleHostInputKind.Camera).ToArray();
         Assert.Equal(24, cameras.Length);
-        Assert.All(cameras, x => { Assert.InRange(x.X, -120, -1); Assert.Equal(0, x.Y); });
+        Assert.All(cameras, x => Assert.InRange(x.X, -120, -1));
+        Assert.Contains(cameras, x => x.Y != 0);
         Assert.DoesNotContain(io.Inputs, x => x.Kind == CombatBattleHostInputKind.Approach);
     }
 }

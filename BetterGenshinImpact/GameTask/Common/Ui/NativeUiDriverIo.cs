@@ -85,6 +85,11 @@ internal sealed class NativeUiDriverIo
     {
         switch (action)
         {
+            case UiAction.AdvanceDialogueText:
+                UiEscapeInput.Run(admission,
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyDown(User32.VK.VK_SPACE),
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(User32.VK.VK_SPACE), Thread.Sleep, "对话文本推进");
+                return true;
             case UiAction.DetachClimb:
                 var dropKey = GIActions.Drop.ToActionKey().ToVK();
                 UiEscapeInput.Run(admission,

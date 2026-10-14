@@ -201,7 +201,7 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         try
         {
             // 只在显式选择自动连招时建树，与进本并行；退出前必须排空后台任务。
-            if (_useComboStrategy)
+            if (_useComboStrategy && string.IsNullOrEmpty(_taskParam.PartyName))
             {
                 var avatarNames = await AutoComboBuildTask.EnsureMainUiAndRecognizeTeamAsync(Logger, ct);
                 Logger.LogInformation("自动秘境：后台启动 LLM 建树");
@@ -336,6 +336,15 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
             {
                 ESkillCdTracker.Clear();
                 // 自动连招策略：战斗引擎内部初始化队伍，无需TXTSpecific步骤
+
+                // 指定队伍在进入秘境时切换，此后才按实际队伍建树。
+                if (_comboBuildTask == null)
+                {
+                    var avatars = await AutoComboBuildTask.EnsureMainUiAndRecognizeTeamAsync(Logger, _ct);
+                    var config = TaskContext.Instance().Config.AutoComboBuildConfig;
+                    _comboBuildCts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+                    _comboBuildTask = AutoComboBuildTask.BuildComboTreeAsync(avatars, config, Logger, _comboBuildCts.Token);
+                }
 
                 if (!_comboBuildTask!.IsCompleted)
                 {

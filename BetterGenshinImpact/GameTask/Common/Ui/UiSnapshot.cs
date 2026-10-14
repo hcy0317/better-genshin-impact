@@ -5,7 +5,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal enum UiTarget { Main, Overworld, DomainMain, Party, PartyList, PartyOrMain, Menu, Crafting }
-internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward, DetachClimb, CloseParty }
+internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward, DetachClimb, CloseParty, ExitDialogue, AdvanceDialogueText }
 
 internal enum UiReadinessKind { Ready, TemporarilyUnavailable, Unknown, Terminal }
 internal readonly record struct UiReadiness(UiReadinessKind Kind, string Reason, bool CanProbe = false);
@@ -55,6 +55,11 @@ internal sealed record UiSnapshot(long FrameId)
     public bool Party { get; init; }
     public bool PartyList { get; init; }
     public bool Talk { get; init; }
+    public DialogueObservation Dialogue { get; init; }
+    internal UiAction? DialogueAction => !Talk || !HasUsableEvidence || !Dialogue.IsFor(SourceStamp) ||
+        Prompt || Revive || FullPartyDefeat || BlackConfirm || Reward.IsCandidate || DomainExit.Visible || DomainTip.IsCandidate
+        ? null : Dialogue.ExitBounds is { Width: > 0, Height: > 0 } ? UiAction.ExitDialogue
+        : Dialogue.CanAdvance ? UiAction.AdvanceDialogueText : null;
     public bool Prompt { get; init; }
     public bool Revive { get; init; }
     public bool FullPartyDefeat { get; init; }
@@ -106,7 +111,7 @@ internal sealed record UiSnapshot(long FrameId)
           PartyRejected: false, Motion: MotionStatus.Climb };
     // Domain-tip words alone do not grant Escape. A reward candidate blocks
     // background-page input until the overlay is positively identified or gone.
-    public bool CanEscape => HasUsableEvidence && !FullPartyDefeat && !Reward.IsCandidate && !MainReady && (BigMap || Party || PartyList || Talk || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || TimeSetting || Cannon || CanConfirmDomainExit);
+    public bool CanEscape => HasUsableEvidence && !Talk && !FullPartyDefeat && !Reward.IsCandidate && !MainReady && (BigMap || Party || PartyList || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || TimeSetting || Cannon || CanConfirmDomainExit);
     public bool Matches(UiTarget target) => HasUsableEvidence && !FullPartyDefeat && !Reward.IsCandidate && target switch
     {
         UiTarget.Main => MainReady,
