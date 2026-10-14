@@ -51,6 +51,8 @@ internal static class UiTransition
         UiAction? previousAction = null;
         int? actionSignature = null;
         var unchangedActions = 0;
+        DialogueObservation? lastDialogue = null;
+        DialogueObservation? dialogueAtAction = null;
         while (true)
         {
             operation.Check();
@@ -69,6 +71,7 @@ internal static class UiTransition
                 previousAction = null;
                 actionSignature = null;
                 unchangedActions = 0;
+                lastDialogue = null;
             }
             if (!observed.HasUsableEvidence)
             {
@@ -88,6 +91,15 @@ internal static class UiTransition
                 {
                     confirmed = 0;
                     confirmedSignature = null;
+                    if (observed.Talk && observed.Dialogue.IsFor(observed.SourceStamp) && observed.Dialogue.ContentFingerprint != null)
+                    {
+                        // Only repeated, stable foreground dialogue text is progress, not background animation.
+                        if (lastDialogue is { } previous && observed.Dialogue.SamePage(previous) &&
+                            previousAction is UiAction.AdvanceDialogueText or UiAction.ExitDialogue &&
+                            dialogueAtAction is { } acted && !observed.Dialogue.SamePage(acted))
+                            unchangedActions = 0;
+                        lastDialogue = observed.Dialogue;
+                    }
                     if (previousAction is UiAction.ReviveParty or UiAction.Escape or UiAction.EscapeProbe or UiAction.CloseParty &&
                         actionSignature == observed.Signature && unchangedActions >= 2)
                     {
@@ -95,6 +107,9 @@ internal static class UiTransition
                         error.Data["UI_NO_PROGRESS"] = true;
                         throw error;
                     }
+                    if (previousAction is UiAction.AdvanceDialogueText or UiAction.ExitDialogue && unchangedActions >= 2 &&
+                        dialogueAtAction is { } stalled && observed.Dialogue.SamePage(stalled))
+                        throw new TimeoutException("对话恢复无进展：相同正文/阶段已提交两次安全动作");
                     if (attempts < maxActions && admissionChecks < Math.Max(8, maxActions) &&
                         chooseAction?.Invoke(observed) is { } action)
                     {
@@ -106,10 +121,13 @@ internal static class UiTransition
                         if (applied)
                         {
                             attempts++;
-                            unchangedActions = previousAction == action && actionSignature == observed.Signature
+                            unchangedActions = previousAction == action && (action is UiAction.AdvanceDialogueText or UiAction.ExitDialogue
+                                ? dialogueAtAction is { } prior && observed.Dialogue.SamePage(prior)
+                                : actionSignature == observed.Signature)
                                 ? unchangedActions + 1 : 1;
                             previousAction = action;
                             actionSignature = observed.Signature;
+                            dialogueAtAction = action is UiAction.AdvanceDialogueText or UiAction.ExitDialogue ? observed.Dialogue : null;
                         }
                         actionCompleted?.Invoke(action, applied, observed);
                         if (applied && action == UiAction.ReviveParty)

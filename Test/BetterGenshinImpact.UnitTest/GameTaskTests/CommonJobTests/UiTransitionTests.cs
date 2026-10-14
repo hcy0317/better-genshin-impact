@@ -10,6 +10,14 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class UiTransitionTests
 {
     [Fact]
+    public async Task AmbiguousDialogueNeverFallsBackToEscapeOrAnyInput()
+    {
+        var clock = new FakeTimeProvider();
+        var driver = new ReplayDriver(clock, new UiSnapshot(1) { Talk = true });
+        await Assert.ThrowsAsync<TimeoutException>(() => UiRecovery.ToMainAsync(driver, default, clock: clock));
+        Assert.Empty(driver.Actions);
+    }
+    [Fact]
     public async Task UnchangedPartyPageUsesItsCloseButtonAfterEscape()
     {
         var clock = new FakeTimeProvider();

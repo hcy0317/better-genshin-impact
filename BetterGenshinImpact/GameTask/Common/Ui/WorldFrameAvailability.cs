@@ -32,19 +32,9 @@ internal static class WorldFrameAvailability
             image.SrcMat.Type() != MatType.CV_8UC3 && image.SrcMat.Type() != MatType.CV_8UC4)
             return WorldFrameKind.Unknown;
         if (HasServerWaitSpinner(image)) return WorldFrameKind.Loading;
-        if (HasReconnectPanel(image))
-        {
-            var bounds = new Rect(image.Width * 39 / 100, image.Height * 47 / 100,
-                image.Width * 22 / 100, image.Height * 6 / 100);
-            using var textArea = new Mat(image.SrcMat, bounds);
-            var text = ocr.OcrWithoutDetector(textArea).Replace(" ", "", StringComparison.Ordinal);
-            if (text.Contains("重新连接服务器", StringComparison.Ordinal) ||
-                text.Contains("重新連接伺服器", StringComparison.Ordinal) ||
-                text.Contains("Reconnecting", StringComparison.OrdinalIgnoreCase))
-                return WorldFrameKind.Reconnecting;
-            // 形状像阻断弹窗但文字未确认，不能因后方HUD可见就授予移动。
-            return WorldFrameKind.Unknown;
-        }
+        var connection = ReadConnectionPanel(image, ocr);
+        if (connection != null) return connection == "reconnect-panel"
+            ? WorldFrameKind.Reconnecting : WorldFrameKind.Unknown;
         if (playableHud) return WorldFrameKind.Playable;
         using var center = new Mat(image.SrcMat, new Rect(image.Width / 4, image.Height / 4,
             image.Width / 2, image.Height / 2));
@@ -56,6 +46,48 @@ internal static class WorldFrameAvailability
             ? WorldFrameKind.Loading : WorldFrameKind.Unknown;
     }
 
+    private static string? ReadConnectionPanel(ImageRegion image, IOcrService ocr)
+    {
+        if (HasReconnectPanel(image))
+        {
+            var bounds = new Rect(image.Width * 39 / 100, image.Height * 47 / 100,
+                image.Width * 22 / 100, image.Height * 6 / 100);
+            using var textArea = new Mat(image.SrcMat, bounds);
+            string text;
+            try { text = ocr.OcrWithoutDetector(textArea).Replace(" ", "", StringComparison.Ordinal); }
+            catch (Exception error)
+            { CaptureCandidate(image, bounds, "unavailable", "ocr-failed:" + error.GetType().Name); throw; }
+            var reconnect = text.Contains("重新连接服务器", StringComparison.Ordinal) ||
+                text.Contains("重新連接伺服器", StringComparison.Ordinal) || text.Contains("Reconnecting", StringComparison.OrdinalIgnoreCase);
+            // 同次运行原帧124：邮件已领取提示与重连面板共享暗蓝矩形外观。
+            // 仅精确确认这一非模态提示；未知文字和重连文字仍阻断输入。
+            var mailToast = !reconnect && text == "您的邮箱内附件已全部领取完毕";
+            CaptureCandidate(image, bounds, text, reconnect ? "reconnect-panel"
+                : mailToast ? "mail-attachments-claimed-toast" : "connection-panel-unconfirmed");
+            if (reconnect) return "reconnect-panel";
+            if (mailToast) return null;
+            // 形状像阻断弹窗但文字未确认，不能因后方HUD可见就授予移动。
+            return "connection-panel-unconfirmed";
+        }
+        return null;
+    }
+
+    private static void CaptureCandidate(ImageRegion image, Rect bounds, string text, string reason)
+    {
+        try
+        {
+            var request = "connection:" + (UiOperation.Current?.Id ?? image.FrameStamp.SessionId.ToString("N"));
+            DiagnosticEvidenceScope.Current?.TryCapture(image, request, "connection-candidate", reason,
+                priority: DiagnosticEvidencePriority.Warning,
+                fields: new System.Collections.Generic.Dictionary<string, string>
+                {
+                    ["candidateBounds"] = bounds.ToString(), ["ocr"] = text.Length > 480 ? text[..480] + "[truncated]" : text,
+                    ["classification"] = reason
+                });
+        }
+        catch { /* Evidence failure must not change the classifier or the original OCR exception. */ }
+    }
+
     internal static string? ReadConnectionWait(ImageRegion image, IOcrService ocr) => ReadConnectionWait(image, () => ocr);
 
     internal static string? ReadConnectionWait(ImageRegion image, Func<IOcrService> ocr)
@@ -65,8 +97,7 @@ internal static class WorldFrameAvailability
         if (HasServerWaitSpinner(image)) return "server-wait";
         // A centered panel is a candidate until its existing text check confirms reconnecting.
         if (!HasReconnectPanel(image)) return null;
-        return Read(image, false, ocr()) == WorldFrameKind.Reconnecting
-            ? "reconnect-panel" : "connection-panel-unconfirmed";
+        return ReadConnectionPanel(image, ocr());
     }
 
     internal static bool HasServerWaitSpinner(ImageRegion image)

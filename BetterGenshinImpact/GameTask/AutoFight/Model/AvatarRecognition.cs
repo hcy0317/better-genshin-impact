@@ -512,7 +512,11 @@ public static class AvatarRecognition
                 stall.Mark("before-capture", lastSource.Sequence);
                 using (var capture = CaptureToRectArea())
                 {
-                    Action<PassiveTargetObservation> recordEvidence = observed => targetEvidence.ObservePublished(capture, observed);
+                    Action<PassiveTargetObservation> recordEvidence = observed =>
+                    {
+                        CombatDecisionEvidence.Publish(DiagnosticEvidenceScope.Current, capture, observed);
+                        targetEvidence.ObservePublished(capture, observed);
+                    };
                     stall.Mark("capture-complete", capture.FrameStamp.Sequence);
                     var capturedAtUtc = capture.FrameStamp.CapturedAt.UtcDateTime;
                     lastSource = capture.FrameStamp;

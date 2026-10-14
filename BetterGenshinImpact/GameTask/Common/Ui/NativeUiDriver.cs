@@ -181,13 +181,15 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             BlackConfirm = Has("BtnBlackConfirm"),
             MenuBack = menuBack.IsExist()
         };
+        if (snapshot.Talk)
+            snapshot = snapshot with { Dialogue = DialogueUiReader.Read(image, ocr ?? OcrFactory.Paddle) };
         if (snapshot.MainHud && snapshot.InDomain && snapshot.BlackConfirm && !snapshot.Revive && !snapshot.FullPartyDefeat)
             snapshot = snapshot with { DomainExit = DomainExitUiReader.Read(image, ocr ?? OcrFactory.Paddle) };
-        if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
+        if (!snapshot.Talk && !snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
             snapshot = snapshot with { Cannon = CannonUiReader.Read(image, ocr ?? OcrFactory.Paddle).CanExit };
-        if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
+        if (!snapshot.Talk && !snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
             snapshot = snapshot with { Handbook = HandbookUiRecognition.Read(image, ocr) };
-        if (!snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
+        if (!snapshot.Talk && !snapshot.MainHud && !snapshot.CanEscape && !snapshot.BlackConfirm)
             snapshot = snapshot with { TimeSetting = TimeSettingUiReader.Read(image, ocr).Visible };
         if (inspectWorld && snapshot.MainReady && image.Width * 9 == image.Height * 16)
         {
@@ -234,7 +236,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) && observed.CanEscape;
         if (action == UiAction.Escape && !escapeProposed) return Task.FromResult(false);
         // 兜底探测只允许在"没有任何已识别界面"的空转状态发出，且同样要求后继新帧仍然空转。
-        var escapeProbeProposed = action == UiAction.EscapeProbe && observed.SourceBound && observed.HasUsableEvidence &&
+        var escapeProbeProposed = action == UiAction.EscapeProbe && !observed.Talk && observed.SourceBound && observed.HasUsableEvidence &&
             observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) && UiStallEscapeProbe.IsUnrecognizedStall(observed);
         if (action == UiAction.EscapeProbe && !escapeProbeProposed) return Task.FromResult(false);
         var domainExitProposed = action == UiAction.ConfirmDomainExit && observed.SourceBound &&
@@ -264,6 +266,26 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         switch (action)
         {
+            case UiAction.ExitDialogue:
+            case UiAction.AdvanceDialogueText:
+                bool DialogueAdmitted() => observed.DialogueAction == action && current.DialogueAction == action &&
+                    current.IsAfter(observed) && current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                    observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                    (action == UiAction.ExitDialogue || current.Dialogue.SamePage(observed.Dialogue));
+                if (!DialogueAdmitted()) return Task.FromResult(false);
+                void AdmitDialogueInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!DialogueAdmitted()) throw new InvalidOperationException("对话动作的当前帧证据失效");
+                }
+                if (action == UiAction.AdvanceDialogueText)
+                    return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitDialogueInput)));
+                var bounds = current.Dialogue.ExitBounds!.Value;
+                if (bounds.X < 0 || bounds.Y < 0 || bounds.Right > image.Width || bounds.Bottom > image.Height)
+                    return Task.FromResult(false);
+                _io.Click(image, bounds, AdmitDialogueInput);
+                return Task.FromResult(Completed(true));
             case UiAction.CloseParty when observed.Matches(UiTarget.Party) && observed.Closable &&
                 current.Matches(UiTarget.Party) && current.Closable && current.IsAfter(observed):
                 using (var close = image.Find(RecognitionAssets.Get("QuickTeleport", "MapCloseButton", image)))
@@ -330,7 +352,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                 }
                 _io.Click(image, current.ReviveButtonBounds, AdmitReviveInput);
                 return Task.FromResult(Completed(true));
-            case UiAction.Escape when escapeProposed && current.IsAfter(observed) && current.CanEscape:
+            case UiAction.Escape when !current.Talk && escapeProposed && current.IsAfter(observed) && current.CanEscape:
                 void AdmitEscapeInput()
                 {
                     ct.ThrowIfCancellationRequested();
@@ -339,12 +361,13 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                         throw new InvalidOperationException("Escape source expired before native input.");
                 }
                 return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitEscapeInput)));
-            case UiAction.EscapeProbe when escapeProbeProposed && current.IsAfter(observed) && UiStallEscapeProbe.IsUnrecognizedStall(current):
+            case UiAction.EscapeProbe when !observed.Talk && !current.Talk && escapeProbeProposed &&
+                current.IsAfter(observed) && UiStallEscapeProbe.IsUnrecognizedStall(current):
                 void AdmitEscapeProbeInput()
                 {
                     ct.ThrowIfCancellationRequested();
                     UiOperation.Current?.Check();
-                    if (!UiStallEscapeProbe.IsUnrecognizedStall(current) ||
+                    if (observed.Talk || current.Talk || !UiStallEscapeProbe.IsUnrecognizedStall(current) ||
                         !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
                         throw new InvalidOperationException("兜底 Escape 来源在原生输入前失效。");
                 }

@@ -19,7 +19,7 @@ internal sealed partial class DiagnosticEvidenceScope
             lock (_gate)
             {
                 if (_closed || !frame.FrameStamp.IsKnown || frame.SrcMat.Empty()) return;
-                if (!_exactFrames.ContainsKey(owner) && _exactFrames.Count >= 2)
+                if (!_exactFrames.ContainsKey(owner) && _exactFrames.Count + _reservations.Count >= 2)
                 { MissingFrame(request, "last-observation", "exact-slots-full", _logger); return; }
                 var previous = _exactFrames.GetValueOrDefault(owner);
                 var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());

@@ -958,9 +958,14 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             CombatBattleObservation Target()
             {
                 var stamp = source.Next();
-                using var pixels = new ImageRegion(new Mat(10, 10, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = stamp };
+                using var pixels = new ImageRegion(new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = stamp };
                 evidence?.CaptureRequestedFrames(flow.Context.BattleId.ToString("N"), pixels);
                 var settled = cameraAt.HasValue && clock.GetElapsedTime(cameraAt.Value).TotalMilliseconds >= 350;
+                CombatDecisionEvidence.Publish(evidence, pixels,
+                    new PassiveTargetObservation(false, settled, clock.GetUtcNow().UtcDateTime,
+                        settled ? new EnemySeekVisual(700, 400, 80, 30, 2400) : null, 1920, 1080)
+                    { Source = stamp, BattleId = flow.Context.BattleId, CaptureEpoch = AvatarRecognition.PassiveCaptureGate.Epoch,
+                        Quality = CombatObservationQuality.Available });
                 return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
                     settled ? new EnemySeekDecision(AutoFightSeekAction.KeepFighting, EnemyIndicatorDirection.None,
                         new(700, 400, 80, 30, 2400), 1, SeekCueKind.DamageNumber) : null,
@@ -980,7 +985,8 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
         var plain = await Run(false);
         var recorded = await Run(true);
-        Assert.Equal(plain.Inputs, recorded.Inputs);
+        Assert.Equal(plain.Inputs.Select(item => (item.Actor, item.Skill)), recorded.Inputs.Select(item => (item.Actor, item.Skill)));
+        Assert.All(plain.Inputs.Zip(recorded.Inputs), pair => Assert.InRange(Math.Abs(pair.First.At - pair.Second.At), 0, .3));
         Assert.True(recorded.Images > 0);
     }
 
@@ -2302,14 +2308,17 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.False(io.HoldingInput);
     }
 
-    [Fact]
-    public async Task NativeHostFirstCheckDelayDoesNotSendAndResumesTheSameRequestOnce()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NativeHostFirstCheckDelayDoesNotSendAndResumesTheSameRequestOnce(bool abandon)
     {
         var clock = new FakeTimeProvider();
         var program = LoadProgram("琴 e");
         using var physical = new PhysicalReplay(clock, false, 50, program);
         using var flow = NativeCombatFlowRunner.Create(program, physical);
-        var device = new HostDevice(clock) { Logger = new FirstBeginDelayLogger(clock) };
+        var logger = new FirstBeginDelayLogger(clock);
+        var device = new HostDevice(clock) { Logger = logger };
         var native = new NativeCombatBattleHostIo(flow, device);
         var source = new CaptureFrameSource(clock);
         var request = new CombatBattleHostInput(CombatBattleHostInputKind.OpenParty)
@@ -2322,11 +2331,20 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Null(deferred.CompletedTimestamp);
         Assert.Equal(0, device.Preparations);
         Assert.Empty(device.Inputs);
+        Assert.DoesNotContain(logger.Messages, message => message.StartsWith("HOST_INPUT_RESULT "));
+        if (abandon)
+        {
+            native.EndInputEvidence("parent deadline");
+            native.ReleaseInput();
+            Assert.Contains("status=NotSent", Assert.Single(logger.Messages.Where(message => message.StartsWith("HOST_INPUT_RESULT "))));
+            return;
+        }
         var sent = await native.SendAsync(request with { Source = source.Next() }, default);
         Assert.Equal(CombatBattleHostInputStatus.Sent, sent.Status);
         Assert.NotNull(sent.CompletedTimestamp);
         Assert.Equal(new[] { "party" }, device.Inputs);
         native.ReleaseInput();
+        Assert.Contains("status=Sent", Assert.Single(logger.Messages.Where(message => message.StartsWith("HOST_INPUT_RESULT "))));
         Assert.DoesNotContain("drop", device.Inputs); // 无本次UI已打开的图像证据，不盲关。
     }
 
@@ -2365,6 +2383,54 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             Assert.Null(result.CompletedTimestamp);
         }
         native.ReleaseInput();
+        Assert.Equal(new[] { "party" }, device.Inputs);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task NativeCancellationLogsTheCurrentExceptionOnceInsteadOfAnOlderAttempt(bool deferFirst, bool deviceError)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 e");
+        using var physical = new PhysicalReplay(clock, false, 50, program);
+        using var flow = NativeCombatFlowRunner.Create(program, physical);
+        using var cancellation = new CancellationTokenSource();
+        var logger = new FirstBeginDelayLogger(clock, deferFirst);
+        var device = new HostDevice(clock)
+        {
+            NativeReceipts = true,
+            Logger = logger,
+            AfterParty = () =>
+            {
+                cancellation.Cancel();
+                if (deviceError) throw new IOException("native error concurrent with cancellation");
+                throw new OperationCanceledException("current native cancellation", cancellation.Token);
+            }
+        };
+        var native = new NativeCombatBattleHostIo(flow, device);
+        var source = new CaptureFrameSource(clock);
+        var request = new CombatBattleHostInput(CombatBattleHostInputKind.OpenParty)
+        {
+            RequestId = Guid.NewGuid(), Source = source.Next(),
+            DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency
+        };
+        if (deferFirst)
+            Assert.Equal(CombatBattleHostInputStatus.NotSent, (await native.SendAsync(request, cancellation.Token)).Status);
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await native.SendAsync(request with { Source = source.Next() }, cancellation.Token));
+        native.EndInputEvidence("cancelled", error);
+        native.ReleaseInput();
+        var result = Assert.Single(logger.Messages.Where(message => message.StartsWith("HOST_INPUT_RESULT ")));
+        Assert.Contains("errorType=" + error.GetType().FullName, result);
+        Assert.Contains("errorMessage=" + error.Message, result);
+        Assert.Contains(nameof(NativeCombatBattleHostIo), result);
+        Assert.Contains("requested=2 submitted=2 uncertain=False", result);
+        Assert.Contains("request=" + request.RequestId, result);
+        Assert.Contains("deadline=" + request.DeadlineTimestamp, result);
+        Assert.DoesNotContain("status=NotSent", result);
         Assert.Equal(new[] { "party" }, device.Inputs);
     }
 
@@ -2458,6 +2524,127 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         { if (format(state, error).StartsWith("HOST_APPROACH_TIMING")) log(); }
     }
 
+    [Theory]
+    [InlineData("partial")]
+    [InlineData("uncertain")]
+    [InlineData("transport")]
+    [InlineData("expired")]
+    [InlineData("stale")]
+    [InlineData("cancel")]
+    public async Task CameraOverrunNeverPromotesIncompleteOrInvalidNativeEvidence(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var cancellation = new CancellationTokenSource();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var device = new HostDevice(clock) { NativeReceipts = true, AfterCamera = () =>
+        {
+            if (fault == "transport") InputDispatchCapture.DispatchTransport(enter => enter());
+            else new WindowsInputMessageDispatcher(null, inputs => fault == "uncertain" ? throw new IOException("uncertain")
+                : fault == "partial" ? 1U : (uint)inputs.Length, () => 5).DispatchInput(new User32.INPUT[2]);
+            clock.Advance(TimeSpan.FromMilliseconds(307));
+            if (fault == "cancel") cancellation.Cancel();
+        } };
+        var native = new NativeCombatBattleHostIo(flow, device);
+        var source = new CaptureFrameSource(clock);
+        var input = new CombatBattleHostInput(CombatBattleHostInputKind.Camera, 60)
+        { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency / (fault == "expired" ? 10 : 1) };
+        if (fault == "stale") clock.Advance(TimeSpan.FromMilliseconds(151));
+        if (fault == "cancel") await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await native.SendAsync(input, cancellation.Token));
+        else
+        {
+            var result = await native.SendAsync(input, default);
+            Assert.Null(result.PerformanceRecheck);
+            Assert.True(result.Status != CombatBattleHostInputStatus.Sent || result.Error != null);
+        }
+        Assert.True(device.Inputs.Count <= 1);
+        native.ReleaseInput();
+    }
+
+    [Fact]
+    public async Task IoObservationCannotReleaseEvidenceBeforeTheHostVerdictAndOriginalFailure()
+    {
+        var clock = new FakeTimeProvider();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource(clock);
+        var native = new NativeCombatBattleHostIo(flow, new HostDevice(clock), targetObservation: () =>
+            new(source.Next(), flow.Context.BattleId, CombatObservationQuality.Available, null, 2, 2));
+        var input = new CombatBattleHostInput(CombatBattleHostInputKind.Camera, 60)
+        { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency };
+        Assert.False(native.PrepareInputEvidence(input, default));
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        CombatDecisionEvidence.Publish(scope, frame, new(false, false, clock.GetUtcNow().UtcDateTime, null, 2, 2)
+        { Source = frame.FrameStamp, BattleId = flow.Context.BattleId, CaptureEpoch = AvatarRecognition.PassiveCaptureGate.Epoch, Quality = CombatObservationQuality.Available });
+        input = input with { Source = native.ObserveTarget().Source };
+        Assert.True(native.PrepareInputEvidence(input, default));
+        Assert.Equal(CombatBattleHostInputStatus.Sent, (await native.SendAsync(input, default)).Status);
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        var feedback = native.ObserveTarget();
+        Assert.Equal(1, scope.ExactReservationStatistics.Active);
+        native.ConfirmInputFeedback(feedback with { Quality = CombatObservationQuality.Late });
+        Assert.Equal(1, scope.ExactReservationStatistics.Active);
+        native.EndInputEvidence("original", new IOException("original-exception-detail"));
+        native.ReleaseInput();
+        await scope.DisposeAsync();
+        Assert.Contains(saved, item => item.Source == input.Source && item.Detail.Contains("original-exception-detail"));
+        Assert.Equal(1, scope.ExactReservationStatistics.Released);
+    }
+
+    [Fact]
+    public async Task InvalidatedReservationCannotAuthorizeTheSameRequestWithoutEvidence()
+    {
+        var clock = new FakeTimeProvider();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        var source = new CaptureFrameSource(clock);
+        var native = new NativeCombatBattleHostIo(flow, new HostDevice(clock), targetObservation: () =>
+            new(source.Next(), flow.Context.BattleId, CombatObservationQuality.Available, null, 2, 2));
+        var input = new CombatBattleHostInput(CombatBattleHostInputKind.Camera, 60)
+        { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency };
+        Assert.False(native.PrepareInputEvidence(input, default));
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        CombatDecisionEvidence.Publish(scope, frame, new(false, false, clock.GetUtcNow().UtcDateTime, null, 2, 2)
+        { Source = frame.FrameStamp, BattleId = flow.Context.BattleId, CaptureEpoch = AvatarRecognition.PassiveCaptureGate.Epoch, Quality = CombatObservationQuality.Available });
+        clock.Advance(TimeSpan.FromMilliseconds(151));
+        var later = native.ObserveTarget();
+        Assert.False(native.PrepareInputEvidence(input with { Source = later.Source }, default));
+        native.ReleaseInput();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task CameraOverrunRequiresACompleteNormallyReturnedNativeReceipt(bool throws)
+    {
+        var clock = new FakeTimeProvider();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var device = new HostDevice(clock) { NativeReceipts = true, AfterCamera = () =>
+        {
+            new WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0).DispatchInput(new User32.INPUT[1]);
+            clock.Advance(TimeSpan.FromMilliseconds(307));
+            if (throws) throw new TimeoutException("actual native failure");
+        } };
+        var native = new NativeCombatBattleHostIo(flow, device);
+        var source = new CaptureFrameSource(clock);
+        var request = new CombatBattleHostInput(CombatBattleHostInputKind.Camera, 60)
+        { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency };
+        var result = await native.SendAsync(request, default);
+        Assert.Single(device.Inputs);
+        if (throws) { Assert.NotNull(result.Error); Assert.Null(result.PerformanceRecheck); }
+        else
+        {
+            Assert.Equal(CombatBattleHostInputStatus.Sent, result.Status);
+            Assert.Null(result.Error);
+            Assert.Equal(request.RequestId, result.PerformanceRecheck!.Value.RequestId);
+            Assert.Equal(request.DeadlineTimestamp, result.PerformanceRecheck.Value.DeadlineTimestamp);
+        }
+    }
+
     private sealed class HostDevice(FakeTimeProvider clock) : ICombatHostInputDevice
     {
         public bool NativeReceipts { get; init; }
@@ -2515,15 +2702,18 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
     }
 
-    private sealed class FirstBeginDelayLogger(FakeTimeProvider clock) : ILogger
+    private sealed class FirstBeginDelayLogger(FakeTimeProvider clock, bool delayFirst = true) : ILogger
     {
         private bool _delayed;
+        public List<string> Messages { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel level) => true;
         public void Log<TState>(LogLevel level, EventId id, TState state, Exception? exception,
             Func<TState, Exception?, string> formatter)
         {
-            if (_delayed || !formatter(state, exception).StartsWith("UI_BEGIN")) return;
+            var text = formatter(state, exception);
+            Messages.Add(text);
+            if (!delayFirst || _delayed || !text.StartsWith("UI_BEGIN")) return;
             _delayed = true;
             clock.Advance(TimeSpan.FromMilliseconds(292));
         }

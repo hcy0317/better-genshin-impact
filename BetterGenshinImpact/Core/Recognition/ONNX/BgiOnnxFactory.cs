@@ -328,9 +328,16 @@ public class BgiOnnxFactory : IDisposable
         var coldRealtime = IsRealtimeModel(model.Name) && cached == null;
         _logger.LogInformation("[ONNX]模型 {Model} 会话 provider 选择：{Providers}，TRT缓存命中={Cached}，实时冷启动跳过TRT构建={SkipBuild}",
             model.Name, string.Join(",", providers), cached != null, coldRealtime);
-        return new BgiYoloPredictor(model, cached ?? model.ModalPath,
-            CreateSessionOptions(model, EnableCache && cached == null && !coldRealtime, providers),
-            _logger, initializationFailed);
+        var options = CreateSessionOptions(model, EnableCache && cached == null && !coldRealtime, providers);
+        try
+        {
+            return new BgiYoloPredictor(model, cached ?? model.ModalPath, options, _logger, initializationFailed);
+        }
+        catch
+        {
+            options.Dispose();
+            throw;
+        }
     }
 
     private static bool IsRealtimeModel(string name) => name is "BgiAvatarSide" or "BgiQClassify" or "BgiWorld" or "BgiTree";

@@ -30,6 +30,16 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     private CaptureFrameStamp _partyEvidenceSource;
     private Guid _partyInputRequest;
     private CaptureFrameStamp _lastAdmittedPartySource;
+    private CombatDecisionEvidence? _decisionEvidence;
+    private Guid _evidenceRequest;
+    private long? _evidenceInputCompleted;
+    private bool _evidenceInvalidated;
+    private CancellationTokenSource? _reservationCancellation;
+    private sealed record PendingInputResult(CombatBattleHostInput Input, CombatBattleHostInputResult Result,
+        double ElapsedMs, long Deadline, long? CompletedAt);
+    private PendingInputResult? _pendingInputResult;
+    private Guid? _lastLoggedInputRequest;
+    public bool InputEvidenceInvalidated => _evidenceInvalidated;
     public TimeProvider Clock => _device.Clock;
     public Guid BattleId => _flow.Context.BattleId;
 
@@ -42,10 +52,98 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     public CombatBattleObservation ObserveTarget()
     {
-        if (_targetObservation != null) return _targetObservation();
+        if (_evidenceInputCompleted == null && _decisionEvidence?.TryRead(out var reserved) == true)
+        {
+            var gate = AvatarRecognition.PassiveCaptureGate;
+            if (reserved.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) && gate.CanCapture && reserved.CaptureEpoch == gate.Epoch)
+                return ProjectObservation(reserved, gate.Epoch, gate.CanCapture, Clock.GetUtcNow().UtcDateTime);
+            // A stale/invalidated reservation cannot freeze perception, refresh its deadline,
+            // or be recreated for this same request. Keep only the attempted request identity.
+            _decisionEvidence.Dispose();
+            _decisionEvidence = null;
+            _evidenceInvalidated = true;
+            try { _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} reason=reserved-source-expired-or-invalidated", _evidenceRequest); } catch { }
+        }
+        if (_targetObservation != null)
+        {
+            var injected = _targetObservation();
+            return injected;
+        }
         var observation = AvatarRecognition.LatestPassiveObservation;
         var current = AvatarRecognition.PassiveCaptureGate;
-        return ProjectObservation(observation, current.Epoch, current.CanCapture, Clock.GetUtcNow().UtcDateTime);
+        var projected = ProjectObservation(observation, current.Epoch, current.CanCapture, Clock.GetUtcNow().UtcDateTime);
+        return projected;
+    }
+
+    public void ConfirmInputFeedback(CombatBattleObservation observation)
+    {
+        if (_evidenceInputCompleted is { } completed && _decisionEvidence?.TryRead(out var decision) == true &&
+            observation.Source.IsAfter(decision.Source) && observation.Source.TimestampFrequency == Clock.TimestampFrequency &&
+            observation.Source.CapturedTimestamp >= completed + Clock.TimestampFrequency * 60 / 1000 &&
+            observation.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) && observation.BattleId == BattleId &&
+            observation.Quality == CombatObservationQuality.Available) ClearDecisionEvidence();
+    }
+
+    public bool PrepareInputEvidence(CombatBattleHostInput input, CancellationToken ct)
+    {
+        if (input.Kind is not (CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.Approach)) return true;
+        if (_evidenceRequest != input.RequestId)
+        {
+            if (_pendingInputResult?.Input.RequestId != input.RequestId) FlushInputResult();
+            ClearDecisionEvidence();
+            _evidenceRequest = input.RequestId;
+            var scope = DiagnosticEvidenceScope.Current;
+            if (scope == null)
+            { try { _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} reason=no-run-scope", input.RequestId); } catch { } return true; }
+            if (UiOperation.Current is { } parent)
+                _reservationCancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, parent.Token);
+            _decisionEvidence = CombatDecisionEvidence.TryReserve(scope, BattleId,
+                AvatarRecognition.PassiveCaptureGate.Epoch, input, Clock, _reservationCancellation?.Token ?? ct, out var rejectionReason);
+            if (_decisionEvidence == null)
+                try { _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} reason={Reason}", input.RequestId, rejectionReason); } catch { }
+            return _decisionEvidence == null;
+        }
+        if (_decisionEvidence?.FailureReason is { } failure)
+        {
+            _evidenceInvalidated = true;
+            try { _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} reason={Reason}", input.RequestId, failure); } catch { }
+            _decisionEvidence.Dispose();
+            _decisionEvidence = null;
+        }
+        // This method is reached only after the host has re-evaluated the reserved observation.
+        return !_evidenceInvalidated && (_decisionEvidence == null || _decisionEvidence.TryRead(out var observed) && observed.Source == input.Source);
+    }
+
+    public void EndInputEvidence(string reason, Exception? error = null)
+    {
+        try { FlushInputResult(); SaveDecisionEvidence(error?.ToString() ?? reason); }
+        finally { ClearDecisionEvidence(); }
+    }
+
+    public void CancelInputEvidence()
+    {
+        FlushInputResult();
+        ClearDecisionEvidence();
+    }
+
+    private void SaveDecisionEvidence(string detail)
+    {
+        if (_decisionEvidence is not { } evidence || evidence.Save(detail) || evidence.SaveAccepted) return;
+        // Known failures are accounted and logged once by the owning scope. An unclaimed handoff
+        // has no lease to save; retain an explicit caller-level diagnostic rather than dropping false.
+        if (evidence.FailureReason == null)
+            try { _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} reason=evidence-unavailable:terminal-lease-unavailable", _evidenceRequest); } catch { }
+    }
+
+    private void ClearDecisionEvidence()
+    {
+        _decisionEvidence?.Dispose();
+        _decisionEvidence = null;
+        _evidenceRequest = Guid.Empty;
+        _evidenceInputCompleted = null;
+        _evidenceInvalidated = false;
+        _reservationCancellation?.Dispose();
+        _reservationCancellation = null;
     }
 
     internal static CombatBattleObservation ProjectObservation(PassiveTargetObservation observation,
@@ -135,6 +233,11 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     public void Trace(CombatBattleHostTrace trace)
     {
+        if (trace.CapturePhase == "terminal")
+        {
+            try { SaveDecisionEvidence(trace.Reason); }
+            finally { ClearDecisionEvidence(); }
+        }
         if (trace.ClosedEpisode is { } closed)
             DiagnosticEvidenceScope.Current?.EndFrameRequests(BattleId.ToString("N"), closed);
         var frame = trace.Observation;
@@ -206,6 +309,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     private async ValueTask<CombatBattleHostInputResult> SendCoreAsync(CombatBattleHostInput input, CancellationToken ct, bool controlRecovery)
     {
+        if (_pendingInputResult?.Input.RequestId != input.RequestId) FlushInputResult();
         var requestedAt = Clock.GetTimestamp();
         var inputAttempted = false;
         long? completedAt = null;
@@ -329,8 +433,9 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             result = new(CombatBattleHostInputStatus.Sent, completedAt);
             // 完整执行块后的局部性能超标不是输入未知。先重验业务/父期限，
             // 且只有真实down/up回执完整时才可转入新帧复核；不豁免任何执行异常。
-            if (input.Kind == CombatBattleHostInputKind.Approach && releasedCompletely &&
-                nativeScope is { Uncertain: false, Requested: >= 2 } && nativeScope.Requested == nativeScope.Submitted &&
+            if ((input.Kind == CombatBattleHostInputKind.Camera ||
+                 input.Kind == CombatBattleHostInputKind.Approach && releasedCompletely && nativeScope is { Requested: >= 2 }) &&
+                nativeScope is { Uncertain: false, Requested: > 0 } && nativeScope.Requested == nativeScope.Submitted &&
                 operation.Remaining <= TimeSpan.Zero)
             {
                 token.ThrowIfCancellationRequested();
@@ -361,11 +466,23 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 throw new TimeoutException("辅助输入完成后业务期限已到，不能继续复核");
         }
         }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException error)
+        {
+            RecordInterruptedAttempt(error);
+            throw;
+        }
         catch (Exception error)
         {
-            ct.ThrowIfCancellationRequested();
-            TaskExecutionScope.ThrowIfFailed();
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+            }
+            catch (Exception terminalError)
+            {
+                RecordInterruptedAttempt(terminalError);
+                throw;
+            }
             if (completedAt != null && error is TimeoutException)
                 result = new(CombatBattleHostInputStatus.Sent, completedAt, "input-completed-before-late-check", error);
             else if (completedAt != null)
@@ -382,6 +499,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             result = actual with
             {
                 NativeRequested = nativeCapture.Requested, NativeSubmitted = nativeCapture.Submitted,
+                NativeUncertain = nativeCapture.Uncertain,
                 TransportRequested = nativeCapture.TransportCalls, TransportAcknowledged = nativeCapture.TransportAcknowledged,
                 ObservableAfterTimestamp = Clock.GetTimestamp(),
                 Reason = actual.Reason ?? result.Reason
@@ -414,6 +532,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             }
         }
         if (input.SelectionGoal != null) _flow.ObserveSelectionAssistance(input, result);
+        if (result.Status != CombatBattleHostInputStatus.NotSent)
+        {
+            if (result.Error != null || result.Status != CombatBattleHostInputStatus.Sent)
+            { try { SaveDecisionEvidence(result.Error?.ToString() ?? result.Reason ?? "input-failed"); } finally { ClearDecisionEvidence(); } }
+            else _evidenceInputCompleted = result.CompletedTimestamp;
+        }
         var elapsedMs = Clock.GetElapsedTime(requestedAt).TotalMilliseconds;
         if (input.Kind == CombatBattleHostInputKind.Approach)
         {
@@ -422,14 +546,69 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 input.RequestId, downMs, holdMilliseconds, holdMs, upMs, remainingBeforeHold); }
             catch { }
         }
+        RecordInputResult(new(input, result, elapsedMs, businessDeadline, completedAt));
+        return result;
+
+        void RecordInterruptedAttempt(Exception error)
+        {
+            // This attempt never reaches the normal result path. Replace any older NotSent
+            // with the current exception/receipt before preserving the original throw.
+            try
+            {
+                _pendingInputResult = null;
+                var terminal = new CombatBattleHostInputResult(
+                    completedAt != null ? CombatBattleHostInputStatus.Failed :
+                    inputAttempted ? CombatBattleHostInputStatus.Unknown : CombatBattleHostInputStatus.NotSent,
+                    completedAt, "host-input-interrupted", error)
+                {
+                    NativeRequested = nativeCapture?.Requested ?? 0,
+                    NativeSubmitted = nativeCapture?.Submitted ?? 0,
+                    NativeUncertain = nativeCapture?.Uncertain ?? inputAttempted,
+                    TransportRequested = nativeCapture?.TransportCalls ?? 0,
+                    TransportAcknowledged = nativeCapture?.TransportAcknowledged ?? 0
+                };
+                LogInputResult(new(input, terminal, Clock.GetElapsedTime(requestedAt).TotalMilliseconds,
+                    businessDeadline, completedAt));
+            }
+            catch { /* Diagnostics must not replace the exception being rethrown. */ }
+        }
+    }
+
+    private void RecordInputResult(PendingInputResult pending)
+    {
+        if (pending.Result.Status == CombatBattleHostInputStatus.NotSent)
+        {
+            _pendingInputResult = pending; // One bounded slot, replaced by the same request's next attempt.
+            try { _device.Logger.LogDebug("HOST_INPUT_ATTEMPT request={Request} status={Status} reason={Reason}",
+                pending.Input.RequestId, pending.Result.Status, pending.Result.Reason); } catch { }
+            return;
+        }
+        _pendingInputResult = null;
+        LogInputResult(pending);
+    }
+
+    private void FlushInputResult()
+    {
+        var pending = _pendingInputResult;
+        _pendingInputResult = null;
+        if (pending != null) LogInputResult(pending);
+    }
+
+    private void LogInputResult(PendingInputResult pending)
+    {
+        var (input, result, elapsedMs, businessDeadline, completedAt) = pending;
+        if (_lastLoggedInputRequest == input.RequestId) return;
+        _lastLoggedInputRequest = input.RequestId;
         try
         {
-            _device.Logger.LogDebug("HOST_INPUT_RESULT request={Request} kind={Kind} status={Status} reason={Reason} sourceSequence={SourceSequence} completedAt={CompletedAt} elapsedMs={ElapsedMs:F3} errorType={ErrorType}",
-                input.RequestId, input.Kind, result.Status, result.Reason, input.Source.Sequence, completedAt,
-                elapsedMs, result.Error?.GetType().Name);
+            static string Limited(string? text, int max) => text == null ? "none" : text.Length <= max ? text : text[..max] + "[truncated]";
+            _device.Logger.LogDebug("HOST_INPUT_RESULT request={Request} kind={Kind} status={Status} reason={Reason} source={Source} completedAt={CompletedAt} elapsedMs={ElapsedMs:F3} deadline={Deadline} requested={Requested} submitted={Submitted} uncertain={Uncertain} transportRequested={TransportRequested} transportAcknowledged={TransportAcknowledged} errorType={ErrorType} errorMessage={ErrorMessage} errorStack={ErrorStack}",
+                input.RequestId, input.Kind, result.Status, result.Reason, input.Source, completedAt,
+                elapsedMs, businessDeadline, result.NativeRequested, result.NativeSubmitted, result.NativeUncertain,
+                result.TransportRequested, result.TransportAcknowledged, result.Error?.GetType().FullName,
+                Limited(result.Error?.Message, 1024), Limited(result.Error?.StackTrace, 4096));
         }
         catch { /* 诊断输出不能改变已判定的输入结果。 */ }
-        return result;
     }
 
     private void CloseParty(bool evidence)
@@ -441,6 +620,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => _device.DelayAsync(milliseconds, ct);
     public void ReleaseInput()
     {
+        try { FlushInputResult(); SaveDecisionEvidence("host-release-before-feedback"); }
+        finally { ClearDecisionEvidence(); }
         // 这里只释放本owner持有的物理键；UI转换属于业务输入，未知结果不得在cleanup重放。
         _partyRequested = _partyEvidence = false;
         _partyFence = null;

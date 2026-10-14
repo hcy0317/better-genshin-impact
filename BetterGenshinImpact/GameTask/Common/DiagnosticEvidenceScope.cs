@@ -40,7 +40,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     private readonly DiagnosticEvidenceScope? _previous;
     private readonly object _gate = new();
     private readonly Guid _runId = Guid.NewGuid();
-    private readonly LinkedList<(DiagnosticEvidence Evidence, Mat Image, long Bytes)> _queue = new();
+    private readonly LinkedList<(DiagnosticEvidence Evidence, Mat Image, long Bytes, Action? Release)> _queue = new();
     private readonly Channel<byte> _queueWake = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
     { SingleReader = true, FullMode = BoundedChannelFullMode.DropWrite, AllowSynchronousContinuations = false });
     private readonly int _queueCapacity;
@@ -124,7 +124,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     private int EvidenceQueueLimit(DiagnosticEvidencePriority priority) =>
         _queueCapacity - (priority < DiagnosticEvidencePriority.Error && _queueCapacity > 1 ? 1 : 0);
     private bool FitsByteLimit(long bytes, long replacing = 0, bool terminal = false) =>
-        _maximumBytes is not { } limit || bytes <= limit - _bytes - _stagedBytes + replacing -
+        _maximumBytes is not { } limit || bytes <= limit - _bytes - _stagedBytes + _savedReservationBytes + replacing -
             (terminal ? 0 : Math.Min(32L * 1024 * 1024, limit / 4));
     private bool FitsMemory(long bytes, long replacing = 0, bool terminal = false) =>
         bytes <= _maximumMemoryBytes - _queuedBytes - _stagedBytes + replacing -
@@ -324,7 +324,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 if (window != null && _incidents.TryGetValue(window.WindowId, out var incident))
                     evidence = evidence with { TaskInstanceId = incident.TaskInstanceId, ScriptInstanceId = incident.ScriptInstanceId,
                         UiRootId = incident.UiRootId, UiOperationId = incident.UiOperationId };
-                _queue.AddLast((evidence, owned, bytes));
+                _queue.AddLast((evidence, owned, bytes, null));
                 _queueWake.Writer.TryWrite(0);
                 owned = null; // 从这里起只有writer拥有并释放图像。
                 _accepted++;
@@ -463,7 +463,11 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 }
                 try { _logger.LogWarning(error, "EVIDENCE_WRITE_FAILED run={Run} sequence={Sequence}", _runId, item.Evidence.Sequence); } catch { }
             }
-            finally { item.Image.Dispose(); lock (_gate) _queuedBytes -= item.Bytes; }
+            finally
+            {
+                if (item.Release is { } release) release(); else item.Image.Dispose();
+                lock (_gate) _queuedBytes -= item.Bytes;
+            }
         }
         DrainSummary summary;
         object[] incidents;
@@ -516,20 +520,22 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 CloseWindows("no-next-frame-before-run-end");
                 ClearHistory();
                 ClearRetainedFrame();
-                foreach (var exact in _exactFrames.Values) exact.Frame.Dispose();
+                foreach (var exact in _exactFrames.Values)
+                { _stagedBytes -= exact.Bytes; exact.Frame.Dispose(); }
                 _exactFrames.Clear();
-                foreach (var before in _before.Values) before.Frame.Dispose();
+                CloseExactReservations();
+                foreach (var before in _before.Values)
+                { _stagedBytes -= before.Bytes; before.Frame.Dispose(); }
                 _before.Clear();
                 _phases.Clear();
                 _phaseRequestOrder.Clear();
-                _stagedBytes = 0;
                 _queueWake.Writer.TryComplete();
             }
         }
         return new(_writer);
     }
 
-    private bool TryTakeQueued(out (DiagnosticEvidence Evidence, Mat Image, long Bytes) item)
+    private bool TryTakeQueued(out (DiagnosticEvidence Evidence, Mat Image, long Bytes, Action? Release) item)
     {
         lock (_gate)
         {
@@ -554,7 +560,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 {
                     _queue.Remove(node);
                     _queuedBytes -= item.Bytes;
-                    item.Image.Dispose();
+                    if (item.Release is { } release) release(); else item.Image.Dispose();
                     MissingFrame(item.Evidence.Request, item.Evidence.Phase,
                         priority == DiagnosticEvidencePriority.Routine ? "routine-reclaimed-for-incident" : "warning-reclaimed-for-error", _logger);
                 }
