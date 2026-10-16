@@ -39,7 +39,8 @@ public static class CombatScriptExecutor
             flow = NativeCombatFlowRunner.Create(ExternalSessionCommands(script), scenes, loop: true,
                 mode: CombatScriptExecutionMode.RequiredSequence, inputOwner: inputOwner);
             host = NativeCombatBattleHostIo.CreateForExternalScene(flow, scenes, inputOwner);
-            await RunExternalSessionCoreAsync(flow, host, bindBattle, ct);
+            await RunExternalSessionCoreAsync(flow, host, bindBattle,
+                (battle, token) => AvatarRecognition.ContinuousTargetingLoopAsync(token, null, battle.ToString("N")), ct);
         }
         catch (Exception error) { failure = error; }
         foreach (var resource in new IDisposable?[] { host, flow, scenes })
@@ -49,16 +50,51 @@ public static class CombatScriptExecutor
     }
 
     internal static async Task RunExternalSessionCoreAsync(NativeCombatFlowRunner flow, CombatBattleHost host,
-        Action<Guid> bindBattle, CancellationToken ct)
+        Action<Guid> bindBattle, Func<Guid, CancellationToken, Task> runPerception, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested();
         bindBattle(flow.Context.BattleId);
-        while (true)
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Exception? perceptionFailure = null;
+        Exception? executionFailure = null;
+        // 生产与回放都必须提供感知生产者；不允许仅创建消费latest的宿主后空等。
+        // 保留当前执行上下文的输入所属权/证据作用域，不借用全局FightStatusFlag。
+        async Task ObserveAsync()
         {
-            ct.ThrowIfCancellationRequested();
-            TaskExecutionScope.ThrowIfFailed();
-            if (await host.AdvanceAsync(flow, ct) != CombatBattleHostResult.Continue)
-                throw new InvalidOperationException("外部进度完成前战斗宿主终止：" + host.Reason);
+            try
+            {
+                await runPerception(flow.Context.BattleId, lifetime.Token);
+                if (!lifetime.IsCancellationRequested)
+                    throw new InvalidOperationException("持续战斗感知循环意外退出，停止会话而不继续等待空观察");
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+            catch (Exception error)
+            {
+                perceptionFailure = error;
+                await lifetime.CancelAsync();
+            }
         }
+        var perception = ObserveAsync();
+        try
+        {
+            while (true)
+            {
+                lifetime.Token.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                if (await host.AdvanceAsync(flow, lifetime.Token) != CombatBattleHostResult.Continue)
+                    throw new InvalidOperationException("外部进度完成前战斗宿主终止：" + host.Reason);
+            }
+        }
+        catch (Exception error) { executionFailure = error; }
+        // 等待生产者finally退出后，外层才可释放host/flow/scenes或启动下一段。
+        try { await lifetime.CancelAsync(); }
+        catch (Exception cleanup) { executionFailure = new AggregateException(executionFailure!, cleanup); }
+        try { await perception; }
+        catch (Exception cleanup) { executionFailure = new AggregateException(executionFailure!, cleanup); }
+        if (perceptionFailure != null)
+            executionFailure = executionFailure is OperationCanceledException ? perceptionFailure :
+                new AggregateException(executionFailure!, perceptionFailure);
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(executionFailure!).Throw();
     }
 
     internal static async Task<CombatExecutionResult> ExecutePathingAsync(CombatScript script, CombatScenes scenes,

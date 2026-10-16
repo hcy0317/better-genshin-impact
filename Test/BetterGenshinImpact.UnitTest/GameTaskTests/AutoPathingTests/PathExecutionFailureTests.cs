@@ -178,13 +178,17 @@ public class PathExecutionFailureTests
         Assert.False(PathExecutor.CanRestartAfterHealing(points, 2));
     }
 
-    [Fact]
-    public async Task UnsafeMacroPrefixStillHealsButCannotRetryOrCompleteTheRoute()
+    [Theory]
+    [InlineData("keypress(VK_SPACE),wait(0.6)")]
+    [InlineData("keypress(VK_SPACE),wait(0.3),attack(0.2)")]
+    [InlineData("keypress(f);芙宁娜 e;玛薇卡 e;爱可菲 e;伊涅芙 e;")]
+    public async Task UnsafeMacroPrefixStillHealsButCannotRetryOrCompleteTheRoute(string recordedPrefix)
     {
         var replay = new PathReplay();
         var points = Enumerable.Range(0, 4).Select(_ => replay.Point("walk")).ToList();
         points[0].Type = "teleport";
         points[1].Action = "combat_script";
+        points[1].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext(recordedPrefix, false);
         points[2].Action = points[3].Action = "mining";
         replay.Executor.CurWaypoints = (0, points);
         replay.Executor.CurWaypoint = (3, points[3]);

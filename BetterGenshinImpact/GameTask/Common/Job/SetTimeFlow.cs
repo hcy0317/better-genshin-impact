@@ -37,6 +37,7 @@ internal static class SetTimeFlow
     {
         var target = Normalize(hour, minute);
         TimeSettingObservation confirmed = default;
+        SetTimeResult? confirmedBeforeExit = null;
         try
         {
             var result = await UiOperation.RunAsync("set-time", TimeSpan.FromSeconds(45), ct, async operation =>
@@ -52,6 +53,7 @@ internal static class SetTimeFlow
                 if (Near(observation.CurrentMinutes, target))
                 {
                     confirmed = observation;
+                    confirmedBeforeExit = SetTimeResult.SatisfiedExistingNearTarget;
                     return await FinishAsync(SetTimeResult.SatisfiedExistingNearTarget, observation, target, io, token);
                 }
 
@@ -66,6 +68,7 @@ internal static class SetTimeFlow
                     if (Near(observation.CurrentMinutes, target))
                     {
                         confirmed = observation;
+                        confirmedBeforeExit = SetTimeResult.SatisfiedExistingNearTarget;
                         return await FinishAsync(SetTimeResult.SatisfiedExistingNearTarget, observation, target, io, token);
                     }
                     if (!observation.TooClose && Near(observation.SelectedMinutes, target)) { ready = true; break; }
@@ -93,6 +96,7 @@ internal static class SetTimeFlow
                         confirmed = observation;
                         // 目标已经有真实当前时间证据；跳动画只是优化，不能替代目标确认。
                         if (skipAnimation) { await io.SkipAnimation(token); await io.Delay(100, token); }
+                        confirmedBeforeExit = SetTimeResult.Adjusted;
                         return await FinishAsync(SetTimeResult.Adjusted, observation, target, io, token);
                     }
                     await io.Delay(150, token);
@@ -117,6 +121,18 @@ internal static class SetTimeFlow
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception recovery) { throw new AggregateException("调时失败且退出页面失败", original, recovery); }
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            UiOperation.Current?.Check();
+            // 本次目标时间已有新鲜原帧确认，失败仅在随后退出。既有恢复已确认回到
+            // 主界面后可交接路线；绝不重拨/重发确认，也不把未确认调时包装成成功。
+            if (confirmedBeforeExit is { } recoveredResult)
+            {
+                if (UiOperation.Current == null)
+                    try { io.Logger.LogInformation("SET_TIME_RESULT result={Result} requestedMinutes={Target} currentMinutes={Current} source={Session}/{Sequence} exit=recovered",
+                        recoveredResult, target, confirmed.CurrentMinutes, confirmed.Source.SessionId, confirmed.Source.Sequence); } catch { }
+                return recoveredResult;
+            }
             ExceptionDispatchInfo.Capture(original).Throw();
             throw;
         }

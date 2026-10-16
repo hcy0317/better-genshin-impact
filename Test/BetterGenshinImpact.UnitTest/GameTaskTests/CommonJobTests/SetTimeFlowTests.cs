@@ -11,6 +11,68 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class SetTimeFlowTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RouteDispatchContinuesExactlyOnceAfterRecoveredClockExit(bool recoveryFails)
+    {
+        var replay = new Replay();
+        replay.OnClose = () =>
+        {
+            if (replay.Closes == 2 || recoveryFails && replay.Closes >= 3)
+                throw new TimeoutException("recorded exit failure");
+        };
+        var next = new Replay { Current = 780 };
+        var point = new AutoPathingTests.PathReplay().Point("walk");
+        point.Action = "set_time";
+        point.ActionParams = "12:00:false";
+        var nextPoint = new AutoPathingTests.PathReplay().Point("walk");
+        nextPoint.Action = "set_time";
+        nextPoint.ActionParams = "13:00:false";
+        var completed = new List<string>();
+        async Task Route()
+        {
+            await BetterGenshinImpact.GameTask.AutoPathing.PathExecutor.DispatchArrivalActionAsync(
+                new BetterGenshinImpact.GameTask.AutoPathing.Handler.SetTimeHandler(replay.Io), point, null, default);
+            completed.Add("clock-node");
+            await BetterGenshinImpact.GameTask.AutoPathing.PathExecutor.DispatchArrivalActionAsync(
+                new BetterGenshinImpact.GameTask.AutoPathing.Handler.SetTimeHandler(next.Io), nextPoint, null, default);
+            completed.Add("next-node");
+        }
+        if (recoveryFails) await Assert.ThrowsAsync<AggregateException>(Route);
+        else await Route();
+        Assert.Equal(3, replay.Closes);
+        Assert.Equal(1, replay.Confirms);
+        Assert.Equal(1, replay.Dials);
+        Assert.Equal(recoveryFails ? Array.Empty<string>() : new[] { "clock-node", "next-node" }, completed);
+        Assert.Equal(recoveryFails ? 0 : 2, next.Closes);
+        Assert.Equal(0, next.Confirms);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublicEntryContinuesAfterConfirmedTimeAndRecoveredExitWithoutReconfirming(bool existing)
+    {
+        var replay = new Replay { Current = existing ? 720 : 0 };
+        replay.OnClose = () => { if (replay.Closes == 2) throw new TimeoutException("recorded: Escape submitted twice without feedback"); };
+        await new SetTimeTask(replay.Io).Start(12, 0, default, false);
+        Assert.Equal(3, replay.Closes);
+        Assert.Equal(existing ? 0 : 1, replay.Confirms);
+        Assert.Equal(existing ? 0 : 1, replay.Dials);
+        Assert.False(replay.Visible);
+    }
+
+    [Fact]
+    public async Task ConfirmedTimeDoesNotHideFailedExitRecovery()
+    {
+        var replay = new Replay { Current = 720 };
+        replay.OnClose = () => { if (replay.Closes >= 2) throw new TimeoutException("exit failed"); };
+        await Assert.ThrowsAsync<AggregateException>(() => new SetTimeTask(replay.Io).Start(12, 0, default, false));
+        Assert.Equal(3, replay.Closes);
+        Assert.Equal(0, replay.Confirms);
+    }
+
     [Fact]
     public async Task ExpiredParentBudgetDoesNotCreateAnIndependentRecoveryAllowance()
     {
@@ -160,7 +222,7 @@ public class SetTimeFlowTests
         private readonly CaptureFrameSource _source;
         internal int Current, Selected, Closes, Dials, Confirms, Skips;
         internal bool Visible, DialStuck, ApplyConfirmation = true;
-        internal Action? OnDial, BeforeConfirm;
+        internal Action? OnDial, BeforeConfirm, OnClose;
         internal SetTimeFlowIo Io { get; }
         internal Replay(ILogger? logger = null)
         {
@@ -168,7 +230,7 @@ public class SetTimeFlowTests
             Io = new()
             {
                 Clock = Clock, Logger = logger ?? NullLogger.Instance,
-                ReturnMain = ct => { ct.ThrowIfCancellationRequested(); Closes++; Visible = false; return Task.CompletedTask; },
+                ReturnMain = ct => { ct.ThrowIfCancellationRequested(); Closes++; OnClose?.Invoke(); Visible = false; return Task.CompletedTask; },
                 Open = _ => { Visible = true; return Task.CompletedTask; },
                 Observe = () => new(Visible, Current, Selected, SetTimeFlow.Distance(Current, Selected) < 30, _source.Next()),
                 SetDial = (h, m, _) => { Dials++; if (!DialStuck) Selected = h * 60 + m; OnDial?.Invoke(); return Task.CompletedTask; },

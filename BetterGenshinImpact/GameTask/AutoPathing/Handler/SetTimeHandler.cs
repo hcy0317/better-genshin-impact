@@ -7,7 +7,11 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 
 public class SetTimeHandler : IActionHandler
 {
-    private readonly SetTimeTask _setTimeTask = new();
+    private readonly SetTimeTask _setTimeTask;
+
+    public SetTimeHandler() => _setTimeTask = new();
+    // Keep parameter parsing and the actual task; replace only UI I/O in offline route replay.
+    internal SetTimeHandler(SetTimeFlowIo io) => _setTimeTask = new(io);
 
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
     {

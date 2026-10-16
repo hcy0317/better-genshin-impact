@@ -145,9 +145,12 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         var observation = await WaitForSceneAsync("entry", null, ct);
         _entry = observation.Source;
         _fence = io.Clock.GetTimestamp();
+        var observedWaitMilliseconds = 0;
         for (var commandIndex = 0; commandIndex < segment.Commands.Count; commandIndex++)
         {
             var command = segment.Commands[commandIndex];
+            var precedingFeedbackWait = observedWaitMilliseconds;
+            observedWaitMilliseconds = 0;
             _commandIndex = commandIndex;
             Check(_deadline, ct);
             // 两个原定F是一次交互握手；第一F可能只隐藏HUD，不能在两者之间等待炮台UI。
@@ -175,7 +178,12 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 // 首F已经取得炮台能力时，第二F会成为多余的交互。Unknown只保留原定第二F，
                 // 不在两F之间等待Cannon，也不增加输入或延长宏期限。
                 if (feedback.Scene != PathingMacroScene.Cannon) await PressAsync(User32.VK.VK_F, ct);
+                var handshakeFeedbackStarted = io.Clock.GetTimestamp();
                 observation = await ObserveBoundaryAsync("cannon-handshake-complete", ct, PathingMacroScene.Cannon);
+                // This branch bypasses the common transition accounting below. Credit only
+                // confirmation after the final F, never the script's interval between both Fs.
+                observedWaitMilliseconds = (int)Math.Min(int.MaxValue,
+                    Math.Floor(io.Clock.GetElapsedTime(handshakeFeedbackStarted).TotalMilliseconds));
                 commandIndex += 2;
                 continue;
             }
@@ -198,7 +206,8 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             }
             else if (segment.CannonProgram && key is User32.VK.VK_RETURN or User32.VK.VK_ESCAPE)
                 throw new InvalidOperationException("未确认炮台，不发送炮台发射或退出键");
-            if (command.Method == Method.Wait) await WaitAsync(Milliseconds(command.Args![0]), ct);
+            if (command.Method == Method.Wait)
+                await WaitAsync(Math.Max(0, Milliseconds(command.Args![0]) - precedingFeedbackWait), ct);
             else if (command.Method == Method.W || command.Method == Method.A || command.Method == Method.S || command.Method == Method.D)
             {
                 var moveKey = command.Method == Method.W ? User32.VK.VK_W : command.Method == Method.A ? User32.VK.VK_A :
@@ -231,12 +240,18 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             // 方向键触发转向动画时炮台HUD会暂时消失。先释放方向键，再等
             // 原输入栅栏后的炮台控件恢复；不能用动画前的Scene立即发送退出/下一次转向。
             // 等待仍使用原宏期限，不重发方向键，也不把任意Unknown画面当作炮台。
+            var feedbackStarted = io.Clock.GetTimestamp();
             if (turnsCannon)
                 observation = await ObserveBoundaryAsync("cannon-turn-complete", ct, PathingMacroScene.Cannon);
             if (key is User32.VK.VK_F or User32.VK.VK_ESCAPE &&
                 (segment.CannonProgram || observation.Scene is PathingMacroScene.Cannon or PathingMacroScene.World))
                 observation = await ObserveBoundaryAsync("scene-transition", ct,
                     segment.CannonProgram && key == User32.VK.VK_ESCAPE ? PathingMacroScene.World : null);
+            // 炮台脚本的紧随wait规定的是输入后的最短等待，不是在已验证动画之后
+            // 再等同样一遍。只抵扣实际观察耗时，只交给下一条wait，不续期或重放输入。
+            if (segment.CannonProgram && (turnsCannon || key is User32.VK.VK_F or User32.VK.VK_ESCAPE))
+                observedWaitMilliseconds = (int)Math.Min(int.MaxValue,
+                    Math.Floor(io.Clock.GetElapsedTime(feedbackStarted).TotalMilliseconds));
         }
         ReleaseLeftForHandoff(); // 原匿名mousedown只在本片段持有，不把射击状态交给下一节点。
         // 旧NativeRunner在片段完成时释放X。保留这一既有语义，不声称跨挖矿节点持X。

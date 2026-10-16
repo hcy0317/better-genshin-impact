@@ -44,6 +44,10 @@ internal static class SaurianUiReader
         Cv2.InRange(bar, new Scalar(40, 194, 245, 0), new Scalar(60, 214, 255, 255), orange);
         if (Cv2.CountNonZero(orange) < bar.Width * bar.Height * .28) return false;
         if (!BrightAnchor(frame, "PaimonMenu", 235) && !BrightAnchor(frame, "FriendChat", 220)) return false;
+        // 活动态会同时改变退出图标亮度和Space技能布局，须匹配这一对原帧图标。
+        if (Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianTravelTemplate.ActiveExit, binary: false, shapeOnly: true) >= .88 &&
+            Match(pixels, new Rect(1591, 970, 39, 43), scale, SaurianTravelTemplate.ActiveSpace, binary: true) >= .88)
+            return true;
         if (Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianTravelTemplate.Exit, binary: false) >= .85 &&
             Match(pixels, new Rect(1586, 963, 50, 58), scale, SaurianUiTemplates.Burrow, binary: false) >= .85)
             return true;
@@ -52,7 +56,10 @@ internal static class SaurianUiReader
             Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.AlternateFlight, binary: false) >= .85)
             return true;
         // 只匹配退出图标本体，避免灰态图标周围的大块世界背景主导相关度。
-        if (Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianUiTemplates.Exit, binary: false) < .85) return false;
+        // 退出白色图标后的地形会变色；灰度相关度可能被岩壁/草地背景拖低。
+        // 同阈值补充前景形状匹配，仍须橙色血条、世界锚点及下方对应技能共同成立。
+        if (Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianUiTemplates.Exit, binary: false) < .85 &&
+            Match(pixels, new Rect(1803, 974, 33, 43), scale, SaurianUiTemplates.Exit, binary: false, shapeOnly: true) < .85) return false;
         // S55两种独立布局各自还需对应的Space技能本体，不能仅凭通用退出图标放行。
         return Match(pixels, new Rect(1275, 970, 75, 55), scale, SaurianUiTemplates.Aim, binary: true) >= .88 ||
             Match(pixels, new Rect(1586, 963, 50, 58), scale, SaurianUiTemplates.Burrow, binary: false) >= .85 ||
@@ -73,7 +80,7 @@ internal static class SaurianUiReader
     private static Rect Scaled(Rect rect, double scale) => new((int)Math.Round(rect.X * scale),
         (int)Math.Round(rect.Y * scale), Math.Max(1, (int)Math.Round(rect.Width * scale)), Math.Max(1, (int)Math.Round(rect.Height * scale)));
 
-    private static double Match(Mat frame, Rect rect, double scale, string encoded, bool binary)
+    private static double Match(Mat frame, Rect rect, double scale, string encoded, bool binary, bool shapeOnly = false)
     {
         using var reference = Cv2.ImDecode(Convert.FromBase64String(encoded), ImreadModes.Grayscale);
         using var nativeCrop = new Mat(frame, Scaled(new Rect(rect.X - 4, rect.Y - 4, rect.Width + 8, rect.Height + 8), scale));
@@ -82,6 +89,21 @@ internal static class SaurianUiReader
         using var source = new Mat();
         if (binary) Cv2.InRange(crop, new Scalar(220, 220, 220, 0), Scalar.All(255), source);
         else Cv2.CvtColor(crop, source, crop.Channels() == 4 ? ColorConversionCodes.BGRA2GRAY : ColorConversionCodes.BGR2GRAY);
+        if (shapeOnly)
+        {
+            // 局部亮度分离图标与背景，再平滑一像素的抗锯齿差异；只用于已有退出
+            // 图标的补充匹配，不调整相似度门槛。纯色/缺失图标不能产生退化的满分。
+            Cv2.Threshold(reference, reference, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+            Cv2.Threshold(source, source, 0, 255, ThresholdTypes.Binary | ThresholdTypes.Otsu);
+            static bool HasShape(Mat mask)
+            {
+                var share = Cv2.CountNonZero(mask) / (double)mask.Total();
+                return share is > .05 and < .95;
+            }
+            if (!HasShape(reference) || !HasShape(source)) return 0;
+            Cv2.GaussianBlur(reference, reference, new Size(3, 3), 0);
+            Cv2.GaussianBlur(source, source, new Size(3, 3), 0);
+        }
         using var result = new Mat();
         Cv2.MatchTemplate(source, reference, result, TemplateMatchModes.CCoeffNormed);
         Cv2.MinMaxLoc(result, out double _, out double score);

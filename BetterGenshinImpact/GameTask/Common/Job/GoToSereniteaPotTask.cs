@@ -144,7 +144,7 @@ internal class GoToSereniteaPotTask
         var teleportDiscovery = Stopwatch.StartNew();
         var evidenceRequest = "teapot:" + Guid.NewGuid().ToString("N");
         while (confirmationFailures < 3
-               && teleportDiscovery.Elapsed < TimeSpan.FromSeconds(30))
+               && teleportDiscovery.Elapsed < SereniteaPotEntryRecovery.DiscoveryBudget)
         {
             using var ra = CaptureToRectArea();
             var teleportBtn = ra.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", ra));
@@ -201,7 +201,7 @@ internal class GoToSereniteaPotTask
                     DiagnosticEvidenceScope.Current?.TryCapture(frame, evidenceRequest, "arrival-" + kind,
                         arrival.Describe(kind), Logger);
                     return kind;
-                }, Delay, ct, TimeSpan.FromSeconds(45));
+                }, Delay, ct, SereniteaPotEntryRecovery.ArrivalBudget);
             return true;
         }
         catch (TimeoutException loadingFailure)
@@ -801,7 +801,12 @@ internal class GoToSereniteaPotTask
         var success = false;
         if (SelectedConfig!.SereniteaPotTpType == "地图传送")
         {
-            success = await IntoSereniteaPot(ct);
+            success = await SereniteaPotEntryRecovery.EnterAsync(IntoSereniteaPot, async token =>
+            {
+                await new ReturnMainUiTask().Start(token, requireOverworld: true);
+                await new TpTask(token).TpToStatueOfTheSeven();
+                await new ReturnMainUiTask().Start(token, requireOverworld: true);
+            }, ct);
         }
         else
         {

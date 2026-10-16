@@ -1527,9 +1527,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 return CombatFlowResult.AwaitingObservation;
             }
             using var operation = _input.EnterOperation();
+            // 镜头宏已有输入所有权保护；转向本身不能让每一帧感知换epoch并清空
+            // 方向稳定性。只读感知继续，输入后的新帧/稳定期仍由战斗宿主独立校验。
             using var exclusive = io.BeginExclusive(allowPassiveObservation:
                 command.Method == Method.Skill || command.Method == Method.Burst || command.Method == Method.Attack ||
-                command.Method == Method.Charge || command.Method == Method.Wait);
+                command.Method == Method.Charge || command.Method == Method.Wait || command.Method == Method.MoveBy);
             using var scope = new CombatActionScope(action, ct);
             try
             {
@@ -1622,6 +1624,29 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                     }
                     if (pendingResult is CombatFlowResult.Succeeded or CombatFlowResult.Failed)
                     {
+                        if (pendingResult == CombatFlowResult.Succeeded && command.Method == Method.Skill &&
+                            Purpose == CombatScriptExecutionPurpose.Pathing && command.SourceEntryPoint == "MiningHandler" &&
+                            _evidence != null && _capture != null)
+                        {
+                            // Cast confirmation is not ore destruction. Retain the staged input frame and
+                            // future existing producer frames; never add input, capture or a settle delay.
+                            try
+                            {
+                                var fields = new Dictionary<string, string>(_attempts.InputEvidence(observedAttempt.AttemptId))
+                                {
+                                    ["miningSource"] = command.SourceIdentity ?? "unknown:no-source",
+                                    ["battle"] = action.BattleId.ToString("N"),
+                                    ["command"] = action.CommandId,
+                                    ["syntax"] = DescribeCommand(command),
+                                    ["castOutcome"] = "Succeeded",
+                                    ["oreOutcome"] = "not-observed"
+                                };
+                                _evidence.CaptureBefore("skill", request, "mining-before-cast", Logger, fields);
+                                _evidence.RequestWindowFromFrame(request, "mining-cast-result", _capture,
+                                    "confirmed cast anchor; later context may include path movement, not ore destruction proof", Logger, fields);
+                            }
+                            catch { /* Diagnostics cannot change the confirmed mining action. */ }
+                        }
                         if (_capture != null && (pendingResult == CombatFlowResult.Failed || action.Now - observedAttempt.InputAt >= 1))
                             _evidence?.TryCapture(_capture, request, "skill-terminal-" + pendingResult,
                                 $"battle={action.BattleId} command={action.CommandId} actor={name} {pendingObservation}; original reconciliation frame",

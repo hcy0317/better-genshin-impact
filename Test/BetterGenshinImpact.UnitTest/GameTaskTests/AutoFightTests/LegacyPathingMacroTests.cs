@@ -10,8 +10,68 @@ using Fischless.WindowsInput;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
-public class LegacyPathingMacroTests
+public partial class LegacyPathingMacroTests
 {
+    [Theory]
+    [InlineData(100, 500)]
+    [InlineData(600, 100)]
+    [InlineData(600, 100, 500)]
+    public async Task CannonHandshakeConfirmationConsumesOnlyItsImmediatelyFollowingWait(int settleMs, int scriptWaitMs, int secondWaitMs = 0)
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true, TwoStepCannonEntry = true };
+        DateTimeOffset? started = null, confirmed = null;
+        io.OnObservation = (phase, frame) =>
+        {
+            if (phase != "cannon-handshake-complete") return frame;
+            started ??= io.Time.GetUtcNow();
+            if ((io.Time.GetUtcNow() - started.Value).TotalMilliseconds < settleMs)
+                return frame with { Scene = PathingMacroScene.Unknown };
+            confirmed = io.Time.GetUtcNow();
+            return frame;
+        };
+        var wait = (scriptWaitMs / 1000d).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var secondWait = (secondWaitMs / 1000d).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(
+            $"keypress(f),wait(.2),keypress(f),wait({wait}),wait({secondWait}),keypress(RETURN),keypress(ESCAPE)", false), ["钟离"]);
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(plan, (_, _) => throw new Exception("unexpected native segment"), default);
+        Assert.True(result.CanContinue);
+        Assert.NotNull(confirmed);
+        Assert.Equal(2, io.Inputs.Count(input => input == "KeyDown:VK_F"));
+        Assert.Single(io.Inputs.Where(input => input == "KeyDown:VK_RETURN"));
+        Assert.Single(io.Inputs.Where(input => input == "KeyDown:VK_ESCAPE"));
+        // Two key holds (70ms), exit feedback (~61ms) and only the unused portion of the wait.
+        Assert.InRange((io.Time.GetUtcNow() - confirmed!.Value).TotalMilliseconds,
+            130 + secondWaitMs, 135 + secondWaitMs + Math.Max(0, scriptWaitMs - settleMs - 60));
+        Assert.Equal(PathingMacroScene.World, io.Scene);
+    }
+
+    [Fact]
+    public async Task CannonFeedbackWaitingConsumesTheFollowingScriptWaitInsteadOfDoublingIt()
+    {
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true, TwoStepCannonEntry = true };
+        var lastExitInput = 0;
+        var exitReady = io.Start;
+        io.OnObservation = (phase, observation) =>
+        {
+            if (phase != "scene-transition" || io.Inputs.LastOrDefault() != "KeyUp:VK_ESCAPE") return observation;
+            if (lastExitInput != io.Inputs.Count)
+            {
+                lastExitInput = io.Inputs.Count;
+                exitReady = io.Time.GetUtcNow().AddMilliseconds(2500); // 同轮退出炮台约2.5s的反馈延迟。
+            }
+            return io.Time.GetUtcNow() < exitReady ? observation with { Scene = PathingMacroScene.Unknown } : observation;
+        };
+        var program = string.Join(",", Enumerable.Repeat("keypress(f),wait(.2),keypress(f),a(.04),keypress(ESCAPE),wait(3)", 8));
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(program, false), ["钟离"]);
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(plan, (_, _) => throw new Exception("unexpected native segment"), default);
+        Assert.True(result.CanContinue);
+        Assert.Equal(64, io.Inputs.Count);
+        Assert.Equal(PathingMacroScene.World, io.Scene);
+        Assert.InRange((io.Time.GetUtcNow() - io.Start).TotalSeconds, 24, plan.Segments[0].RawBudgetSeconds);
+    }
+
     [Fact]
     public async Task CannonActivationRejectionStopsBeforeSecondInteractionOrFiring()
     {
@@ -469,8 +529,10 @@ public class LegacyPathingMacroTests
         Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
     }
 
-    [Fact]
-    public async Task ThreeRecordedCannonProgramsCrossWorldBoundariesWithoutReplayingInput()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ThreeRecordedCannonProgramsCrossWorldBoundariesWithoutReplayingInput(bool delayedFeedback)
     {
         using var programs = System.Text.Json.JsonDocument.Parse(File.ReadAllText(
             Path.Combine(AppContext.BaseDirectory, "Fixtures", "Combat", "s56-cannon-programs.json")));
@@ -479,6 +541,20 @@ public class LegacyPathingMacroTests
         {
             var text = item.GetProperty("script").GetString()!;
             var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true, TwoStepCannonEntry = true };
+            if (delayedFeedback)
+            {
+                var transitions = new Dictionary<(string Phase, int InputCount), DateTimeOffset>();
+                io.OnObservation = (phase, frame) =>
+                {
+                    var milliseconds = phase == "cannon-handshake-complete" ? 600 :
+                        phase == "scene-transition" && io.Inputs.LastOrDefault() == "KeyUp:VK_ESCAPE" ? 2500 : 0;
+                    if (milliseconds == 0) return frame;
+                    var key = (phase, io.Inputs.Count);
+                    if (!transitions.TryGetValue(key, out var started)) transitions[key] = started = io.Time.GetUtcNow();
+                    return (io.Time.GetUtcNow() - started).TotalMilliseconds < milliseconds
+                        ? frame with { Scene = PathingMacroScene.Unknown } : frame;
+                };
+            }
             using var session = new PathingMacroSession(io);
             var result = await session.ExecuteAsync(LegacyPathingMacroPlan.Create(
                 CombatScriptParser.ParseContext(text, false), ["琴"]), (_, _) => throw new Exception("unexpected humanoid runner"), default);

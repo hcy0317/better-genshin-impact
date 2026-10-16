@@ -16,6 +16,15 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoTrackPathTests;
 public class TeleportRejectionTests
 {
     [Theory]
+    [InlineData("战斗中无法进入「尘歌壶」")]
+    [InlineData("戰鬥中無法進入「塵歌壺」")]
+    public void RecordedCombatRestrictionIsRecognizedBeforeAnotherTeleportInput(string text)
+    {
+        using var frame = new ImageRegion(new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        Assert.True(TeleportRejection.Read(frame, new TextOcr(text)));
+    }
+
+    [Theory]
     [InlineData("角色无法继续战斗", true)]
     [InlineData("角色 無法 繼續 戰鬥", true)]
     [InlineData("", false)]
@@ -44,9 +53,10 @@ public class TeleportRejectionTests
         Assert.False(progress.Arrived);
     }
 
-    [UiRecoveryTheory("teleport-death-rejected-20261006.png", "teleport-original-world-20261006.png")]
+    [UiRecoveryTheory("teleport-death-rejected-20261006.png", "teleport-original-world-20261006.png", "teapot-combat-rejected-20261016.png")]
     [InlineData("teleport-death-rejected-20261006.png", true)]
     [InlineData("teleport-original-world-20261006.png", false)]
+    [InlineData("teapot-combat-rejected-20261016.png", true)]
     public void ActualTransitionUsesCpuOcr(string file, bool rejected)
     {
         using var factory = new BgiOnnxFactory(NullLogger<BgiOnnxFactory>.Instance, forceCpuOcr: true);

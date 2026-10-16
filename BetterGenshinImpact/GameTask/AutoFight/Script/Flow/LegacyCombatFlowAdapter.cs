@@ -17,6 +17,10 @@ internal sealed record LegacyGuardianOptions(string Actor, bool Hold, GuardianCo
 /// <summary>只在普通格式入口规范化兼容政策；增强语法的整队和required要求不参与模板过滤。</summary>
 internal static class LegacyCombatFlowAdapter
 {
+    // Typed only at the party validation boundary; other fragment failures are not route skips.
+    internal sealed class MissingRequiredActorException(string reason)
+        : InvalidOperationException($"[BGI_COMBAT_FRAGMENT_INCOMPLETE] Failed: {reason}");
+
     internal static CombatScript Prepare(IReadOnlyList<CombatCommand> commands, IEnumerable<string> party,
         bool loop, CombatScriptExecutionMode mode, LegacyGuardianOptions? guardian = null)
     {
@@ -43,11 +47,11 @@ internal static class LegacyCombatFlowAdapter
             .Select(command => command.Name).ToHashSet(StringComparer.Ordinal);
         var enhanced = commands.Any(command => command.RequiresFlow);
         if ((enhanced || mode == CombatScriptExecutionMode.RequiredSequence) && !named.IsSubsetOf(available))
-            throw Failure("REQUIRED_ACTOR_MISSING:" + string.Join(",", named.Except(available)));
+            throw new MissingRequiredActorException("REQUIRED_ACTOR_MISSING:" + string.Join(",", named.Except(available)));
         var hasCurrentActorAction = commands.Any(command => !command.Method.IsFlowControl &&
             command.Name == CombatScriptParser.CurrentAvatarName);
         if (!enhanced && !hasCurrentActorAction && named.Count > 0 && !named.Overlaps(available))
-            throw Failure($"NO_APPLICABLE_ACTOR: 路线所需角色=[{string.Join(",", named)}]，当前队伍=[{string.Join(",", available)}]");
+            throw new MissingRequiredActorException($"NO_APPLICABLE_ACTOR: 路线所需角色=[{string.Join(",", named)}]，当前队伍=[{string.Join(",", available)}]");
         return available;
     }
 

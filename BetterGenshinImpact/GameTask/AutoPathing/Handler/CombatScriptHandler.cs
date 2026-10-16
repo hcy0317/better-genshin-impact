@@ -27,6 +27,10 @@ public class CombatScriptHandler : IActionHandler
                 var script = CombatScriptParser.ParseContext(point.ActionParams ?? "", false);
                 LegacyCombatFlowAdapter.ValidateParty(script.CombatCommands, available, CombatScriptExecutionMode.LegacyPartyTemplate);
             }
+            catch (LegacyCombatFlowAdapter.MissingRequiredActorException error)
+            {
+                throw new PathingRequiredActorMissingException(routeName, point.Id, error);
+            }
             catch (Exception error) when (error is InvalidOperationException or FormatException)
             {
                 throw new InvalidOperationException($"路线 {routeName} 第{point.Id}点策略前置条件不满足；尚未开始移动：{error.Message}", error);

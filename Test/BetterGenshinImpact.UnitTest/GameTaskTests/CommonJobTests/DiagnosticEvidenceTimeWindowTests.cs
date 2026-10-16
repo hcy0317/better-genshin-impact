@@ -7,6 +7,67 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class DiagnosticEvidenceTimeWindowTests
 {
+    [Theory]
+    [InlineData("ui-action-feedback")]
+    [InlineData("selection-before-submit")]
+    [InlineData("mining-cast-result")]
+    [InlineData("host-input-context")]
+    [InlineData("path-interaction-context")]
+    public async Task RoutineInputWindowsCannotConsumeFaultPriority(string phase)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        Assert.True(scope.RequestWindowFromFrame("input", phase, frame, "ordinary input observation, not failure"));
+        await scope.DisposeAsync();
+        Assert.Equal(DiagnosticEvidencePriority.Routine, Assert.Single(saved).Priority);
+    }
+
+    [Theory]
+    [InlineData("mining-cast-result")]
+    [InlineData("host-input-context")]
+    [InlineData("path-interaction-context")]
+    public async Task RoutineContextDenialCannotConsumeTheReservedTerminalWindow(string phase)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; },
+            maxWindows: 2, maxPendingWindows: 2, queueCapacity: 64);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        Assert.True(scope.RequestWindowFromFrame("first", phase, frame, "ordinary context"));
+        Assert.False(scope.RequestWindowFromFrame("denied", phase, frame, "window budget full"));
+        Assert.True(scope.RequestWindowFromFrame("failure", "terminal", frame, "original terminal"));
+        await scope.DisposeAsync();
+        var fallback = Assert.Single(saved.Where(item => item.Request == "denied"));
+        Assert.Null(fallback.Window);
+        Assert.Equal(DiagnosticEvidencePriority.Routine, fallback.Priority);
+        Assert.Equal(DiagnosticEvidencePriority.Error, Assert.Single(saved.Where(item => item.Request == "failure")).Priority);
+    }
+
+    [Fact]
+    public async Task ExhaustedWindowMetadataBudgetStillKeepsTheExplicitFaultAnchor()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; },
+            maxWindows: 2, queueCapacity: 64);
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        frame.FrameStamp = source.Next();
+        Assert.True(scope.RequestWindowFromFrame("first", "fault", frame, "first fault"));
+        clock.Advance(TimeSpan.FromSeconds(6));
+        frame.FrameStamp = source.Next();
+        var late = frame.FrameStamp;
+        Assert.False(scope.RequestWindowFromFrame("late", "fault", frame, "later fault"));
+        // No new window is admitted, but the supplied original pixels must not be lost.
+        await scope.DisposeAsync();
+        var anchor = Assert.Single(saved.Where(item => item.Request == "late"));
+        Assert.Equal(late, anchor.Source);
+        Assert.Null(anchor.Window);
+        Assert.Equal(DiagnosticEvidencePriority.Error, anchor.Priority);
+    }
+
     [Fact]
     public async Task CompletedStormTailsReleaseTheirSlotsBeforeTheRunEnds()
     {

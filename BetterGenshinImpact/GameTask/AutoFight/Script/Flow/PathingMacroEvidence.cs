@@ -3,10 +3,12 @@ using System.Collections.Generic;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Model.Area;
 using Microsoft.Extensions.Logging;
+using Fischless.GameCapture;
+using Vanara.PInvoke;
 
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
-internal sealed class PathingMacroEvidence(string context, string commands)
+internal sealed class PathingMacroEvidence(string context, string commands, TimeProvider? clock = null)
 {
     private readonly string _request = "pathing-macro:" + Guid.NewGuid().ToString("N");
     private readonly Queue<string> _receipts = new();
@@ -17,11 +19,29 @@ internal sealed class PathingMacroEvidence(string context, string commands)
     private PathingMacroObservation _last;
     private int _commandIndex = -1;
     private long _deadline, _inputFence;
+    private readonly TimeProvider _clock = clock ?? TimeProvider.System;
+    private sealed record Interaction(long Ordinal, CaptureFrameStamp Before, long Completed, string Receipt);
+    private Interaction? _interaction;
+    private ILogger? _logger;
 
     internal void Boundary(int commandIndex, long deadline, long inputFence)
     { _commandIndex = commandIndex; _deadline = deadline; _inputFence = inputFence; }
 
-    internal void End() => DiagnosticEvidenceScope.Current?.ForgetExactFrame("pathing-macro", _request);
+    internal void End()
+    {
+        MissingInteraction("feedback-not-observed-before-macro-end");
+        DiagnosticEvidenceScope.Current?.ForgetExactFrame("pathing-macro", _request);
+        // Admitted context windows belong to the run scope and consume later existing path frames.
+    }
+
+    private void MissingInteraction(string reason)
+    {
+        var pending = _interaction;
+        _interaction = null;
+        if (pending == null) return;
+        try { _logger?.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} phase=path-interaction-context reason={Reason} context={Context}",
+            _request + ":input-" + pending.Ordinal, reason, context); } catch { }
+    }
 
     internal void Mapping(string logical, string physical)
     {
@@ -33,12 +53,19 @@ internal sealed class PathingMacroEvidence(string context, string commands)
     {
         try
         {
+            MissingInteraction("next-input-before-qualified-feedback");
             var value = $"ordinal={++_inputCount} kind={input.Kind} physical={input.Key} delta={input.X},{input.Y} status={receipt.Status} " +
                 $"native={receipt.NativeSubmitted}/{receipt.NativeRequested} transport={receipt.TransportAcknowledged}/{receipt.TransportRequested} " +
                 $"started={receipt.StartedTimestamp} completed={receipt.CompletedTimestamp} observableAfter={receipt.ObservableAfterTimestamp} error={receipt.Error?.GetType().Name}";
             _firstReceipt ??= value;
             if (_receipts.Count == 6) _receipts.Dequeue();
             _receipts.Enqueue(value);
+            // A physical F release in an ordinary-world macro, not the separate cannon handshake.
+            if (input.Kind == PathingMacroInputKind.KeyUp && input.Key == User32.VK.VK_F &&
+                _last.Scene == PathingMacroScene.World && _lastPhase is "entry" or "scene-transition" or "post" &&
+                receipt.HasCompleteReceipt && !receipt.NativeUncertain && receipt.Error == null &&
+                (receipt.ObservableAfterTimestamp ?? receipt.CompletedTimestamp) is { } completed)
+                _interaction = new(_inputCount, _last.Source, completed, value);
         }
         catch { }
     }
@@ -83,11 +110,34 @@ internal sealed class PathingMacroEvidence(string context, string commands)
     {
         try
         {
+            _logger = logger ?? _logger;
             _last = observation;
             _lastPhase = phase;
             _observations++;
             DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
             DiagnosticEvidenceScope.Current?.RememberExactFrame("pathing-macro", _request, frame);
+            if (_interaction is { } pending && phase == "scene-transition" && observation.Scene == PathingMacroScene.World &&
+                observation.Source == frame.FrameStamp && observation.Source.IsAfter(pending.Before) &&
+                observation.Source.TimestampFrequency == _clock.TimestampFrequency &&
+                observation.Source.IsFresh(_clock, TimeSpan.FromMilliseconds(150)) &&
+                observation.Source.CapturedTimestamp >= pending.Completed + _clock.TimestampFrequency * 60 / 1000 &&
+                _clock.GetTimestamp() < _deadline)
+            {
+                _interaction = null; // One window per receipt, including when its budget rejects it.
+                var fields = new Dictionary<string, string>
+                {
+                    ["interaction:context"] = Bounded(context),
+                    ["interaction:commands"] = Bounded(commands),
+                    ["interaction:beforeSource"] = $"{pending.Before.SessionId}/{pending.Before.Sequence}",
+                    ["interaction:anchorSource"] = $"{observation.Source.SessionId}/{observation.Source.Sequence}",
+                    ["interaction:receipt"] = Bounded(pending.Receipt),
+                    ["interaction:outcome"] = "not-observed"
+                };
+                DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(_request + ":input-" + pending.Ordinal,
+                    "path-interaction-context", frame,
+                    $"{context}; existing frames after F; anchor metadata only; not pickup, electrogranum possession or lifetime proof",
+                    logger, fields);
+            }
             // 只保存既有边界观察；同一阶段首次unknown与首次已识别各一帧，不逐帧输出。
             if (phase is not ("entry" or "post" or "scene-transition" or "before-fire" or
                 "before-cannon-handshake" or "cannon-handshake-first-f" or "cannon-handshake-complete" or "cannon-turn-complete")) return;

@@ -25,6 +25,20 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 // B层：真实解析/调度/在途协议与选角策略，帧到达和游戏物理效果是可控外部边界。
 public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
+    [Fact]
+    public async Task NativeCameraPrimitivesKeepPassiveTargetObservationAvailable()
+    {
+        var clock = new FakeTimeProvider();
+        using var io = new PhysicalReplay(clock, false, 20, LoadProgram("琴 attack(.1)"));
+        io.SetFrontActor("琴");
+        using var runner = NativeCombatFlowRunner.Create(CombatScriptParser.ParseLineCommands(
+            "moveby(1800,0),wait(.08),moveby(1800,-1400),attack(.1)", "琴"), io, false);
+        Assert.Equal(CombatFlowResult.Succeeded, await RunBoundedReplayRound(runner, io));
+        Assert.Equal(2, io.MoveByPassiveObservation.Count);
+        Assert.All(io.MoveByPassiveObservation, allowed => Assert.True(allowed));
+        Assert.Contains(io.Primitives, command => command.Method == Method.Attack);
+    }
+
     [Theory]
     [InlineData(MotionStatus.Fly, "wait(.35),j,wait(2),j", 2.35)]
     [InlineData(MotionStatus.Climb, "wait(.4),j,wait(1),j", 1.4)]
@@ -3077,7 +3091,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var clock = new FakeTimeProvider();
         using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
         var commands = CombatScriptParser.ParseContext("莱依拉 e;琴 e").CombatCommands;
-        Assert.Throws<InvalidOperationException>(() => NativeCombatFlowRunner.Create(commands, io, false));
+        Assert.Throws<LegacyCombatFlowAdapter.MissingRequiredActorException>(() => NativeCombatFlowRunner.Create(commands, io, false));
         Assert.Empty(io.Inputs);
         using var runner = NativeCombatFlowRunner.Create(commands, io, false, CombatScriptExecutionMode.LegacyPartyTemplate);
         CombatFlowStep step = default;
@@ -3872,6 +3886,9 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public bool ResourceEvents { get; init; }
         public bool DropFirstSkill { get; init; }
         public bool DropAllSkills { get; init; }
+        // Synthetic observed cooldown for actors outside this replay's timing catalog.
+        // This is fake game I/O, not a change to production skill data.
+        public double? SimulatedSkillCooldown { get; init; }
         public bool CompleteSkillReceipts { get; init; }
         public List<Guid> SkillRequests { get; } = [];
         public bool RockEnergyEvents { get; init; }
@@ -4094,7 +4111,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
                 WaitForSelection(hold ? 1000 : 50, default);
                 return;
             }
-            var cooldown = _program.GetTiming(actor.Name, skill == Method.Skill ? "e" : "q", hold)?.Cooldown
+            var cooldown = SimulatedSkillCooldown ?? _program.GetTiming(actor.Name, skill == Method.Skill ? "e" : "q", hold)?.Cooldown
                 ?? throw new InvalidDataException("生产目录缺少CD：" + actor.Name);
             _cooldowns[(actor.Name, skill)] = (Now + (skill == Method.Burst ? 2.4 : .4), Now + cooldown);
             if (skill == Method.Burst) _energyEvents.Add((Now, actor.Name, false));
@@ -4173,6 +4190,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         {
             Primitives.Add(command);
             if (command.Method == Method.MoveBy) MoveByHeldStates.Add(_held);
+            if (command.Method == Method.MoveBy) MoveByPassiveObservation.Add(_passiveSuppression == 0);
             if (HideHudAfterInteraction && command.Method == Method.KeyPress)
             {
                 if (User32Helper.ToVk(command.Args![0]) == User32.VK.VK_F) _interactionUi = true;
@@ -4211,7 +4229,14 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         { ct.ThrowIfCancellationRequested(); _visionInvalidated = false; VisionPreparations.Add(needsBurst); return VisionReadiness ?? Task.CompletedTask; }
         internal Action? OnExclusiveEnd { get; init; }
         internal bool ExternalClockAdvance { get; init; }
-        public IDisposable BeginExclusive(bool allowPassiveObservation) => new Lease(allowPassiveObservation ? null : OnExclusiveEnd);
+        private int _passiveSuppression;
+        internal List<bool> MoveByPassiveObservation { get; } = [];
+        public IDisposable BeginExclusive(bool allowPassiveObservation)
+        {
+            if (allowPassiveObservation) return new Lease(null);
+            _passiveSuppression++;
+            return new Lease(() => { _passiveSuppression--; OnExclusiveEnd?.Invoke(); });
+        }
         private sealed class Lease(Action? end) : IDisposable { public void Dispose() => end?.Invoke(); }
         public void ReleaseInput()
         {

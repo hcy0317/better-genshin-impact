@@ -22,8 +22,10 @@ internal static class HealingObservation
             var frame = capture();
             ct.ThrowIfCancellationRequested();
             if (clock.GetElapsedTime(started) >= UiSnapshot.RecoveryMaximumAge) break;
-            if (fence.Accepts(frame.Source) && frame.Source.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) && frame.MainReady)
-                return !frame.LowHp;
+            // 传送/技能返回并不等于下一帧血条已更新；低血是尚未完成，而不是等待的终态。
+            // 仍只在原两秒预算内接受输入后的新鲜非低血画面，不重发恢复输入。
+            if (fence.Accepts(frame.Source) && frame.Source.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) && frame.MainReady && !frame.LowHp)
+                return true;
             await delay(100);
         }
         ct.ThrowIfCancellationRequested();
