@@ -6,6 +6,32 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    [Theory]
+    [InlineData("Left", -90)]
+    [InlineData("Right", 90)]
+    [InlineData("Behind", 179)]
+    public async Task ExhaustedOffscreenDirectionCannotResumeBlindAttacks(string directionName, double bearing)
+    {
+        // 2026-10-16: 24/24 camera pulses followed by a persistent offscreen arrow
+        // resumed the water strategy and eventually failed as busy-without-game-progress.
+        var direction = Enum.Parse<EnemyIndicatorDirection>(directionName);
+        var clock = new FakeTimeProvider();
+        var game = new ReturningGame(clock);
+        using var flow = CreateFlow(false, game, clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            new(AutoFightSeekAction.Approach, direction, new(447, 408, 33, 30, 392, bearing), 1,
+                SeekCueKind.DirectionIndicator), 1920, 1080);
+        using var host = new CombatBattleHost(io, new() { FinishDetectionEnabled = false });
+        var result = CombatBattleHostResult.Continue;
+        for (var i = 0; i < 1000 && result == CombatBattleHostResult.Continue; i++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(24, host.CameraRequests);
+        Assert.Equal(0, game.Inputs);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Equal("offscreen-target-search-exhausted", host.Reason);
+    }
+
     [Fact]
     public async Task ForwardHintAtASafeBoundaryCannotStarveTheStrategy()
     {

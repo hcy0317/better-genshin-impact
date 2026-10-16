@@ -1527,9 +1527,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 return CombatFlowResult.AwaitingObservation;
             }
             using var operation = _input.EnterOperation();
+            // 镜头宏已有输入所有权保护；转向本身不能让每一帧感知换epoch并清空
+            // 方向稳定性。只读感知继续，输入后的新帧/稳定期仍由战斗宿主独立校验。
             using var exclusive = io.BeginExclusive(allowPassiveObservation:
                 command.Method == Method.Skill || command.Method == Method.Burst || command.Method == Method.Attack ||
-                command.Method == Method.Charge || command.Method == Method.Wait);
+                command.Method == Method.Charge || command.Method == Method.Wait || command.Method == Method.MoveBy);
             using var scope = new CombatActionScope(action, ct);
             try
             {
