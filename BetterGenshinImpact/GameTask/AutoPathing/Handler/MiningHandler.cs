@@ -72,7 +72,7 @@ public class MiningHandler : IActionHandler
         }
 
         // 挖矿
-        await MiningAsync(io, ct);
+        await MiningAsync(io, ct, waypointForTrack);
         ct.ThrowIfCancellationRequested();
 
 
@@ -87,15 +87,29 @@ public class MiningHandler : IActionHandler
         }
     }
 
-    private static async Task MiningAsync(INativeCombatIo io, CancellationToken ct)
+    private static async Task MiningAsync(INativeCombatIo io, CancellationToken ct, WaypointForTrack? waypoint)
     {
         ct.ThrowIfCancellationRequested();
         var selected = SelectMiningAction(name => io.Actors.Any(actor => actor.Name == name));
         if (selected == null) throw new InvalidOperationException("当前队伍没有可执行的挖矿动作，不能标记路线完成");
         var miningAction = CombatScriptParser.ParseContext(selected);
+        miningAction.BindSourceContext($"route={waypoint?.PathingTaskFileName ?? "unknown:no-waypoint"} node={waypoint?.Id.ToString() ?? "unknown"}",
+            nameof(MiningHandler));
         using var runner = NativeCombatFlowRunner.Create(miningAction.CombatCommands, io, loop: false,
             purpose: CombatScriptExecutionPurpose.Pathing);
-        var outcome = CombatScriptExecutor.FromFlowResult(await runner.RunRoundAsync(ct));
+        // Join the route node to the existing skill/input evidence by battle id.
+        // No extra captures or ore-success inference on this diagnostic path.
+        void Trace(string phase, string result)
+        {
+            try { io.Logger.LogDebug("MINING_ACTION_BOUNDARY battle={Battle} route={Route} node={Node} phase={Phase} strategy={Strategy} outcome={Outcome} oreState=not-observed",
+                runner.Context.BattleId, waypoint?.PathingTaskFileName ?? "unknown:no-waypoint", waypoint?.Id,
+                phase, selected, result); } catch { }
+        }
+        Trace("start", "pending");
+        CombatExecutionResult outcome;
+        try { outcome = CombatScriptExecutor.FromFlowResult(await runner.RunRoundAsync(ct)); }
+        catch (Exception error) { Trace("exception", error.GetType().Name); throw; }
+        Trace("end", $"{outcome.Kind}/{outcome.Reason}");
         ct.ThrowIfCancellationRequested();
         if (outcome.Kind != CombatExecutionKind.Completed)
         {
