@@ -3091,7 +3091,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var clock = new FakeTimeProvider();
         using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
         var commands = CombatScriptParser.ParseContext("莱依拉 e;琴 e").CombatCommands;
-        Assert.Throws<InvalidOperationException>(() => NativeCombatFlowRunner.Create(commands, io, false));
+        Assert.Throws<LegacyCombatFlowAdapter.MissingRequiredActorException>(() => NativeCombatFlowRunner.Create(commands, io, false));
         Assert.Empty(io.Inputs);
         using var runner = NativeCombatFlowRunner.Create(commands, io, false, CombatScriptExecutionMode.LegacyPartyTemplate);
         CombatFlowStep step = default;
@@ -3886,6 +3886,9 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public bool ResourceEvents { get; init; }
         public bool DropFirstSkill { get; init; }
         public bool DropAllSkills { get; init; }
+        // Synthetic observed cooldown for actors outside this replay's timing catalog.
+        // This is fake game I/O, not a change to production skill data.
+        public double? SimulatedSkillCooldown { get; init; }
         public bool CompleteSkillReceipts { get; init; }
         public List<Guid> SkillRequests { get; } = [];
         public bool RockEnergyEvents { get; init; }
@@ -4108,7 +4111,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
                 WaitForSelection(hold ? 1000 : 50, default);
                 return;
             }
-            var cooldown = _program.GetTiming(actor.Name, skill == Method.Skill ? "e" : "q", hold)?.Cooldown
+            var cooldown = SimulatedSkillCooldown ?? _program.GetTiming(actor.Name, skill == Method.Skill ? "e" : "q", hold)?.Cooldown
                 ?? throw new InvalidDataException("生产目录缺少CD：" + actor.Name);
             _cooldowns[(actor.Name, skill)] = (Now + (skill == Method.Burst ? 2.4 : .4), Now + cooldown);
             if (skill == Method.Burst) _energyEvents.Add((Now, actor.Name, false));
@@ -4187,10 +4190,10 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         {
             Primitives.Add(command);
             if (command.Method == Method.MoveBy) MoveByHeldStates.Add(_held);
+            if (command.Method == Method.MoveBy) MoveByPassiveObservation.Add(_passiveSuppression == 0);
             if (HideHudAfterInteraction && command.Method == Method.KeyPress)
             {
                 if (User32Helper.ToVk(command.Args![0]) == User32.VK.VK_F) _interactionUi = true;
-            if (command.Method == Method.MoveBy) MoveByPassiveObservation.Add(_passiveSuppression == 0);
                 if (User32Helper.ToVk(command.Args![0]) == User32.VK.VK_ESCAPE) _interactionUi = false;
             }
             if (command.Method == Method.KeyDown)
