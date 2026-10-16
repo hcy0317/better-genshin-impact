@@ -49,10 +49,12 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         public CaptureFrameFence? OriginalFence;
         public Guid? OriginalRequest;
         public long ReceiptFrequency;
+        public CombatSkillObservation? OptionalReady;
+        public CaptureFrameStamp OptionalSource;
     }
 
     internal void MarkOriginalReceipt(Guid attemptId, CombatBattleHostInputResult receipt, double now, TimeProvider clock,
-        Guid? requestId = null)
+        Guid? requestId = null, CombatSkillInputCapability? capability = null)
     {
         lock (_gate)
         {
@@ -69,7 +71,8 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
                 slot.InputFence is { } fence && started >= fence.Before.CapturedTimestamp;
             if (slot.RecoveryEligible)
                 slot.RecoveryWindowEnd = Math.Min(slot.Attempt.Deadline,
-                    now - clock.GetElapsedTime(receipt.CompletedTimestamp!.Value).TotalSeconds + 1);
+                    now - clock.GetElapsedTime(receipt.CompletedTimestamp!.Value).TotalSeconds +
+                    (capability?.RecoveryWindowSeconds ?? 1));
         }
     }
 
@@ -82,10 +85,8 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
             if (_closed || !_slots.TryGetValue((command.Name, command.Method), out var slot) ||
                 slot.Attempt.AttemptId != action.PendingAttempt?.AttemptId || slot.Attempt.CommandId != action.CommandId ||
                 slot.Attempt.BattleId != action.BattleId) return null;
-            var allowed = command.NativeSkillSequence == null &&
-                (command.Name == "班尼特" && command.Method == Method.Burst && !command.HasFlag("hold") ||
-                 command.Name == "钟离" && command.Method == Method.Skill && command.HasFlag("hold"));
-            if (!allowed || !slot.RecoveryEligible || slot.RecoveryClaimed || slot.SawCooldown || slot.Confirmed ||
+            var capability = CombatSkillInputCapabilities.Resolve(command);
+            if (capability == null || !slot.RecoveryEligible || slot.RecoveryClaimed || slot.SawCooldown || slot.Confirmed ||
                 !action.CanStart || !action.CanContinue || action.Now >= slot.RecoveryWindowEnd ||
                 action.RemainingBudget < CombatFlowPolicy.ActionSeconds(command)) return null;
             if (!actorAndControlValid || sample.BattleId != battleId || !sample.SourceBound || !sample.SourceAcceptedFresh ||
@@ -142,7 +143,46 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
             {
                 slot.InputFence = fence;
                 slot.RecoveryReceipt = receipt;
+                slot.OptionalReady = null;
+                slot.OptionalSource = default;
             }
+        }
+    }
+
+    internal bool ObserveOptionalReadiness(CombatFlowAction action, CombatSkillObservation sample,
+        bool actorAndControlValid, bool retireExpired = false)
+    {
+        lock (_gate)
+        {
+            var command = action.Command;
+            if (_closed || command.Criticality != CombatActionCriticality.Optional ||
+                CombatSkillInputCapabilities.Resolve(command)?.AllowsOptionalBurst != true ||
+                !_slots.TryGetValue((command.Name, command.Method), out var slot) ||
+                slot.Attempt.AttemptId != action.PendingAttempt?.AttemptId ||
+                slot.Attempt.CommandId != action.CommandId || slot.Attempt.BattleId != action.BattleId) return false;
+            var recoveryComplete = !slot.RecoveryDispatchStarted || slot.RecoveryReceipt is
+                { Status: CombatBattleHostInputStatus.Sent, Error: null, NativeRequested: > 0 } recovery &&
+                recovery.NativeRequested == recovery.NativeSubmitted && recovery.StartedTimestamp is { } started &&
+                recovery.CompletedTimestamp is { } completed && started <= completed &&
+                slot.InputFence is { } recoveryFence && started >= recoveryFence.Before.CapturedTimestamp &&
+                completed == recoveryFence.InputCompletedTimestamp;
+            if (!slot.RecoveryEligible || !recoveryComplete || slot.SawCooldown || slot.Confirmed || slot.CreditTaken ||
+                !actorAndControlValid || sample.BattleId != battleId || !sample.SourceBound || !sample.SourceAcceptedFresh ||
+                !double.IsFinite(sample.CapturedAt) || sample.CapturedAt > action.Now || action.Now - sample.CapturedAt > .15 ||
+                slot.InputFence is not { } fence || !fence.Accepts(sample.SourceStamp) ||
+                sample.SourceStamp.SessionId != fence.Before.SessionId || sample.Ready != true || sample.CoolingDown != false)
+            { slot.OptionalReady = null; slot.OptionalSource = default; return false; }
+            if (slot.OptionalSource.IsKnown && !sample.SourceStamp.IsAfter(slot.OptionalSource))
+            {
+                if (sample.SourceStamp != slot.OptionalSource) slot.OptionalReady = null;
+                return false;
+            }
+            slot.OptionalSource = sample.SourceStamp;
+            slot.OptionalReady ??= sample;
+            if (!retireExpired || action.Now < slot.Attempt.Deadline ||
+                sample.CapturedAt - slot.OptionalReady.Value.CapturedAt < .2) return false;
+            _slots.Remove((command.Name, command.Method));
+            return true; // 原请求未施放；不签发任何成功或效果凭据。
         }
     }
 

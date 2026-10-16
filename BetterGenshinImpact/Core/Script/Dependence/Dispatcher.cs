@@ -30,7 +30,7 @@ using BetterGenshinImpact.GameTask.Common;
 
 namespace BetterGenshinImpact.Core.Script.Dependence;
 
-public class Dispatcher
+public partial class Dispatcher
 {
     private readonly TaskExecutionScope.Guard _taskGuard = TaskExecutionScope.Capture();
     private readonly ScriptAsyncLifetime? _scriptLifetime = ScriptAsyncLifetime.Current;
@@ -41,6 +41,28 @@ public class Dispatcher
     private readonly ILogger<Dispatcher> _logger;
     private readonly CombatSkillCatalog? _skillCatalog;
     private CombatSkillCatalog SkillCatalog => _skillCatalog ?? CombatSkillCatalog.Default;
+
+    private CombatScript ParseCombatScript(string text, string? avatar, string entry, string identity)
+    {
+        void Trace(string state, object? hash)
+        {
+            try { _logger.LogInformation("FIGHT_STRATEGY_PARSE entry={Entry} source={Source} state={State} parsedUtf8TextSha256={Hash}",
+                entry, identity, state, hash ?? "not-computed"); }
+            catch { /* 诊断失败不改变真实解析结果。 */ }
+        }
+        try
+        {
+            var parsed = CombatScriptParser.ParseContext(text, validate: false, defaultAvatarName: avatar);
+            parsed.BindSourceContext(identity, entry);
+            Trace(parsed.CombatCommands.Count == 0 ? "empty" : "parsed", parsed.SourceTextSha256);
+            return parsed;
+        }
+        catch (Exception error) when (error is FormatException or ArgumentException)
+        {
+            Trace("failed", error.Data["StrategyTextSha256"]);
+            throw;
+        }
+    }
 
     /// <summary>同步公共技能数值；角色使用英文键，逗号分隔。不会启动战斗或热改当前快照。</summary>
     public async Task<string> SyncCombatSkills(string? characterKeys = null, CancellationToken? customCt = null)
@@ -124,11 +146,13 @@ public class Dispatcher
         _logger = App.GetLogger<Dispatcher>();
     }
 
-    internal Dispatcher(object config, CombatSkillCatalog skillCatalog, ILogger<Dispatcher> logger)
+    internal Dispatcher(object config, CombatSkillCatalog skillCatalog, ILogger<Dispatcher> logger,
+        CombatSessionDependencies? combatSessions = null)
     {
         _config = config;
         _skillCatalog = skillCatalog;
         _logger = logger;
+        _combatSessions = combatSessions;
     }
 
     public void RunTask()
@@ -195,6 +219,7 @@ public class Dispatcher
     public async Task RunTask(SoloTask soloTask, CancellationTokenSource customCts)
     {
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         // 创建链接的取消令牌源，任何一个取消都会触发
         using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
             customCts.Token,
@@ -219,6 +244,7 @@ public class Dispatcher
     public async Task<object?> RunTask(SoloTask soloTask, CancellationToken? customCt = null)
     {
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (soloTask == null)
         {
             throw new ArgumentNullException(nameof(soloTask), "独立任务对象不能为空");
@@ -425,6 +451,7 @@ public class Dispatcher
     public async Task<object> RunAutoDomainTask(AutoDomainParam param, CancellationToken? customCt = null)
     {  
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (param == null)  
         {  
             throw new ArgumentNullException(nameof(param), "秘境任务参数不能为空");  
@@ -445,6 +472,7 @@ public class Dispatcher
     public async Task<object> RunAutoBossTask(AutoBossParam param, CancellationToken? customCt = null)
     {
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (param == null)
         {
             throw new ArgumentNullException(nameof(param), "自动首领讨伐任务参数不能为空");
@@ -465,6 +493,7 @@ public class Dispatcher
     public async Task RunAutoFightTask(AutoFightParam param, CancellationToken? customCt = null)
     {  
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (param == null)  
         {  
             throw new ArgumentNullException(nameof(param), "战斗任务参数不能为空");  
@@ -505,6 +534,7 @@ public class Dispatcher
     public async Task RunCombatScript(string script, string? avatarName = null, CancellationToken? customCt = null)
     {
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (string.IsNullOrWhiteSpace(script))
         {
             throw new ArgumentException("策略字符串不能为空", nameof(script));
@@ -514,7 +544,7 @@ public class Dispatcher
         var cancellationToken = cancellation.Token;
 
         // 1. 解析策略字符串（ParseContext 已处理全角符号、注释、分号/逗号分隔）
-        var combatScript = CombatScriptParser.ParseContext(script, validate: false, defaultAvatarName: avatarName);
+        var combatScript = ParseCombatScript(script, avatarName, "Dispatcher.RunCombatScript", "memory:fragment");
         if (combatScript.CombatCommands.Count == 0) return;
 
         _logger.LogInformation("执行 {Text}", "简易策略脚本");
@@ -531,6 +561,7 @@ public class Dispatcher
     public async Task RunAutoLeyLineOutcropTask(AutoLeyLineOutcropParam param, CancellationToken? customCt = null)  
     {  
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (param == null)  
         {  
             throw new ArgumentNullException(nameof(param), "自动地脉花任务参数不能为空");  
@@ -551,6 +582,7 @@ public class Dispatcher
     public async Task RunAutoStygianOnslaughtTask(AutoStygianOnslaughtParam param, CancellationToken? customCt = null)
     {
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (param == null)
         {
             throw new ArgumentNullException(nameof(param), "自动幽境危战任务参数不能为空");
@@ -570,6 +602,7 @@ public class Dispatcher
     public async Task<object?> RunCountInventoryItemTask(CountInventoryItemParam param, CancellationToken? customCt = null)
     {
         using var ownedTask = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         if (param == null)
         {
             throw new ArgumentNullException(nameof(param), "背包物品计数参数不能为空");

@@ -42,7 +42,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight,
             ILogger logger,
-            CancellationToken ct)
+            CancellationToken ct, int? behindSide = null)
         {
             if (decision.Action != AutoFightSeekAction.Approach || decision.Visual is not { } visual)
             {
@@ -55,6 +55,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 visual,
                 imageWidth,
                 imageHeight);
+            if (decision.Direction == EnemyIndicatorDirection.Behind && behindSide is -1 or 1)
+                cameraOffset = behindSide.Value * 120;
             var verticalCameraOffset = AutoFightSeek.GetIndicatorCameraVerticalOffset(visual, imageHeight);
             logger.LogInformation(
                 "红色敌人方位小三角反馈转向: 候选={SignalCount}，位置=({X},{Y})，尺寸={Width}x{Height}，采用方位角={Bearing:F1}°，模板方位角={TemplateBearing:F1}°，方向={Direction}，本步转向=({CameraOffset},{VerticalCameraOffset})",
@@ -238,6 +240,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         Behind
     }
 
+    internal enum EnemyDirectionConfidence { Uncertain, Coarse }
+
     internal readonly record struct EnemySeekVisual(
         int X,
         int Y,
@@ -261,6 +265,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
     {
         // 同帧存在/血量进展证据，不占用空间目标通道。
         public EnemySeekVisual? FixedTopHealth { get; init; }
+        public EnemyDirectionConfidence DirectionConfidence { get; init; }
     }
 
     internal enum SeekCueKind
@@ -600,8 +605,6 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         private const double DirectionIndicatorMinSolidity = 0.50;
         private const double DirectionIndicatorMaxSolidity = 0.92;
         private const double DirectionIndicatorMinPinkRedShare = 0.70;
-        private const int HalfTurnMouseOffset = 1920;
-        private const int MaxIndicatorCameraStep = 320;
         private const int MaxVisibleEnemyCameraStep = 320;
 
         private static readonly DirectionIndicatorTemplateSpec[] DirectionIndicatorTemplateSpecs =
@@ -870,7 +873,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                         : AutoFightSeekAction.KeepFighting,
                     EnemyIndicatorDirection.None,
                     visual,
-                    SignalCount: 1,
+                    SignalCount: observation.SpatialCandidateCount,
                     Cue: SeekCueKind.HealthBar);
                 return true;
             }
@@ -1296,27 +1299,32 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             bool indicatorRouteLocked = false,
             bool fixedTopHealthTracked = false,
             bool fixedTopHealthAdvanceCompleted = false,
-            bool fixedTopHealthExhausted = false)
+            bool fixedTopHealthExhausted = false,
+            CombatSceneCapabilities? scene = null)
         {
+            scene ??= CombatSceneCapabilities.Unknown;
+            fixedTopHealthTracked &= scene.FixedHealthSlot != null;
             // 固定血条提供存在/进展证据，不能遮住同帧的空间目标。
             var fixedTopHealthBar = visuals
-                .Where(visual => IsHealthBar(visual, imageHeight))
-                .Where(visual => IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight))
+                .Where(visual => IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight, scene))
                 .OrderBy(visual => Math.Abs(visual.CenterX - imageWidth / 2))
                 .ThenByDescending(visual => visual.Width)
                 .FirstOrDefault();
             EnemySeekDecision FixedDecision() => new EnemySeekDecision(
-                fixedTopHealthExhausted ? AutoFightSeekAction.Scan : fixedTopHealthAdvanceCompleted
-                    ? AutoFightSeekAction.KeepFighting : AutoFightSeekAction.ApproachFixedTopHealthTarget,
+                AutoFightSeekAction.KeepFighting,
                 EnemyIndicatorDirection.None, fixedTopHealthBar == default ? null : fixedTopHealthBar,
                 1, SeekCueKind.FixedTopHealth)
             { FixedTopHealth = fixedTopHealthBar == default ? null : fixedTopHealthBar };
             // 兼容旧入口已取得的路线锁；被动/ClosedLoop入口不持此锁，空间信息照常发布。
-            if (indicatorRouteLocked && (fixedTopHealthBar != default || fixedTopHealthTracked))
+            if ((scene.PreferFixedTarget || indicatorRouteLocked) && (fixedTopHealthBar != default || fixedTopHealthTracked))
                 return FixedDecision();
+            if (indicatorRouteLocked && scene.FixedHealthSlot == null &&
+                visuals.Any(visual => IsAmbiguousTopHealthBar(visual, imageWidth, imageHeight)))
+                return new(AutoFightSeekAction.Scan, EnemyIndicatorDirection.None);
             var floatingHealthBars = visuals
                 .Where(visual => IsHealthBar(visual, imageHeight))
-                .Where(visual => !IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight))
+                .Where(visual => !IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight, scene))
+                .Where(visual => scene.FixedHealthSlot != null || !IsAmbiguousTopHealthBar(visual, imageWidth, imageHeight))
                 .OrderByDescending(visual => visual.Height)
                 .ThenByDescending(visual => visual.Area)
                 .ThenByDescending(visual => visual.Width)
@@ -1390,7 +1398,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 GetIndicatorDirection(indicator, imageWidth, imageHeight),
                 indicator,
                 indicators.Count,
-                SeekCueKind.DirectionIndicator);
+                SeekCueKind.DirectionIndicator) { DirectionConfidence = EnemyDirectionConfidence.Coarse };
         }
 
         internal static int GetIndicatorCameraOffset(
@@ -1399,16 +1407,16 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight = SeekViewportHeight)
         {
-            var bearing = GetIndicatorBearingDegrees(visual, imageWidth, imageHeight);
-            if (Math.Abs(bearing) < 8)
+            // Screen/template angles are coarse hints, not calibrated game yaw.
+            return direction switch
             {
-                return 0;
-            }
-
-            return Math.Clamp(
-                (int)Math.Round(bearing / 180d * HalfTurnMouseOffset),
-                -MaxIndicatorCameraStep,
-                MaxIndicatorCameraStep);
+                EnemyIndicatorDirection.Left => -120,
+                EnemyIndicatorDirection.Right => 120,
+                EnemyIndicatorDirection.Behind => GetIndicatorBearingDegrees(visual, imageWidth, imageHeight) < 0 ? -120 : 120,
+                EnemyIndicatorDirection.Forward => 0,
+                _ => Math.Abs(visual.CenterX - imageWidth / 2d) <= imageWidth * .04 ? 0 :
+                    visual.CenterX < imageWidth / 2d ? -80 : 80
+            };
         }
 
         internal static IReadOnlyList<int> GetIndicatorCameraSteps(
@@ -1416,22 +1424,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight)
         {
-            var bearing = GetIndicatorBearingDegrees(visual, imageWidth, imageHeight);
-            if (Math.Abs(bearing) < 8)
-            {
-                return Array.Empty<int>();
-            }
-
-            var remaining = (int)Math.Round(bearing / 180d * HalfTurnMouseOffset);
-            var steps = new List<int>();
-            while (remaining != 0)
-            {
-                var step = Math.Clamp(remaining, -MaxIndicatorCameraStep, MaxIndicatorCameraStep);
-                steps.Add(step);
-                remaining -= step;
-            }
-
-            return steps;
+            var step = GetIndicatorCameraOffset(GetIndicatorDirection(visual, imageWidth, imageHeight), visual, imageWidth, imageHeight);
+            return step == 0 ? Array.Empty<int>() : [step]; // Reacquire before choosing another step.
         }
 
         private static bool IsHealthBar(EnemySeekVisual visual, int imageHeight)
@@ -1550,13 +1544,17 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         internal static bool IsFixedTopEliteHealthBar(
             EnemySeekVisual visual,
             int imageWidth,
-            int imageHeight)
+            int imageHeight, CombatSceneCapabilities? scene = null)
         {
-            return IsHealthBar(visual, imageHeight)
-                   && visual.Width >= 60
+            return scene?.FixedHealthSlot is { } slot && slot.Contains(visual, imageWidth, imageHeight) &&
+                   (IsHealthBar(visual, imageHeight) || HealthBarGeometryFailure(visual, imageHeight, out _) == "width" &&
+                    visual.Width >= Math.Max(6, 6 * imageHeight / 1080d));
+        }
+
+        private static bool IsAmbiguousTopHealthBar(EnemySeekVisual visual, int imageWidth, int imageHeight) =>
+                   Math.Max(visual.Width, visual.HealthBarTrackWidth) >= 60 * imageWidth / 1920d
                    && visual.CenterY <= imageHeight * 0.18
                    && Math.Abs(visual.CenterX - imageWidth / 2d) <= imageWidth * 0.25;
-        }
 
         internal static (bool tracked, bool advanceCompleted, bool exhausted)
             ObserveFixedTopHealthPresence(EnemySeekVisual? healthBar, DateTime? now = null)
@@ -1690,19 +1688,16 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 previous, imageWidth, imageHeight);
             var currentBearing = GetIndicatorBearingDegrees(
                 current, imageWidth, imageHeight);
-            var expectedBearing = NormalizeBearingDegrees(
-                previousBearing
-                - cameraHorizontalOffset / (double)HalfTurnMouseOffset * 180d);
-            var expectedError = CircularBearingDeltaDegrees(
-                expectedBearing,
-                currentBearing);
+            var change = NormalizeBearingDegrees(currentBearing - previousBearing);
             var widthRatio = Math.Abs(previous.Width - current.Width)
                              / (double)Math.Max(previous.Width, current.Width);
             var heightRatio = Math.Abs(previous.Height - current.Height)
                               / (double)Math.Max(previous.Height, current.Height);
             var stillConverging = Math.Abs(currentBearing)
                                   <= Math.Abs(previousBearing) + 12;
-            return expectedError <= 25
+            return Math.Abs(change) <= 50 && change * Math.Sign(cameraHorizontalOffset) <= 12
+                   && Math.Abs(previous.CenterX - current.CenterX) <= imageWidth * .2
+                   && Math.Abs(previous.CenterY - current.CenterY) <= imageHeight * .2
                    && widthRatio <= 0.35
                    && heightRatio <= 0.35
                    && stillConverging;
@@ -1945,7 +1940,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             ImageRegion image, Scalar bloodLower, Scalar? bloodHigher,
             out int imageWidth, out int imageHeight, bool indicatorOnly = false,
             bool saveDiagnostics = true, SeekRecognitionDiagnostics? diagnostics = null,
-            Action<EnemySeekVisual>? unconfirmedDirection = null)
+            Action<EnemySeekVisual>? unconfirmedDirection = null, CombatSceneCapabilities? scene = null)
         {
             var detectionRegion = GetSeekDetectionRegion(image.Width, image.Height);
             using var imageCrop = image.DeriveCrop(
@@ -1987,7 +1982,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     IsIndicatorRouteLocked,
                     fixedTopStateWithoutRedMask.tracked,
                     fixedTopStateWithoutRedMask.advanceCompleted,
-                    fixedTopStateWithoutRedMask.exhausted),
+                    fixedTopStateWithoutRedMask.exhausted, scene),
                     imageCrop.Width,
                     imageCrop.Height);
             }
@@ -2014,7 +2009,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     imageCrop.SrcMat,
                     visual,
                     imageCrop.Width,
-                    imageCrop.Height, diagnostics, unconfirmedDirection))
+                    imageCrop.Height, diagnostics, unconfirmedDirection, scene))
                 .Where(visual => visual.HasValue)
                 .Select(visual => visual!.Value)
                 .ToList();
@@ -2038,11 +2033,10 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             }
 
             var fixedTopHealthBar = visuals
-                .Where(visual => IsHealthBar(visual, imageCrop.Height))
                 .Where(visual => IsFixedTopEliteHealthBar(
                     visual,
                     imageCrop.Width,
-                    imageCrop.Height))
+                    imageCrop.Height, scene))
                 .OrderBy(visual => Math.Abs(visual.CenterX - imageCrop.Width / 2))
                 .ThenByDescending(visual => visual.Width)
                 .Select(visual => (EnemySeekVisual?)visual)
@@ -2056,7 +2050,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 IsIndicatorRouteLocked,
                 fixedTopState.tracked,
                 fixedTopState.advanceCompleted,
-                fixedTopState.exhausted),
+                fixedTopState.exhausted, scene),
                 imageCrop.Width,
                 imageCrop.Height);
             if (saveDiagnostics) SaveSeekSelectionScreenshot(imageCrop.SrcMat, visuals, decision);
@@ -2225,7 +2219,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             EnemySeekVisual visual,
             int imageWidth,
             int imageHeight,
-            SeekRecognitionDiagnostics? diagnostics = null, Action<EnemySeekVisual>? unconfirmedDirection = null)
+            SeekRecognitionDiagnostics? diagnostics = null, Action<EnemySeekVisual>? unconfirmedDirection = null,
+            CombatSceneCapabilities? scene = null)
         {
             var healthFailure = HealthBarGeometryFailure(visual, imageHeight, out var minimumWidth);
             EnemySeekVisual? Finish(EnemySeekVisual? accepted, string indicatorResult)
@@ -2233,6 +2228,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 diagnostics?.Record(visual, healthFailure, indicatorResult, minimumWidth, imageWidth, imageHeight, accepted.HasValue);
                 return accepted;
             }
+            if (source != null && healthFailure == "width" &&
+                IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight, scene) &&
+                MatchesHealthBarFeature(mask, source, visual)) return Finish(visual, "declared-fixed-slot");
             if (healthFailure == "width" && source != null &&
                 visual.Width >= Math.Max(6, (int)Math.Round(6 * imageHeight / 1080d)) &&
                 visual.Height <= Math.Max(6, (int)Math.Round(12 * imageHeight / 1080d)) &&
@@ -2256,7 +2254,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             }
 
             var indicator = ClassifyDirectionIndicator(mask, source, visual, imageWidth, imageHeight, out var indicatorReason);
-            if (source != null && indicatorReason == "bearing") unconfirmedDirection?.Invoke(visual);
+            if (source != null && indicatorReason is "bearing" or "screen-bearing") unconfirmedDirection?.Invoke(visual);
             return Finish(indicator, indicatorReason);
         }
 
@@ -2403,7 +2401,29 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
             }
 
-            return Cv2.CountNonZero(salmonMask) / (double)foregroundPixels >= 0.40;
+            if (Cv2.CountNonZero(salmonMask) / (double)foregroundPixels < 0.40)
+                return false;
+
+            // The horizontal run must be made of the verified health-fill color itself.
+            // An unrelated long red contour plus scattered salmon highlights is not a bar.
+            var requiredRun = (int)Math.Ceiling(candidate.Width * 0.60);
+            var supportedRows = 0;
+            for (var y = 0; y < salmonMask.Height; y++)
+            {
+                var run = 0;
+                for (var x = 0; x < salmonMask.Width; x++)
+                {
+                    run = salmonMask.At<byte>(y, x) != 0 ? run + 1 : 0;
+                    if (run >= requiredRun)
+                    {
+                        supportedRows++;
+                        break;
+                    }
+                }
+            }
+            // A single colored edge of a shaded effect does not establish a filled HUD band.
+            // Keep room for antialiased/tapered top and bottom rows.
+            return supportedRows >= (salmonMask.Height + 1) / 2;
         }
 
         internal static bool HasDirectionIndicatorPinkRedShare(
@@ -2854,6 +2874,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             var currentImageWidth = imageWidth;
             var currentImageHeight = imageHeight;
             var indicatorAligned = false;
+            var behindSide = 0;
 
             for (var step = 0;
                  step < MaxIndicatorTurnFeedbackSteps
@@ -2879,12 +2900,16 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 }
 
                 var previousVisual = visual;
+                if (currentDecision.Direction == EnemyIndicatorDirection.Left) behindSide = -1;
+                else if (currentDecision.Direction == EnemyIndicatorDirection.Right) behindSide = 1;
+                else if (currentDecision.Direction == EnemyIndicatorDirection.Behind && behindSide == 0)
+                    behindSide = bearing < 0 ? -1 : 1;
                 var movement = await MoveForwardTask.TurnTowardIndicatorAsync(
                     currentDecision,
                     currentImageWidth,
                     currentImageHeight,
                     logger,
-                    ct);
+                    ct, behindSide);
                 VisibleHealthApproach.RecordCameraMovement(
                     movement.horizontal,
                     movement.vertical);
@@ -3114,7 +3139,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return false;
         }
 
-        private static async Task<bool> HandleFixedTopHealthApproachAsync(
+        private static Task<bool> HandleFixedTopHealthApproachAsync(
             EnemySeekDecision decision,
             int imageWidth,
             int imageHeight,
@@ -3128,10 +3153,10 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             _ = imageHeight;
             _ = bloodLower;
             _ = bloodHigher;
-            await MoveForwardTask.AdvanceFixedTopHealthOnceAsync(logger, ct);
-            MarkFixedTopHealthAdvanceCompleted();
+            ct.ThrowIfCancellationRequested();
+            logger.LogDebug("固定HUD血条不是空间目标，不据此发送前进输入");
             UnlockIndicatorRoute();
-            return true;
+            return Task.FromResult(true);
         }
 
         internal static (int x, int y) GetSeekCameraOffset(int imageWidth, int imageHeight, int rotationCount, int retryCount)

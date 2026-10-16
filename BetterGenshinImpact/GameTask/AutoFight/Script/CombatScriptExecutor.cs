@@ -13,6 +13,54 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 
 public static class CombatScriptExecutor
 {
+    internal static IReadOnlyList<CombatCommand> ExternalSessionCommands(CombatScript script) =>
+        script.CombatCommands.Select(original =>
+        {
+            var command = new CombatCommand(original);
+            if (!command.Method.IsFlowControl && command.Criticality == CombatActionCriticality.Required)
+                command.Flags.Add("required");
+            return command;
+        }).ToArray();
+
+    internal static async Task ExecuteExternalSessionAsync(CombatScript script,
+        Core.Input.InputSessionOwnership.Owner inputOwner, Action<Guid> bindBattle, CancellationToken ct)
+    {
+        CombatScenes? scenes = null;
+        NativeCombatFlowRunner? flow = null;
+        CombatBattleHost? host = null;
+        Exception? failure = null;
+        try
+        {
+            ct.ThrowIfCancellationRequested();
+            scenes = new CombatScenes();
+            using (var frame = CaptureToRectArea()) scenes.InitializeTeam(frame);
+            if (!scenes.CheckTeamInitialized()) throw new InvalidOperationException("持续战斗队伍未初始化");
+            scenes.BeforeTask(ct);
+            flow = NativeCombatFlowRunner.Create(ExternalSessionCommands(script), scenes, loop: true,
+                mode: CombatScriptExecutionMode.RequiredSequence, inputOwner: inputOwner);
+            host = NativeCombatBattleHostIo.CreateForExternalScene(flow, scenes, inputOwner);
+            await RunExternalSessionCoreAsync(flow, host, bindBattle, ct);
+        }
+        catch (Exception error) { failure = error; }
+        foreach (var resource in new IDisposable?[] { host, flow, scenes })
+            try { resource?.Dispose(); }
+            catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }
+        if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    internal static async Task RunExternalSessionCoreAsync(NativeCombatFlowRunner flow, CombatBattleHost host,
+        Action<Guid> bindBattle, CancellationToken ct)
+    {
+        bindBattle(flow.Context.BattleId);
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            if (await host.AdvanceAsync(flow, ct) != CombatBattleHostResult.Continue)
+                throw new InvalidOperationException("外部进度完成前战斗宿主终止：" + host.Reason);
+        }
+    }
+
     internal static async Task<CombatExecutionResult> ExecutePathingAsync(CombatScript script, CombatScenes scenes,
         PathingMacroSession macro, CancellationToken ct)
     {
@@ -51,6 +99,7 @@ public static class CombatScriptExecutor
         CombatScriptExecutionPurpose purpose = CombatScriptExecutionPurpose.Combat)
     {
         var ownsScenes = false;
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         try
         {
             if (combatScenes == null)

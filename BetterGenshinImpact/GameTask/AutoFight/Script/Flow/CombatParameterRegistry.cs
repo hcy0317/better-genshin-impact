@@ -10,7 +10,8 @@ internal static class CombatParameterRegistry
     private static readonly string[] ActionOptions =
         ["record", "keep", "maintain", "before", "timing", "id", "if", "watch", "watch-mode", "watch-target", "timeout"];
 
-    public static bool IsCommandFlag(string parameter) => parameter.Equals("required", StringComparison.OrdinalIgnoreCase);
+    public static bool IsCommandFlag(string parameter) => parameter.Equals("required", StringComparison.OrdinalIgnoreCase) ||
+        parameter.Equals("optional", StringComparison.OrdinalIgnoreCase);
 
     public static IReadOnlyCollection<string> OptionsFor(CombatCommand command)
     {
@@ -33,6 +34,8 @@ internal static class CombatParameterRegistry
     {
         if (command.Method == Method.Round) throw command.Error("round 必须位于动作组开头；请使用 | 分组或在声明片段内另起一行");
         var allowed = OptionsFor(command);
+        if (command.HasFlag("optional") && (command.Method != Method.Burst || command.HasFlag("required")))
+            throw command.Error("optional 仅适用于 Q，不能与 required 组合");
         foreach (var key in command.Options.Keys)
             if (!allowed.Contains(key, StringComparer.OrdinalIgnoreCase)) throw command.Error("未知或不适用于此处的参数：" + key);
         foreach (var flag in command.Flags)

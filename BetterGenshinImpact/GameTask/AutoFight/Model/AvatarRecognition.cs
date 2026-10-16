@@ -567,7 +567,8 @@ public static class AvatarRecognition
                             capture.Height,
                             capturedAtUtc,
                             observationEpoch, source: capture.FrameStamp, battleId: battleId, motion: motion, control: control,
-                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth, evidence: recordEvidence));
+                            recognition: targetRead.Diagnostics, fixedTopHealth: target.FixedTopHealth, evidence: recordEvidence,
+                            spatialCandidateCount: target.SignalCount));
 
                         if (drawResults)
                         {
@@ -674,18 +675,22 @@ public static class AvatarRecognition
 
     internal static EnemySeekDecision ReadPassiveTarget(ImageRegion frame) => ReadPassiveTargetEvidence(frame).Decision;
 
-    internal static (EnemySeekDecision Decision, SeekRecognitionDiagnostics Diagnostics, UnconfirmedSearchHint? Hint) ReadPassiveTargetEvidence(ImageRegion frame) =>
-        frame.ReadOnce((typeof(AvatarRecognition), "target"), () =>
+    internal static (EnemySeekDecision Decision, SeekRecognitionDiagnostics Diagnostics, UnconfirmedSearchHint? Hint) ReadPassiveTargetEvidence(
+        ImageRegion frame, CombatSceneCapabilities? scene = null)
+    {
+        scene ??= _currentAutoFightParam.Value?.SceneCapabilities ?? CombatSceneCapabilities.Unknown;
+        return frame.ReadOnce((typeof(AvatarRecognition), "target", scene), () =>
         {
             var diagnostics = new SeekRecognitionDiagnostics();
             var hints = new Dictionary<(int X, int Y, int Width, int Height), EnemySeekVisual>();
             var decision = AutoFightSeek.RecognizeSeekDecision(frame,
                 new Scalar(255, 90, 90), null, out var width, out var height, saveDiagnostics: false, diagnostics: diagnostics,
-                unconfirmedDirection: visual => hints[(visual.X, visual.Y, visual.Width, visual.Height)] = visual);
+                unconfirmedDirection: visual => hints[(visual.X, visual.Y, visual.Width, visual.Height)] = visual, scene: scene);
             UnconfirmedSearchHint? hint = hints.Count == 1 && frame.FrameStamp.IsKnown
                 ? new(frame.FrameStamp, hints.Values.Single(), width, height) : null;
             return (decision, diagnostics, hint);
         });
+    }
 
     internal static bool PublishPassiveObservation(
         bool hasNormalHealthBar,
@@ -700,14 +705,15 @@ public static class AvatarRecognition
         CombatObservationQuality quality = CombatObservationQuality.Available, ulong cueFingerprint = 0, MotionStatus motion = MotionStatus.Unknown,
         CombatControlObservation control = default, SeekRecognitionDiagnostics? recognition = null,
         string? absenceReason = null, string? damageFallback = null, UnconfirmedSearchHint? searchHint = null,
-        EnemySeekVisual? fixedTopHealth = null, Action<PassiveTargetObservation>? evidence = null)
+        EnemySeekVisual? fixedTopHealth = null, Action<PassiveTargetObservation>? evidence = null, int spatialCandidateCount = 1)
     {
         var observation = new PassiveTargetObservation(hasNormalHealthBar, hasDamageCue, capturedAtUtc,
             visual, imageWidth, imageHeight, indicatorDecision)
         { Source = source, BattleId = battleId, CaptureEpoch = captureEpoch, Quality = quality,
             CueFingerprint = cueFingerprint, Motion = motion, Control = control,
             Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback,
-            SearchHint = searchHint, FixedTopHealth = fixedTopHealth };
+            SearchHint = searchHint, FixedTopHealth = fixedTopHealth, SpatialCandidateCount = spatialCandidateCount,
+            Scene = _currentAutoFightParam.Value?.SceneCapabilities ?? CombatSceneCapabilities.Unknown };
         lock (_seekLock)
         {
             if (!CanPublishPassiveObservation(
@@ -774,6 +780,9 @@ internal readonly record struct PassiveTargetObservation(
     int ImageHeight,
     EnemySeekDecision? IndicatorDecision = null)
 {
+    // Semantic ambiguity from the selected scene, independent of diagnostic counters.
+    public int SpatialCandidateCount { get; init; } = 1;
+    public CombatSceneCapabilities Scene { get; init; } = CombatSceneCapabilities.Unknown;
     public EnemySeekVisual? FixedTopHealth { get; init; }
     public CaptureFrameStamp Source { get; init; }
     public Guid BattleId { get; init; }

@@ -238,7 +238,7 @@ public class CombatScriptResourceTests
         var section = SourceSection(
             source,
             "private static async Task<bool> HandleVisibleEnemyApproachAsync",
-            "private static async Task<bool> HandleFixedTopHealthApproachAsync");
+            "private static Task<bool> HandleFixedTopHealthApproachAsync");
 
         Assert.Matches(
             @"(?s)血条候选跨帧跳变.*?return true;",
@@ -342,14 +342,13 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void IndicatorCameraSteps_MustCoverTheWholeBearingWithoutAnUnboundedMouseJump()
+    public void IndicatorCameraSteps_MustReturnOnlyOneStepBeforeReacquiring()
     {
         var visual = new EnemySeekVisual(12, 430, 24, 20, 260, -145);
 
         var steps = AutoFightSeek.GetIndicatorCameraSteps(visual, 1500, 900);
 
-        Assert.InRange(steps.Sum(), -1555, -1540);
-        Assert.All(steps, step => Assert.InRange(Math.Abs(step), 1, 320));
+        Assert.Equal(-120, Assert.Single(steps));
     }
 
     [Fact]
@@ -365,7 +364,7 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void SelectSeekDecision_FixedTopEliteHealthBarMustAdvanceOnceThenKeepFighting()
+    public void SelectSeekDecision_DeclaredFixedHudNeverBecomesASpatialMovementTarget()
     {
         var fixedTopHealthBar = new EnemySeekVisual(969, 125, 251, 11, 2600);
 
@@ -375,14 +374,14 @@ public class CombatScriptResourceTests
             imageHeight: 1080,
             indicatorRouteLocked: true,
             fixedTopHealthTracked: true,
-            fixedTopHealthAdvanceCompleted: false);
+            fixedTopHealthAdvanceCompleted: false, scene: new(new(.45, .10, .65, .15), PreferFixedTarget: true));
         var outputPointReady = AutoFightSeek.SelectSeekDecision(
             [fixedTopHealthBar],
             imageWidth: 1920,
             imageHeight: 1080,
             indicatorRouteLocked: true,
             fixedTopHealthTracked: true,
-            fixedTopHealthAdvanceCompleted: true);
+            fixedTopHealthAdvanceCompleted: true, scene: new(new(.45, .10, .65, .15), PreferFixedTarget: true));
         var exhausted = AutoFightSeek.SelectSeekDecision(
             [fixedTopHealthBar],
             imageWidth: 1920,
@@ -390,12 +389,13 @@ public class CombatScriptResourceTests
             indicatorRouteLocked: true,
             fixedTopHealthTracked: true,
             fixedTopHealthAdvanceCompleted: true,
-            fixedTopHealthExhausted: true);
+            fixedTopHealthExhausted: true, scene: new(new(.45, .10, .65, .15), PreferFixedTarget: true));
 
-        Assert.Equal(AutoFightSeekAction.ApproachFixedTopHealthTarget, approaching.Action);
+        Assert.Equal(AutoFightSeekAction.KeepFighting, approaching.Action);
+        Assert.Equal(SeekCueKind.FixedTopHealth, approaching.Cue);
         Assert.Equal(EnemyIndicatorDirection.None, approaching.Direction);
         Assert.Equal(AutoFightSeekAction.KeepFighting, outputPointReady.Action);
-        Assert.Equal(AutoFightSeekAction.Scan, exhausted.Action);
+        Assert.Equal(AutoFightSeekAction.KeepFighting, exhausted.Action);
     }
 
     [Fact]
@@ -411,9 +411,10 @@ public class CombatScriptResourceTests
             imageHeight: 1080,
             indicatorRouteLocked: true,
             fixedTopHealthTracked: true,
-            fixedTopHealthAdvanceCompleted: false);
+            fixedTopHealthAdvanceCompleted: false, scene: new(new(.45, .10, .65, .15), PreferFixedTarget: true));
 
-        Assert.Equal(AutoFightSeekAction.ApproachFixedTopHealthTarget, decision.Action);
+        Assert.Equal(AutoFightSeekAction.KeepFighting, decision.Action);
+        Assert.Equal(SeekCueKind.FixedTopHealth, decision.Cue);
         Assert.Equal(251, decision.Visual!.Value.Width);
     }
 
@@ -793,7 +794,9 @@ public class CombatScriptResourceTests
                 Cv2.CountNonZero(alpha)),
             imageWidth: 1920,
             imageHeight: 1080, unconfirmedDirection: hints.Add));
-        Assert.Empty(hints);
+        var uncertain = Assert.Single(hints);
+        Assert.Null(uncertain.IndicatorBearingDegrees);
+        Assert.Equal(targetRect.X, uncertain.X); // Same uncertainty semantics as fragmented candidates.
     }
 
     [Fact]
@@ -980,14 +983,14 @@ public class CombatScriptResourceTests
     }
 
     [Fact]
-    public void SelectSeekDecision_WideTopHealthBarMustUseTheOneSecondOutputPointPolicy()
+    public void SelectSeekDecision_UndeclaredWideTopBarRemainsAmbiguousWithoutMovement()
     {
         var decision = AutoFightSeek.SelectSeekDecision(
             [new EnemySeekVisual(757, 82, 406, 9, 3654)],
             imageWidth: 1920,
             imageHeight: 1080);
 
-        Assert.Equal(AutoFightSeekAction.ApproachFixedTopHealthTarget, decision.Action);
+        Assert.Equal(AutoFightSeekAction.Scan, decision.Action);
         Assert.Equal(EnemyIndicatorDirection.None, decision.Direction);
     }
 
@@ -1203,7 +1206,7 @@ public class CombatScriptResourceTests
     [Theory]
     [InlineData(720, 300, 60, 4, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
     [InlineData(80, 300, 180, 4, (int)AutoFightSeekAction.ApproachVisibleEnemy)]
-    [InlineData(720, 40, 180, 5, (int)AutoFightSeekAction.ApproachFixedTopHealthTarget)]
+    [InlineData(720, 40, 180, 5, (int)AutoFightSeekAction.Scan)]
     public void SelectSeekDecision_DistantOrOffCenterHealthBarMustDriveApproach(
         int x,
         int y,
@@ -1263,9 +1266,9 @@ public class CombatScriptResourceTests
     }
 
     [Theory]
-    [InlineData(945, 810, 19, 25, -320, -320)]
-    [InlineData(1399, 311, 29, 27, 320, 320)]
-    [InlineData(1100, 99, 36, 27, 200, 230)]
+    [InlineData(945, 810, 19, 25, 0, 0)]
+    [InlineData(1399, 311, 29, 27, 80, 80)]
+    [InlineData(1100, 99, 36, 27, 80, 80)]
     public void IndicatorFeedbackStep_MustStayBoundedBeforeReacquisition(
         int x,
         int y,
@@ -1283,7 +1286,7 @@ public class CombatScriptResourceTests
 
         Assert.InRange(
             AutoFightSeek.GetIndicatorCameraOffset(
-                EnemyIndicatorDirection.Forward,
+                EnemyIndicatorDirection.None,
                 visual,
                 imageWidth: 1920,
                 imageHeight: 1080),

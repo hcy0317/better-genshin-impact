@@ -37,6 +37,8 @@ public sealed class JsonCombatFlowExecution : IDisposable
     public bool HasPendingConfirmation => _active?.Execution.HasPendingConfirmation == true;
     public bool HasAwaitingObservation => _preparing != null || _active?.Execution.HasAwaitingObservation == true;
     public bool IsAtRootBoundary => _preparing == null && _active?.Execution.IsAtRootBoundary != false;
+    internal CombatEngagementDemand EngagementDemand => _preparing == null && _active?.Execution.NeedsCompletion == false
+        ? _active.Execution.EngagementDemand : CombatEngagementDemand.Unknown;
     public bool TakeFinishCheckRequest() => _battle.TakeFinishCheckRequest();
 
     public static bool RequiresFlow(JsonCombatStrategy strategy) => strategy.Info.Declarations.Count != 0 ||

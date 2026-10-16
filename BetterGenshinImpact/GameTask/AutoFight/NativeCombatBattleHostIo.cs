@@ -12,6 +12,7 @@ using BetterGenshinImpact.GameTask.Model;
 using Microsoft.Extensions.Logging;
 using Fischless.GameCapture;
 using Fischless.WindowsInput;
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
 
@@ -43,8 +44,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     public TimeProvider Clock => _device.Clock;
     public Guid BattleId => _flow.Context.BattleId;
 
-    public NativeCombatBattleHostIo(NativeCombatFlowRunner flow, CombatScenes scenes)
-        : this(flow, new NativeCombatHostInputDevice()) => _vision = new(scenes);
+    public NativeCombatBattleHostIo(NativeCombatFlowRunner flow, CombatScenes scenes, InputSessionOwnership.Owner? inputOwner = null)
+        : this(flow, new NativeCombatHostInputDevice(inputOwner)) => _vision = new(scenes, inputOwner);
 
     internal NativeCombatBattleHostIo(NativeCombatFlowRunner flow, ICombatHostInputDevice device,
         Func<PartySetupFinishObservation>? partyObservation = null, Func<CombatBattleObservation>? targetObservation = null)
@@ -52,18 +53,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     public CombatBattleObservation ObserveTarget()
     {
-        if (_evidenceInputCompleted == null && _decisionEvidence?.TryRead(out var reserved) == true)
-        {
-            var gate = AvatarRecognition.PassiveCaptureGate;
-            if (reserved.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) && gate.CanCapture && reserved.CaptureEpoch == gate.Epoch)
-                return ProjectObservation(reserved, gate.Epoch, gate.CanCapture, Clock.GetUtcNow().UtcDateTime);
-            // A stale/invalidated reservation cannot freeze perception, refresh its deadline,
-            // or be recreated for this same request. Keep only the attempted request identity.
-            _decisionEvidence.Dispose();
-            _decisionEvidence = null;
-            _evidenceInvalidated = true;
-            try { _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} reason=reserved-source-expired-or-invalidated", _evidenceRequest); } catch { }
-        }
+        // Business perception always reads the latest publication, never a diagnostic reservation.
         if (_targetObservation != null)
         {
             var injected = _targetObservation();
@@ -81,7 +71,11 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             observation.Source.IsAfter(decision.Source) && observation.Source.TimestampFrequency == Clock.TimestampFrequency &&
             observation.Source.CapturedTimestamp >= completed + Clock.TimestampFrequency * 60 / 1000 &&
             observation.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) && observation.BattleId == BattleId &&
-            observation.Quality == CombatObservationQuality.Available) ClearDecisionEvidence();
+            observation.Quality == CombatObservationQuality.Available)
+        {
+            try { SaveDecisionEvidence("host-input-feedback-accepted"); }
+            finally { ClearDecisionEvidence(); }
+        }
     }
 
     public bool PrepareInputEvidence(CombatBattleHostInput input, CancellationToken ct)
@@ -110,8 +104,20 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             _decisionEvidence.Dispose();
             _decisionEvidence = null;
         }
-        // This method is reached only after the host has re-evaluated the reserved observation.
+        // Readiness is diagnostic metadata only; the host independently rechecks a fresh frame.
         return !_evidenceInvalidated && (_decisionEvidence == null || _decisionEvidence.TryRead(out var observed) && observed.Source == input.Source);
+    }
+
+    private void BindDecisionEvidenceToInput(CombatBattleHostInput input)
+    {
+        if (input.Kind is not (CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.Approach)) return;
+        if (_evidenceRequest == input.RequestId && _decisionEvidence?.TryRead(out var observed) == true &&
+            observed.Source == input.Source && observed.BattleId == BattleId) return;
+        var reason = _decisionEvidence?.FailureReason ?? "business-source-not-reserved";
+        try { _decisionEvidence?.Dispose(); }
+        finally { _decisionEvidence = null; }
+        try { _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} source={SourceSession}/{SourceSequence} reason={Reason}",
+            input.RequestId, input.Source.SessionId, input.Source.Sequence, reason); } catch { }
     }
 
     public void EndInputEvidence(string reason, Exception? error = null)
@@ -158,7 +164,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         else if (!canCapture) passiveGate = "capture-exclusive";
         return new(observation.Source, observation.BattleId, quality, target,
             observation.ImageWidth, observation.ImageHeight, observation.CueFingerprint)
-        { Motion = observation.Motion, Control = observation.Control, Recognition = observation.Recognition,
+        { Scene = observation.Scene, CaptureEpoch = observation.CaptureEpoch, Motion = observation.Motion, Control = observation.Control, Recognition = observation.Recognition,
             PassiveGate = passiveGate, DamageFallback = observation.DamageFallback,
             SearchHint = observation.SearchHint, FixedTopHealth = observation.FixedTopHealth };
     }
@@ -309,6 +315,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
 
     private async ValueTask<CombatBattleHostInputResult> SendCoreAsync(CombatBattleHostInput input, CancellationToken ct, bool controlRecovery)
     {
+        BindDecisionEvidenceToInput(input);
         if (_pendingInputResult?.Input.RequestId != input.RequestId) FlushInputResult();
         var requestedAt = Clock.GetTimestamp();
         var inputAttempted = false;
@@ -361,6 +368,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             }
             switch (input.Kind)
             {
+                case CombatBattleHostInputKind.TargetLock:
+                    if (input.Scene is not { PreferFixedTarget: true, AllowTargetLock: true, FixedHealthSlot: not null })
+                        throw new InvalidOperationException("场景未明确授权固定目标定位");
+                    inputAttempted = true;
+                    using (operation.Measure(UiOperationPhase.NativeInput)) _device.PressTargetLock();
+                    break;
                 case CombatBattleHostInputKind.Camera:
                     inputAttempted = true;
                     using (operation.Measure(UiOperationPhase.NativeInput))
@@ -644,11 +657,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         });
     }
 
-    internal static CombatBattleHost CreateForExternalScene(NativeCombatFlowRunner flow, CombatScenes scenes)
+    internal static CombatBattleHost CreateForExternalScene(NativeCombatFlowRunner flow, CombatScenes scenes,
+        InputSessionOwnership.Owner? inputOwner = null)
     {
         var config = TaskContext.Instance().Config.AutoFightConfig;
         var seek = AutoDomain.AutoDomainFightSeekOptions.FromAutoFightConfig(config);
-        return new(new NativeCombatBattleHostIo(flow, scenes), new()
+        return new(new NativeCombatBattleHostIo(flow, scenes, inputOwner), new()
         {
             ExternalCompletionAuthority = true,
             FinishDetectionEnabled = false,
@@ -682,21 +696,24 @@ internal interface ICombatHostInputDevice
     void MoveForward(bool down);
     void PressDrop();
     void PressParty();
+    void PressTargetLock() => throw new NotSupportedException("此场景设备未提供目标定位");
     void PressBreakout() => throw new NotSupportedException("此输入设备未实现已验证的键盘挣脱");
     ValueTask DelayAsync(int milliseconds, CancellationToken ct);
 }
 
-internal sealed class NativeCombatHostInputDevice : ICombatHostInputDevice
+internal sealed class NativeCombatHostInputDevice(InputSessionOwnership.Owner? inputOwner = null) : ICombatHostInputDevice
 {
     public TimeProvider Clock => TimeProvider.System;
     public ILogger Logger => TaskControl.Logger;
     public void PrepareInput() => TaskControl.CheckAndSleep(0);
     public InputDispatchCapture BeginNativeCapture(Action beforeFirstNative) => new(beforeFirstNative);
-    public void MoveCamera(int x, int y) => BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.MoveMouseBy(x, y);
-    public void MoveForward(bool down) => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.MoveForward,
-        down ? KeyType.KeyDown : KeyType.KeyUp);
-    public void PressDrop() => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.Drop);
-    public void PressParty() => BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.OpenPartySetupScreen);
-    public void PressBreakout() => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_SPACE);
+    public void MoveCamera(int x, int y) => Send(() => InputHub.Foreground.Mouse.MoveMouseBy(x, y));
+    public void MoveForward(bool down) => Send(() => InputHub.Foreground.SimulateAction(GIActions.MoveForward,
+        down ? KeyType.KeyDown : KeyType.KeyUp));
+    public void PressDrop() => Send(() => InputHub.Foreground.SimulateAction(GIActions.Drop));
+    public void PressParty() => Send(() => InputHub.Foreground.SimulateActionPulse(GIActions.OpenPartySetupScreen));
+    public void PressTargetLock() => Send(() => InputHub.Foreground.Mouse.MiddleButtonClick());
+    public void PressBreakout() => Send(() => InputHub.Foreground.Keyboard.KeyPress(Vanara.PInvoke.User32.VK.VK_SPACE));
     public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => new(Task.Delay(milliseconds, ct));
+    private void Send(Action send) { if (inputOwner == null) send(); else inputOwner.Invoke(send); }
 }

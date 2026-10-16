@@ -9,10 +9,21 @@ public class CombatScript(HashSet<string> avatarNames, List<CombatCommand> comba
     public string Name { get; set; } = string.Empty;
 
     public string Path { get; set; } = string.Empty;
+    internal string? SourceTextSha256 { get; set; }
 
     public HashSet<string> AvatarNames { get; set; } = avatarNames;
     public List<CombatCommand> CombatCommands { get; set; } = combatCommands;
     public bool HasFlowCommands => CombatCommands.Any(command => command.RequiresFlow);
+
+    internal void BindSourceContext(string identity, string entryPoint, string? sessionId = null)
+    {
+        foreach (var command in CombatCommands)
+        {
+            command.SourceIdentity = identity;
+            command.SourceEntryPoint = entryPoint;
+            command.SourceSessionId = sessionId;
+        }
+    }
 
     public bool IsAvailableForParty(IEnumerable<string> party)
     {

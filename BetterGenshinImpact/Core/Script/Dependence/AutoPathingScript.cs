@@ -72,6 +72,7 @@ public class AutoPathingScript
     private async Task<PathingRunResult> Run(string json, string? sourcePath)
     {
         using var owned = _taskGuard.Enter();
+        using var inputOperation = Core.Input.InputHub.EnterLegacyOperation();
         try
         {
             if (!await _executePath(json, sourcePath))

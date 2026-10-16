@@ -69,10 +69,13 @@ public partial class CombatScriptParser
         {
             var located = new FormatException($"{path}: {exception.Message}", exception);
             located.Data["CombatSourceLocated"] = true;
+            located.Data["StrategyParseState"] = "failed";
+            located.Data["StrategyTextSha256"] = exception.Data["StrategyTextSha256"];
             throw located;
         }
         combatScript.Path = Path.GetFullPath(path);
         combatScript.Name = Path.GetFileNameWithoutExtension(path);
+        combatScript.BindSourceContext(combatScript.Path, "CombatScriptParser.Parse");
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(script)));
         foreach (var command in combatScript.CombatCommands)
         {
@@ -83,7 +86,25 @@ public partial class CombatScriptParser
     }
 
     public static CombatScript ParseContext(string context, bool validate = true, string? defaultAvatarName = null)
-        => ParseContextCore(context, validate, defaultAvatarName, 1, 1);
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        // 摘要绑定实际解析输入，不归一换行/空白，也不从稍后可能改变的文件重读。
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(context)));
+        try
+        {
+            var script = ParseContextCore(context, validate, defaultAvatarName, 1, 1);
+            script.SourceTextSha256 = hash;
+            foreach (var command in script.CombatCommands) command.SourceTextSha256 = hash;
+            script.BindSourceContext("in-memory", "CombatScriptParser.ParseContext");
+            return script;
+        }
+        catch (Exception error) when (error is FormatException or ArgumentException)
+        {
+            error.Data["StrategyTextSha256"] = hash;
+            error.Data["StrategyParseState"] = "failed";
+            throw;
+        }
+    }
 
     private static List<CombatCommand> ParseLine(string line, HashSet<string> combatAvatarNames, bool validate = true,
         string? defaultAvatarName = null, int sourceLine = 1, int sourceColumn = 1)

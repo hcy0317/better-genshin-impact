@@ -61,7 +61,8 @@ internal static class CombatSkillInput
         if (completed < before.CapturedTimestamp || completed > clock.GetTimestamp())
             throw new InvalidOperationException("技能输入回执时间边界无效");
         attempts.MarkInputCompleted(attempt.AttemptId, new(before, completed));
-        attempts.MarkOriginalReceipt(attempt.AttemptId, receipt, action.Now, clock, request.Id);
+        attempts.MarkOriginalReceipt(attempt.AttemptId, receipt, action.Now, clock, request.Id,
+            CombatSkillInputCapabilities.Resolve(action.Command));
         ct.ThrowIfCancellationRequested();
         if (receipt.Status == CombatBattleHostInputStatus.Failed)
             throw receipt.Error ?? new InvalidOperationException(receipt.Reason);

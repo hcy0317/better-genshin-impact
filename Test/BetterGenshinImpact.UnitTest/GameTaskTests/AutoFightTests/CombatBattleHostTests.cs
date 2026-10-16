@@ -95,7 +95,13 @@ public partial class CombatBattleHostTests
         for (var i = 0; i < 200 && host.State != "Searching"; i++) await host.AdvanceAsync(flow, default);
         Assert.Equal("Searching", host.State);
         var pending = new List<CombatBattleHostInput>();
-        io.PrepareEvidence = input => { pending.Add(input); return false; };
+        io.PrepareEvidence = input =>
+        {
+            pending.Add(input);
+            // No new business frame: diagnostics cannot grant admission or renew the parent.
+            io.TargetFactory = _ => new(input.Source, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080);
+            return false;
+        };
         var start = clock.GetTimestamp();
         var failure = await Record.ExceptionAsync(() => BetterGenshinImpact.GameTask.Common.Ui.UiOperation.RunAsync("test-parent",
             TimeSpan.FromMilliseconds(100), default, async operation =>
@@ -109,7 +115,7 @@ public partial class CombatBattleHostTests
         Assert.Empty(io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.Camera));
     }
     [Fact]
-    public async Task ReservedFrameWaitKeepsOneRequestAndItsOriginalDeadline()
+    public async Task BusinessFrameRecheckKeepsOneRequestWithoutWaitingForDiagnosticReadiness()
     {
         var clock = new FakeTimeProvider();
         using var flow = CreateFlow(false, new ReturningGame(clock), clock);
@@ -119,11 +125,11 @@ public partial class CombatBattleHostTests
         {
             if (input.Kind != CombatBattleHostInputKind.Camera) return true;
             attempts.Add(input);
-            return attempts.Count >= 5;
+            return false;
         };
         using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
         for (var i = 0; i < 200 && host.CameraRequests == 0; i++) await host.AdvanceAsync(flow, default);
-        Assert.Equal(5, attempts.Count);
+        Assert.Equal(2, attempts.Count);
         Assert.Single(attempts.Select(item => item.RequestId).Distinct());
         Assert.Single(attempts.Select(item => item.DeadlineTimestamp).Distinct());
         Assert.True(attempts[^1].Source.IsAfter(attempts[0].Source));
@@ -951,7 +957,8 @@ public partial class CombatBattleHostTests
             result = await host.AdvanceAsync(flow, default);
         Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
         Assert.InRange(io.Inputs.Count(x => x.Kind == CombatBattleHostInputKind.Approach), 1, 12);
-        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 45, 120);
+        Assert.InRange(clock.GetElapsedTime(started).TotalSeconds, 1, 15);
+        Assert.Equal("engagement-approach-budget-exhausted", host.Reason);
         Assert.False(io.PartyOpen);
     }
 
