@@ -135,7 +135,15 @@ internal sealed partial class DiagnosticEvidenceScope
                 if (_latestHistory != null) ReleaseHistory(_latestHistory);
                 _latestHistory = CopyHistory(anchor);
             }
-            return RequestWindow(request, phase, anchor.FrameStamp, detail, logger, fields, changeKey);
+            var admitted = RequestWindow(request, phase, anchor.FrameStamp, detail, logger, fields, changeKey);
+            // 窗口额度只限制前后文，不能连调用方仍持有的故障原帧也一并丢弃。
+            // 重复事件继续走首/变/末窗口去重；新事件仅降级为单张，不伪造完整窗口。
+            var key = (request.Length > 256 ? request[..256] : request, phase.Length > 64 ? phase[..64] : phase);
+            if (!admitted && !_closed && !_eventIncidents.ContainsKey(key))
+                TryCapture(anchor, request, phase, detail, logger,
+                    priority: DiagnosticEvidenceStorage.IsRoutineWindowPhase(phase)
+                        ? DiagnosticEvidencePriority.Routine : DiagnosticEvidencePriority.Error, fields: fields);
+            return admitted;
         }
     }
 

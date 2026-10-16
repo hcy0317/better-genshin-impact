@@ -44,6 +44,8 @@ internal sealed class CombatDecisionEvidence : IDisposable
 
     internal static void Publish(DiagnosticEvidenceScope? scope, ImageRegion image, PassiveTargetObservation observation)
     {
+        if (scope != null)
+            try { CombatInputFeedbackEvidence.Publish(scope, image, observation); } catch { }
         if (scope == null || !Pending.TryGetValue(scope, out var pending)) return;
         CombatDecisionEvidence[] snapshot;
         lock (pending) snapshot = pending.ToArray();

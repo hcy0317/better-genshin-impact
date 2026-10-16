@@ -545,6 +545,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             }
         }
         if (input.SelectionGoal != null) _flow.ObserveSelectionAssistance(input, result);
+        try { CombatInputFeedbackEvidence.Arm(DiagnosticEvidenceScope.Current, BattleId,
+            AvatarRecognition.PassiveCaptureGate.Epoch, input, result, Clock, _device.Logger); } catch { }
         if (result.Status != CombatBattleHostInputStatus.NotSent)
         {
             if (result.Error != null || result.Status != CombatBattleHostInputStatus.Sent)
@@ -633,6 +635,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => _device.DelayAsync(milliseconds, ct);
     public void ReleaseInput()
     {
+        try { CombatInputFeedbackEvidence.End(DiagnosticEvidenceScope.Current, BattleId); } catch { }
         try { FlushInputResult(); SaveDecisionEvidence("host-release-before-feedback"); }
         finally { ClearDecisionEvidence(); }
         // 这里只释放本owner持有的物理键；UI转换属于业务输入，未知结果不得在cleanup重放。

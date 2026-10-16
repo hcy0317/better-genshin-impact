@@ -43,6 +43,19 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     internal bool BudgetExhausted => _budgetExhausted;
 
     internal static bool IsTerminalPhase(string phase) => phase is "terminal" or "combat-terminal";
+    internal static bool IsRoutineWindowPhase(string phase) => phase is "selection-before-submit" or "ui-action-feedback"
+        or "mining-cast-result" or "host-input-context" or "path-interaction-context";
+
+    internal static DiagnosticEvidencePriority ResolvePriority(string phase, DiagnosticWindowFrame? window,
+        DiagnosticEvidencePriority requested)
+    {
+        // 故障锚点比前后文优先；不能让早期数千张上下文与后来的决策原图同级。
+        // 终态窗口的周边帧也不是终态本身，仍可为之后的真实故障锚点让出预算。
+        var minimum = window != null && !IsRoutineWindowPhase(phase)
+            ? window.RelativeIndex == 0 ? DiagnosticEvidencePriority.Error : DiagnosticEvidencePriority.Warning
+            : IsTerminalPhase(phase) ? DiagnosticEvidencePriority.Error : DiagnosticEvidencePriority.Routine;
+        return requested > minimum ? requested : minimum;
+    }
 
     internal DiagnosticEvidenceStorage(string root, Guid run, long maximumBytes = DefaultMaximumBytes,
         TimeProvider? clock = null, Action<string>? diagnostic = null, Action<int, string>? onEvicted = null)
@@ -96,9 +109,8 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     internal async Task WriteAsync(DiagnosticEvidence evidence, Mat image)
     {
         Initialize();
-        var priority = IsTerminalPhase(evidence.Phase) ? DiagnosticEvidencePriority.Error : evidence.Priority;
-        if (evidence.Window != null && evidence.Phase != "selection-before-submit" && priority == DiagnosticEvidencePriority.Routine)
-            priority = DiagnosticEvidencePriority.Warning;
+        var priority = ResolvePriority(evidence.Phase, evidence.Window, evidence.Priority);
+        evidence = evidence with { Priority = priority };
         var terminal = priority > DiagnosticEvidencePriority.Routine;
         if (_budgetExhausted && !terminal) throw new DiagnosticEvidenceBudgetException();
         if (evidence.RunId != _run || evidence.Sequence <= 0) throw new IOException("Evidence run identity mismatch");

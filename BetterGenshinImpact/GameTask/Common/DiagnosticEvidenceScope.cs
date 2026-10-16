@@ -298,10 +298,8 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
             lock (_gate)
             {
                 if (_closed) { reason = "scope-closed"; return false; }
-                var terminal = DiagnosticEvidenceStorage.IsTerminalPhase(phase) || priority >= DiagnosticEvidencePriority.Warning ||
-                    window != null && phase != "selection-before-submit";
-                if (DiagnosticEvidenceStorage.IsTerminalPhase(phase)) priority = DiagnosticEvidencePriority.Error;
-                else if (terminal && priority == DiagnosticEvidencePriority.Routine) priority = DiagnosticEvidencePriority.Warning;
+                priority = DiagnosticEvidenceStorage.ResolvePriority(phase, window, priority);
+                var terminal = priority >= DiagnosticEvidencePriority.Warning;
                 if (_storage?.BudgetExhausted == true && !terminal) { reason = "run-disk-budget"; return false; }
                 if (!frame.FrameStamp.IsKnown) { reason = "source-unknown"; return false; }
                 if (frame.SrcMat.Empty()) { reason = "empty-frame"; return false; }
@@ -414,6 +412,24 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 MissingFrame(request, "before-" + channel, "before-unavailable", logger ?? _logger);
             }
             TryCapture(frame, request, phase, detail, logger, priority: DiagnosticEvidencePriority.Warning, fields: fields);
+        }
+    }
+
+    // Save an already staged exact frame without labelling a successful action as a fault.
+    // No new slot or capture; the original owner still calls ForgetBefore.
+    internal void CaptureBefore(string channel, string request, string phase, ILogger? logger = null,
+        IReadOnlyDictionary<string, string>? fields = null)
+    {
+        lock (_gate)
+        {
+            if (_closed) return;
+            if (_before.TryGetValue(BeforeKey(channel, request), out var before) && before.Request == request)
+                TryCapture(before.Frame, request, phase, before.Detail, logger, before.Request, fields: fields);
+            else
+            {
+                _missingBefore++;
+                MissingFrame(request, phase, "before-unavailable", logger ?? _logger);
+            }
         }
     }
 

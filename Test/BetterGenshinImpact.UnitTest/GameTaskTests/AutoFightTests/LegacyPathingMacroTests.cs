@@ -10,7 +10,7 @@ using Fischless.WindowsInput;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
-public class LegacyPathingMacroTests
+public partial class LegacyPathingMacroTests
 {
     [Fact]
     public async Task CannonActivationRejectionStopsBeforeSecondInteractionOrFiring()

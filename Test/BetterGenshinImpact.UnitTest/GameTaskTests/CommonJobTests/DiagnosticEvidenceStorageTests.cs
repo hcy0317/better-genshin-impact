@@ -7,6 +7,35 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class DiagnosticEvidenceStorageTests
 {
+    [Fact]
+    public async Task LateFaultAnchorReclaimsEarlierWindowContextWithinTheSameDiskBudget()
+    {
+        using var fixture = new EvidenceDirectory();
+        var run = Guid.NewGuid();
+        const long budget = 32768;
+        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run, budget);
+        using var image = new Mat(2, 2, MatType.CV_8UC3, Scalar.Black);
+        var stamp = new CaptureFrameSource().Next();
+        var sequence = 1;
+        for (; sequence < 100; sequence++)
+        {
+            try
+            {
+                await storage.WriteAsync(new(run, sequence, "old-context", "fault", stamp, new string('x', 1024),
+                    Window: new(Guid.NewGuid(), stamp, -1)), image);
+            }
+            catch (DiagnosticEvidenceBudgetException) { break; }
+        }
+        Assert.InRange(sequence, 2, 99);
+        await storage.WriteAsync(new(run, ++sequence, "late-fault", "fault", stamp, new string('y', 10000),
+            Window: new(Guid.NewGuid(), stamp, 0)), image);
+        await storage.CompleteAsync(new { });
+        var directory = System.IO.Path.Combine(fixture.Path, run.ToString("N"));
+        Assert.True(File.Exists(System.IO.Path.Combine(directory, $"evidence-{sequence:D4}.json")));
+        Assert.False(File.Exists(System.IO.Path.Combine(directory, "evidence-0001.json")));
+        Assert.InRange(Directory.GetFiles(directory).Sum(path => new FileInfo(path).Length), 1, budget);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
