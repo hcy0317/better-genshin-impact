@@ -10,6 +10,87 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PreciseApproachRecoveryTests
 {
     [Fact]
+    public async Task TransformationEnteringWaterDuringRotationCannotSendGroundMovement()
+    {
+        var rotated = false;
+        var replay = new PathReplay { EmitReceipts = true, Transformed = true, Hud = false,
+            PositionAt = _ => new Point2f(104, 100),
+            MotionAt = _ => rotated ? MotionStatus.Swim : MotionStatus.Fly };
+        replay.OnRotateUntil = () => rotated = true;
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("dash")));
+        Assert.True(rotated);
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown);
+        Assert.Empty(replay.RecoveryInputs);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TransformationDoesNotOverrideSwimmingOrLossOfItsHudAfterRotation(bool losesHud)
+    {
+        var replay = new PathReplay { EmitReceipts = true, Transformed = true, Hud = false,
+            PositionAt = _ => new Point2f(104, 100), MotionAt = _ => losesHud ? MotionStatus.Fly : MotionStatus.Swim };
+        replay.OnRotateUntil = () => replay.Transformed = false;
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("dash")));
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown);
+        Assert.Empty(replay.RecoveryInputs);
+    }
+
+    [Theory]
+    [InlineData("walk")]
+    [InlineData("run")]
+    [InlineData("dash")]
+    public async Task ConfirmedTransformationCanFinishAuthoredGroundApproachWithoutHumanoidRecovery(string mode)
+    {
+        // 16:10 run, 620 node 24: transformed UI, dash, legacy motion Fly.
+        // Production must consume its direct position, not wait for a humanoid HUD.
+        var moved = false;
+        var replay = new PathReplay { EmitReceipts = true, Transformed = true, Hud = false,
+            MotionAt = _ => MotionStatus.Fly };
+        replay.PositionAt = _ => moved ? new Point2f(100, 100) : new Point2f(104, 100);
+        replay.OnInput = (action, type) =>
+        { if (action == GIActions.MoveForward && type == KeyType.KeyUp && replay.Inputs.Any(i => i.Type == KeyType.KeyDown)) moved = true; };
+        await replay.Executor.MoveCloseTo(replay.Point(mode));
+        Assert.True(moved);
+        Assert.Single(replay.Inputs.Where(i => i.Type == KeyType.KeyDown && i.Action == GIActions.MoveForward));
+        Assert.DoesNotContain(replay.Inputs, i => i.Action is GIActions.Drop or GIActions.Jump);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, frame => Assert.True(frame.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task BodyBlockedApproachSidestepsThenResumesTheSameWaypointWithoutLongRetreat()
+    {
+        // Noon 606923 -> 607243: generic retreat moved 15 pixels away from the
+        // body-blocked target. Model the collision boundary, not an instant arrival.
+        var replay = new PathReplay { EmitReceipts = true };
+        var position = new Point2f(104, 100);
+        var held = GIActions.MoveForward;
+        var moving = false;
+        var cleared = false;
+        replay.PositionAt = _ => position;
+        replay.OnInput = (action, type) =>
+        {
+            if (type == KeyType.KeyDown) { held = action; moving = true; }
+            if (type == KeyType.KeyUp && action == held) moving = false;
+        };
+        replay.AfterDelay = ms =>
+        {
+            if (!moving) return;
+            if (held == GIActions.MoveLeft) position.Y += ms * .02f;
+            cleared |= position.Y >= 102;
+            if (held == GIActions.MoveBackward) position.X += ms * .01f;
+            if (held == GIActions.MoveForward && cleared)
+            { position.X = Math.Max(100, position.X - .6f); position.Y = Math.Max(100, position.Y - .3f); }
+        };
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        Assert.True(Math.Pow(position.X - 100, 2) + Math.Pow(position.Y - 100, 2) < 4);
+        Assert.Contains(replay.RecoveryInputs, input => input.Action == GIActions.MoveLeft && input.Type == KeyType.KeyDown);
+        Assert.DoesNotContain(replay.RecoveryInputs, input => input.Action is GIActions.Jump or GIActions.Drop or GIActions.MoveBackward);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
     public async Task RecoveryCannotUseAQueuedPreInputFrameToSendTheNextAction()
     {
         var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(104, 100) };

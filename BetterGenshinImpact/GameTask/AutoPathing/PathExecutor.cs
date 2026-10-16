@@ -1544,6 +1544,7 @@ public partial class PathExecutor
                 approachDiagnostics.Detach(screen, detachAttempts, "first-valid-feedback", observation,
                     detachPulse, detachEnvironment, detachFence, _moveIo.Logger);
             }
+            var transformed = _moveIo.Transformed(screen);
             if (observation.Motion == MotionStatus.Swim && waypoint.MoveMode != MoveModeEnum.Swim.Code)
             {
                 _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
@@ -1557,7 +1558,9 @@ public partial class PathExecutor
                 continue;
             }
             swimmingFrames = 0;
-            if ((detachFence != null || waypoint.MoveMode is "walk" or "run" or "dash") &&
+            // 已确认的变身使用自身HUD，不把普通角色Fly/Unknown解释套到其移动上。
+            // 脱离攀爬后的落地、游泳和原始源帧约束仍独立生效。
+            if ((detachFence != null || !transformed && waypoint.MoveMode is "walk" or "run" or "dash") &&
                 observation.Motion is not (MotionStatus.Normal or MotionStatus.Climb))
             {
                 // 松开攀爬后的下落/未知姿态不算落地，也不消耗小碎步次数。
@@ -1661,10 +1664,10 @@ public partial class PathExecutor
                             {
                                 approachDiagnostics.RecordRecoveryInput(action, type, receipt, environment);
                             });
-                        await _trapEscaper.RotateAndMove(scope);
+                        recoveryTerminal = await PathPreciseRecovery.SidestepAsync(scope, observation)
+                            ? "sidestep-displaced" : "sidestep-no-displacement";
                         return true;
                     }, clock: _moveIo.Clock);
-                    recoveryTerminal = "returned";
                 }
                 catch (RecoveryObservationChanged) { recoveryTerminal = "interrupted"; }
                 catch (Exception error) { approachDiagnostics.RecoveryFinished(error.GetType().Name, _moveIo.Logger); throw; }
@@ -1704,8 +1707,9 @@ public partial class PathExecutor
             var currentObservation = ReadMoveObservation(current, currentLocation, previous);
             operation.Check();
             if (!currentObservation.Valid || detachFence is { } currentFence && !currentFence.Accepts(currentObservation.Stamp) ||
+                currentObservation.Motion == MotionStatus.Swim && waypoint.MoveMode != MoveModeEnum.Swim.Code ||
                 waypoint.MoveMode is "walk" or "run" or "dash" &&
-                (currentObservation.Motion != MotionStatus.Normal || _moveIo.Transformed(current)))
+                !_moveIo.Transformed(current) && currentObservation.Motion != MotionStatus.Normal)
             {
                 // 转向期间也可能爬上障碍物；回到原脱离分支，不能继续W或用平面距离判落地。
                 stationary = 0;
