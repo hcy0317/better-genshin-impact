@@ -5,6 +5,31 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class CombatScriptParserTests
 {
     [Fact]
+    public void FailedAndEmptyMemoryParsingKeepTheirActualContentIdentityWithoutClaimingExecution()
+    {
+        const string broken = "钟离 e(";
+        var error = Assert.Throws<FormatException>(() => CombatScriptParser.ParseContext(broken));
+        Assert.Equal("failed", error.Data["StrategyParseState"]);
+        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(broken))),
+            error.Data["StrategyTextSha256"]);
+        var empty = CombatScriptParser.ParseContext("");
+        Assert.Empty(empty.CombatCommands);
+        Assert.Equal("E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855", empty.SourceTextSha256);
+        Assert.Throws<ArgumentNullException>(() => CombatScriptParser.ParseContext(null!));
+    }
+
+    [Fact]
+    public void MemoryCommandsCarryTheExactInputUtf8HashBeforeNormalization()
+    {
+        const string input = "钟离 e(hold), q(optional)\r\n钟离 attack(1.2)";
+        var script = CombatScriptParser.ParseContext(input);
+        var expected = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(input)));
+        Assert.All(script.CombatCommands, command => Assert.Equal(expected, command.SourceTextSha256));
+        Assert.All(CombatScriptExecutor.ExternalSessionCommands(script), command => Assert.Equal(expected, command.SourceTextSha256));
+        Assert.NotEqual(expected, CombatScriptParser.ParseContext(input.Replace("\r\n", "\n")).CombatCommands[0].SourceTextSha256);
+    }
+
+    [Fact]
     public void ParsedSourceIdentityRemainsBoundToTheLoadedTextWhenDiskChanges()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"bgi-source-{Guid.NewGuid():N}.txt");

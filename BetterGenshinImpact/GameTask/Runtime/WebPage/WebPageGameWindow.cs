@@ -2,6 +2,7 @@ using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.GameTask.Runtime.Win32;
 using BetterGenshinImpact.View.Windows;
 using System.ComponentModel;
+using System;
 using Vanara.PInvoke;
 
 namespace BetterGenshinImpact.GameTask.Runtime.WebPage;
@@ -52,9 +53,14 @@ public sealed class WebPageGameWindow : Win32GameWindow
     }
 
     /// <summary>
-    /// 页面销毁前释放所有按下的按键（UI 线程上直接投递到页面）
+    /// 首次Closing被宿主取消时，先由StopAsync排空任务；仅真正关闭时释放遗留按键。
     /// </summary>
-    private void OnHostClosing(object? sender, CancelEventArgs e) => InputHub.ReleaseAll();
+    private void OnHostClosing(object? sender, CancelEventArgs e) => ReleaseForHostClosing(e, InputHub.ReleaseAll);
+
+    internal static void ReleaseForHostClosing(CancelEventArgs e, Action release)
+    {
+        if (!e.Cancel) release();
+    }
 
     protected override void Dispose(bool disposing)
     {

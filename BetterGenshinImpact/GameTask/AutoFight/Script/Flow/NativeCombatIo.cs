@@ -8,6 +8,7 @@ using BetterGenshinImpact.Core.Recognition.OCR;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.Core.Config;
+using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.Common;
@@ -18,9 +19,10 @@ using Microsoft.Extensions.Logging;
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 /// <summary>唯一连接截图/视觉/键鼠及原有角色状态的生产实现，不拥有战斗调度。</summary>
-internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
+internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.Owner? inputOwner = null) : INativeCombatIo
 {
-    internal static readonly CombatInputCoordinator Coordinator = new();
+    internal static readonly CombatInputCoordinator Coordinator = new(InputHub.EnterLegacyOperation);
+    private readonly CombatInputCoordinator _coordinator = inputOwner == null ? Coordinator : new();
     private bool _visionRequested, _burstRequested;
     private int _burstWidth, _burstHeight;
     public bool IsVisionPrepared => _visionRequested && OcrFactory.IsPaddlePrepared &&
@@ -28,8 +30,8 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     public TimeProvider Clock => TimeProvider.System;
     public double DpiScale => TaskContext.Instance().DpiScale;
     public ILogger Logger => TaskControl.Logger;
-    public ICombatHostInputDevice ControlDevice { get; } = new NativeCombatHostInputDevice();
-    public CombatInputCoordinator InputCoordinator => Coordinator;
+    public ICombatHostInputDevice ControlDevice { get; } = new NativeCombatHostInputDevice(inputOwner);
+    public CombatInputCoordinator InputCoordinator => _coordinator;
     public IReadOnlyList<NativeCombatActor> Actors => scenes.GetAvatars().Select(avatar => new NativeCombatActor(avatar.Name, avatar.Index)).ToArray();
     public double LastFinishCheckAge => Math.Max(0, (DateTime.Now - AutoFightTask.LastFightFinishCheckTime).TotalSeconds);
     private Avatar AvatarFor(NativeCombatActor actor) => scenes.SelectAvatar(actor.Name)
@@ -104,7 +106,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     {
         CombatActionScope.Current?.Check();
         ct.ThrowIfCancellationRequested();
-        return scenes.SelectAvatar(index).SubmitSwitchAction(index, request, ct);
+        return Owned(() => scenes.SelectAvatar(index).SubmitSwitchAction(index, request, ct));
     }
     public void WaitForSelection(int milliseconds, CancellationToken ct) => TaskControl.Sleep(milliseconds, ct);
     public bool OnSelectionMismatch(NativeCombatActor actor, int attempt, int attempts, int observed, CancellationToken ct)
@@ -113,7 +115,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
             Logger.LogWarning("切换角色失败，最后一次尝试，当前角色编号:{CurrentIndex}，期望角色编号:{ExpectedIndex}", observed, actor.Index);
         else if (attempt == 9 && AutoFightTask.FightStatusFlag)
         {
-            AvatarFor(actor).PerformUnstuckAction(ct);
+            Owned(() => AvatarFor(actor).PerformUnstuckAction(ct));
             return true;
         }
         return false;
@@ -122,18 +124,18 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     {
         using var request = new Avatar.AvatarRecoveryRequest(new(actor.Name, actor.Index), scenes,
             selection.TakeBefore(), selection.TakeFrame() ?? throw new InvalidOperationException("恢复缺少原始帧"), selection.InputFence);
-        Avatar.ResolveSelectionRecovery(request, ct);
+        Owned(() => Avatar.ResolveSelectionRecovery(request, ct));
     }
     public void CheckDefeated(ImageRegion frame, CancellationToken ct) => Avatar.ThrowWhenDefeated(frame, ct);
     public CombatBattleHostInputResult SubmitInput(NativeCombatActor actor, CombatCommand command,
         CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken ct)
-        => SubmitCore(command, request, beforeFirstNative, ct, () =>
+        => Owned(() => SubmitCore(command, request, beforeFirstNative, ct, () =>
         {
             if (command.NativeSkillSequence is { } sequence) SendSkillSequence(actor, command, sequence, ct);
             else if (command.Method == Method.Skill) AvatarFor(actor).SendSkillInput(command.HasFlag("hold"));
             else if (command.Method == Method.Burst) AvatarFor(actor).SendBurstInput();
             else command.Execute(AvatarFor(actor));
-        });
+        }));
 
     private void SendSkillSequence(NativeCombatActor actor, CombatCommand command, IReadOnlyList<CombatCommand> sequence, CancellationToken ct)
     {
@@ -161,7 +163,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
 
     public CombatBattleHostInputResult SubmitPathingInput(CombatCommand command, CombatNativeInputRequest request,
         Action beforeFirstNative, CancellationToken ct, CannonUiObservation scene = default) =>
-        SubmitCore(command, request, beforeFirstNative, ct, () => PathingPrimitiveInput.Send(command, ct, scene, request.Source));
+        Owned(() => SubmitCore(command, request, beforeFirstNative, ct, () => PathingPrimitiveInput.Send(command, ct, scene, request.Source)));
 
     private CombatBattleHostInputResult SubmitCore(CombatCommand command, CombatNativeInputRequest request,
         Action beforeFirstNative, CancellationToken ct, Action send)
@@ -176,7 +178,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
         }
         return receipt;
     }
-    public void ReleaseInput() => BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
+    public void ReleaseInput() => Owned(InputHub.ReleaseAll, release: true);
     public Vanara.PInvoke.User32.VK? HeldEPhysicalKey() =>
         ResolveHeldEPhysicalKey(ViewModel.Pages.KeyBindingsSettingsPageViewModel.MappingKey);
 
@@ -190,12 +192,27 @@ internal sealed class NativeCombatIo(CombatScenes scenes) : INativeCombatIo
     }
     public CombatBattleHostInputResult SubmitHeldE(Vanara.PInvoke.User32.VK key, bool down,
         CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken ct) =>
-        new CombatNativeInput(Clock, Logger, () => TaskControl.CheckAndSleep(0)).Submit(request,
+        Owned(() => new CombatNativeInput(Clock, Logger, () => TaskControl.CheckAndSleep(0)).Submit(request,
             down ? "held-e-down" : "held-e-up", () =>
             {
                 if (down) BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyDown(key);
                 else BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(key);
-            }, ct, beforeFirstNative);
-    public void ReleaseHeldE(Vanara.PInvoke.User32.VK key) => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(key);
+            }, ct, beforeFirstNative));
+    public void ReleaseHeldE(Vanara.PInvoke.User32.VK key) => Owned(() => { InputHub.Foreground.Keyboard.KeyUp(key); }, release: true);
     public Task DelayAsync(int milliseconds, CancellationToken ct) => Task.Delay(milliseconds, ct);
+
+    private T Owned<T>(Func<T> send)
+    {
+        if (inputOwner == null) return send();
+        T result = default!;
+        inputOwner.Invoke(() => { result = send(); });
+        return result;
+    }
+
+    private void Owned(Action send, bool release = false)
+    {
+        if (inputOwner == null) send();
+        else if (release) inputOwner.ReleaseInput(send);
+        else inputOwner.Invoke(send);
+    }
 }

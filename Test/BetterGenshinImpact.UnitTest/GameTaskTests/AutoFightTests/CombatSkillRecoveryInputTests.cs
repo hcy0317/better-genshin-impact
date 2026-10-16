@@ -37,6 +37,7 @@ public class CombatSkillRecoveryInputTests
     [Theory]
     [InlineData("班尼特", "q(required)")]
     [InlineData("钟离", "e(hold,wait)")]
+    [InlineData("钟离", "q(required)")]
     public void DuplicateReadySampleDoesNotEraseTheRecoveryObservationWindow(string actor, string syntax)
     {
         using var trial = new Trial(actor: actor, syntax: syntax);
@@ -100,6 +101,39 @@ public class CombatSkillRecoveryInputTests
         internal CombatSkillRecoveryPulse? Claim(CombatSkillObservation sample, bool controlled = true) =>
             Attempts.TryClaimRecovery(Confirmation, sample, controlled);
         public void Dispose() { Attempts.Dispose(); Context.Dispose(); }
+    }
+
+    [Fact]
+    public void ZhongliBurstRecoveryRemainsAvailableAfterTheFirstSecondWithinItsOriginalDeadline()
+    {
+        using var trial = new Trial(actor: "钟离", syntax: "q(required)");
+        Assert.Null(trial.Claim(trial.Ready(1200)));
+        var pulse = Assert.IsType<CombatSkillRecoveryPulse>(trial.Claim(trial.Ready(210)));
+        Assert.Equal(trial.Original.PendingAttempt, pulse.Attempt);
+        Assert.Equal(8, pulse.Attempt.Deadline);
+        Assert.Null(trial.Claim(trial.Ready()));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("unknown")]
+    [InlineData("partial")]
+    [InlineData("error")]
+    [InlineData("missing-time")]
+    [InlineData("control")]
+    [InlineData("stale")]
+    public void OptionalExpiryRequiresCompleteInputAndFreshStableControlWithoutCreatingConfirmation(string fault)
+    {
+        using var trial = new Trial(fault, "钟离", "q(optional)");
+        var first = trial.Ready(7800);
+        Assert.False(trial.Attempts.ObserveOptionalReadiness(trial.Confirmation, first, true));
+        var final = trial.Ready(210);
+        if (fault == "stale") final = first;
+        Assert.Equal(fault.Length == 0, trial.Attempts.ObserveOptionalReadiness(trial.Confirmation,
+            final, fault != "control", retireExpired: true));
+        var attempt = trial.Original.PendingAttempt!;
+        Assert.Null(trial.Attempts.TakeConfirmation(attempt.Actor, attempt.Skill, attempt.CommandId, trial.Context.Now));
+        Assert.Equal(1, trial.Context.InputAttemptRevision);
     }
 
     [Theory]

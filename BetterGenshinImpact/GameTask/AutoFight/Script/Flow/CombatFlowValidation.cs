@@ -66,6 +66,27 @@ internal static partial class CombatFlowValidation
         ValidateCallGraph(program);
         ValidateRecordDependencies(program);
         ValidateOpeningWatchTargets(program);
+        ValidateOptionalBursts(program);
+    }
+
+    private static void ValidateOptionalBursts(CombatFlowProgram program)
+    {
+        foreach (var block in program.Blocks.Values.Append(program.Root))
+        foreach (var node in block.Nodes.Where(node => node.Command.Criticality == CombatActionCriticality.Optional))
+        {
+            var command = node.Command;
+            // 首批只允许根级独立输出。具名/嵌套片段可能通过 call、requires 或完成记录形成间接依赖，
+            // 未证明无依赖时拒绝，而不是把保护段中的 Q 静默变成可选。
+            if (block != program.Root || CombatSkillInputCapabilities.Resolve(command)?.AllowsOptionalBurst != true ||
+                command.Options.Keys.Any(key => key is not ("id" or "timeout" or "if")))
+                throw command.Error("optional Q 必须是已声明能力的根级独立输出，不能生成效果或参与保护/维护依赖");
+            if (command.Options.TryGetValue("id", out var id) &&
+                program.Blocks.Values.Append(program.Root).Any(owner =>
+                    (owner.Requires?.NamedReferences ?? []).Any(reference => reference.Function == "succeeded" && reference.Name == id) ||
+                    owner.Nodes.Any(other => (other.Condition?.NamedReferences ?? [])
+                        .Any(reference => reference.Function == "succeeded" && reference.Name == id))))
+                throw command.Error("optional Q 的结果不能作为其他动作或原子段的依赖");
+        }
     }
 
     internal static void ValidateConditionReferences(CombatFlowProgram program, CombatFlowBlock block,

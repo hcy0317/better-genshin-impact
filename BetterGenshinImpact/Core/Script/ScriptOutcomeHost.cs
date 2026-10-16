@@ -144,19 +144,29 @@ internal static class ScriptOutcomeHost
         var reporter = new ScriptOutcomeReporter(ct);
         try
         {
-            reporter.Check();
-            if (outcomeContract == ScriptOutcomeContract.ExplicitV1) reporter.RequireExplicitOutcome();
-            engine.AddHostObject("taskResult", reporter);
-            var result = evaluate();
-            if (result is Task task) await task;
-            await lifetime.CloseAsync();
+            Exception? executionFailure = null;
+            try
+            {
+                reporter.Check();
+                if (outcomeContract == ScriptOutcomeContract.ExplicitV1) reporter.RequireExplicitOutcome();
+                engine.AddHostObject("taskResult", reporter);
+                var result = evaluate();
+                if (result is Task task) await task;
+            }
+            catch (Exception error) { executionFailure = error; }
+
+            Exception? retirementFailure = null;
+            try { await lifetime.CloseAsync(); }
+            catch (Exception error) { retirementFailure = error; }
+            if (executionFailure != null && retirementFailure != null)
+                throw new AggregateException("脚本执行与退休均失败", executionFailure, retirementFailure);
+            if ((executionFailure ?? retirementFailure) is { } failure)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             return reporter.Finish();
         }
         finally
         {
             reporter.Close();
-            try { await lifetime.CloseAsync(); }
-            catch { /* 首个执行/退休异常已经由try块传播，不以重复清理覆盖它。 */ }
         }
     }
 }

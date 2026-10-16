@@ -185,6 +185,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     [Theory]
     [InlineData("班尼特", "q(required,record=恢复记录)")]
     [InlineData("钟离", "e(hold,required,record=恢复记录)")]
+    [InlineData("钟离", "q(required,record=恢复记录)")]
     public async Task CompleteIgnoredSkillCanRecoverOnceInsideTheOriginalConfirmationAttempt(string actor, string syntax)
     {
         var clock = new FakeTimeProvider();
@@ -1329,7 +1330,13 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             var beforeReady = io.CapturedFrames.Last().FrameStamp;
             await io.DelayAsync(400, default);
             ready.SetResult();
-            for (var i = 0; i < 100 && io.Inputs.Count == 0; i++) await runner.StepAsync(default);
+            for (var i = 0; i < 100 && io.Inputs.Count == 0; i++)
+            {
+                // 替身Delay只推进虚拟时钟；给真实模型Task的异步continuation调度机会，
+                // 不改变动作次数、虚拟预算或下方新帧/输入时刻断言。
+                await Task.Delay(1);
+                await runner.StepAsync(default);
+            }
             Assert.Single(io.Inputs);
             Assert.All(io.FirstInputCooldownSources, source => Assert.True(source.IsAfter(beforeReady)));
             Assert.InRange(io.Inputs[0].At, .4, 5);
@@ -2570,18 +2577,21 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var saved = new List<DiagnosticEvidence>();
         await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
         var source = new CaptureFrameSource(clock);
+        CaptureFrameStamp latest = default;
         var native = new NativeCombatBattleHostIo(flow, new HostDevice(clock), targetObservation: () =>
-            new(source.Next(), flow.Context.BattleId, CombatObservationQuality.Available, null, 2, 2));
+            new(latest, flow.Context.BattleId, CombatObservationQuality.Available, null, 2, 2));
         var input = new CombatBattleHostInput(CombatBattleHostInputKind.Camera, 60)
         { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency };
         Assert.False(native.PrepareInputEvidence(input, default));
         using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
         CombatDecisionEvidence.Publish(scope, frame, new(false, false, clock.GetUtcNow().UtcDateTime, null, 2, 2)
         { Source = frame.FrameStamp, BattleId = flow.Context.BattleId, CaptureEpoch = AvatarRecognition.PassiveCaptureGate.Epoch, Quality = CombatObservationQuality.Available });
+        latest = frame.FrameStamp;
         input = input with { Source = native.ObserveTarget().Source };
         Assert.True(native.PrepareInputEvidence(input, default));
         Assert.Equal(CombatBattleHostInputStatus.Sent, (await native.SendAsync(input, default)).Status);
         clock.Advance(TimeSpan.FromMilliseconds(200));
+        latest = source.Next();
         var feedback = native.ObserveTarget();
         Assert.Equal(1, scope.ExactReservationStatistics.Active);
         native.ConfirmInputFeedback(feedback with { Quality = CombatObservationQuality.Late });
@@ -2662,6 +2672,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public double HoldOverheadMs { get; init; }
         public void PrepareInput() { Preparations++; clock.Advance(TimeSpan.FromMilliseconds(PreparationDelayMs)); }
         public void MoveCamera(int x, int y) { Inputs.Add("camera"); AfterCamera?.Invoke(); }
+        public void PressTargetLock() => Inputs.Add("target-lock");
         public double DownDelayMs { get; init; }
         public double UpDelayMs { get; init; }
         public Func<bool, bool>? RejectForward { get; init; }
@@ -2761,6 +2772,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 
     private sealed class SceneReplayIo(FakeTimeProvider clock, Guid battleId, CaptureFrameSource? producer = null) : ICombatBattleHostIo
     {
+        public Action? BeforeObservation { get; init; }
         private readonly CaptureFrameSource _source = producer ?? new(clock);
         public bool NoProgress { get; init; }
         public bool AlignedTarget { get; init; }
@@ -2770,6 +2782,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public Guid BattleId => battleId;
         public CombatBattleObservation ObserveTarget()
         {
+            BeforeObservation?.Invoke();
             TargetObservations++;
             if (AlignedTarget) return new(_source.Next(), battleId, CombatObservationQuality.Available,
                 new(AutoFightSeekAction.ApproachVisibleEnemy, EnemyIndicatorDirection.None, new(910, 400, 100, 4, 400), 1, SeekCueKind.HealthBar),

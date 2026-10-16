@@ -852,6 +852,7 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
             KazuhaPickupEnabled = false,
             PickDropsAfterFightEnabled = false,
             Timeout = _taskParam.Timeout,
+            SceneCapabilities = SceneForBoss(_taskParam.BossName),
         };
 
         var jsonTask = new AutoFightJsonTask(jsonParam);
@@ -885,10 +886,16 @@ public class AutoBossTask : ISoloTask<Dictionary<string, int>>
             KazuhaPartyName = string.Empty,
             BattleThresholdForLoot = -1,
             OnlyPickEliteDropsMode = "DisableAutoPickupForNonElite",
-            Timeout = _taskParam.Timeout
+            Timeout = _taskParam.Timeout,
+            SceneCapabilities = SceneForBoss(_taskParam.BossName)
         };
         return taskParam;
     }
+
+    internal static CombatSceneCapabilities SceneForBoss(string bossName)
+        => string.Equals(bossName, "半永恒统辖矩阵", StringComparison.Ordinal)
+            ? CombatSceneCapabilities.AlgorithmOfSemiIntransientMatrix
+            : CombatSceneCapabilities.Unknown;
 
     /// <summary>
     /// 校验自动首领讨伐启动所需的 Boss、战斗策略、讨伐次数、补充树脂开关、重试次数和路线文件。

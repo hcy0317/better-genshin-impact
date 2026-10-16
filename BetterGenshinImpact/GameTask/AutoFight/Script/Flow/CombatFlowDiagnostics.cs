@@ -180,6 +180,8 @@ internal sealed class DiagnosticCombatGame(ICombatFlowGame game, CombatFlowDiagn
     }
     public void CheckDefeated(CancellationToken ct) => game.CheckDefeated(ct);
     public bool HasPendingSkill(CombatFlowAction action) => game.HasPendingSkill(action);
+    public bool TrySkipExpiredOptionalSkill(CombatFlowAction action, CancellationToken ct) =>
+        game.TrySkipExpiredOptionalSkill(action, ct);
     public void CancelObservation(CombatFlowAction action) => game.CancelObservation(action);
     public ValueTask WaitAfterFailedPassAsync(CancellationToken ct) => game.WaitAfterFailedPassAsync(ct);
     public async ValueTask<CombatSkillAttempt?> TryRecoverExpiredSkillAsync(CombatFlowAction action, CancellationToken ct)

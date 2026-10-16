@@ -14,6 +14,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script;
 
 public class CombatCommand
 {
+    public CombatActionCriticality Criticality => HasFlag("optional")
+        ? CombatActionCriticality.Optional : CombatActionCriticality.Required;
     public string Name { get; set; }
 
     public Method Method { get; set; }
@@ -29,6 +31,9 @@ public class CombatCommand
     public int? RoundParity { get; set; }
     public string? SourceFile { get; set; }
     internal string? SourceTextSha256 { get; set; }
+    internal string? SourceIdentity { get; set; }
+    internal string? SourceEntryPoint { get; set; }
+    internal string? SourceSessionId { get; set; }
     public int SourceLine { get; set; } = 1;
     public int SourceColumn { get; set; } = 1;
     internal bool IsCompilerGenerated { get; init; }
@@ -63,6 +68,9 @@ public class CombatCommand
         RoundParity = source.RoundParity;
         SourceFile = source.SourceFile;
         SourceTextSha256 = source.SourceTextSha256;
+        SourceIdentity = source.SourceIdentity;
+        SourceEntryPoint = source.SourceEntryPoint;
+        SourceSessionId = source.SourceSessionId;
         SourceLine = source.SourceLine;
         SourceColumn = source.SourceColumn;
         IsCompilerGenerated = source.IsCompilerGenerated;
@@ -199,7 +207,8 @@ public class CombatCommand
     public void Execute(Avatar avatar)
     {
         LastExecutionResult = new(CombatExecutionKind.Completed, "LEGACY_INPUT_RETURNED");
-        if (Method.IsFlowControl || Options.Count != 0 || RoundParity != null || HasFlag("refresh") || Flags.Count != 0 && Method != Method.Burst)
+        if (Method.IsFlowControl || Options.Count != 0 || RoundParity != null || HasFlag("refresh") ||
+            HasFlag("optional") || Flags.Count != 0 && Method != Method.Burst)
             throw new InvalidOperationException("增强策略必须通过统一流程执行器运行");
         if (Method == Method.Skill)
         {
@@ -408,3 +417,5 @@ public class CombatCommand
         avatar.QueueSkillCooldownObservation();
     }
 }
+
+public enum CombatActionCriticality { Required, Optional }

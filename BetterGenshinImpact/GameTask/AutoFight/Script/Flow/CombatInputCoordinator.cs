@@ -8,6 +8,10 @@ public sealed class CombatInputCoordinator
 {
     private readonly object _gate = new();
     private Session? _owner;
+    private readonly Func<IDisposable>? _enterInputScope;
+
+    public CombatInputCoordinator() { }
+    internal CombatInputCoordinator(Func<IDisposable> enterInputScope) => _enterInputScope = enterInputScope;
 
     public Session? TryAcquire(Guid battleId, Action release)
     {
@@ -15,7 +19,7 @@ public sealed class CombatInputCoordinator
         lock (_gate)
         {
             if (_owner != null) return null;
-            return _owner = new(this, battleId, release);
+            return _owner = new(this, battleId, release, _enterInputScope?.Invoke());
         }
     }
 
@@ -24,16 +28,18 @@ public sealed class CombatInputCoordinator
     {
         private readonly CombatInputCoordinator _coordinator;
         private readonly Action _release;
+        private readonly IDisposable? _inputScope;
         private bool _closed;
         private bool _working;
         private bool _releaseStarted;
         public Guid BattleId { get; }
 
-        internal Session(CombatInputCoordinator coordinator, Guid battleId, Action release)
+        internal Session(CombatInputCoordinator coordinator, Guid battleId, Action release, IDisposable? inputScope)
         {
             _coordinator = coordinator;
             BattleId = battleId;
             _release = release;
+            _inputScope = inputScope;
         }
 
         public IDisposable EnterOperation()
@@ -87,6 +93,7 @@ public sealed class CombatInputCoordinator
             if (!_closed || _working || _releaseStarted) return;
             _releaseStarted = true;
             _release(); // 若释放失败，保留所有权并拒绝交接，不能猜测键已全部松开。
+            _inputScope?.Dispose();
             if (ReferenceEquals(_coordinator._owner, this)) _coordinator._owner = null;
         }
 

@@ -13,10 +13,96 @@ public class ScriptAsyncRetirementCollection;
 public class ScriptAsyncRetirementTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     [Fact]
+    public async Task BindingRestoreFailureCannotReplaceAnAlreadyObservedNativeFailure()
+    {
+        using var lifetime = new ScriptAsyncLifetime(default);
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        engine.AddHostObject("dispatcher", new RegisteredWorkPort(lifetime,
+            Task.FromException(new IOException("native-failure-before-restore")), () => { }));
+        var error = await Record.ExceptionAsync(() => ScriptOutcomeHost.RunAsync(engine, () => engine.Evaluate("""
+            dispatcher.Begin();
+            Object.defineProperty(globalThis, 'dispatcher', { writable: false, configurable: false });
+            """), default, lifetime: lifetime));
+        var combined = Assert.IsType<AggregateException>(error);
+        Assert.Contains(combined.Flatten().InnerExceptions, e => e.Message.Contains("native-failure-before-restore"));
+        Assert.True(combined.Flatten().InnerExceptions.Count >= 2);
+    }
+
+    [Fact]
+    public async Task NativeFailureAndAdmissionFailureAreObservedEvenWhenJavascriptDoesNotWait()
+    {
+        using var lifetime = new ScriptAsyncLifetime(default);
+        var operation = lifetime.RegisterOperation(_ => Task.FromException(new IOException("worker-failure")),
+            () => throw new InvalidOperationException("admission-failure"));
+        var first = lifetime.CloseAsync();
+        Assert.Same(first, lifetime.CloseAsync());
+        var error = await Assert.ThrowsAsync<AggregateException>(() => first);
+        Assert.Contains(error.Flatten().InnerExceptions, e => e.Message == "worker-failure");
+        Assert.Contains(error.Flatten().InnerExceptions, e => e.Message == "admission-failure");
+        await Assert.ThrowsAsync<IOException>(() => operation);
+    }
+
+    [Fact]
+    public async Task NativeWorkerWithoutAReturnedPromiseMustExitBeforeTheScriptHostReturns()
+    {
+        using var owner = TaskExecutionScope.BeginOwned();
+        using var lifetime = new ScriptAsyncLifetime(default);
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        engine.AddHostObject("dispatcher", new RegisteredWorkPort(lifetime, released.Task, () => closed.TrySetResult()));
+        var running = ScriptOutcomeHost.RunAsync(engine,
+            () => engine.Evaluate("dispatcher.Begin(); Promise.resolve();"), default, lifetime: lifetime);
+        try
+        {
+            await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(running.IsCompleted);
+            await Assert.ThrowsAsync<OperationCanceledException>(() => lifetime.RegisterOperation(_ => Task.CompletedTask, () => { }));
+            Assert.Throws<InvalidOperationException>(lifetime.Dispose);
+        }
+        finally
+        {
+            released.TrySetResult();
+            await running.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.Equal(2, engine.Evaluate("1+1"));
+    }
+
+    public sealed class RegisteredWorkPort
+    {
+        private readonly ScriptAsyncLifetime _lifetime;
+        private readonly Task _completion;
+        private readonly Action _close;
+        internal RegisteredWorkPort(ScriptAsyncLifetime lifetime, Task completion, Action close)
+        { _lifetime = lifetime; _completion = completion; _close = close; }
+        public string Begin()
+        {
+            _lifetime.RegisterOperation(_ => _completion, _close);
+            return "registered";
+        }
+    }
+
+    [Fact]
+    public async Task MainFailureAndRetirementFailureAreBothPreservedBeforeEngineRetirement()
+    {
+        Assert.True(BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.IsProhibited);
+        using var lifetime = new ScriptAsyncLifetime(default);
+        using var engine = new V8ScriptEngine(V8ScriptEngineFlags.EnableTaskPromiseConversion);
+        using var callback = lifetime.Token.Register(() => throw new IOException("native-retirement-failure"));
+        var error = await Record.ExceptionAsync(() => ScriptOutcomeHost.RunAsync(engine,
+            () => engine.Evaluate("throw new Error('original-main-failure')"), default, lifetime: lifetime));
+        var combined = Assert.IsType<AggregateException>(error);
+        Assert.Contains(combined.Flatten().InnerExceptions, e => e.Message.Contains("original-main-failure"));
+        Assert.Contains(combined.Flatten().InnerExceptions, e => e.Message.Contains("native-retirement-failure"));
+        Assert.Equal(2, engine.Evaluate("1+1"));
+    }
+
+    [Fact]
     public async Task CancellationCallbacksHaveAVisibleRetirementPhaseBeforeTheyReturn()
     {
         var logger = new RetirementLogger();
-        using var lifetime = new ScriptAsyncLifetime(default, logger);
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        using var lifetime = new ScriptAsyncLifetime(default, logger, clock);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var callback = lifetime.Token.Register(() =>
@@ -28,8 +114,8 @@ public class ScriptAsyncRetirementTests(Xunit.Abstractions.ITestOutputHelper out
         try
         {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var reported = await Task.WhenAny(logger.SlowCancellation.Task, Task.Delay(3500));
-            Assert.Same(logger.SlowCancellation.Task, reported);
+            clock.Advance(TimeSpan.FromMilliseconds(2001));
+            Assert.True(logger.SlowCancellation.Task.IsCompleted);
             Assert.False(closing.IsCompleted);
         }
         finally
