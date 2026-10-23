@@ -34,6 +34,7 @@ param(
     [string]$ShowStatus,
     [string]$AutoPickKey,
     [string]$CpuOcr,
+    [string]$AutoPickEnabled,
     [switch]$NoChange
 )
 [PSCustomObject]@{
@@ -43,6 +44,7 @@ param(
     showStatus = $ShowStatus
     autoPickKey = $AutoPickKey
     cpuOcr = $CpuOcr
+    autoPickEnabled = $AutoPickEnabled
     noChange = [bool]$NoChange
 } | ConvertTo-Json | Set-Content -LiteralPath $env:BETTERGI_STARTUP_TEST_CAPTURE_RECORD -Encoding UTF8
 'capture settings recorded'
@@ -119,6 +121,18 @@ function Stop-BetterGIRdpSession {
         throw 'Daily-controller startup validation changed user-owned config content.'
     }
 
+    # The native path must work without loading any old RDP lifecycle helper.
+    Remove-Item -LiteralPath (Join-Path $schedulerRoot 'Use-BetterGI-RdpSession.ps1') -Force
+    $native = & $launcherPath -ConfigName '每日自动化总控' -OneDragonLaunchLockName $isolatedLock -ChildSessionAutomation -NoLaunch | ConvertFrom-Json
+    if (-not $native.childSessionAutomation -or $native.rdpLifecycleEnabled -or
+        $native.wouldOpenRdp -or $native.wouldCloseRdp -or $native.wouldLogoffRdpUser -or
+        $native.argumentList -contains '--no-single' -or $native.argumentList[0] -ne '--child-session-one-dragon' -or
+        -not $native.requiredAutoPickEnabled) { throw 'Native path retained legacy RDP behavior.' }
+    $captureRecord = Get-Content -LiteralPath $captureRecordPath -Raw | ConvertFrom-Json
+    if (-not $captureRecord.noChange -or $captureRecord.autoPickEnabled -ne 'True') {
+        throw 'Native preview must not change settings and must enable automatic pickup.'
+    }
+
     Remove-Item -LiteralPath $configPath -Force
     $missingConfigFailure = $null
     try {
@@ -126,8 +140,7 @@ function Stop-BetterGIRdpSession {
             -OneDragonLaunchLockName $isolatedLock `
             -ConfigName '每日自动化总控' `
             -NoLaunch `
-            -EnableRdpLifecycle $false `
-            -SetRdpSessionVolumeOnStart $false | Out-Null
+            -ChildSessionAutomation | Out-Null
     }
     catch {
         $missingConfigFailure = $_
