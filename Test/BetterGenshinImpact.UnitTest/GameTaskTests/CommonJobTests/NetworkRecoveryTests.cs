@@ -170,8 +170,9 @@ public class NetworkRecoveryTests
     public void SpinnerRequiresThreeSmallRoundComponents(int dots, bool expected)
     {
         using var frame = new ImageRegion(new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        Point[] centers = [new(960, 585), new(992, 572), new(1005, 540)];
         for (var i = 0; i < dots; i++)
-            Cv2.Circle(frame.SrcMat, new Point(960 + i * 20, 560 - i * 15), 7, new Scalar(40, 210, 255), -1);
+            Cv2.Circle(frame.SrcMat, centers[i], 7, new Scalar(40, 210, 255), -1);
         Assert.Equal(expected, WorldFrameAvailability.HasServerWaitSpinner(frame));
     }
 

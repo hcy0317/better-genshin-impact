@@ -11,6 +11,37 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatNativeAdapterReplayTests
 {
+    [Fact]
+    public async Task PartyProbeReleaseSavesItsActualLastFrameAndFreesTheExactSlots()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var sample = default(PartySetupFinishObservation);
+        var native = new NativeCombatBattleHostIo(flow, new HostDevice(clock) { NativeReceipts = true }, partyObservation: () => sample);
+        var input = new CombatBattleHostInput(CombatBattleHostInputKind.OpenParty)
+        { RequestId = Guid.NewGuid(), Source = source.Next(), DeadlineTimestamp = clock.GetTimestamp() + clock.TimestampFrequency };
+        var result = await native.SendAsync(input, default);
+        Assert.Equal(CombatBattleHostInputStatus.Sent, result.Status);
+        clock.Advance(TimeSpan.FromMilliseconds(70));
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(19, 0, 0)), 0, 0) { FrameStamp = source.Next() };
+        sample = new(frame.FrameStamp.Sequence, frame.FrameStamp.CapturedAt, 2, 2, false, 0) { Source = frame.FrameStamp };
+        native.ObservePartyBar();
+        NativeCombatBattleHostIo.CapturePartyProbe(frame, sample, true, input.RequestId,
+            new CaptureFrameFence(input.Source, result.CompletedTimestamp!.Value), clock,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, flow.Context.BattleId, admittedAtDecision: true);
+        native.ReleaseInput();
+        using var reservation = scope.TryReserveExactFrame(new(flow.Context.BattleId, Guid.NewGuid(), 1), frame.FrameStamp,
+            clock, clock.GetTimestamp() + clock.TimestampFrequency, default, out var rejection);
+        Assert.NotNull(reservation);
+        Assert.Null(rejection);
+        await scope.DisposeAsync();
+        Assert.Contains(saved, item => item.Phase == "party-terminal" && item.Source == frame.FrameStamp);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

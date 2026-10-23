@@ -141,8 +141,7 @@ internal sealed partial class DiagnosticEvidenceScope
             var key = (request.Length > 256 ? request[..256] : request, phase.Length > 64 ? phase[..64] : phase);
             if (!admitted && !_closed && !_eventIncidents.ContainsKey(key))
                 TryCapture(anchor, request, phase, detail, logger,
-                    priority: DiagnosticEvidenceStorage.IsRoutineWindowPhase(phase)
-                        ? DiagnosticEvidencePriority.Routine : DiagnosticEvidencePriority.Error, fields: fields);
+                    priority: DiagnosticEvidenceStorage.AnchorPriority(phase), fields: fields);
             return admitted;
         }
     }
@@ -222,7 +221,21 @@ internal sealed partial class DiagnosticEvidenceScope
     internal bool RequestLatestWindow(string request, string phase, string detail, ILogger? logger = null,
         IReadOnlyDictionary<string, string>? fields = null, string? changeKey = null)
     {
-        lock (_gate) return RequestWindow(request, phase, _lastWindowSource, detail, logger, fields, changeKey);
+        lock (_gate)
+        {
+            var admitted = RequestWindow(request, phase, _lastWindowSource, detail, logger, fields, changeKey);
+            var key = (request.Length > 256 ? request[..256] : request, phase.Length > 64 ? phase[..64] : phase);
+            if (!admitted && !_closed && !_eventIncidents.ContainsKey(key))
+            {
+                var pivot = _latestHistory?.Source == _lastWindowSource ? _latestHistory :
+                    _history.FirstOrDefault(item => item.Source == _lastWindowSource);
+                if (pivot?.Image is { } original)
+                    TryCapture(original, request, phase, detail, logger,
+                        priority: DiagnosticEvidenceStorage.AnchorPriority(phase), fields: fields);
+                else MissingFrame(request, phase, "latest-source-pixels-unavailable", logger ?? _logger);
+            }
+            return admitted;
+        }
     }
 
     private void SaveHistory(PendingWindow window, HistoryFrame item, int index)

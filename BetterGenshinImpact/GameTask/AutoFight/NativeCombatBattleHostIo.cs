@@ -30,6 +30,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     private CaptureFrameFence? _partyFence;
     private CaptureFrameStamp _partyEvidenceSource;
     private Guid _partyInputRequest;
+    private CaptureFrameStamp _lastPartyProbeSource;
     private CaptureFrameStamp _lastAdmittedPartySource;
     private CombatDecisionEvidence? _decisionEvidence;
     private Guid _evidenceRequest;
@@ -176,6 +177,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             AutoFightTask.ObservePartySetupBar(capture, capture.FrameStamp.Sequence));
         var admitted = _partyRequested && observed.Source.IsFresh(Clock, TimeSpan.FromMilliseconds(150)) &&
                  _partyFence?.Accepts(observed.Source) == true;
+        if (_partyRequested) _lastPartyProbeSource = observed.Source;
         if (admitted) _lastAdmittedPartySource = observed.Source;
         if (admitted && observed.BarVisible)
         {
@@ -234,6 +236,29 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         }
     }
 
+    private void RetirePartyEvidence(string detail, IReadOnlyDictionary<string, string>? fields = null)
+    {
+        if (_partyInputRequest == Guid.Empty) return;
+        try
+        {
+            CapturePartyTerminal(_partyInputRequest, _lastPartyProbeSource, _lastAdmittedPartySource,
+                detail, _device.Logger, fields ?? new Dictionary<string, string>
+                {
+                    ["battle"] = BattleId.ToString("N"),
+                    ["partyInputRequest"] = _partyInputRequest.ToString("N"),
+                    ["inputCompleted"] = _partyFence?.InputCompletedTimestamp.ToString() ?? "unknown",
+                    ["sourceRole"] = "last-party-probe; not current target or battle-completion proof",
+                    ["barObserved"] = _partyEvidence.ToString()
+                });
+        }
+        catch { /* Evidence retirement must not prevent physical input release. */ }
+        finally
+        {
+            _partyInputRequest = Guid.Empty;
+            _lastPartyProbeSource = _lastAdmittedPartySource = default;
+        }
+    }
+
     public ValueTask<CombatBattleHostInputResult> SendAsync(CombatBattleHostInput input, CancellationToken ct) =>
         SendCoreAsync(input, ct, controlRecovery: false);
 
@@ -266,7 +291,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         if (trace.CapturePhase is not { } phase) return;
         var evidence = DiagnosticEvidenceScope.Current;
         if (phase == "terminal" && _partyInputRequest != Guid.Empty)
-            CapturePartyTerminal(_partyInputRequest, trace.PartySample.Source, _lastAdmittedPartySource, detail, _device.Logger, EvidenceFields(trace));
+            RetirePartyEvidence(detail, EvidenceFields(trace));
         if (evidence == null)
             _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase={Phase} reason=no-run-scope", BattleId, phase);
         else
@@ -528,8 +553,10 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         {
             if (input.Kind == CombatBattleHostInputKind.OpenParty)
             {
+                RetirePartyEvidence("previous party request retired before opening a new probe");
                 _partyRequested = true;
                 _partyInputRequest = input.RequestId;
+                _lastPartyProbeSource = default;
                 _lastAdmittedPartySource = default;
                 _partyEvidence = false;
                 AutoFightTask.LastFightFinishCheckTime = DateTime.Now;
@@ -539,6 +566,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             {
                 try { DiagnosticEvidenceScope.Current?.ForgetExactFrame("party-probe", _partyInputRequest.ToString("N")); } catch { }
                 try { DiagnosticEvidenceScope.Current?.ForgetExactFrame("party-probe-admitted", _partyInputRequest.ToString("N")); } catch { }
+                _partyInputRequest = Guid.Empty;
+                _lastPartyProbeSource = _lastAdmittedPartySource = default;
                 _partyRequested = _partyEvidence = false;
                 _partyFence = null;
                 _partyEvidenceSource = default;
@@ -638,6 +667,9 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         try { CombatInputFeedbackEvidence.End(DiagnosticEvidenceScope.Current, BattleId); } catch { }
         try { FlushInputResult(); SaveDecisionEvidence("host-release-before-feedback"); }
         finally { ClearDecisionEvidence(); }
+        // A negative party probe may resume fighting. Persist its actual pixels now,
+        // then return both exact slots to selection/input evidence for that continuation.
+        RetirePartyEvidence("party probe ended at host input release; no confirmed battle completion");
         // 这里只释放本owner持有的物理键；UI转换属于业务输入，未知结果不得在cleanup重放。
         _partyRequested = _partyEvidence = false;
         _partyFence = null;

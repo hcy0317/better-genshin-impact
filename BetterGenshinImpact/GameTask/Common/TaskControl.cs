@@ -1,6 +1,7 @@
 using BetterGenshinImpact.Core.Input;
 using System;
 using System.Drawing;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
@@ -80,7 +81,7 @@ public class TaskControl
         CombatActionScope.Current?.Check();
         operation.Check();
         using (operation.Measure(UiOperationPhase.Pause)) TrySuspend();
-        using (operation.Measure(UiOperationPhase.Focus)) CheckAndActivateGameWindow();
+        CheckAndActivateGameWindow();
         operation.DelayAsync(Math.Max(0, milliseconds), ct).GetAwaiter().GetResult();
         return true;
     }
@@ -174,6 +175,7 @@ public class TaskControl
 
     internal static void CheckAndActivateGameWindow(Runtime.IGameWindow? window)
     {
+        using var focusMeasurement = UiOperation.Current?.Measure(UiOperationPhase.Focus);
         // 已绑定的确切窗口在前台时无需重复查询进程名；这些查询会消耗
         // 战斗输入的源帧新鲜度预算。失焦/最小化仍走原有恢复与暂停逻辑。
         if (window is { Handle: not 0, IsMinimized: false, IsForeground: true }) return;
@@ -209,33 +211,50 @@ public class TaskControl
         }
 
         var count = 0;
+        var started = Stopwatch.GetTimestamp();
+        var lastActiveProcess = activeProcessName;
         //未激活则尝试恢复窗口
-        WaitWhileManaged(() => !SystemControl.IsGenshinImpactActiveByProcess(), () =>
+        try
         {
-            ThrowIfGameProcessExited();
-            var name = SystemControl.GetActiveByProcess();
-            if (RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
-                    System.Windows.Forms.SystemInformation.TerminalServerSession,
-                    name))
+            WaitWhileManaged(() => !SystemControl.IsGenshinImpactActiveByProcess(), () =>
             {
-                Logger.LogInformation("远程会话 SearchHost 抢占焦点，释放 Win 键并关闭搜索浮层后恢复原神窗口");
-                DismissTransientShellWindow();
-                SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
-                Thread.Sleep(300);
-            }
-            else if (count >= 10 && count % 10 == 0)
-            {
-                Logger.LogInformation("多次尝试未恢复，尝试最小化后激活窗口！");
-                SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
-            }
-            else
-            {
-                Logger.LogInformation("当前获取焦点的窗口为: {Name}，不是原神，尝试恢复窗口", name);
-                SystemControl.FocusWindow(TaskContext.Instance().GameHandle);
-            }
+                ThrowIfGameProcessExited();
+                var name = lastActiveProcess = SystemControl.GetActiveByProcess();
+                if (RemoteSessionInputPolicy.ShouldDismissTransientShellWindow(
+                        System.Windows.Forms.SystemInformation.TerminalServerSession,
+                        name))
+                {
+                    Logger.LogInformation("远程会话 SearchHost 抢占焦点，释放 Win 键并关闭搜索浮层后恢复原神窗口");
+                    DismissTransientShellWindow();
+                    SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
+                    Thread.Sleep(300);
+                }
+                else if (count >= 10 && count % 10 == 0)
+                {
+                    Logger.LogInformation("多次尝试未恢复，尝试最小化后激活窗口！");
+                    SystemControl.MinimizeAndActivateWindow(TaskContext.Instance().GameHandle);
+                }
+                else
+                {
+                    Logger.LogInformation("当前获取焦点的窗口为: {Name}，不是原神，尝试恢复窗口", name);
+                    SystemControl.FocusWindow(TaskContext.Instance().GameHandle);
+                }
 
-            count++;
-        });
+                count++;
+            });
+        }
+        finally
+        {
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            try
+            {
+                if (elapsed >= TimeSpan.FromSeconds(2))
+                    Logger.LogDebug("FOCUS_RECOVERY op={Operation} target={Target} lastForegroundProcess={Process} remoteSession={RemoteSession} attempts={Attempts} elapsedMs={Milliseconds:F1}; 前台归属等待，不代表识别耗时或输入已送达",
+                        UiOperation.Current?.Id, TaskContext.Instance().GameHandle, lastActiveProcess,
+                        System.Windows.Forms.SystemInformation.TerminalServerSession, count, elapsed.TotalMilliseconds);
+            }
+            catch { /* 诊断失败不能替换原来的超时或取消。 */ }
+        }
     }
 
     private static void DismissTransientShellWindow()

@@ -16,10 +16,14 @@ public class Rec(
     BgiOnnxModel model,
     IReadOnlyList<string> labels,
     OcrVersionConfig config,
-    BgiOnnxFactory bgiOnnxFactory)
+    BgiOnnxSessionFactory bgiOnnxFactory)
     : IDisposable
 {
     private readonly InferenceSession _session = bgiOnnxFactory.CreateInferenceSession(model, true);
+    private bool _disposed;
+
+    public Rec(BgiOnnxModel model, IReadOnlyList<string> labels, OcrVersionConfig config, BgiOnnxFactory factory)
+        : this(model, labels, config, factory.ForCurrentRuntime()) { }
 
     // _labels = File.ReadAllLines(labelFilePath);
 
@@ -27,6 +31,8 @@ public class Rec(
     {
         lock (_session)
         {
+            if (_disposed) return;
+            _disposed = true;
             _session.Dispose();
         }
         GC.SuppressFinalize(this);
@@ -119,6 +125,7 @@ public class Rec(
                 {
                     using (RecognitionExecutionScope.Enter(_session))
                     {
+                        ObjectDisposedException.ThrowIf(_disposed, this);
                         return OcrInference.Run(options =>
                         {
                             using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([

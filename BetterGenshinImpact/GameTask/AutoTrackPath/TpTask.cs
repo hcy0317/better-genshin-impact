@@ -1030,7 +1030,8 @@ public class TpTask
     private async Task<bool> WaitForTeleportPanelAndConfirm(GiTpPosition? targetTp)
     {
         var timeoutMilliseconds = GetTeleportPanelTimeoutMilliseconds();
-        await Delay(TeleportPanelInitialDelayMs, ct);
+        await Delay(Math.Max(TeleportPanelInitialDelayMs,
+            Math.Clamp(TaskContext.Instance().Config.QuickTeleportConfig.WaitTeleportPanelDelay, 0, 500)), ct);
         var stopwatch = Stopwatch.StartNew();
         for (var i = 0; i == 0 || stopwatch.ElapsedMilliseconds < timeoutMilliseconds; i++)
         {

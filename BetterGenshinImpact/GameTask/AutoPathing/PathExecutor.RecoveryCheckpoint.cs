@@ -124,13 +124,18 @@ public partial class PathExecutor
             $"canRestart={canRestart} rejection={HealingRestartRejection(CurWaypoints.Item2, resumeIndex) ?? "none"} " +
             $"beforeSource={before.SessionId}/{before.Sequence}";
         var lastObservation = "unavailable:not-observed";
+        var lastSource = default(CaptureFrameStamp);
+        var evidence = DiagnosticEvidenceScope.Current;
         void Trace(string state, bool fault)
         {
             try
             {
                 var detail = $"request={request} {context} state={state} observation={lastObservation} cancelled={ct.IsCancellationRequested}";
                 _moveIo.Logger.LogDebug("PATH_HEALING_CHECKPOINT {Detail}", detail);
-                if (fault) DiagnosticEvidenceScope.Current?.RequestLatestWindow(request, "healing-resume-failed", detail, _moveIo.Logger);
+                if (fault && lastSource.IsKnown)
+                    evidence?.CaptureExactWindow(request, request, lastSource, "healing-resume-failed", detail, _moveIo.Logger);
+                else if (fault)
+                    evidence?.RequestLatestWindow(request, "healing-resume-failed", detail, _moveIo.Logger);
             }
             catch { /* 诊断不能改变回血结果或失败传播。 */ }
         }
@@ -145,11 +150,14 @@ public partial class PathExecutor
                 var result = new HealingFrame(frame.FrameStamp, _moveIo.CombatHud(frame) && !_moveIo.Transformed(frame),
                     Bv.CurrentAvatarIsLowHp(frame));
                 lastObservation = result.ToString();
+                lastSource = frame.FrameStamp;
+                evidence?.RememberExactFrame(request, request, frame);
                 return result;
             }, milliseconds => _moveIo.Delay(milliseconds, ct), ct, _moveIo.Clock, canRestart, allowParentReplan);
         }
         catch (HealingRecoveryCompletedException) { Trace("healed-restart-confirmed", false); throw; }
         catch (Exception error) { Trace("failed:" + error.GetType().Name, true); throw; }
+        finally { evidence?.ForgetExactFrame(request, request); }
     }
 
     internal static async Task ConfirmHealingRestartAsync(CaptureFrameStamp before, Func<Task> recover,

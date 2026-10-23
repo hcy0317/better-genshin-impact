@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BetterGIRoot,
 
     [ValidateNotNullOrEmpty()]
@@ -15,6 +15,9 @@ param(
 
     [ValidateSet('Keep', 'True', 'False')]
     [string]$CpuOcr = 'Keep',
+
+    [ValidateSet('Keep', 'True', 'False')]
+    [string]$AutoPickEnabled = 'Keep',
 
     [switch]$NoChange
 )
@@ -86,16 +89,22 @@ if ($ShowLogBox -ne 'Keep' -or $ShowStatus -ne 'Keep') {
     }
 }
 
-if ($AutoPickKey -ne 'Keep') {
+if ($AutoPickKey -ne 'Keep' -or $AutoPickEnabled -ne 'Keep') {
     if (-not $config.autoPickConfig) {
         throw "BetterGI autoPickConfig not found in: $ConfigPath"
     }
 
-    $changes += Set-ConfigProperty `
-        -Target $config.autoPickConfig `
-        -Name 'pickKey' `
-        -Value $AutoPickKey `
-        -DisplayName 'autoPickConfig.pickKey'
+    if ($AutoPickKey -ne 'Keep') {
+        $changes += Set-ConfigProperty `
+            -Target $config.autoPickConfig `
+            -Name 'pickKey' `
+            -Value $AutoPickKey `
+            -DisplayName 'autoPickConfig.pickKey'
+    }
+    if ($AutoPickEnabled -ne 'Keep') {
+        $changes += Set-ConfigProperty -Target $config.autoPickConfig -Name 'enabled' `
+            -Value ([bool]::Parse($AutoPickEnabled)) -DisplayName 'autoPickConfig.enabled'
+    }
 }
 
 if ($CpuOcr -ne 'Keep') {

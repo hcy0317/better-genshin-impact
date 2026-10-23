@@ -59,6 +59,7 @@ $RequiredCaptureMode = 'BitBlt'
 $RequiredShowLogBox = 'True'
 $RequiredShowStatus = 'True'
 $RequiredAutoPickKey = 'F'
+$RequiredAutoPickEnabled = 'True'
 $RequiredCpuOcr = 'True'
 $RdpTargetAddress = '127.0.0.2'
 $CaptureModeScript = Join-Path $SchedulerDir 'Set-BetterGICaptureMode.ps1'
@@ -268,11 +269,11 @@ if (-not (Test-Path -LiteralPath $CaptureModeScript -PathType Leaf)) {
     throw "Capture mode script not found: $CaptureModeScript"
 }
 
-if (-not (Test-Path -LiteralPath $RdpLifecycleScript -PathType Leaf)) {
+if (-not $ChildSessionAutomation -and -not (Test-Path -LiteralPath $RdpLifecycleScript -PathType Leaf)) {
     throw "RDP lifecycle script not found: $RdpLifecycleScript"
 }
 
-. $RdpLifecycleScript
+if (-not $ChildSessionAutomation) { . $RdpLifecycleScript }
 $rdpLogAction = { param([string]$Message) Write-RunLog $Message }
 $rdpSession = $null
 $didOrWouldSetRdpSessionVolume = $false
@@ -301,18 +302,20 @@ try {
         }
         Write-RunLog ("Acquired one-dragon launch lock '{0}'." -f $OneDragonLaunchLockName)
     }
-    $rdpSession = Start-BetterGIRdpSession `
-        -RdpFilePath $RdpFilePath `
-        -TargetAddress $RdpTargetAddress `
-        -RdpUserName $RdpUserName `
-        -OpenRdpClient $OpenRdpClientOnStart `
-        -RequireCurrentRdpSession $RequireCurrentRdpSession `
-        -EnableRdpLifecycle $EnableRdpLifecycle `
-        -NoLaunch:$NoLaunch `
-        -WarmupSeconds $RdpWarmupSeconds `
-        -LogAction $rdpLogAction
+    if (-not $ChildSessionAutomation) {
+        $rdpSession = Start-BetterGIRdpSession `
+            -RdpFilePath $RdpFilePath `
+            -TargetAddress $RdpTargetAddress `
+            -RdpUserName $RdpUserName `
+            -OpenRdpClient $OpenRdpClientOnStart `
+            -RequireCurrentRdpSession $RequireCurrentRdpSession `
+            -EnableRdpLifecycle $EnableRdpLifecycle `
+            -NoLaunch:$NoLaunch `
+            -WarmupSeconds $RdpWarmupSeconds `
+            -LogAction $rdpLogAction
 
-    $didOrWouldSetRdpSessionVolume = Invoke-RdpSessionVolumeSync
+        $didOrWouldSetRdpSessionVolume = Invoke-RdpSessionVolumeSync
+    }
 
     if ($NoLaunch) {
         Write-RunLog "Ensuring BetterGI capture mode is $RequiredCaptureMode before NoLaunch validation."
@@ -320,6 +323,9 @@ try {
     else {
         Write-RunLog "Ensuring BetterGI capture mode is $RequiredCaptureMode before BetterGI launch."
     }
+    $existingBetterGI = @(Get-Process -Name 'BetterGI' -ErrorAction SilentlyContinue)
+    # A live root/child owns its cached configuration. Let the native automation entry synchronize it.
+    $previewSettingsOnly = $NoLaunch -or ($ChildSessionAutomation -and $existingBetterGI.Count -gt 0)
     & $CaptureModeScript `
         -BetterGIRoot $BetterGIRoot `
         -CaptureMode $RequiredCaptureMode `
@@ -327,10 +333,10 @@ try {
         -ShowStatus $RequiredShowStatus `
         -AutoPickKey $RequiredAutoPickKey `
         -CpuOcr $RequiredCpuOcr `
-        -NoChange:$NoLaunch |
+        -AutoPickEnabled $RequiredAutoPickEnabled `
+        -NoChange:$previewSettingsOnly |
         ForEach-Object { Write-RunLog ("Capture mode sync: {0}" -f $_) }
 
-    $existingBetterGI = @(Get-Process -Name 'BetterGI' -ErrorAction SilentlyContinue)
     if ($ChildSessionAutomation) {
         $argsForBetterGI = @(
             '--child-session-one-dragon',
@@ -378,10 +384,11 @@ try {
             requiredShowLogBox = [bool]::Parse($RequiredShowLogBox)
             requiredShowStatus = [bool]::Parse($RequiredShowStatus)
             requiredAutoPickKey = $RequiredAutoPickKey
+            requiredAutoPickEnabled = [bool]::Parse($RequiredAutoPickEnabled)
             requiredCpuOcr = [bool]::Parse($RequiredCpuOcr)
             rdpLifecycleEnabled = $EnableRdpLifecycle
             rdpFilePath = $rdpSession.rdpFilePath
-            rdpTargetAddress = '127.0.0.2'
+            rdpTargetAddress = if ($ChildSessionAutomation) { $null } else { $RdpTargetAddress }
             rdpUserName = $rdpSession.userName
             openRdpClientOnStart = $OpenRdpClientOnStart
             requireCurrentRdpSession = $RequireCurrentRdpSession
@@ -477,7 +484,9 @@ finally {
                 Write-RunLog ("Keeping owned-process record for live BetterGI PID {0} so the outer scheduler can clean up this launch." -f $process.Id)
             }
         }
-        Stop-BetterGIRdpSession -Session $rdpSession -CloseTimeoutSeconds $RdpCloseTimeoutSeconds -LogoffRdpUser $LogoffRdpUserOnStop -LogAction $rdpLogAction
+        if (-not $ChildSessionAutomation) {
+            Stop-BetterGIRdpSession -Session $rdpSession -CloseTimeoutSeconds $RdpCloseTimeoutSeconds -LogoffRdpUser $LogoffRdpUserOnStop -LogAction $rdpLogAction
+        }
     }
     finally {
         if ($oneDragonLaunchLockTaken) {

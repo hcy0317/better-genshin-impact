@@ -101,6 +101,7 @@ dotnet build BetterGenshinImpact.sln -c Debug
 - Flow 提示 `workflow_repo_revision_unbounded`，且贡献路径位于 `.codex-tmp` 等已声明忽略目录时，先在触发问题的执行身份下核对 `git rev-parse --show-toplevel`、准确路径的 `git check-ignore -v -- <路径>` 及退出码；Git 所有权或权限检查失败不能当作“未忽略”。
 - 检查被权限阻断时，按宿主批准机制在获准身份下做同范围只读复核；不得自动写全局 `safe.directory`、扩大排除或提高指纹上限，也不因超限直接搬仓库或删除工作树。
 - 只有 Git 检查成功后仍超限，才继续按实际贡献路径调查；涉及清理或规则变更须另有明确授权，保留未提交工作、用户数据及既有失败停止边界。
+禁止 新增 BetterGenshinImpact\Assets 目录，这里的资源已经被 BetterGI.Assets.* 的外部资源给占用了。如果要新增资源，需要人工去修改对应 nuget 包的资源。
 
 ## 识别与模拟操作
 

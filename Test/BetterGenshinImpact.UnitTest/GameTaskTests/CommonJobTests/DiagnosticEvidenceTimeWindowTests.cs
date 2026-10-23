@@ -8,6 +8,44 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 public class DiagnosticEvidenceTimeWindowTests
 {
     [Theory]
+    [InlineData("party-terminal")]
+    [InlineData("selection-terminal")]
+    public async Task ProvisionalWindowsLeaveTheReservedWindowForTheActualTerminal(string phase)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; },
+            maxWindows: 2, maxPendingWindows: 2, queueCapacity: 64);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        Assert.True(scope.RequestWindowFromFrame("pending", "unconfirmed", frame, "still waiting"));
+        Assert.False(scope.RequestWindowFromFrame("another", "unconfirmed", frame, "still waiting"));
+        Assert.True(scope.RequestWindowFromFrame("failure", phase, frame, "original terminal"));
+        await scope.DisposeAsync();
+        Assert.All(saved.Where(item => item.Phase == "unconfirmed"),
+            item => Assert.Equal(DiagnosticEvidencePriority.Warning, item.Priority));
+        Assert.Equal(DiagnosticEvidencePriority.Error, Assert.Single(saved.Where(item => item.Request == "failure")).Priority);
+    }
+
+    [Fact]
+    public async Task LatestWindowDenialStillSavesTheSameRetainedOriginalWithoutTakingANewFrame()
+    {
+        var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();
+        await using var scope = new DiagnosticEvidenceScope((item, image) =>
+        { saved.Add((item, image.At<Vec3b>(0, 0).Item0)); return Task.CompletedTask; }, maxWindows: 1);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(17, 0, 0)), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        scope.ObserveExistingFrame(frame);
+        Assert.True(scope.RequestLatestWindow("first", "fault", "first window"));
+        Assert.False(scope.RequestLatestWindow("late", "fault", "window exhausted"));
+        frame.SrcMat.SetTo(new Scalar(29, 0, 0));
+        await scope.DisposeAsync();
+        var fallback = Assert.Single(saved.Where(item => item.Evidence.Request == "late"));
+        Assert.Equal(frame.FrameStamp, fallback.Evidence.Source);
+        Assert.Equal(17, fallback.Pixel);
+        Assert.Null(fallback.Evidence.Window);
+    }
+
+    [Theory]
     [InlineData("ui-action-feedback")]
     [InlineData("selection-before-submit")]
     [InlineData("mining-cast-result")]

@@ -15,7 +15,7 @@ public class ChildSessionAutomationSettingsTests
         config.AutoPickConfig.ItemTextLeftOffset = 123;
         config.MaskWindowConfig.ShowLogBox = config.MaskWindowConfig.ShowStatus = false;
         config.HardwareAccelerationConfig.CpuOcr = false;
-        config.HardwareAccelerationConfig.GpuDevice = 2;
+        config.HardwareAccelerationConfig.DirectML.DeviceId = "GPU-2";
         config.ChildSessionConfig.AudioMuted = false;
         var pick = config.AutoPickConfig;
         var service = new FakeConfigService(config);
@@ -30,7 +30,7 @@ public class ChildSessionAutomationSettingsTests
         Assert.True(config.HardwareAccelerationConfig.CpuOcr);
         Assert.Same(pick, config.AutoPickConfig);
         Assert.Equal(123, config.AutoPickConfig.ItemTextLeftOffset);
-        Assert.Equal(2, config.HardwareAccelerationConfig.GpuDevice);
+        Assert.Equal("GPU-2", config.HardwareAccelerationConfig.DirectML.DeviceId);
         Assert.False(config.ChildSessionConfig.AudioMuted);
         Assert.Equal(1, service.Flushes);
         ChildSessionAutomationSettings.Apply(service);

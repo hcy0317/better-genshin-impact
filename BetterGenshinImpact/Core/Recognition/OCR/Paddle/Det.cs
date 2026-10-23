@@ -8,10 +8,14 @@ using OpenCvSharp;
 
 namespace BetterGenshinImpact.Core.Recognition.OCR.Paddle;
 
-public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgiOnnxFactory)
+public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxSessionFactory bgiOnnxFactory)
     : IDisposable
 {
     private readonly InferenceSession _session = bgiOnnxFactory.CreateInferenceSession(model, true);
+    private bool _disposed;
+
+    public Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory factory)
+        : this(model, config, factory.ForCurrentRuntime()) { }
 
     /// <summary>Gets or sets the detection side length limit used by the Python det preprocess.</summary>
     public int LimitSideLen { get; set; } = 960;
@@ -44,6 +48,8 @@ public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgi
     {
         lock (_session)
         {
+            if (_disposed) return;
+            _disposed = true;
             _session.Dispose();
         }
         GC.SuppressFinalize(this);
@@ -95,6 +101,7 @@ public class Det(BgiOnnxModel model, OcrVersionConfig config, BgiOnnxFactory bgi
             {
                 using (RecognitionExecutionScope.Enter(_session))
                 {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
                     return OcrInference.Run(options =>
                     {
                         using IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results = _session.Run([

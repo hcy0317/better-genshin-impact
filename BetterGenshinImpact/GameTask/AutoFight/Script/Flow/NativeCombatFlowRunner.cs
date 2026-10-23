@@ -609,6 +609,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private CombatControlObservation _selectionControl;
         private CaptureFrameStamp _selectionControlSource;
         private string _selectionReceiptDetail = "receipt=not-requested nativeRequested=0 nativeSubmitted=0 uncertain=False";
+        private CaptureFrameStamp _selectionEvidenceSource;
         private string? _lastSelectionTrace;
         private int _selectionTraceCount;
         private string? _selectionActor;
@@ -786,7 +787,10 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 if (_selectionResult == null) return new(false, false, default, null, null, null, awaitingObservation: true);
                 CheckSelectionOutcome(_selectionResult);
                 if (_selectionResult.State is not (AvatarSelectionProtocol.Outcome.Ready or AvatarSelectionProtocol.Outcome.RetiredWithoutCompletion or AvatarSelectionProtocol.Outcome.Unavailable))
+                {
+                    CaptureSelectionTerminal("expired-selection-cannot-handoff", _selectionResult.BorrowFrame);
                     TaskExecutionScope.StopUnconfirmedCombat("选角原期限耗尽且未取得可交接的新帧，禁止由新目标覆盖");
+                }
                 CancelSelection();
                 _confirmedActor = null;
                 ClearCapture();
@@ -886,6 +890,12 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         {
             if (_selection is not { } goal || _selectionAction is not { } action) return;
             var source = goal.ObservedSource;
+            if (_capture != null && source.IsKnown && _capture.FrameStamp == source && source != _selectionEvidenceSource)
+            {
+                // One of the existing two exact slots; no capture or repeated recognition.
+                _evidence?.RememberExactFrame("selection-observation", goal.GoalId.ToString("N"), _capture);
+                _selectionEvidenceSource = source;
+            }
             var detail = $"battle={action.BattleId} goal={goal.GoalId} target={_selectionActor} actual={goal.ObservedIndex?.ToString() ?? "unknown"} state={state} reason={goal.Reason} source={source.SessionId}/{source.Sequence} sourceKnown={source.IsKnown} originalDeadline={goal.DeadlineTimestamp} remaining={action.RemainingBudget:F3}s {_selectionReceiptDetail} " +
                 $"controlObserved={_selectionControl.IsObserved} motion={_selectionControl.Motion} keyboardBreakout={_selectionControl.KeyboardBreakoutRequested} controlSource={_selectionControlSource.SessionId}/{_selectionControlSource.Sequence} " +
                 $"purpose={Purpose} command={DescribeCommand(action.Command)} pathingPrimitive={PathingPrimitiveInput.Supports(action.Command)} atomic={action.InAtomicScope} observationOnly={_selectionObservationOnly}";
@@ -933,8 +943,43 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             if (result.State == AvatarSelectionProtocol.Outcome.UnconfirmedTerminal)
             {
                 _selectionTerminal = true;
+                CaptureSelectionTerminal("unconfirmed-input-terminal", result.BorrowFrame);
                 TaskExecutionScope.StopUnconfirmedCombat($"切人输入结果未知且原目标 {_selectionActor} 未确认，禁止跳过或向其他角色继续输入");
             }
+        }
+
+        private void CaptureSelectionTerminal(string reason, ImageRegion? frame = null)
+        {
+            if (_selection is not { } goal || _selectionAction is not { } action) return;
+            var request = goal.GoalId.ToString("N");
+            try
+            {
+                var fields = new Dictionary<string, string>
+                {
+                    ["battle"] = action.BattleId.ToString("N"),
+                    ["targetActor"] = _selectionActor ?? "unknown",
+                    ["targetIndex"] = FindActor(_selectionActor ?? "")?.Index.ToString() ?? "unknown",
+                    ["observedIndex"] = goal.ObservedIndex?.ToString() ?? "unknown",
+                    ["observedSource"] = $"{goal.ObservedSource.SessionId}/{goal.ObservedSource.Sequence}",
+                    ["inputReceipt"] = _selectionReceiptDetail,
+                    ["deadline"] = $"original={goal.DeadlineTimestamp} expired={goal.IsExpired} remaining={action.RemainingBudget:F3}",
+                    ["sourceRole"] = "last-selection-observation; not fresh handoff or completion proof",
+                    ["control"] = $"observed={_selectionControl.IsObserved} motion={_selectionControl.Motion} breakout={_selectionControl.KeyboardBreakoutRequested} source={_selectionControlSource.SessionId}/{_selectionControlSource.Sequence}"
+                };
+                var detail = $"reason={reason} goalReason={goal.Reason} command={DescribeCommand(action.Command)} purpose={Purpose}";
+                frame ??= _capture;
+                if (frame != null && frame.FrameStamp == goal.ObservedSource)
+                {
+                    _evidence?.TryCapture(frame, request, "selection-terminal", detail, Logger, fields: fields);
+                    _evidence?.RequestWindowFromFrame(request, "selection-terminal", frame, detail, Logger, fields);
+                }
+                else _evidence?.CaptureExactWindow("selection-observation", request, _selectionEvidenceSource,
+                    "selection-terminal", detail, Logger, fields);
+                _evidence?.CaptureBefore("selection", request, "before-selection-terminal", Logger, fields);
+                if (_evidence == null)
+                    Logger.LogDebug("EVIDENCE_CAPTURE_MISSING request={Request} phase=selection-terminal reason=no-run-scope", request);
+            }
+            catch { /* Diagnostic failure cannot change selection retirement or authorize input. */ }
         }
 
         private ImageRegion? TakeSelectionFrame()
@@ -974,6 +1019,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 if (!_selectionTerminal && _selection is { HasUnconfirmedSubmission: true, IsExpired: true })
                 {
                     _selectionTerminal = true;
+                    CaptureSelectionTerminal("expired-unconfirmed-submission");
                     TaskExecutionScope.StopUnconfirmedCombat($"切人输入结果未知且原目标 {_selectionActor} 到期未确认，禁止当作可选跳过");
                 }
                 if (_selection is { HasSubmittedInput: false } or { IsClosed: true, HasUnconfirmedSubmission: false }) CancelSelection();
@@ -984,7 +1030,12 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
 
         private void CancelSelection()
         {
-            if (_selection is { } goal) _evidence?.ForgetBefore("selection", goal.GoalId.ToString("N"));
+            if (_selection is { } goal)
+            {
+                _evidence?.ForgetBefore("selection", goal.GoalId.ToString("N"));
+                _evidence?.ForgetExactFrame("selection-observation", goal.GoalId.ToString("N"));
+            }
+            _selectionEvidenceSource = default;
             _selectionResult?.Dispose();
             _selectionResult = null;
             _selection?.Dispose();
