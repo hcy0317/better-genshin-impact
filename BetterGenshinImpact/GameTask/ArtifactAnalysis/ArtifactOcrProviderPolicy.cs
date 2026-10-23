@@ -1,5 +1,6 @@
 using BetterGenshinImpact.Core.Recognition.OCR.Paddle;
 using BetterGenshinImpact.Core.Recognition.ONNX;
+using Microsoft.Extensions.DependencyInjection;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
@@ -18,7 +19,8 @@ internal static class ArtifactOcrProviderPolicy
         return new BgiOnnxFactory(
             App.GetLogger<BgiOnnxFactory>(),
             forceCpuOcr,
-            excludeTensorRtForOcr: ExcludeTensorRt);
+            excludeTensorRtForOcr: ExcludeTensorRt,
+            resolvedRuntime: App.ServiceProvider.GetRequiredService<InferenceRuntimeService>().Current);
     }
 
     internal static PaddleOcrService.PaddleOcrModelType ResolveCurrentModel()

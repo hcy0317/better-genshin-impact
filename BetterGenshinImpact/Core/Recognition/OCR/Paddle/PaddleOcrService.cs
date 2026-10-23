@@ -110,7 +110,7 @@ public class PaddleOcrService : IOcrService, IDisposable
                 preHeatImagePath ?? TestImagePath);
         }
 
-        public (Det, Rec) Build(BgiOnnxFactory onnxFactory)
+        public (Det, Rec) Build(BgiOnnxSessionFactory onnxFactory)
         {
             var detector = new Det(DetectionModel, DetectionVersion, onnxFactory);
             try
@@ -263,6 +263,9 @@ public class PaddleOcrService : IOcrService, IDisposable
     }
 
     public PaddleOcrService(BgiOnnxFactory bgiOnnxFactory, PaddleOcrModelType modelType)
+        : this(bgiOnnxFactory.ForCurrentRuntime(), modelType) { }
+
+    public PaddleOcrService(BgiOnnxSessionFactory bgiOnnxFactory, PaddleOcrModelType modelType)
     {
         var (modelsDet, modelsRec) = modelType.Build(bgiOnnxFactory);
         _localDetModel = modelsDet;
