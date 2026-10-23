@@ -2176,6 +2176,8 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
     [Fact]
     public async Task ExpiredSubmittedSelectionIsRetiredBeforeANewActorCanReplaceIt()
     {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
         var clock = new FakeTimeProvider();
         using var io = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e\n芙宁娜 e"));
         var adapter = NativeCombatFlowRunner.CreateAdapter(io);
@@ -2193,6 +2195,12 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.NotNull(await Record.ExceptionAsync(async () =>
             await adapter.PrepareObservationStepAsync(next, "onfield", default)));
         Assert.Single(io.Selections);
+        await evidence.DisposeAsync();
+        var terminal = Assert.Single(saved.Where(item => item.Phase == "selection-terminal" && item.Window == null));
+        Assert.Contains(io.ActiveObservations, item => item.Source == terminal.Source);
+        Assert.Equal("琴", terminal.Fields!["targetActor"]);
+        Assert.Contains("inputRequest=", terminal.Fields["inputReceipt"]);
+        Assert.Equal(DiagnosticEvidencePriority.Error, terminal.Priority);
     }
 
     [Theory]

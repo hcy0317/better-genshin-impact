@@ -42,9 +42,13 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     private int _evictedCount;
     internal bool BudgetExhausted => _budgetExhausted;
 
-    internal static bool IsTerminalPhase(string phase) => phase is "terminal" or "combat-terminal";
+    internal static bool IsTerminalPhase(string phase) => phase is "terminal" or "combat-terminal"
+        or "party-terminal" or "selection-terminal" or "skill-terminal-Failed";
     internal static bool IsRoutineWindowPhase(string phase) => phase is "selection-before-submit" or "ui-action-feedback"
         or "mining-cast-result" or "host-input-context" or "path-interaction-context";
+
+    internal static DiagnosticEvidencePriority AnchorPriority(string phase) => IsRoutineWindowPhase(phase)
+        ? DiagnosticEvidencePriority.Routine : phase == "unconfirmed" ? DiagnosticEvidencePriority.Warning : DiagnosticEvidencePriority.Error;
 
     internal static DiagnosticEvidencePriority ResolvePriority(string phase, DiagnosticWindowFrame? window,
         DiagnosticEvidencePriority requested)
@@ -52,8 +56,8 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
         // 故障锚点比前后文优先；不能让早期数千张上下文与后来的决策原图同级。
         // 终态窗口的周边帧也不是终态本身，仍可为之后的真实故障锚点让出预算。
         var minimum = window != null && !IsRoutineWindowPhase(phase)
-            ? window.RelativeIndex == 0 ? DiagnosticEvidencePriority.Error : DiagnosticEvidencePriority.Warning
-            : IsTerminalPhase(phase) ? DiagnosticEvidencePriority.Error : DiagnosticEvidencePriority.Routine;
+            ? window.RelativeIndex == 0 ? AnchorPriority(phase) : DiagnosticEvidencePriority.Warning
+            : IsTerminalPhase(phase) || phase == "deadline" ? DiagnosticEvidencePriority.Error : DiagnosticEvidencePriority.Routine;
         return requested > minimum ? requested : minimum;
     }
 

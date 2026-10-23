@@ -7,6 +7,13 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
 public class WorldFrameAvailabilityTests
 {
+    [UiRecoveryFact("zhongli-shield-map-open-20261023.png")]
+    public void RecordedZhongliShieldParticlesCannotBecomeAServerWait()
+    {
+        using var frame = Frame("zhongli-shield-map-open-20261023.png");
+        Assert.Null(WorldFrameAvailability.ReadConnectionWait(frame, new TextOcr("")));
+    }
+
     [UiRecoveryFact("dark-world-20261004.png")]
     public void DarkRockBackgroundIsNotAReconnectPanel()
     {

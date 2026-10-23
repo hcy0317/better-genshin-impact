@@ -131,6 +131,20 @@ internal static class WorldFrameAvailability
             dots.Add(new(centroids.At<double>(i, 0), centroids.At<double>(i, 1)));
         }
         if (dots.Count != 3) return false;
+        // 真实等待动画沿屏幕中心约45px半径旋转。仅三个金色连通块会把
+        // 钟离护盾粒子当成等待；同次原帧206400的粒子半径为56/61/79px。
+        var origin = new Point2d(image.Width / 2d - image.Width * 46 / 100,
+            image.Height / 2d - image.Height * 45 / 100);
+        var minimumRadius = double.MaxValue;
+        var maximumRadius = 0d;
+        foreach (var dot in dots)
+        {
+            var radius = dot.DistanceTo(origin);
+            if (radius < 32 * scale || radius > 55 * scale) return false;
+            minimumRadius = Math.Min(minimumRadius, radius);
+            maximumRadius = Math.Max(maximumRadius, radius);
+        }
+        if (maximumRadius - minimumRadius > 8 * scale) return false;
         for (var i = 0; i < dots.Count; i++)
             for (var j = i + 1; j < dots.Count; j++)
             {
