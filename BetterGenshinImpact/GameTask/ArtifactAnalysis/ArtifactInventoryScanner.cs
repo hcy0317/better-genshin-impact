@@ -25,7 +25,7 @@ public sealed class ArtifactInventoryScanner : IArtifactInventoryScanner
     public async Task<ArtifactSnapshotDto> ScanAsync(string uid, CancellationToken cancellationToken)
     {
         var task = new ArtifactInventoryScanTask(uid, cancellationToken);
-        await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+        await ArtifactHostTaskScope.RunSoloTaskAsync(task, cancellationToken);
         return task.Result ?? throw new InvalidOperationException(
             "Artifact inventory scan ended without a complete snapshot.");
     }
@@ -38,7 +38,7 @@ public sealed class ArtifactInventoryScanner : IArtifactInventoryScanner
     {
         var task = new ArtifactInventoryExecutionInspectionTask(
             uid, expectedArtifactCount, targets, cancellationToken);
-        await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+        await ArtifactHostTaskScope.RunSoloTaskAsync(task, cancellationToken);
         return task.Result ?? throw new InvalidOperationException(
             "Artifact execution inspection ended without a complete observation.");
     }

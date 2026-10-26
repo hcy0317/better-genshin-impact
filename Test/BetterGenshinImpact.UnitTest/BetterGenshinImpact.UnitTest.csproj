@@ -34,6 +34,7 @@
       <None Update="Fixtures\Ui\*.png" CopyToOutputDirectory="PreserveNewest" />
       <None Update="Fixtures\Pathing\*.json" CopyToOutputDirectory="PreserveNewest" />
       <None Update="Fixtures\Combat\*.json" CopyToOutputDirectory="PreserveNewest" />
+      <None Update="Fixtures\Combat\*.png" CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
 
 </Project>

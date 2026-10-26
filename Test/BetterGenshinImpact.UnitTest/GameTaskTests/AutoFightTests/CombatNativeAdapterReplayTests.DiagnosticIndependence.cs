@@ -11,6 +11,71 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatNativeAdapterReplayTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TerminalTraceUsesExistingPixelsAndLabelsMissingDecisionSource(bool exactDecisionRetained)
+    {
+        var clock = new FakeTimeProvider();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();
+        await using var scope = new DiagnosticEvidenceScope((item, image) =>
+        { saved.Add((item, image.At<Vec3b>(0, 0).Item0)); return Task.CompletedTask; });
+        var source = new CaptureFrameSource(clock);
+        using var first = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(7, 0, 0)), 0, 0)
+        { FrameStamp = source.Next() };
+        scope.ObserveExistingFrame(first);
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        using var decision = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(19, 0, 0)), 0, 0)
+        { FrameStamp = source.Next() };
+        scope.ObserveExistingFrame(decision); // Sparse history deliberately has no pixels for this source.
+        if (exactDecisionRetained) scope.RememberExactFrame("fixture", "decision", decision);
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        using var later = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(31, 0, 0)), 0, 0)
+        { FrameStamp = source.Next() };
+        scope.ObserveExistingFrame(later); // Must never be relabelled as the decision anchor.
+        var native = new NativeCombatBattleHostIo(flow, new HostDevice(clock));
+        native.Trace(new(flow.Context.BattleId, "search", "Unconfirmed", "no-progress", CombatBattleHostResult.Unconfirmed,
+            new(decision.FrameStamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 2, 2),
+            24, 12, 15, 0, true, "terminal"));
+        await scope.DisposeAsync();
+        var anchor = Assert.Single(saved.Where(item => item.Evidence.Phase == "combat-terminal" && item.Evidence.Window?.RelativeIndex == 0));
+        var expected = exactDecisionRetained ? decision.FrameStamp : first.FrameStamp;
+        Assert.Equal(expected, anchor.Evidence.Source);
+        Assert.Equal(exactDecisionRetained ? 19 : 7, anchor.Pixel);
+        Assert.Equal($"{decision.FrameStamp.SessionId}/{decision.FrameStamp.Sequence}", anchor.Evidence.Fields!["requestedDecisionSource"]);
+        Assert.Equal($"{expected.SessionId}/{expected.Sequence}", anchor.Evidence.Fields["actualContextSource"]);
+        Assert.Equal(exactDecisionRetained ? "exact-decision-source" : "unavailable:nearby-context-only", anchor.Evidence.Fields["decisionSourcePixels"]);
+        Assert.Equal(exactDecisionRetained ? "0.000" : "-0.100", anchor.Evidence.Fields["contextOffsetSeconds"]);
+    }
+
+    [Theory]
+    [InlineData("session")]
+    [InlineData("clock")]
+    [InlineData("expired-context")]
+    public async Task TerminalTraceCannotUseUnrelatedOrExpiredContextPixels(string mismatch)
+    {
+        var clock = new FakeTimeProvider();
+        using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("琴 e"));
+        using var flow = NativeCombatFlowRunner.Create(LoadProgram("琴 e"), physical);
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0) { FrameStamp = source.Next() };
+        scope.ObserveExistingFrame(frame);
+        clock.Advance(TimeSpan.FromSeconds(mismatch == "expired-context" ? 11 : .1));
+        var requested = source.Next();
+        if (mismatch == "session") requested = requested with { SessionId = Guid.NewGuid() };
+        if (mismatch == "clock") requested = requested with { TimestampFrequency = requested.TimestampFrequency * 2 };
+        var native = new NativeCombatBattleHostIo(flow, new HostDevice(clock));
+        native.Trace(new(flow.Context.BattleId, "search", "Unconfirmed", "no-progress", CombatBattleHostResult.Unconfirmed,
+            new(requested, flow.Context.BattleId, CombatObservationQuality.Available, null, 2, 2),
+            24, 12, 15, 0, true, "terminal"));
+        await scope.DisposeAsync();
+        Assert.DoesNotContain(saved, item => item.Phase == "combat-terminal");
+    }
+
     [Fact]
     public async Task PartyProbeReleaseSavesItsActualLastFrameAndFreesTheExactSlots()
     {
@@ -157,7 +222,7 @@ public partial class CombatNativeAdapterReplayTests
         Assert.Contains(context, item => item.Pixel == 66 && item.Evidence.Window?.RelativeSeconds >= 2);
         Assert.All(context, item =>
         {
-            Assert.Equal(input.RequestId.ToString("N"), item.Evidence.Request);
+            Assert.Equal(input.RequestId.ToString("N"), item.Evidence.Fields!["inputRequest"]);
             Assert.Equal(DiagnosticEvidencePriority.Routine, item.Evidence.Priority);
             Assert.Equal($"{feedback.SessionId}/{feedback.Sequence}", item.Evidence.Fields!["contextAnchorSource"]);
             Assert.True(item.Evidence.Fields.ContainsKey("anchorFeedbackTarget"));

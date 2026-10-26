@@ -297,7 +297,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         else
         {
             if (phase == "terminal")
-                evidence.RequestWindow("battle:" + BattleId.ToString("N") + ":" + trace.Episode,
+                evidence.RequestExistingWindow(BattleId.ToString("N"), "battle:" + BattleId.ToString("N") + ":" + trace.Episode,
                     "combat-terminal", frame.Source, detail, _device.Logger, EvidenceFields(trace));
             evidence.RequestFrame(BattleId.ToString("N"), trace.Episode, phase, frame.Source, detail, _device.Logger, EvidenceFields(trace));
             if (phase == "terminal")

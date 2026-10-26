@@ -61,7 +61,13 @@ internal static class CombatInputFeedbackEvidence
                         ["feedbackTarget"] = $"health={observed.HasNormalHealthBar} visual={observed.Visual} direction={observed.IndicatorDecision} damage={observed.HasDamageCue}",
                         ["feedbackControl"] = $"{observed.Control} motion={observed.Motion} epoch={observed.CaptureEpoch}"
                     });
-                scope.RequestWindowFromFrame(request.Input.RequestId.ToString("N"), "host-input-context", image,
+                // Share sparse first/change/last context; every exact feedback above keeps its own receipt.
+                // Source ids, timestamps and pixel geometry are deliberately absent from the change key.
+                var contextRequest = $"host-input:{request.Battle:N}:{request.Epoch}:{observed.Source.SessionId}";
+                var changeKey = $"kind={request.Input.Kind} health={observed.HasNormalHealthBar} visual={observed.Visual != null} " +
+                    $"direction={observed.IndicatorDecision?.Direction} damage={observed.HasDamageCue} " +
+                    $"control={observed.Control.IsObserved}/{observed.Control.Motion}/{observed.Control.KeyboardBreakoutRequested} motion={observed.Motion}";
+                scope.RequestWindowFromFrame(contextRequest, "host-input-context", image,
                     "existing producer context after input; anchor observation is not a per-frame hit, arrival or obstacle verdict",
                     request.Logger, fields: new Dictionary<string, string>
                     {
@@ -69,10 +75,11 @@ internal static class CombatInputFeedbackEvidence
                         ["inputSource"] = $"{request.Input.Source.SessionId}/{request.Input.Source.Sequence}",
                         ["inputIntent"] = $"kind={request.Input.Kind} x={request.Input.X} y={request.Input.Y}",
                         ["inputReceipt"] = request.Result.ToString(),
+                        ["inputRequest"] = request.Input.RequestId.ToString("N"),
                         ["contextAnchorSource"] = $"{observed.Source.SessionId}/{observed.Source.Sequence}",
                         ["anchorFeedbackTarget"] = $"health={observed.HasNormalHealthBar} visual={observed.Visual} direction={observed.IndicatorDecision} damage={observed.HasDamageCue}",
                         ["anchorFeedbackControl"] = $"{observed.Control} motion={observed.Motion} epoch={observed.CaptureEpoch}"
-                    });
+                    }, changeKey: changeKey);
             }
         }
     }

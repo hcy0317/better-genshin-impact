@@ -10,13 +10,14 @@ namespace BetterGenshinImpact.GameTask.ArtifactAnalysis;
 
 public interface IArtifactEquipmentJobRunner
 {
-    Task RunAsync(ArtifactHostRequest request, string token, CancellationToken ct);
+    Task RunAsync(ArtifactHostRequest request, string token, CancellationToken ct, bool allowExpiredClaimed = false);
 }
 
-public sealed class ArtifactEquipmentJobRunner(HttpClient client) : IArtifactEquipmentJobRunner
+public sealed class ArtifactEquipmentJobRunner(HttpClient client, IArtifactHostTaskRunner? taskRunner = null,
+    TimeProvider? timeProvider = null) : IArtifactEquipmentJobRunner
 {
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
-    public async Task RunAsync(ArtifactHostRequest request, string token, CancellationToken ct)
+    public async Task RunAsync(ArtifactHostRequest request, string token, CancellationToken ct, bool allowExpiredClaimed = false)
     {
         var path = $"artifacts/optimizer/host/plans/{Uri.EscapeDataString(request.JobId)}" +
                    $"?uid={Uri.EscapeDataString(request.Uid)}&requestToken={Uri.EscapeDataString(token)}";
@@ -24,15 +25,26 @@ public sealed class ArtifactEquipmentJobRunner(HttpClient client) : IArtifactEqu
         EquipmentTask? task = null;
         try
         {
-            using var claim = await client.PostAsync(Endpoint("claim"), null, ct);
-            var plan = await Read<ArtifactEquipmentPlanDto>(claim, ct);
-            if (!plan.Confirmed || plan.Id != request.JobId || plan.Uid != request.Uid || plan.Digest != request.NativePlanDigest
-                || plan.InventoryCount != request.SourceArtifactCount)
-                throw new InvalidOperationException("Equipment confirmation binding does not match the host request.");
-            ct.ThrowIfCancellationRequested();
-            task = new EquipmentTask(plan, client, Endpoint, _json, ct);
-            await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
-            if (task.Result?.Status != "completed") throw new InvalidOperationException(task.Result?.Message ?? "Equipment execution requires a new observation.");
+            ArtifactEquipmentPlanDto? plan = null;
+            await (taskRunner ?? new ArtifactHostTaskRunner()).RunAsync(async taskToken =>
+            {
+                ValidateExpiry();
+                using var claim = await client.PostAsync(Endpoint("claim"), null, taskToken);
+                plan = await Read<ArtifactEquipmentPlanDto>(claim, taskToken);
+                if (!plan.Confirmed || plan.Id != request.JobId || plan.Uid != request.Uid || plan.Digest != request.NativePlanDigest
+                    || plan.InventoryCount != request.SourceArtifactCount)
+                    throw new InvalidOperationException("Equipment confirmation binding does not match the host request.");
+                ValidateExpiry();
+            }, async taskToken =>
+            {
+                task = new EquipmentTask(plan!, client, Endpoint, _json, taskToken);
+                await ArtifactHostTaskScope.RunSoloTaskAsync(task, taskToken);
+            }, ct);
+            if (task?.Result?.Status != "completed") throw new InvalidOperationException(task?.Result?.Message ?? "Equipment execution requires a new observation.");
+        }
+        catch (OperationCanceledException) when (task?.Result?.Status == "completed")
+        {
+            // 终态已逐项核验并上报，不把随后到达的取消改写为失败。
         }
         catch (Exception error)
         {
@@ -53,6 +65,12 @@ public sealed class ArtifactEquipmentJobRunner(HttpClient client) : IArtifactEqu
                 catch (Exception reportingError) { error.Data["EquipmentReportError"] = reportingError.Message; }
             }
             throw;
+        }
+
+        void ValidateExpiry()
+        {
+            if (!allowExpiredClaimed && request.ExpiresAtUtc <= (timeProvider ?? TimeProvider.System).GetUtcNow())
+                throw new ArtifactHostRequestExpiredException();
         }
     }
     private async Task<T> Read<T>(HttpResponseMessage response, CancellationToken ct)

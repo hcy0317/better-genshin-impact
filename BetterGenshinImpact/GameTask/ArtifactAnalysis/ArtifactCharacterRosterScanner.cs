@@ -36,7 +36,7 @@ public sealed class ArtifactCharacterRosterScanner : IArtifactCharacterRosterSca
                 uid, gameNickname, miliastraNickname,
                 miliastraCharacterKey, ct),
             cancellationToken);
-        await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+        await ArtifactHostTaskScope.RunSoloTaskAsync(task, cancellationToken);
         return task.Result ?? throw new InvalidOperationException(
             "角色配装检测结束但没有生成完整名单。");
     }

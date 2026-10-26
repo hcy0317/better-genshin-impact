@@ -979,41 +979,37 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
     /// </summary>
     private async Task StartComboFight()
     {
-        CancellationTokenSource cts = new();
-        _ct.Register(cts.Cancel);
-
         // 建树已在 WalkToPressF 前汇合完成，此处 await 已完成的任务同步返回结果
         var comboTreeSession = await _comboBuildTask!;
 
         // 抑制其自带的结束检测（FightFinishDetectEnabled=false），由秘境的DomainEndDetectionTask控制战斗结束
         var comboTask = new AutoComboRunTask(new AutoFightParam { FightFinishDetectEnabled = false }, comboTreeSession);
 
-        var domainEndTask = DomainEndDetectionTask(cts);
-
-        var combatTask = Task.Run(async () =>
+        async Task CombatAsync(CancellationToken ct)
         {
             try
             {
-                await comboTask.Start(cts.Token);
+                await comboTask.Start(ct);
             }
-            catch (RetryException)
-            {
-                // 复活/恢复信号必须传回 Start 的重试循环，复活后重试秘境
-                await cts.CancelAsync();
-                throw;
-            }
-            catch (OperationCanceledException)
-            {
-                // 对局结束取消战斗，正常流程
-            }
-            catch (Exception e)
+            catch (Exception e) when (e is not (RetryException or OperationCanceledException or NormalEndException))
             {
                 Logger.LogWarning("自动连招战斗任务异常：{Msg}", e.Message);
+                throw;
             }
-        }, cts.Token);
+        }
 
-        domainEndTask.Start();
-        await Task.WhenAll(combatTask, domainEndTask);
+        await RunComboFightAsync(_ct, CombatAsync, DomainEndDetectionTask);
+    }
+
+    /// <summary>连招与结束检测共享会话令牌，保留重试/异常并在返回前等待兄弟任务全部退出。</summary>
+    internal static async Task RunComboFightAsync(
+        CancellationToken parentToken,
+        Func<CancellationToken, Task> combat,
+        Func<CancellationTokenSource, Task> detectEnd)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(parentToken);
+        await NativeCombatTaskGroup.RunAsync(cts, parentToken,
+            () => combat(cts.Token), () => detectEnd(cts));
     }
 
     /// <summary>
