@@ -36,7 +36,7 @@ public sealed class ArtifactNativePlanExecutor : IArtifactNativePlanExecutor
             plan, expectedUid, cancellationToken);
         try
         {
-            await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+            await ArtifactHostTaskScope.RunSoloTaskAsync(task, cancellationToken);
         }
         catch (OperationCanceledException) when (task.Completed)
         {

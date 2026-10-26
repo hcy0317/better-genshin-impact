@@ -12,17 +12,20 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 public class FragmentedDirectionIndicatorTests(ITestOutputHelper output)
 {
     [UiRecoveryFact("arrow-outline-20261005.png")]
-    public void RecordedAmbiguousArrowKeepsSearchEvidenceWithoutInventingBearing()
+    public void RecordedArrowWithAmbiguousPixelsUsesOnlyCoarseGeometricDirection()
     {
         using var pixels = Cv2.ImRead(UiRecoveryFixtures.PathFor("arrow-outline-20261005.png"));
         using var frame = new ImageRegion(pixels.Clone(), 0, 0) { FrameStamp = new CaptureFrameSource().Next() };
         AutoFightSeek.ResetSeekState();
-        var hints = new List<EnemySeekVisual>();
         var decision = AutoFightSeek.RecognizeSeekDecision(frame, new Scalar(255, 90, 90), null,
-            out _, out _, saveDiagnostics: false, unconfirmedDirection: hints.Add);
-        Assert.Null(decision.Visual);
-        Assert.Contains(hints, hint => hint.CenterX is >= 1420 and <= 1455 && hint.CenterY is >= 650 and <= 690);
-        Assert.All(hints, hint => Assert.Null(hint.IndicatorBearingDegrees));
+            out _, out _, saveDiagnostics: false);
+        // 实拍中是右下方敌人箭头：像素朝向存在歧义，但凹口轮廓与屏幕方位一致。
+        // 新增的几何证据只提供粗方向，仍不能授权沿箭头直线行走。
+        Assert.Equal(SeekCueKind.DirectionIndicator, decision.Cue);
+        Assert.Equal(EnemyDirectionConfidence.Coarse, decision.DirectionConfidence);
+        Assert.Equal(EnemyIndicatorDirection.Right, decision.Direction);
+        Assert.InRange(decision.Visual!.Value.CenterX, 1420, 1455);
+        Assert.InRange(decision.Visual.Value.CenterY, 650, 690);
     }
 
     [UiRecoveryFact("arrow-hue-wrap-20261004.png")]

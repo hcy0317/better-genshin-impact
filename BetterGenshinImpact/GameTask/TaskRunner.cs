@@ -161,12 +161,29 @@ public class TaskRunner
         await Task.Run(() => RunCurrentAsync(action, propagateExceptions: propagateExceptions));
     }
 
-    public async Task RunSoloTaskAsync(ISoloTask soloTask, bool propagateExceptions = false)
+    public async Task RunSoloTaskAsync(
+        ISoloTask soloTask,
+        bool propagateExceptions = false,
+        CancellationToken cancellationToken = default,
+        bool waitForTask = false,
+        Func<CancellationToken, Task>? beforeStart = null)
     {
-        CheckTaskAdmission();
+        if (waitForTask && TaskExecutionScope.DiagnosticId != null)
+        {
+            TaskExecutionScope.ThrowIfFailed();
+            throw new InvalidOperationException("持有独立任务锁的子调用不能排队等待自身，请复用所属任务作用域。");
+        }
+        if (!waitForTask) CheckTaskAdmission();
         var ownsTaskSemaphore = await TaskRunnerStartupGate.TryAcquireAsync(
             TaskSemaphore,
-            InitializeTaskCancellation);
+            InitializeTaskCancellation,
+            cancellationToken,
+            waitForTask,
+            waitForTask ? () => TaskRunnerStartupGate.CanEnterRun(CancellationContext.Instance) : null,
+            () =>
+            {
+                if (IsShuttingDown) throw new OperationCanceledException("应用正在关闭，拒绝排队任务");
+            });
         if (!ownsTaskSemaphore)
         {
             _logger.LogError("任务启动失败：当前存在正在运行中的独立任务，请不要重复执行任务！");
@@ -179,8 +196,17 @@ public class TaskRunner
         Exception? startupFailure = null;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            CheckTaskAdmission();
             startupRun = CancellationContext.Instance.EnterTaskRun(reset: false);
+            var taskCancellationSource = CancellationContext.Instance.Cts;
+            using var externalCancellation = cancellationToken.Register(
+                static source => ((CancellationTokenSource)source!).Cancel(), taskCancellationSource);
             var taskCancellationToken = CancellationContext.Instance.GetTokenOrNone();
+            taskCancellationToken.ThrowIfCancellationRequested();
+            if (beforeStart != null) await beforeStart(taskCancellationToken);
+            taskCancellationToken.ThrowIfCancellationRequested();
+            CheckTaskAdmission();
 
             // 没启动的时候先启动
             bool waitForMainUi = soloTask.Name != "自动七圣召唤" && !soloTask.Name.Contains("自动音游") &&
@@ -289,25 +315,59 @@ public class TaskRunner
 
 internal static class TaskRunnerStartupGate
 {
-    internal static async Task<bool> TryAcquireAsync(
-        SemaphoreSlim semaphore,
-        Action initializeCancellation)
+    internal static bool CanEnterRun(CancellationContext cancellation)
     {
-        if (!await semaphore.WaitAsync(0))
+        try
+        {
+            // 一条龙在子任务之间释放输入锁，但整次运行权仍然有效。
+            cancellation.CheckRunAccess(checkCancellation: true);
+            return true;
+        }
+        catch (InvalidOperationException)
         {
             return false;
         }
+    }
 
-        try
+    internal static async Task<bool> TryAcquireAsync(
+        SemaphoreSlim semaphore,
+        Action initializeCancellation,
+        CancellationToken cancellationToken = default,
+        bool waitForTask = false,
+        Func<bool>? canEnter = null,
+        Action? checkWaiting = null)
+    {
+        do
         {
-            initializeCancellation();
-            return true;
-        }
-        catch
-        {
-            semaphore.Release();
-            throw;
-        }
+            cancellationToken.ThrowIfCancellationRequested();
+            checkWaiting?.Invoke();
+            if (!await semaphore.WaitAsync(waitForTask ? 100 : 0, cancellationToken))
+            {
+                if (waitForTask) continue;
+                return false;
+            }
+
+            var admitted = false;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                checkWaiting?.Invoke();
+                if (canEnter?.Invoke() != false)
+                {
+                    initializeCancellation();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    admitted = true;
+                    return true;
+                }
+                if (!waitForTask) return false;
+            }
+            finally
+            {
+                // 只有成功取得的锁才由本次调用释放；取消的等待不触碰前一任务。
+                if (!admitted) semaphore.Release();
+            }
+            await Task.Delay(100, cancellationToken);
+        } while (true);
     }
 }
 

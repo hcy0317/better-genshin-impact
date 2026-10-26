@@ -2295,9 +2295,19 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 return null;
             }
 
+            // 屏幕位置先约束候选方位，再比较掩码；先取全局最高分会让相似轮廓
+            // （例如左下箭头与正前方箭头）抢占结果，随后又被 screen-bearing 拒绝。
+            var screenBearing = GetIndicatorScreenBearingDegrees(visual, imageWidth, imageHeight);
             var bearingMatch = MatchDirectionIndicatorTemplateBearing(
                 candidate,
-                templates);
+                templates.Where(template => CircularBearingDeltaDegrees(
+                    template.BearingDegrees, screenBearing) <= DirectionIndicatorMaxScreenBearingDelta).ToArray());
+            // 发光、受击色和半透明背景会改变内部像素，掩码相关分数不能独自
+            // 否定已经通过颜色及轮廓检验的箭头。用轮廓重心的几何方位补充，
+            // 仍要求它与屏幕环带方位相符；不把任意红色轮廓升级为目标。
+            if (!bearingMatch.HasValue && TryGetDirectionIndicatorContourBearing(candidate, out var contourBearing)
+                && CircularBearingDeltaDegrees(contourBearing, screenBearing) <= DirectionIndicatorMaxScreenBearingDelta)
+                bearingMatch = (contourBearing, DirectionIndicatorOrientationMinScore);
             if (bearingMatch.HasValue
                 && CircularBearingDeltaDegrees(
                     bearingMatch.Value.bearing,
@@ -2593,6 +2603,28 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             return bestScore >= DirectionIndicatorOrientationMinScore
                 ? (NormalizeBearingDegrees(bestBearing), bestScore)
                 : null;
+        }
+
+        internal static bool TryGetDirectionIndicatorContourBearing(Mat candidateMask, out double bearing)
+        {
+            bearing = 0;
+            var contour = GetLargestExternalContour(candidateMask);
+            if (contour is not { Length: >= 4 }) return false;
+            var hull = Cv2.ConvexHull(contour);
+            if (hull.Length < 3) return false;
+            // 凹口从凸包中移除了尾部面积，轮廓重心相对凸包重心的偏移指向尖端。
+            // 使用面积矩而非单个最远顶点，避免720p像素化让尾翼抢占尖端。
+            var shape = Cv2.Moments(contour);
+            var envelope = Cv2.Moments(hull);
+            if (shape.M00 <= 0 || envelope.M00 <= shape.M00) return false;
+            var dx = shape.M10 / shape.M00 - envelope.M10 / envelope.M00;
+            var dy = shape.M01 / shape.M00 - envelope.M01 / envelope.M00;
+            // 面积矩可表达亚像素重心；边长2.5%的阈值会拒绝720p真实箭头。
+            // 此处只判断粗方向，颜色、强轮廓和屏幕方位仍在调用处共同约束。
+            var minimumOffset = Math.Min(candidateMask.Width, candidateMask.Height) * .005;
+            if (dx * dx + dy * dy < minimumOffset * minimumOffset) return false;
+            bearing = NormalizeBearingDegrees(Math.Atan2(dx, -dy) * 180 / Math.PI);
+            return true;
         }
 
         internal static int GetDirectionIndicatorTemplateCount()

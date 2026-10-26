@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using BetterGenshinImpact.GameTask.Model.Area;
 using Fischless.GameCapture;
@@ -129,25 +130,68 @@ internal sealed partial class DiagnosticEvidenceScope
         lock (_gate)
         {
             ObserveExistingFrame(anchor);
-            if (!_closed && anchor.FrameStamp == _lastWindowSource &&
-                !_history.Any(item => item.Source == anchor.FrameStamp && item.Image != null))
+            var retained = _latestHistory?.Source == anchor.FrameStamp && _latestHistory.Image != null ? _latestHistory :
+                _history.FirstOrDefault(item => item.Source == anchor.FrameStamp && item.Image != null);
+            // 调用方仍持有的旧决策帧也可作准确锚点，不能因生产者已前进而丢失。
+            var owned = !_closed && anchor.FrameStamp.IsKnown && retained == null ? CopyHistory(anchor) : null;
+            try
             {
-                if (_latestHistory != null) ReleaseHistory(_latestHistory);
-                _latestHistory = CopyHistory(anchor);
+                var admitted = RequestWindowCore(request, phase, anchor.FrameStamp, detail, logger, fields, changeKey, owned ?? retained);
+                // 窗口额度只限制前后文，不能连调用方仍持有的故障原帧也一并丢弃。
+                // 重复事件继续走首/变/末窗口去重；新事件仅降级为单张，不伪造完整窗口。
+                var key = (request.Length > 256 ? request[..256] : request, phase.Length > 64 ? phase[..64] : phase);
+                if (!admitted && !_closed && !_eventIncidents.ContainsKey(key))
+                    TryCapture(anchor, request, phase, detail, logger,
+                        priority: DiagnosticEvidenceStorage.AnchorPriority(phase), fields: fields);
+                return admitted;
             }
-            var admitted = RequestWindow(request, phase, anchor.FrameStamp, detail, logger, fields, changeKey);
-            // 窗口额度只限制前后文，不能连调用方仍持有的故障原帧也一并丢弃。
-            // 重复事件继续走首/变/末窗口去重；新事件仅降级为单张，不伪造完整窗口。
-            var key = (request.Length > 256 ? request[..256] : request, phase.Length > 64 ? phase[..64] : phase);
-            if (!admitted && !_closed && !_eventIncidents.ContainsKey(key))
-                TryCapture(anchor, request, phase, detail, logger,
-                    priority: DiagnosticEvidenceStorage.AnchorPriority(phase), fields: fields);
+            finally { if (owned != null) ReleaseHistory(owned); }
+        }
+    }
+
+    // 借用作用域已有像素；只在同一来源/时钟的十秒历史内选择较早上下文，不重新截图。
+    internal bool RequestExistingWindow(string owner, string request, string phase, CaptureFrameStamp requestedDecisionSource,
+        string detail, ILogger? logger = null, IReadOnlyDictionary<string, string>? fields = null)
+    {
+        lock (_gate)
+        {
+            if (_closed || !requestedDecisionSource.IsKnown)
+                return RequestWindow(request, phase, requestedDecisionSource, detail, logger, fields);
+            var candidates = _history.Select(item => item.Image).Append(_latestHistory?.Image)
+                .Append(_retainedOwner == owner ? _retainedFrame : null)
+                .Concat(_exactFrames.Values.Where(item => item.Frame.FrameStamp == requestedDecisionSource).Select(item => item.Frame));
+            var existing = candidates.Where(image => image != null && image.FrameStamp.TimestampFrequency == requestedDecisionSource.TimestampFrequency &&
+                    (image.FrameStamp == requestedDecisionSource || requestedDecisionSource.IsAfter(image.FrameStamp)) &&
+                    SecondsBetween(requestedDecisionSource, image.FrameStamp) <= WindowBeforeSeconds)
+                .OrderByDescending(image => image!.FrameStamp.Sequence).FirstOrDefault();
+            if (existing == null)
+            {
+                MissingFrame(request, phase, "window-decision-source-pixels-unavailable", logger ?? _logger);
+                return false;
+            }
+            var exact = existing.FrameStamp == requestedDecisionSource;
+            var annotated = new Dictionary<string, string>
+            {
+                ["requestedDecisionSource"] = $"{requestedDecisionSource.SessionId}/{requestedDecisionSource.Sequence}",
+                ["actualContextSource"] = $"{existing.FrameStamp.SessionId}/{existing.FrameStamp.Sequence}",
+                ["decisionSourcePixels"] = exact ? "exact-decision-source" : "unavailable:nearby-context-only",
+                ["contextOffsetSeconds"] = SecondsBetween(existing.FrameStamp, requestedDecisionSource).ToString("F3", CultureInfo.InvariantCulture)
+            };
+            if (fields != null)
+                foreach (var item in fields) annotated.TryAdd(item.Key, item.Value);
+            var admitted = RequestWindowFromFrame(request, phase, existing,
+                $"decisionSourcePixels={annotated["decisionSourcePixels"]}; contextOffsetSeconds={annotated["contextOffsetSeconds"]}; {detail}", logger, annotated);
+            if (!exact) MissingFrame(request, phase, "window-decision-source-pixels-unavailable", logger ?? _logger);
             return admitted;
         }
     }
 
     internal bool RequestWindow(string request, string phase, CaptureFrameStamp anchor, string detail, ILogger? logger = null,
-        IReadOnlyDictionary<string, string>? fields = null, string? changeKey = null)
+        IReadOnlyDictionary<string, string>? fields = null, string? changeKey = null) =>
+        RequestWindowCore(request, phase, anchor, detail, logger, fields, changeKey, null);
+
+    private bool RequestWindowCore(string request, string phase, CaptureFrameStamp anchor, string detail, ILogger? logger,
+        IReadOnlyDictionary<string, string>? fields, string? changeKey, HistoryFrame? exactAnchor)
     {
         lock (_gate)
         {
@@ -162,7 +206,7 @@ internal sealed partial class DiagnosticEvidenceScope
             if (_eventIncidents.TryGetValue((request, phase), out var existing))
             {
                 _duplicateSuppressed++;
-                RefreshIncident(_incidents[existing], anchor, detail, changeKey, logger, snapshot);
+                RefreshIncident(_incidents[existing], anchor, detail, changeKey, logger, snapshot, exactAnchor);
                 return false;
             }
             var terminal = DiagnosticEvidenceStorage.IsTerminalPhase(phase);
@@ -176,7 +220,7 @@ internal sealed partial class DiagnosticEvidenceScope
                 MissingFrame(request, phase, rejection, logger);
                 return false;
             }
-            var pivot = _latestHistory?.Source == anchor ? _latestHistory : _history.FirstOrDefault(item => item.Source == anchor);
+            var pivot = exactAnchor ?? (_latestHistory?.Source == anchor ? _latestHistory : _history.FirstOrDefault(item => item.Source == anchor));
             if (pivot == null)
             {
                 // 不用相邻样本冒充已经淘汰的真实锚点。
@@ -211,7 +255,9 @@ internal sealed partial class DiagnosticEvidenceScope
                 window.LastAfterSeconds = elapsed;
             }
             if (window.LastAfterSeconds < WindowAfterSeconds)
-                if (SecondsBetween(_lastWindowSource, anchor) > WindowAfterSeconds)
+                if (_lastWindowSource.SessionId != anchor.SessionId || _lastWindowSource.TimestampFrequency != anchor.TimestampFrequency)
+                    MissingFrame(request, phase, "capture-source-changed", logger);
+                else if (SecondsBetween(_lastWindowSource, anchor) > WindowAfterSeconds)
                     MissingFrame(request, phase, "window-after-boundary-unavailable", logger);
                 else _windows.Add(window);
             return true;
@@ -278,7 +324,7 @@ internal sealed partial class DiagnosticEvidenceScope
     }
 
     private void RefreshIncident(Incident incident, CaptureFrameStamp anchor, string detail, string changeKey, ILogger logger,
-        IReadOnlyDictionary<string, string>? fields)
+        IReadOnlyDictionary<string, string>? fields, HistoryFrame? exactAnchor)
     {
         if (incident.Occurrences < int.MaxValue) incident.Occurrences++;
         if (_closed || !anchor.IsKnown || anchor.SessionId != incident.LastSource.SessionId || !anchor.IsAfter(incident.LastSource))
@@ -290,7 +336,7 @@ internal sealed partial class DiagnosticEvidenceScope
         incident.LastSource = anchor;
         incident.LastDetail = changeKey;
         if (changed && incident.Changes < int.MaxValue) incident.Changes++;
-        var pivot = _latestHistory?.Source == anchor ? _latestHistory : _history.FirstOrDefault(item => item.Source == anchor);
+        var pivot = exactAnchor ?? (_latestHistory?.Source == anchor ? _latestHistory : _history.FirstOrDefault(item => item.Source == anchor));
         if (pivot?.Image == null)
         { MissingFrame(incident.Request, incident.Phase, "repeat-anchor-unavailable", logger); return; }
         var tail = new PendingWindow(incident.Request, incident.Phase, detail, anchor, logger, fields, incident.Id, "last");

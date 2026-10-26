@@ -27,7 +27,7 @@ public sealed class ArtifactLockPlanExecutor : IArtifactLockPlanExecutor
             actions, expectedArtifactCount,
             reusePreparedInventory, verifiedArtifacts,
             cancellationToken);
-        await new TaskRunner().RunSoloTaskAsync(task, propagateExceptions: true);
+        await ArtifactHostTaskScope.RunSoloTaskAsync(task, cancellationToken, requireContinuousOwnership: true);
         if (!task.Completed)
         {
             throw new InvalidOperationException("Artifact lock execution did not complete all actions.");

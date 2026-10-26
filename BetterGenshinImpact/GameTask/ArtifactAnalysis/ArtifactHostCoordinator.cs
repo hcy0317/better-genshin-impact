@@ -164,8 +164,11 @@ public sealed class ArtifactHostCoordinator(
     IArtifactLockPlanExecutor lockExecutor,
     IArtifactNativePlanExecutor nativePlanExecutor,
     IArtifactCharacterRosterScanner? characterRosterScanner = null,
-    IArtifactEquipmentJobRunner? equipmentJobRunner = null)
+    IArtifactEquipmentJobRunner? equipmentJobRunner = null,
+    IArtifactHostTaskRunner? taskRunner = null,
+    TimeProvider? timeProvider = null)
 {
+    private readonly IArtifactHostTaskRunner _taskRunner = taskRunner ?? new ArtifactHostTaskRunner();
     public async Task RunAsync(
         ArtifactHostRequest request,
         string requestToken,
@@ -176,112 +179,130 @@ public sealed class ArtifactHostCoordinator(
         if (request.Operation == ArtifactHostOperation.ExecuteEquipPlan)
         {
             if (equipmentJobRunner is null) throw new InvalidOperationException("Equipment execution adapter is unavailable.");
-            await equipmentJobRunner.RunAsync(request, requestToken, cancellationToken);
+            await equipmentJobRunner.RunAsync(request, requestToken, cancellationToken, allowExpiredClaimed);
             return;
         }
+        var nativePlanCompleted = false;
+        ArtifactNativeSyncPlanDto? nativePlan = null;
         try
         {
-            await client.ClaimAsync(
-                request.JobId, request.Uid, request.Operation,
-                requestToken, cancellationToken);
-            switch (request.Operation)
+            await _taskRunner.RunAsync(async taskToken =>
             {
-                case ArtifactHostOperation.Analyze:
+                taskToken.ThrowIfCancellationRequested();
+                Validate(request, requestToken, allowExpiredClaimed);
+                await client.ClaimAsync(request.JobId, request.Uid, request.Operation, requestToken, taskToken);
+                if (request.Operation == ArtifactHostOperation.ScanCharacterRoster && characterRosterScanner is null)
+                    throw new InvalidOperationException("Character roster scanner is unavailable.");
+                if (request.Operation == ArtifactHostOperation.RebuildNativePlans)
                 {
-                    var snapshot = await scanner.ScanAsync(request.Uid, cancellationToken);
-                    EnsureUid(request, snapshot);
-                    await client.SubmitSnapshotAsync(
-                        request.JobId, requestToken, snapshot, cancellationToken);
-                    break;
-                }
-                case ArtifactHostOperation.ScanCharacterRoster:
-                {
-                    if (request.CharacterLevelThreshold is null or < 0 or > 90
-                        || request.FavoriteOverride is null)
-                    {
-                        throw new InvalidOperationException(
-                            "Character roster request is missing its activation settings.");
-                    }
-                    if (characterRosterScanner is null)
-                    {
-                        throw new InvalidOperationException("Character roster scanner is unavailable.");
-                    }
-                    var roster = await characterRosterScanner.ScanAsync(
-                        request.Uid, request.GameNickname,
-                        request.MiliastraNickname,
-                        request.MiliastraCharacterKey,
-                        cancellationToken);
-                    if (!string.Equals(request.Uid, roster.Uid, StringComparison.Ordinal))
-                    {
-                        throw new InvalidOperationException(
-                            "Character roster UID does not match the host request.");
-                    }
-                    await client.SubmitCharacterRosterAsync(
-                        request.JobId, requestToken, roster, cancellationToken);
-                    break;
-                }
-                case ArtifactHostOperation.ExecuteLockPlan:
-                {
-                    if (request.SourceArtifactCount is null or < 0)
-                    {
-                        throw new InvalidOperationException(
-                            "Artifact lock request is missing its approved inventory count.");
-                    }
-                    var observation = await scanner.InspectForExecutionAsync(
-                        request.Uid,
-                        request.SourceArtifactCount.Value,
-                        request.Targets ?? [],
-                        cancellationToken);
-                    if (!string.Equals(request.Uid, observation.Uid, StringComparison.Ordinal))
-                    {
-                        throw new InvalidOperationException(
-                            "Artifact execution observation UID does not match the host request.");
-                    }
-                    var preflight = await client.PreflightAsync(
-                        request.JobId, requestToken, observation, cancellationToken);
-                    if (preflight.Status == ArtifactPreflightStatus.RescanRequired) break;
-                    if (preflight.Status != ArtifactPreflightStatus.Ready)
-                    {
-                        throw new InvalidOperationException(
-                            $"Artifact lock preflight rejected execution: {preflight.Status}");
-                    }
-                    await lockExecutor.ExecuteAsync(
-                        preflight.Actions,
-                        request.SourceArtifactCount.Value,
-                        observation.CountOnly,
-                        observation.Artifacts,
-                        cancellationToken);
-                    break;
-                }
-                case ArtifactHostOperation.RebuildNativePlans:
-                {
-                    if (request.NativeCapacity is null || string.IsNullOrWhiteSpace(request.NativePlanDigest))
-                    {
-                        throw new InvalidOperationException(
-                            "Native artifact request is missing its reviewed plan binding.");
-                    }
-                    var plan = await client.GetNativeSyncPlanAsync(
-                        request.JobId, requestToken, cancellationToken);
-                    if (!string.Equals(plan.Status, "READY", StringComparison.Ordinal)
-                        || !plan.RequiresPreMutationEvidence
-                        || plan.Capacity != request.NativeCapacity
-                        || !string.Equals(plan.PlanDigest, request.NativePlanDigest, StringComparison.Ordinal)
+                    nativePlan = await client.GetNativeSyncPlanAsync(
+                        request.JobId, requestToken, taskToken);
+                    if (!string.Equals(nativePlan.Status, "READY", StringComparison.Ordinal)
+                        || !nativePlan.RequiresPreMutationEvidence
+                        || nativePlan.Capacity != request.NativeCapacity
+                        || !string.Equals(nativePlan.PlanDigest, request.NativePlanDigest, StringComparison.Ordinal)
                         || !string.Equals(
-                            plan.TranslationMode,
+                            nativePlan.TranslationMode,
                             "BUILD_SCOPED_LOCK_AND_QUICK_EQUIP_V1",
                             StringComparison.Ordinal))
                     {
                         throw new InvalidOperationException(
-                            $"Native artifact plan preflight rejected replacement: {plan.Status}");
+                            $"Native artifact plan preflight rejected replacement: {nativePlan.Status}");
                     }
-                    ArtifactNativePlanValidator.Validate(plan);
-                    await nativePlanExecutor.ReplaceAllAsync(
-                        plan, request.Uid, cancellationToken);
-                    break;
+                    ArtifactNativePlanValidator.Validate(nativePlan);
                 }
-                default:
-                    throw new ArgumentOutOfRangeException(nameof(request.Operation), request.Operation, null);
-            }
+                Validate(request, requestToken, allowExpiredClaimed);
+            }, async taskToken =>
+            {
+                switch (request.Operation)
+                {
+                    case ArtifactHostOperation.Analyze:
+                    {
+                        var snapshot = await scanner.ScanAsync(request.Uid, taskToken);
+                        EnsureUid(request, snapshot);
+                        await client.SubmitSnapshotAsync(
+                            request.JobId, requestToken, snapshot, taskToken);
+                        break;
+                    }
+                    case ArtifactHostOperation.ScanCharacterRoster:
+                    {
+                        if (request.CharacterLevelThreshold is null or < 0 or > 90
+                            || request.FavoriteOverride is null)
+                        {
+                            throw new InvalidOperationException(
+                                "Character roster request is missing its activation settings.");
+                        }
+                        if (characterRosterScanner is null)
+                        {
+                            throw new InvalidOperationException("Character roster scanner is unavailable.");
+                        }
+                        var roster = await characterRosterScanner.ScanAsync(
+                            request.Uid, request.GameNickname,
+                            request.MiliastraNickname,
+                            request.MiliastraCharacterKey,
+                            taskToken);
+                        if (!string.Equals(request.Uid, roster.Uid, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(
+                                "Character roster UID does not match the host request.");
+                        }
+                        await client.SubmitCharacterRosterAsync(
+                            request.JobId, requestToken, roster, taskToken);
+                        break;
+                    }
+                    case ArtifactHostOperation.ExecuteLockPlan:
+                    {
+                        if (request.SourceArtifactCount is null or < 0)
+                        {
+                            throw new InvalidOperationException(
+                                "Artifact lock request is missing its approved inventory count.");
+                        }
+                        var observation = await scanner.InspectForExecutionAsync(
+                            request.Uid,
+                            request.SourceArtifactCount.Value,
+                            request.Targets ?? [],
+                            taskToken);
+                        if (!string.Equals(request.Uid, observation.Uid, StringComparison.Ordinal))
+                        {
+                            throw new InvalidOperationException(
+                                "Artifact execution observation UID does not match the host request.");
+                        }
+                        var preflight = await client.PreflightAsync(
+                            request.JobId, requestToken, observation, taskToken);
+                        if (preflight.Status == ArtifactPreflightStatus.RescanRequired) break;
+                        if (preflight.Status != ArtifactPreflightStatus.Ready)
+                        {
+                            throw new InvalidOperationException(
+                                $"Artifact lock preflight rejected execution: {preflight.Status}");
+                        }
+                        await lockExecutor.ExecuteAsync(
+                            preflight.Actions,
+                            request.SourceArtifactCount.Value,
+                            observation.CountOnly,
+                            observation.Artifacts,
+                            taskToken);
+                        break;
+                    }
+                    case ArtifactHostOperation.RebuildNativePlans:
+                    {
+                        if (request.NativeCapacity is null || string.IsNullOrWhiteSpace(request.NativePlanDigest))
+                        {
+                            throw new InvalidOperationException(
+                                "Native artifact request is missing its reviewed plan binding.");
+                        }
+                        await nativePlanExecutor.ReplaceAllAsync(
+                            nativePlan!, request.Uid, taskToken);
+                        nativePlanCompleted = true;
+                        break;
+                    }
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(request.Operation), request.Operation, null);
+                }
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException) when (nativePlanCompleted)
+        {
+            // 原生方案已越过提交点并核验目标，外层终态取消不能把完成改写为失败。
         }
         catch (ArtifactForwardRecoveryRequiredException)
         {
@@ -316,7 +337,7 @@ public sealed class ArtifactHostCoordinator(
             true, null, completionTimeout.Token);
     }
 
-    private static void Validate(
+    private void Validate(
         ArtifactHostRequest request,
         string requestToken,
         bool allowExpiredClaimed)
@@ -329,9 +350,28 @@ public sealed class ArtifactHostCoordinator(
         {
             throw new InvalidOperationException("Artifact host request token is required.");
         }
-        if (!allowExpiredClaimed && request.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+        switch (request.Operation)
         {
-            throw new InvalidOperationException("Artifact host request has expired.");
+            case ArtifactHostOperation.ExecuteLockPlan when request.SourceArtifactCount is null or < 0:
+                throw new InvalidOperationException("Artifact lock request is missing its approved inventory count.");
+            case ArtifactHostOperation.ScanCharacterRoster when request.CharacterLevelThreshold is null or < 0 or > 90
+                || request.FavoriteOverride is null:
+                throw new InvalidOperationException("Character roster request is missing its activation settings.");
+            case ArtifactHostOperation.RebuildNativePlans when request.NativeCapacity is null
+                || string.IsNullOrWhiteSpace(request.NativePlanDigest):
+                throw new InvalidOperationException("Native artifact request is missing its reviewed plan binding.");
+            case ArtifactHostOperation.Analyze:
+            case ArtifactHostOperation.ScanCharacterRoster:
+            case ArtifactHostOperation.ExecuteLockPlan:
+            case ArtifactHostOperation.RebuildNativePlans:
+            case ArtifactHostOperation.ExecuteEquipPlan:
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(request.Operation), request.Operation, null);
+        }
+        if (!allowExpiredClaimed && request.ExpiresAtUtc <= (timeProvider ?? TimeProvider.System).GetUtcNow())
+        {
+            throw new ArtifactHostRequestExpiredException();
         }
     }
 
