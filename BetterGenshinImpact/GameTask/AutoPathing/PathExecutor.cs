@@ -908,9 +908,12 @@ public partial class PathExecutor
         moveToStartTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
         _moveDeadline = new DateTimeOffset(moveToStartTime, TimeSpan.Zero).AddSeconds(
             waypoint.MoveMode == MoveModeEnum.Climb.Code ? 60 : 240);
+        var airborneStart = false;
         using (var ready = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct))
         {
             ct.ThrowIfCancellationRequested();
+            airborneStart = ready.FrameStamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2)) &&
+                _moveIo.CombatHud(ready) && _moveIo.Motion(ready) == MotionStatus.Fly;
         }
         // 已证实变身时只能导航，不切回不存在的人形活动位。
         var transformed = false;
@@ -922,7 +925,7 @@ public partial class PathExecutor
         if (!transformed)
         {
             _pathingMacro?.Release();
-            await _moveIo.SwitchAvatar(PartyConfig.MainAvatarIndex);
+            if (!airborneStart) await _moveIo.SwitchAvatar(PartyConfig.MainAvatarIndex);
         }
         // 切人完成时刻：切人后有约1秒CD，期间无法切换到其他角色（用于生存位）
         var switchAvatarTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
@@ -941,7 +944,10 @@ public partial class PathExecutor
         }
         var targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
         _moveIo.Logger.LogDebug("粗略接近途经点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
-        if (!await _moveIo.RotateUntil(targetOrientation, 5))
+        // 收翼后的自由落体必须先开翼；已在空中的衔接保留逐帧转向，不能停等数秒。
+        var flightRotationPending = waypoint.MoveMode == MoveModeEnum.Fly.Code && !airborneStart;
+        if (waypoint.MoveMode != MoveModeEnum.Fly.Code && !airborneStart &&
+            !await _moveIo.RotateUntil(targetOrientation, 5))
             throw new RetryException("路径起步转向未完成，停止前进");
         var progressHeartbeat = new PathProgressHeartbeat(moveToStartTime, TimeSpan.FromSeconds(15));
         var movementWatchdog = new PathMovementWatchdog(
@@ -962,8 +968,9 @@ public partial class PathExecutor
         var swimmingFrames = 0;
         CaptureFrameStamp lastMoveFrame = default;
 
-        // 按下w，一直走
-        SendPathForward(KeyType.KeyDown);
+        // 飞行先取得有效观测并开翼，再接管前进输入。
+        if (waypoint.MoveMode != MoveModeEnum.Fly.Code && !airborneStart)
+            SendPathForward(KeyType.KeyDown);
         // 赶路帧间隔：始终使用配置值（5-150 钳制），不依赖是否配置赶路角色（空选也可用）
         var hurryFrameInterval = Math.Clamp(PartyConfig.HurryOnFrameInterval, 5, 150);
         while (true)
@@ -1006,7 +1013,7 @@ public partial class PathExecutor
             var progressObservedAt = _moveIo.Clock.GetUtcNow().UtcDateTime;
             if (waypoint.MoveMode == MoveModeEnum.Climb.Code && progressObservedAt >= moveToStartTime.AddSeconds(60))
                 throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
-            var observation = waypoint.MoveMode == MoveModeEnum.Fly.Code || waypoint.MoveMode == MoveModeEnum.Climb.Code
+            var observation = waypoint.MoveMode == MoveModeEnum.Fly.Code || waypoint.MoveMode == MoveModeEnum.Climb.Code || airborneStart
                 ? ReadMoveObservation(screen, located, lastMoveFrame) : default;
             // Recognition is synchronous and may itself consume the remaining node budget.
             ct.ThrowIfCancellationRequested();
@@ -1018,7 +1025,7 @@ public partial class PathExecutor
             lastMoveFrame = screen.FrameStamp;
             // 战斗游泳检测不会进入寻路飞行分支。两张同源新鲜游泳帧后回到既有
             // 分段重试/传送入口，不能把同一XY当作飞行到达，也不能持续发送起跳。
-            if (observation.SourceUsable && observation.Motion == MotionStatus.Swim)
+            if (waypoint.MoveMode != MoveModeEnum.Swim.Code && observation.SourceUsable && observation.Motion == MotionStatus.Swim)
             {
                 SendPathForward(KeyType.KeyUp);
                 swimmingFrames = observation.Valid ? swimmingFrames + 1 : 0;
@@ -1035,7 +1042,7 @@ public partial class PathExecutor
             if (waypoint.MoveMode == MoveModeEnum.Fly.Code && observation.Valid && observation.Motion == MotionStatus.Fly)
                 flightObserved = true;
             Debug.WriteLine($"接近目标点中，距离为{distance}");
-            if (distance < 4 && (waypoint.MoveMode != MoveModeEnum.Fly.Code ||
+            if (distance < 4 && (!airborneStart || observation.Valid) && (waypoint.MoveMode != MoveModeEnum.Fly.Code ||
                 observation.Valid && (flightObserved || plainFlightTransit)))
             {
                 _moveIo.Logger.LogDebug("到达路径点附近");
@@ -1046,10 +1053,38 @@ public partial class PathExecutor
                 break;
             }
 
+            if ((waypoint.MoveMode == MoveModeEnum.Fly.Code || airborneStart) && !observation.Valid)
+            {
+                SendPathForward(KeyType.KeyUp);
+                await _moveIo.Delay(100, ct);
+                continue;
+            }
             if (distance < 4 && waypoint.MoveMode == MoveModeEnum.Fly.Code)
             {
                 SendPathForward(KeyType.KeyUp);
                 await AdvanceFlyAsync(observation.Valid && observation.Motion == MotionStatus.Normal, waypoint, observation.Stamp);
+                continue;
+            }
+            if (flightRotationPending)
+            {
+                SendPathForward(KeyType.KeyUp);
+                if (observation.Motion == MotionStatus.Normal && !transformed)
+                {
+                    await AdvanceFlyAsync(true);
+                    continue;
+                }
+                if (observation.Motion != MotionStatus.Fly && !transformed)
+                {
+                    await _moveIo.Delay(100, ct);
+                    continue;
+                }
+                targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
+                if (!await _moveIo.RotateUntil(targetOrientation, 5))
+                    throw new RetryException("路径起步转向未完成，停止前进");
+                ct.ThrowIfCancellationRequested();
+                if (_moveIo.Clock.GetUtcNow() >= _moveDeadline.Value)
+                    throw new RetryException("路径点执行超时，放弃整条路径");
+                flightRotationPending = false;
                 continue;
             }
             if (!_moveIo.IsDown(GIActions.MoveForward))
@@ -1821,9 +1856,21 @@ public partial class PathExecutor
             {
                 SuccessFight++;
             }
-            if (_pathingMacro != null) await _pathingMacro.WaitAsync(1000, ct);
-            else await Delay(1000, ct);
+            var segment = CurWaypoints.Item2;
+            var next = segment != null && CurWaypoint.Item1 + 1 < segment.Count ? segment[CurWaypoint.Item1 + 1] : null;
+            await WaitAfterWaypointActionAsync(waypoint, next,
+                (milliseconds, token) => _pathingMacro != null ? _pathingMacro.WaitAsync(milliseconds, token) : Delay(milliseconds, token), ct);
         }
+    }
+
+    internal static Task WaitAfterWaypointActionAsync(WaypointForTrack waypoint, WaypointForTrack? next,
+        Func<int, CancellationToken, Task> wait, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var flightHandoff = waypoint.Action == ActionEnum.CombatScript.Code &&
+            (waypoint.MoveMode == MoveModeEnum.Fly.Code || next?.MoveMode == MoveModeEnum.Fly.Code);
+        // 宏自己的等待已完成；仅缩短额外收尾等待，避免在空中再停顿一秒。
+        return wait(flightHandoff ? 60 : 1000, token);
     }
 
     private async Task<Avatar?> SwitchAvatar(string index, bool needSkill = false)
