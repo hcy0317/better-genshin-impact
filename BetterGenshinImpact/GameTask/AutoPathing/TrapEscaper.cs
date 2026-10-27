@@ -153,6 +153,7 @@ public class TrapEscaper(CancellationToken ct)
                 if (io.Motion(screen) == MotionStatus.Climb)
                 {
                     await Send(scope, GIActions.MoveForward, KeyType.KeyUp);
+                    await Wait(scope, 60); // 先让游戏观察到前进已释放，再触发攀爬脱离。
                     await Send(scope, GIActions.Drop);
                     await Wait(scope, 75, synchronous: true);
                     await Send(scope, GIActions.MoveBackward, KeyType.KeyDown);
@@ -201,6 +202,7 @@ public class TrapEscaper(CancellationToken ct)
         IncreaseRandomAngle();
         // 脱离攀爬状态
         await Send(scope, GIActions.MoveForward, KeyType.KeyUp);
+        await Wait(scope, 60); // 与脱离后的反馈等待分开，仍受原恢复期限约束。
         await Send(scope, GIActions.Drop);
         await Wait(scope, 75);
         if (scope != null) await scope.ObserveAsync();
@@ -336,9 +338,13 @@ public class TrapEscaper(CancellationToken ct)
         var started = NativeIo.Clock.GetTimestamp();
         while (NativeIo.Clock.GetElapsedTime(started).TotalMilliseconds < milliseconds)
         {
-            await NativeIo.Delay(Math.Min(50, milliseconds), ct);
-            using var frame = await PathWorldAvailability.CapturePlayableAsync(NativeIo,
-                _nativeDeadline ??= NativeIo.Clock.GetUtcNow().AddSeconds(25), ct);
+            ct.ThrowIfCancellationRequested();
+            var deadline = _nativeDeadline ??= BeginNativeDeadline();
+            var remaining = Math.Min(milliseconds - NativeIo.Clock.GetElapsedTime(started).TotalMilliseconds,
+                (deadline - NativeIo.Clock.GetUtcNow()).TotalMilliseconds);
+            if (remaining <= 0) throw new RetryException("脱困等待已耗尽原路径期限");
+            await NativeIo.Delay((int)Math.Ceiling(Math.Min(50, remaining)), ct);
+            using var frame = await PathWorldAvailability.CapturePlayableAsync(NativeIo, deadline, ct);
         }
     }
 }

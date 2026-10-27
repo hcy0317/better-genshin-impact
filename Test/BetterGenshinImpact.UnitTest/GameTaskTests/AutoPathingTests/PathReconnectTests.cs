@@ -28,7 +28,12 @@ public class PathReconnectTests
         var blocked = false;
         var replay = new PathReplay { MinimumWait = 1100, PositionAt = _ => new Point2f(90, 100),
             AvailabilityAt = _ => blocked ? WorldFrameKind.Reconnecting : WorldFrameKind.Playable };
-        replay.BeforeCapture = frame => { if (frame == 12) replay.Clock.Advance(replay.Started.AddSeconds(239.9) - replay.Clock.GetUtcNow()); };
+        replay.BeforeCapture = frame =>
+        {
+            if (frame != 12) return;
+            replay.Clock.Advance(replay.Started.AddSeconds(239.9) - replay.Clock.GetUtcNow());
+            replay.MinimumWait = 0; // Only accelerate the lead-in; exercise actual waits in the final 100ms.
+        };
         replay.OnInput = (action, _) => { if (action == GIActions.Drop) { blocked = true; replay.MinimumWait = 0; } };
         await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveTo(replay.Point("walk")));
         Assert.True(blocked);
