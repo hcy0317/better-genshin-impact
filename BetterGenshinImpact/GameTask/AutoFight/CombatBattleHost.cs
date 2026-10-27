@@ -140,6 +140,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private int _detachPulses;
     private Guid _inputRequestId;
     private long _inputRequestDeadline;
+    private long? _searchCandidateDeadline;
     private CaptureFrameStamp _inputRequestSource;
     private (Phase Phase, CombatBattleHostInputKind Kind, Guid? SelectionGoal, int X, int Y) _inputRequestIntent;
     private readonly record struct CandidateDecision(EnemySeekDecision? Target, MotionStatus Motion,
@@ -153,7 +154,9 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     {
         if (before.Motion != next.Motion || before.Control != next.Control || before.Epoch != next.Epoch ||
             before.Width != next.Width || before.Height != next.Height || before.Scene != next.Scene) return false;
-        var tolerance = Math.Max(2, before.Width / 960);
+        // 实拍392494→392504：同条血量60x8→61x7、中心Y相差3px。
+        // 一像素厚度变化和取整不能饿死输入后的新帧复核；其余身份/意图门禁仍须一致。
+        var tolerance = Math.Max(3, before.Width / 640);
         static bool VisualMatches(EnemySeekVisual? left, EnemySeekVisual? right, int tolerance)
         {
             if (left == null || right == null) return left == right;
@@ -230,6 +233,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             // 收束未发送请求，不能等画面恢复后才发现几分钟前就已到期。
             if (_inputRequestId != Guid.Empty && io.Clock.GetTimestamp() >= _inputRequestDeadline)
                 return Stop("host-input-request-deadline");
+            if (_searchCandidateDeadline is { } candidateDeadline && io.Clock.GetTimestamp() >= candidateDeadline)
+                return Stop("search-candidate-deadline");
             if (_performanceRecheckDeadline is { } beforeRead && io.Clock.GetTimestamp() >= beforeRead)
                 return Stop("host-input-performance-recheck-deadline");
             var observation = ReadObservation(io.ObserveTarget);
@@ -666,6 +671,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             _evidenceActive = false;
         }
         _lastProgressAt = now;
+        _searchCandidateDeadline = null; // Only real game progress can renew an unsent search continuation.
         _lastProgressEvidence = new(observation.Source, damage ? "new-damage-cue" : "health-progress",
             observation.Target, observation.FixedTopHealth, io.Clock.GetTimestamp());
         _reengaged = false;
@@ -694,6 +700,12 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         {
             await io.DelayAsync(50, ct);
             return _result;
+        }
+        // 多目标不能建立唯一的镜头/接近意图；交回原有有界策略，不反复重建必然被撤回的请求。
+        if (observation.Target is { SignalCount: > 1 })
+        {
+            if (TryResumeStrategy()) return _result;
+            return Stop("ambiguous-search-without-game-progress");
         }
         // 固定Boss条仅是存在/进展证据；没有空间线索时走下方既有有界扫描。
         if (observation.Target is { } target && target.Cue != SeekCueKind.FixedTopHealth && target.Visual is { } visual)
@@ -1030,6 +1042,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     Reason = "host-input-performance-awaiting-fresh-evidence";
                 }
                 _inputRequestId = Guid.Empty;
+                _searchCandidateDeadline = null; // A confirmed physical step advances the bounded search.
                 if (result.Error != null) Stop("host-input-submitted-but-operation-interrupted: " + result.Error.GetType().Name);
                 if (completed > _inputRequestDeadline) Stop("host-input-deadline-after-send");
                 _inputRequestDeadline = 0;
@@ -1054,6 +1067,9 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
 
     private void CancelPendingCandidate()
     {
+        // 撤回未发送的候选仍消耗本次搜索的原等待期限；换目标不能为同一未推进搜索续期。
+        if (_phase == Phase.Searching && _inputRequestId != Guid.Empty && _inputRequestDeadline > 0)
+            _searchCandidateDeadline = Math.Min(_searchCandidateDeadline ?? _inputRequestDeadline, _inputRequestDeadline);
         _engagementPending = false;
         io.CancelInputEvidence();
         _inputRequestId = Guid.Empty;
@@ -1071,6 +1087,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         _engagementSearch = false;
         _behindTurnSide = 0;
         if (_inputRequestId != Guid.Empty) CancelPendingCandidate();
+        _searchCandidateDeadline = null;
         // Keep the global pulse/deadline budgets and the bounded last-seen handoff timestamp.
     }
 
