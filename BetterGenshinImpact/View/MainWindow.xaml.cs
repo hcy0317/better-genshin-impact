@@ -239,8 +239,8 @@ public partial class MainWindow : FluentWindow, INavigationWindow
         _logger.LogDebug("主窗体退出");
         CompositionTarget.Rendering -= OnCompositionTargetRendering;
         RemoveHandler(PreviewMouseWheelEvent, new MouseWheelEventHandler(OnGlobalPreviewMouseWheel));
+        // Closing 已交给关闭协调器；Closed 时服务可能已退役，不能再解析服务或重入退出。
         base.OnClosed(e);
-        App.GetService<NotifyIconViewModel>()?.Exit();
     }
 
     private void OnNotifyIconLeftDoubleClick(NotifyIcon sender, RoutedEventArgs e)

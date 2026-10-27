@@ -40,6 +40,7 @@ public partial class CombatBattleHostTests
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
     public async Task SmallSingleTargetJitterKeepsTheOriginalInputRequestAndDeadline(int jitter)
     {
         var clock = new FakeTimeProvider();

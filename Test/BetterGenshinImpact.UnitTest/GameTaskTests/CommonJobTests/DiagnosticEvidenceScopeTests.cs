@@ -253,22 +253,31 @@ public class DiagnosticEvidenceScopeTests
         Assert.Contains("capture:window-budget\":1", drained);
     }
 
-    [Fact]
-    public async Task MemoryPressureReportsHolesWithoutBorrowingOrDisposingCallerPixels()
+    [Theory]
+    [InlineData(24, true)]
+    [InlineData(8, false)]
+    public async Task MemoryPressureKeepsTheExactAnchorWhenItFitsAndReportsRealHolesOtherwise(int budget, bool anchorFits)
     {
         var logger = new EvidenceLogger();
         var saved = new List<DiagnosticEvidence>();
-        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }, maximumMemoryBytes: 24);
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }, maximumMemoryBytes: budget);
         var source = new CaptureFrameSource();
         using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
         for (var i = 0; i < 4; i++) { frame.FrameStamp = source.Next(); scope.ObserveExistingFrame(frame); }
         Assert.True(scope.RequestWindowFromFrame("memory", "decision", frame, "", logger));
         await scope.DisposeAsync();
-        var retained = Assert.Single(saved); // 故障预留仍可保存一张真实历史帧，但不能冒充缺失锚点。
-        Assert.True(retained.Window!.RelativeIndex < 0);
-        Assert.NotEqual(frame.FrameStamp, retained.Source);
+        if (anchorFits)
+        {
+            var anchor = Assert.Single(saved.Where(item => item.Window?.RelativeIndex == 0));
+            Assert.Equal(frame.FrameStamp, anchor.Source);
+            Assert.Contains(saved, item => item.Window!.RelativeIndex < 0 && item.Source != frame.FrameStamp);
+        }
+        else
+        {
+            Assert.Empty(saved); // 十二字节原图不能塞入八字节预算，仍须报告真实缺失。
+            Assert.Contains(logger.Messages, message => message.Contains("memory-budget"));
+        }
         Assert.False(frame.SrcMat.IsDisposed);
-        Assert.Contains(logger.Messages, message => message.Contains("memory-budget"));
     }
 
     [Theory]
@@ -360,6 +369,9 @@ public class DiagnosticEvidenceScopeTests
         await scope.DisposeAsync();
         var drained = Assert.Single(logger.Messages.Where(message => message.StartsWith("EVIDENCE_DRAINED ")));
         Assert.Contains("accepted=1", drained);
+        Assert.Contains("rawPixelBytes=12", drained);
+        Assert.Contains("diskBudgetUsedBytes=", drained);
+        Assert.Contains("diskLimit=", drained);
         Assert.Contains("dropped=3", drained);
         Assert.Contains("missingBefore=1", drained);
         Assert.Contains("writeFailures=1", drained);
@@ -607,6 +619,35 @@ public class DiagnosticEvidenceScopeTests
         var terminal = Assert.Single(saved.Where(item => item.Phase == "terminal"));
         Assert.Equal(frame.FrameStamp, terminal.Source);
         Assert.Contains("latest-existing-frame", terminal.Detail);
+    }
+
+    [Fact]
+    public async Task TerminalPrefersExactDecisionPixelsOverTheHalfSecondSearchCache()
+    {
+        var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();
+        var logger = new EvidenceLogger();
+        await using var scope = new DiagnosticEvidenceScope((item, image) =>
+        { saved.Add((item, image.At<Vec3b>(0, 0).Item0)); return Task.CompletedTask; });
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(7, 0, 0)), 0, 0)
+        { FrameStamp = source.Next() };
+        Assert.True(scope.RequestFrame("battle", "episode", "search", frame.FrameStamp, "", logger));
+        clock.Advance(TimeSpan.FromSeconds(1));
+        frame.FrameStamp = source.Next();
+        scope.CaptureRequestedFrames("battle", frame);
+        clock.Advance(TimeSpan.FromMilliseconds(40));
+        frame.FrameStamp = source.Next();
+        frame.SrcMat.SetTo(new Scalar(17, 0, 0));
+        scope.CaptureRequestedFrames("battle", frame);
+        var decision = frame.FrameStamp;
+        Assert.True(scope.RequestFrame("battle", "episode", "terminal", decision, "original failure", logger));
+        frame.SrcMat.SetTo(new Scalar(29, 0, 0));
+        await scope.DisposeAsync();
+        var terminal = Assert.Single(saved.Where(item => item.Evidence.Phase == "terminal"));
+        Assert.Equal(decision, terminal.Evidence.Source);
+        Assert.Equal(17, terminal.Pixel);
+        Assert.Contains("exact-decision-source", terminal.Evidence.Detail);
     }
 
     [Fact]

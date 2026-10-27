@@ -437,6 +437,106 @@ public class DiagnosticEvidenceTimeWindowTests
         Assert.Contains(logger.Messages, m => m.StartsWith("EVIDENCE_RUN_IDENTITIES ") && m.Contains("fixture-content-hash"));
     }
 
+    [Fact]
+    public async Task JitteredFirstChangedAndLastWindowsKeepRealBoundarySamples()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        var logger = new RecordingLogger();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var source = Guid.NewGuid();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        for (var i = 0; i <= 30; i++)
+        {
+            frame.FrameStamp = new(source, i + 1, i * 1010, 1000, DateTimeOffset.UnixEpoch.AddMilliseconds(i * 1010));
+            scope.ObserveExistingFrame(frame);
+            if (i is 12 or 14)
+                scope.RequestWindowFromFrame("jitter", "deadline", frame, i == 12 ? "first" : "changed", logger);
+        }
+        await scope.DisposeAsync();
+        foreach (var occurrence in new[] { "first", "change", "last" })
+        {
+            var window = saved.Where(item => item.Window?.Occurrence == occurrence).ToArray();
+            Assert.Contains(window, item => item.Window!.RelativeSeconds <= -10 && item.Window.RelativeSeconds >= -11.25);
+            Assert.Contains(window, item => item.Window!.RelativeSeconds >= 5 && item.Window.RelativeSeconds <= 6.25);
+            Assert.All(window, item => Assert.Equal((item.Source.CapturedTimestamp - item.Window!.Anchor.CapturedTimestamp) / 1000d,
+                item.Window.RelativeSeconds));
+        }
+        Assert.DoesNotContain(logger.Messages, item => item.StartsWith("EVIDENCE_CAPTURE_MISSING "));
+    }
+
+    [Fact]
+    public async Task MissingBoundaryPixelsRemainMissingWhenTheProducerSkipsSeveralSeconds()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        var logger = new RecordingLogger();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        var session = Guid.NewGuid();
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0);
+        foreach (var second in new[] { 0, 20, 21, 24, 28 })
+        {
+            frame.FrameStamp = new(session, second + 1, second * 1000, 1000, DateTimeOffset.UnixEpoch.AddSeconds(second));
+            scope.ObserveExistingFrame(frame);
+            if (second == 20) Assert.True(scope.RequestWindowFromFrame("hole", "deadline", frame, "", logger));
+        }
+        await scope.DisposeAsync();
+        Assert.Contains(logger.Messages, item => item.Contains("window-before-unavailable"));
+        Assert.Contains(logger.Messages, item => item.Contains("window-after-boundary-unavailable"));
+        Assert.DoesNotContain(saved, item => item.Window!.RelativeSeconds < -11.25 || item.Window.RelativeSeconds > 6.25);
+    }
+
+    [Fact]
+    public async Task UnsampledLatestWindowOwnsExactPixelsWhileLaterFramesReuseTheBuffer()
+    {
+        var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var scope = new DiagnosticEvidenceScope(async (item, image) =>
+        { entered.TrySetResult(); await release.Task; saved.Add((item, image.At<Vec3b>(0, 0).Item0)); });
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, new Scalar(7, 0, 0)), 0, 0)
+        { FrameStamp = source.Next() };
+        scope.ObserveExistingFrame(frame);
+        clock.Advance(TimeSpan.FromMilliseconds(40));
+        frame.FrameStamp = source.Next();
+        frame.SrcMat.SetTo(new Scalar(17, 0, 0));
+        scope.ObserveExistingFrame(frame);
+        var expected = frame.FrameStamp;
+        try
+        {
+            Assert.True(scope.RequestLatestWindow("latest", "deadline", "exact unsampled source"));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(TimeSpan.FromMilliseconds(40));
+            frame.FrameStamp = source.Next();
+            frame.SrcMat.SetTo(new Scalar(29, 0, 0));
+            scope.ObserveExistingFrame(frame);
+        }
+        finally { release.TrySetResult(); }
+        await scope.DisposeAsync();
+        var anchor = Assert.Single(saved.Where(item => item.Evidence.Window?.RelativeIndex == 0));
+        Assert.Equal(expected, anchor.Evidence.Source);
+        Assert.Equal(17, anchor.Pixel);
+        Assert.False(frame.SrcMat.IsDisposed);
+    }
+
+    [Fact]
+    public async Task RoutineWindowsLeaveMetadataCapacityForLaterNonterminalFaults()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; },
+            maxWindows: 6, maxPendingWindows: 8);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        for (var i = 0; i < 3; i++)
+            Assert.True(scope.RequestWindowFromFrame("routine-" + i, "path-interaction-context", frame, ""));
+        Assert.False(scope.RequestWindowFromFrame("routine-denied", "path-interaction-context", frame, ""));
+        Assert.True(scope.RequestWindowFromFrame("actual-friction", "path-world-blocked", frame, ""));
+        Assert.True(scope.RequestWindowFromFrame("terminal", "combat-terminal", frame, ""));
+        await scope.DisposeAsync();
+        Assert.Contains(saved, item => item.Request == "actual-friction" && item.Window?.RelativeIndex == 0);
+        Assert.Contains(saved, item => item.Request == "terminal" && item.Window?.RelativeIndex == 0);
+    }
+
     private sealed class RecordingLogger : Microsoft.Extensions.Logging.ILogger
     {
         public List<string> Messages { get; } = [];

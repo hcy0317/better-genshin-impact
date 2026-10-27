@@ -250,7 +250,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
         int Area,
         double? IndicatorBearingDegrees = null)
     {
-        // Width始终是红色剩余量；暗槽只补充定位/分类，不能伪装为血量进展。
+        // Width始终是实际剩余血量（红色或已确认部件的白/金色）；暗槽不能伪装为血量进展。
         internal int HealthBarTrackWidth { get; init; }
         internal int CenterX => X + Math.Max(Width, HealthBarTrackWidth) / 2;
         internal int CenterY => Y + Height / 2;
@@ -1963,8 +1963,10 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 connectivity: PixelConnectivity.Connectivity4,
                 ltype: MatType.CV_32S);
 
-            if (diagnostics != null) diagnostics.RawComponents = numLabels - 1;
-            if (numLabels <= 1)
+            // 构装体隐身部件使用白/金血条；保留独立蓝标复核，不能放宽整个红色掩码。
+            var componentBars = indicatorOnly ? Array.Empty<Rect>() : CombatComponentHealthBarReader.Read(imageCrop.SrcMat);
+            if (diagnostics != null) diagnostics.RawComponents = numLabels - 1 + componentBars.Count;
+            if (numLabels <= 1 && componentBars.Count == 0)
             {
                 if (indicatorOnly)
                 {
@@ -2013,6 +2015,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 .Where(visual => visual.HasValue)
                 .Select(visual => visual!.Value)
                 .ToList();
+            visuals.AddRange(componentBars.Select(bar => new EnemySeekVisual(bar.X, bar.Y, bar.Width, bar.Height,
+                bar.Width * bar.Height)));
+            if (diagnostics != null) diagnostics.Accepted += componentBars.Count;
 
             if (visuals.Count == 0 || indicatorOnly && !visuals.Any(v => v.IndicatorBearingDegrees.HasValue))
             {

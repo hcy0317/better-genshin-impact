@@ -124,7 +124,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     private int EvidenceQueueLimit(DiagnosticEvidencePriority priority) =>
         _queueCapacity - (priority < DiagnosticEvidencePriority.Error && _queueCapacity > 1 ? 1 : 0);
     private bool FitsByteLimit(long bytes, long replacing = 0, bool terminal = false) =>
-        _maximumBytes is not { } limit || bytes <= limit - _bytes - _stagedBytes + _savedReservationBytes + replacing -
+        _maximumBytes is not { } limit || bytes <= limit - _bytes - _stagedBytes + _savedReservationBytes + _savedHistoryBytes + replacing -
             (terminal ? 0 : Math.Min(32L * 1024 * 1024, limit / 4));
     private bool FitsMemory(long bytes, long replacing = 0, bool terminal = false) =>
         bytes <= _maximumMemoryBytes - _queuedBytes - _stagedBytes + replacing -
@@ -141,10 +141,15 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
             {
                 try
                 {
-                    if (retained.FrameStamp.SessionId != requestedSource.SessionId)
+                    var exact = _latestHistory?.Source == requestedSource && _latestHistory.Image != null ? _latestHistory :
+                        _history.FirstOrDefault(item => item.Source == requestedSource && item.Image != null);
+                    var original = exact?.Image ?? retained;
+                    if (original.FrameStamp.SessionId != requestedSource.SessionId)
                     { MissingFrame(request, phase, "capture-source-changed", logger); return false; }
-                    var saved = TryCaptureWithReason(retained, request, phase,
-                        $"requestedSource={requestedSource.SessionId}/{requestedSource.Sequence}; latest-existing-frame; {detail}", out var reason, logger, fields: fields);
+                    var sourcePixels = original.FrameStamp == requestedSource ? "exact-decision-source" : "unavailable:retained-context-only";
+                    var saved = TryCaptureWithReason(original, request, phase,
+                        $"requestedSource={requestedSource.SessionId}/{requestedSource.Sequence}; latest-existing-frame; sourcePixels={sourcePixels}; {detail}",
+                        out var reason, logger, fields: fields, sharedHistory: exact);
                     if (!saved) MissingFrame(request, phase, reason, logger);
                     return saved;
                 }
@@ -289,7 +294,7 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
     private bool TryCaptureWithReason(ImageRegion frame, string request, string phase, string detail, out string reason,
         ILogger? logger = null, string? sourceRequest = null, DiagnosticWindowFrame? window = null,
         DiagnosticEvidencePriority priority = DiagnosticEvidencePriority.Routine,
-        IReadOnlyDictionary<string, string>? fields = null)
+        IReadOnlyDictionary<string, string>? fields = null, HistoryFrame? sharedHistory = null)
     {
         reason = "accepted";
         Mat? owned = null;
@@ -310,24 +315,33 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 if (window == null && seen != null && seen.Contains(phase))
                 { reason = "duplicate-phase"; return false; }
                 var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
-                if (EvidenceImageLimitReached(priority) || !FitsByteLimit(bytes, terminal: terminal))
+                if (EvidenceImageLimitReached(priority) || !FitsByteLimit(bytes,
+                        sharedHistory is { Saved: false } ? sharedHistory.Bytes : 0, terminal: terminal))
                 { reason = "run-image-or-byte-budget"; return false; }
-                if (terminal) ReclaimQueuedLowerPriority(bytes, priority);
-                if (!FitsMemory(bytes, terminal: terminal)) { reason = "memory-budget"; return false; }
+                var memoryBytes = sharedHistory == null ? bytes : 0;
+                if (terminal) ReclaimQueuedLowerPriority(memoryBytes, priority);
+                if (!FitsMemory(memoryBytes, terminal: terminal)) { reason = "memory-budget"; return false; }
                 if (_queue.Count >= EvidenceQueueLimit(priority))
                 { reason = "writer-queue-full"; return false; }
-                owned = frame.SrcMat.Clone();
+                var image = sharedHistory?.Image?.SrcMat ?? (owned = frame.SrcMat.Clone());
                 var evidence = new DiagnosticEvidence(_runId, _accepted + 1, request, phase, frame.FrameStamp,
                     detail.Length > 2048 ? detail[..2048] : detail, sourceRequest, window, priority) { Fields = fields };
                 if (window != null && _incidents.TryGetValue(window.WindowId, out var incident))
                     evidence = evidence with { TaskInstanceId = incident.TaskInstanceId, ScriptInstanceId = incident.ScriptInstanceId,
                         UiRootId = incident.UiRootId, UiOperationId = incident.UiOperationId };
-                _queue.AddLast((evidence, owned, bytes, null));
+                Action? release = null;
+                if (sharedHistory != null)
+                {
+                    sharedHistory.References++;
+                    if (!sharedHistory.Saved) { sharedHistory.Saved = true; _savedHistoryBytes += sharedHistory.Bytes; }
+                    release = () => ReleaseHistory(sharedHistory);
+                }
+                _queue.AddLast((evidence, image, memoryBytes, release));
                 _queueWake.Writer.TryWrite(0);
-                owned = null; // 从这里起只有writer拥有并释放图像。
+                owned = null; // writer拥有此排队引用；共享历史仅在最后一个引用释放时归还像素。
                 _accepted++;
                 _bytes += bytes;
-                _queuedBytes += bytes;
+                _queuedBytes += memoryBytes;
                 if (window != null) return true;
                 if (!_phases.TryGetValue(request, out seen))
                 {
@@ -500,16 +514,17 @@ internal sealed partial class DiagnosticEvidenceScope : IAsyncDisposable
                 await _storage.CompleteAsync(new { summary.RunId, accepted = summary.Accepted, written = summary.Written,
                     dropped = summary.Dropped, missingBefore = summary.MissingBefore, writeFailures = summary.WriteFailures,
                     duplicateSuppressed = summary.DuplicateSuppressed, missingReasons = summary.MissingReasons,
+                    rawPixelBytes = summary.Bytes, diskBudgetUsedBytesBeforeSummary = _storage.UsedBytes, diskLimit = _storage.MaximumBytes,
                     incidents, rejectedIncidents = _rejectedIncidents.Values, rejectedIdentityOverflow = _rejectedIdentityOverflow,
                     identities = _identities, identityDrops = _identityDrops }).ConfigureAwait(false);
         }
         catch (Exception error) { try { _logger.LogWarning(error, "EVIDENCE_SUMMARY_FAILED run={Run}", _runId); } catch { } }
         finally { _storage?.Dispose(); }
         LogIncidentSummaries(incidents);
-        try { _logger.LogDebug("EVIDENCE_DRAINED run={Run} accepted={Accepted} bytes={Bytes} dropped={Dropped} missingBefore={MissingBefore} writeFailures={Failures} imageLimit={ImageLimit} byteLimit={ByteLimit} written={Written} duplicateSuppressed={DuplicateSuppressed} missingReasons={MissingReasons}",
+        try { _logger.LogDebug("EVIDENCE_DRAINED run={Run} accepted={Accepted} bytes={Bytes} dropped={Dropped} missingBefore={MissingBefore} writeFailures={Failures} imageLimit={ImageLimit} byteLimit={ByteLimit} written={Written} duplicateSuppressed={DuplicateSuppressed} rawPixelBytes={RawPixelBytes} diskBudgetUsedBytes={DiskBudgetUsedBytes} diskLimit={DiskLimit} missingReasons={MissingReasons}",
             summary.RunId, summary.Accepted, summary.Bytes, summary.Dropped, summary.MissingBefore, summary.WriteFailures,
             _maxImages?.ToString() ?? "unlimited", _maximumBytes?.ToString() ?? "unlimited", summary.Written, summary.DuplicateSuppressed,
-            JsonConvert.SerializeObject(summary.MissingReasons)); } catch { }
+            summary.Bytes, _storage?.UsedBytes, _storage?.MaximumBytes, JsonConvert.SerializeObject(summary.MissingReasons)); } catch { }
     }
 
     private async Task WriteFileAsync(DiagnosticEvidence evidence, Mat image)

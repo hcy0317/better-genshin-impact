@@ -73,7 +73,8 @@ internal sealed partial class DiagnosticEvidenceScope
         RetainedStartSeconds = _writtenIncidentFrames.Values.Where(frame => frame.IncidentId == item.Id).Select(frame => (double?)frame.Seconds).Min(),
         RetainedEndSeconds = _writtenIncidentFrames.Values.Where(frame => frame.IncidentId == item.Id).Select(frame => (double?)frame.Seconds).Max(),
         item.FirstWrittenSeconds, item.LastWrittenSeconds, MissingReasons = new Dictionary<string, int>(item.Missing),
-        Sampling = "existing-source-sparse-not-video"
+        Sampling = "existing-source-sparse-with-boundary-neighbors-not-video",
+        BoundaryJitterSeconds, BoundaryNeighborSeconds, MaximumAfterBoundarySeconds
     }).ToArray();
 
     private void IncidentMissing(string request, string phase, string reason, int count)

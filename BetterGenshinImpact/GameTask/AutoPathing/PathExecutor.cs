@@ -1224,8 +1224,7 @@ public partial class PathExecutor
             // 根据指定方式进行移动
             if (waypoint.MoveMode == MoveModeEnum.Fly.Code)
             {
-                var isFlying = _moveIo.Motion(screen) == MotionStatus.Fly;
-                await AdvanceFlyAsync(!isFlying);
+                await AdvanceFlyAsync(observation.Valid && observation.Motion == MotionStatus.Normal);
                 continue;
             }
 
@@ -1379,15 +1378,15 @@ public partial class PathExecutor
     private async Task AdvanceFlyAsync(bool jump, WaypointForTrack? nearPoint = null, CaptureFrameStamp previous = default)
     {
         var near = nearPoint != null;
-        async Task<bool> Step(UiOperation? operation)
+        async Task<bool> Step(UiOperation operation)
         {
             if (jump)
             {
-                operation?.Check();
+                operation.Check();
                 if (near)
                 {
                     _moveIo.CheckInput();
-                    operation!.Check();
+                    operation.Check();
                     while (true)
                     {
                         using var fresh = _moveIo.Capture();
@@ -1398,7 +1397,7 @@ public partial class PathExecutor
                         if (observed.SourceUsable && observed.Stamp == previous && observed.Motion == MotionStatus.Normal)
                         {
                             // Non-blocking capture may return the same producer frame; wait, never sign a replacement.
-                            await _moveIo.Delay(50, ct);
+                            await _moveIo.Delay(50, operation.Token);
                             operation.Check();
                             continue;
                         }
@@ -1406,23 +1405,30 @@ public partial class PathExecutor
                         break;
                     }
                 }
-                operation?.Check();
+                operation.Check();
                 ct.ThrowIfCancellationRequested();
                 if (jump)
                 {
-                    _moveIo.Send(GIActions.Jump, KeyType.KeyPress);
-                    await _moveIo.Delay(200, ct);
-                    operation?.Check();
+                    // KeyPress sends down/up in one batch and can be missed at 30fps.
+                    // Keep both the hold and post-release response inside this node's original budget.
+                    try
+                    {
+                        _moveIo.Send(GIActions.Jump, KeyType.KeyDown);
+                        await _moveIo.Delay(60, operation.Token);
+                        operation.Check();
+                    }
+                    finally { _moveIo.Send(GIActions.Jump, KeyType.KeyUp); }
+                    await _moveIo.Delay(200, operation.Token);
+                    operation.Check();
                 }
             }
-            await _moveIo.Delay(100, ct);
-            operation?.Check();
+            await _moveIo.Delay(100, operation.Token);
+            operation.Check();
             return true;
         }
-        if (!near) { await Step(null); return; }
         var remaining = moveToStartTime.AddSeconds(240) - _moveIo.Clock.GetUtcNow().UtcDateTime;
         if (remaining <= TimeSpan.Zero) throw new RetryException("路径点执行超时，放弃整条路径");
-        try { await UiOperation.RunAsync("path-near-flight", remaining, ct, op => Step(op), clock: _moveIo.Clock); }
+        try { await UiOperation.RunAsync(near ? "path-near-flight" : "path-flight", remaining, ct, op => Step(op), clock: _moveIo.Clock); }
         catch (TimeoutException) { throw new RetryException("路径点执行超时，放弃整条路径"); }
     }
 
@@ -1494,6 +1500,7 @@ public partial class PathExecutor
         var stepsTaken = 0;
         var stationary = 0;
         var recoveryUsed = false;
+        var continueFlying = false;
         string? recoveryTerminal = null;
         CaptureFrameStamp previous = default;
         Point2f? previousPosition = null;
@@ -1629,7 +1636,13 @@ public partial class PathExecutor
             climbingFrames = 0;
             if (distance < 2)
             {
+                // Only this fresh, direct arrival observation can keep a fly node in flight.
+                // Prior flight or the authored move mode alone cannot bypass ground settling.
                 _moveIo.Logger.LogDebug("已到达路径点");
+                operation.Check();
+                continueFlying = waypoint.MoveMode == MoveModeEnum.Fly.Code &&
+                    observation.Motion == MotionStatus.Fly && !transformed &&
+                    observation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2));
                 break;
             }
 
@@ -1716,6 +1729,7 @@ public partial class PathExecutor
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
+            previous = currentObservation.Stamp;
             lastPulse = await PathApproachDiagnostics.RunPulseAsync(
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, current);
@@ -1728,15 +1742,16 @@ public partial class PathExecutor
         _arrivalReachedAt = Stopwatch.GetTimestamp();
         await SettleArrivalAsync(waypoint.Action,
             () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp),
-            _moveIo.Delay, ct);
+            _moveIo.Delay, operation.Token, continueFlying);
     }
 
     internal static async Task SettleArrivalAsync(string? action, Action releaseMovement,
-        Func<int, CancellationToken, Task> delay, CancellationToken token)
+        Func<int, CancellationToken, Task> delay, CancellationToken token, bool continueFlying = false)
     {
         releaseMovement();
         token.ThrowIfCancellationRequested();
-        if (action != ActionEnum.Fight.Code) await delay(1000, token);
+        if (continueFlying) await delay(60, token); // Input response only; authored macro waits still run separately.
+        else if (action != ActionEnum.Fight.Code) await delay(1000, token);
     }
 
     internal static Task DispatchArrivalActionAsync(IActionHandler handler, WaypointForTrack? waypoint,
