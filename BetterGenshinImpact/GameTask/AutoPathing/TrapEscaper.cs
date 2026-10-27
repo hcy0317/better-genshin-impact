@@ -299,6 +299,13 @@ public class TrapEscaper(CancellationToken ct)
     {
         if (scope == null && type == KeyType.KeyPress && action is GIActions.Drop or GIActions.Jump)
         {
+            // 攀附时起跳会继续上爬，飞行时会收翼；先按新帧姿态决定能否起跳。
+            if (action == GIActions.Jump)
+            {
+                using var frame = await CapturePlayable(null);
+                if (NativeIo.Motion(frame) != MotionStatus.Normal || !PathWorldAvailability.IsPlayable(NativeIo, frame))
+                    return;
+            }
             // 游戏轮询可能错过同批次按下/松开；脱困也须保持可观测的持键时长。
             try
             {
