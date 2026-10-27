@@ -159,7 +159,44 @@ public class PathMoveToFlightTests
         var replay = new PathReplay { ProducerIntervalMilliseconds = 50 };
         replay.MotionAt = _ => replay.Inputs.Any(x => x.Action == GIActions.Jump) ? MotionStatus.Fly : MotionStatus.Normal;
         await replay.Executor.MoveTo(replay.Point("fly"));
-        Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Jump));
+        Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Jump && x.Type == KeyType.KeyDown));
+        Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Jump && x.Type == KeyType.KeyUp));
+    }
+
+    [Fact]
+    public async Task GliderHoldsJumpAndWaitsForPostReleaseFeedback()
+    {
+        var replay = new PathReplay();
+        DateTimeOffset? down = null, released = null;
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.Jump) return;
+            Assert.NotEqual(KeyType.KeyPress, type);
+            if (type == KeyType.KeyDown) down = replay.Clock.GetUtcNow();
+            if (type == KeyType.KeyUp) released = replay.Clock.GetUtcNow();
+        };
+        replay.MotionAt = _ => released is { } at && replay.Clock.GetUtcNow() - at >= TimeSpan.FromMilliseconds(60)
+            ? MotionStatus.Fly : MotionStatus.Normal;
+        await replay.Executor.MoveTo(replay.Point("fly"));
+        Assert.NotNull(down); Assert.NotNull(released);
+        Assert.True(released - down >= TimeSpan.FromMilliseconds(60));
+        Assert.True(replay.Clock.GetUtcNow() - released >= TimeSpan.FromMilliseconds(60));
+        Assert.Single(replay.Inputs.Where(x => x.Action == GIActions.Jump && x.Type == KeyType.KeyDown));
+    }
+
+    [Theory]
+    [InlineData("hold")]
+    [InlineData("response")]
+    public async Task GliderCancellationReleasesJumpAndForward(string phase)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var replay = new PathReplay(cancellation.Token);
+        replay.AfterDelay = ms => { if (ms == (phase == "hold" ? 60 : 200)) cancellation.Cancel(); };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => replay.Executor.MoveTo(replay.Point("fly")));
+        var jump = replay.Inputs.Where(x => x.Action == GIActions.Jump).ToArray();
+        Assert.Equal(new[] { KeyType.KeyDown, KeyType.KeyUp }, jump.Select(x => x.Type));
+        Assert.Equal((GIActions.MoveForward, KeyType.KeyUp), (replay.Inputs[^1].Action, replay.Inputs[^1].Type));
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
     }
 
     [Theory]

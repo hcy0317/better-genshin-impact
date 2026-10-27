@@ -91,6 +91,47 @@ public class PreciseApproachRecoveryTests
     }
 
     [Fact]
+    public async Task WallOnTheLeftUsesTheOtherSideBeforeResumingTheSameWaypoint()
+    {
+        // 2026-10-27 645: the left probe stayed within .05px against the wall.
+        // The other side is clear; the recovery still must return to the target.
+        var replay = new PathReplay { EmitReceipts = true };
+        var position = new Point2f(104, 100);
+        GIActions? held = null;
+        var cleared = false;
+        replay.PositionAt = _ => position;
+        replay.OnInput = (action, type) =>
+        {
+            if (type == KeyType.KeyDown) held = action;
+            if (type == KeyType.KeyUp && held == action) held = null;
+        };
+        replay.AfterDelay = ms =>
+        {
+            if (held == GIActions.MoveRight) position.Y -= ms * .02f;
+            cleared |= position.Y <= 98;
+            if (held == GIActions.MoveForward && cleared)
+            { position.X = Math.Max(100, position.X - .6f); position.Y = Math.Min(100, position.Y + .3f); }
+        };
+        await replay.Executor.MoveCloseTo(replay.Point("dash"));
+        Assert.True(cleared);
+        Assert.True(Math.Pow(position.X - 100, 2) + Math.Pow(position.Y - 100, 2) < 4);
+        Assert.Contains(replay.RecoveryInputs, input => input.Action == GIActions.MoveRight && input.Type == KeyType.KeyDown);
+        Assert.DoesNotContain(replay.RecoveryInputs, input => input.Action is GIActions.Jump or GIActions.MoveBackward);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task BothSidesBlockedStillFailWithinTheOriginalApproachBudget()
+    {
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(104, 100) };
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("dash")));
+        Assert.Single(replay.RecoveryInputs.Where(input => input.Action == GIActions.MoveLeft && input.Type == KeyType.KeyDown));
+        Assert.Single(replay.RecoveryInputs.Where(input => input.Action == GIActions.MoveRight && input.Type == KeyType.KeyDown));
+        Assert.True(replay.Clock.GetUtcNow() - replay.Started < TimeSpan.FromSeconds(60));
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
     public async Task RecoveryCannotUseAQueuedPreInputFrameToSendTheNextAction()
     {
         var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(104, 100) };
@@ -343,8 +384,10 @@ public class PreciseApproachRecoveryTests
         target.Y = 1256.85f;
         await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
         Assert.NotEmpty(replay.RecoveryInputs);
-        Assert.Single(replay.RecoveryInputs.Where(input => input.Type == KeyType.KeyDown &&
-            input.Action is GIActions.MoveBackward or GIActions.MoveLeft or GIActions.MoveRight));
+        var recoveryMoves = replay.RecoveryInputs.Where(input => input.Type == KeyType.KeyDown &&
+            input.Action is GIActions.MoveBackward or GIActions.MoveLeft or GIActions.MoveRight).ToArray();
+        Assert.Equal(new[] { GIActions.MoveLeft, GIActions.MoveRight }, recoveryMoves.Select(input => input.Action));
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
         Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
     }
 }

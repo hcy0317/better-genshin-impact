@@ -11,24 +11,28 @@ internal static class PathPreciseRecovery
 {
     internal static async Task<bool> SidestepAsync(PathRecoveryScope scope, PathMoveObservation start)
     {
-        var stableDisplacement = 0;
-        try
+        // 645的左侧就是岩壁；把原700ms侧移分给两侧，不扩大恢复期限或到达预算。
+        foreach (var direction in new[] { GIActions.MoveLeft, GIActions.MoveRight })
         {
-            await scope.SendAsync(GIActions.MoveLeft, KeyType.KeyDown);
-            var started = scope.Io.Clock.GetTimestamp();
-            // No longer than the existing first lateral recovery hold (700ms).
-            while (scope.Io.Clock.GetElapsedTime(started).TotalMilliseconds < 700)
+            var stableDisplacement = 0;
+            var origin = direction == GIActions.MoveLeft ? start : await scope.ObserveAsync();
+            try
             {
-                await scope.DelayAsync((int)Math.Ceiling(Math.Min(60,
-                    700 - scope.Io.Clock.GetElapsedTime(started).TotalMilliseconds)));
-                var observed = await scope.ObserveAsync();
-                var dx = observed.Position.X - start.Position.X;
-                var dy = observed.Position.Y - start.Position.Y;
-                stableDisplacement = dx * dx + dy * dy >= 4 ? stableDisplacement + 1 : 0;
-                if (stableDisplacement >= 2) return true;
+                await scope.SendAsync(direction, KeyType.KeyDown);
+                var started = scope.Io.Clock.GetTimestamp();
+                while (scope.Io.Clock.GetElapsedTime(started).TotalMilliseconds < 350)
+                {
+                    await scope.DelayAsync((int)Math.Ceiling(Math.Min(60,
+                        350 - scope.Io.Clock.GetElapsedTime(started).TotalMilliseconds)));
+                    var observed = await scope.ObserveAsync();
+                    var dx = observed.Position.X - origin.Position.X;
+                    var dy = observed.Position.Y - origin.Position.Y;
+                    stableDisplacement = dx * dx + dy * dy >= 4 ? stableDisplacement + 1 : 0;
+                    if (stableDisplacement >= 2) return true;
+                }
             }
-            return false;
+            finally { await scope.SendAsync(direction, KeyType.KeyUp); }
         }
-        finally { await scope.SendAsync(GIActions.MoveLeft, KeyType.KeyUp); }
+        return false;
     }
 }

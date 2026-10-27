@@ -64,7 +64,9 @@ internal static class SaurianUiReader
         return Match(pixels, new Rect(1275, 970, 75, 55), scale, SaurianUiTemplates.Aim, binary: true) >= .88 ||
             Match(pixels, new Rect(1586, 963, 50, 58), scale, SaurianUiTemplates.Burrow, binary: false) >= .85 ||
             Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.Spirit, binary: false) >= .85 ||
-            Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.Flight, binary: false) >= .85;
+            Match(pixels, new Rect(1686, 963, 57, 58), scale, SaurianUiTemplates.Flight, binary: false) >= .85 ||
+            // 冲浪板布局仍须世界锚点、橙色血条和退出图标；仅补充这一对控制图标的 Space。
+            Match(pixels, new Rect(1586, 963, 50, 58), scale, SaurianUiTemplates.SurfboardSpace, binary: false, shapeOnly: true) >= .88;
     }
 
     private static bool BrightAnchor(ImageRegion frame, string name, int minimum)
