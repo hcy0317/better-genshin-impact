@@ -109,7 +109,7 @@ public class TrapEscaper(CancellationToken ct)
             }
             if ((now - startTime).TotalSeconds > 25)
             {
-                (scope?.Io.Logger ?? Logger).LogError("卡死脱困超时！");
+                (scope?.Io.Logger ?? NativeIo.Logger).LogError("卡死脱困超时！");
                 break;
             }
 
@@ -209,7 +209,7 @@ public class TrapEscaper(CancellationToken ct)
             using var screen = NativeIo.Capture();
             return PathWorldAvailability.IsPlayable(NativeIo, screen) ? NativeIo.Motion(screen) : MotionStatus.Normal;
         }, () => NativeIo.Send(GIActions.NormalAttack, KeyType.KeyPress), ct);
-        (scope?.Io.Logger ?? Logger).LogDebug(attacked
+        (scope?.Io.Logger ?? NativeIo.Logger).LogDebug(attacked
             ? "脱困：确认飞行，执行一次下落攻击"
             : "脱困：未确认飞行，不发送普攻");
         await Wait(scope, 500);
@@ -297,6 +297,17 @@ public class TrapEscaper(CancellationToken ct)
 
     private async Task Send(PathRecoveryScope? scope, GIActions action, KeyType type = KeyType.KeyPress)
     {
+        if (scope == null && type == KeyType.KeyPress && action is GIActions.Drop or GIActions.Jump)
+        {
+            // 游戏轮询可能错过同批次按下/松开；脱困也须保持可观测的持键时长。
+            try
+            {
+                await Send(scope, action, KeyType.KeyDown);
+                await Wait(scope, 60);
+            }
+            finally { await Send(scope, action, KeyType.KeyUp); }
+            return;
+        }
         if (scope != null) { await scope.SendAsync(action, type); return; }
         if (type != KeyType.KeyUp)
         {
