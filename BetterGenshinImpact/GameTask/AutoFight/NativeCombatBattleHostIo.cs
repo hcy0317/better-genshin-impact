@@ -355,6 +355,9 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.NotSent);
         try
         {
+        ct.ThrowIfCancellationRequested();
+        // 取得输入排他权会暂停被动发布；先保留本请求的世界帧，原生输入前仍重验帧龄/控制。
+        var resetObservation = input.Kind == CombatBattleHostInputKind.CameraReset ? ObserveTarget() : default;
         async ValueTask Dispatch(CancellationToken token)
         {
             var dispatch = Clock.GetElapsedTime(requestedAt);
@@ -398,6 +401,31 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                         throw new InvalidOperationException("场景未明确授权固定目标定位");
                     inputAttempted = true;
                     using (operation.Measure(UiOperationPhase.NativeInput)) _device.PressTargetLock();
+                    break;
+                case CombatBattleHostInputKind.CameraReset:
+                    if (_partyRequested || !CombatBattleHost.CanResetCamera(resetObservation, BattleId, Clock) ||
+                        !(resetObservation.Source == input.Source || resetObservation.Source.IsAfter(input.Source)))
+                    {
+                        result = new(CombatBattleHostInputStatus.NotSent, Reason: "camera-reset-world-frame-not-admitted");
+                        return;
+                    }
+                    // 观察与窗口准备也占原生150ms窗口，持键前留足40ms和释放余量。
+                    operation.Check();
+                    if (operation.Remaining.TotalMilliseconds < 50)
+                    {
+                        result = new(CombatBattleHostInputStatus.NotSent, Reason: "camera-reset-hold-budget-insufficient");
+                        return;
+                    }
+                    inputAttempted = true;
+                    try
+                    {
+                        using (operation.Measure(UiOperationPhase.NativeInput)) _device.SetCameraReset(true);
+                        using (operation.Measure(UiOperationPhase.ExplicitWait)) await _device.DelayAsync(40, token);
+                    }
+                    finally
+                    {
+                        using (operation.Measure(UiOperationPhase.NativeInput)) _device.SetCameraReset(false);
+                    }
                     break;
                 case CombatBattleHostInputKind.Camera:
                     inputAttempted = true;
@@ -728,6 +756,7 @@ internal interface ICombatHostInputDevice
     void PrepareInput();
     InputDispatchCapture? BeginNativeCapture(Action beforeFirstNative) => null;
     void MoveCamera(int x, int y);
+    void SetCameraReset(bool down) => throw new NotSupportedException("此输入设备未提供寻敌镜头回正");
     void MoveForward(bool down);
     void PressDrop();
     void PressParty();
@@ -743,6 +772,11 @@ internal sealed class NativeCombatHostInputDevice(InputSessionOwnership.Owner? i
     public void PrepareInput() => TaskControl.CheckAndSleep(0);
     public InputDispatchCapture BeginNativeCapture(Action beforeFirstNative) => new(beforeFirstNative);
     public void MoveCamera(int x, int y) => Send(() => InputHub.Foreground.Mouse.MoveMouseBy(x, y));
+    public void SetCameraReset(bool down) => Send(() =>
+    {
+        if (down) InputHub.Foreground.Mouse.MiddleButtonDown();
+        else InputHub.Foreground.Mouse.MiddleButtonUp();
+    });
     public void MoveForward(bool down) => Send(() => InputHub.Foreground.SimulateAction(GIActions.MoveForward,
         down ? KeyType.KeyDown : KeyType.KeyUp));
     public void PressDrop() => Send(() => InputHub.Foreground.SimulateAction(GIActions.Drop));

@@ -27,7 +27,7 @@ public partial class CombatNativeAdapterReplayTests
             {
                 var complete = await ready.Task.WaitAsync(token);
                 using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("钟离 attack(.1)"))
-                { Actors = [new("钟离", 1)] };
+                { Actors = [new("钟离", 1)], ExternalClockAdvance = true };
                 physical.SetFrontActor("钟离");
                 using var flow = NativeCombatFlowRunner.Create(CombatScriptExecutor.ExternalSessionCommands(script), physical, loop: true);
                 var perceptionStarted = false;
