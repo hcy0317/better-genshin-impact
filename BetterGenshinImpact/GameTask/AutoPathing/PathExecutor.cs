@@ -966,6 +966,9 @@ public partial class PathExecutor
         var plainFlightTransit = waypoint.Type == WaypointType.Path.Code && string.IsNullOrWhiteSpace(waypoint.Action);
         var climbWindow = new PathClimbProgressWindow();
         var swimmingFrames = 0;
+        var flightClimbingFrames = 0;
+        var flightDetachUsed = false;
+        CaptureFrameFence? flightDetachFence = null;
         CaptureFrameStamp lastMoveFrame = default;
 
         // 飞行先取得有效观测并开翼，再接管前进输入。
@@ -985,7 +988,7 @@ public partial class PathExecutor
             }
 
             using var screen = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct,
-                onBlocked: () => { climbWindow.Clear(); swimmingFrames = 0; });
+                onBlocked: () => { climbWindow.Clear(); swimmingFrames = flightClimbingFrames = 0; });
             transformed = IsKnownPathTransformation(screen);
 
             _moveIo.EndJudgment(screen);
@@ -1023,6 +1026,14 @@ public partial class PathExecutor
             if (waypoint.MoveMode == MoveModeEnum.Climb.Code && progressObservedAt >= moveToStartTime.AddSeconds(60))
                 throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
             lastMoveFrame = screen.FrameStamp;
+            if (flightDetachFence is { } requiredFlightFrame &&
+                (!observation.Valid || !requiredFlightFrame.Accepts(observation.Stamp)))
+            {
+                flightClimbingFrames = 0;
+                SendPathForward(KeyType.KeyUp);
+                await _moveIo.Delay(100, ct);
+                continue;
+            }
             // 战斗游泳检测不会进入寻路飞行分支。两张同源新鲜游泳帧后回到既有
             // 分段重试/传送入口，不能把同一XY当作飞行到达，也不能持续发送起跳。
             if (waypoint.MoveMode != MoveModeEnum.Swim.Code && observation.SourceUsable && observation.Motion == MotionStatus.Swim)
@@ -1055,10 +1066,48 @@ public partial class PathExecutor
 
             if ((waypoint.MoveMode == MoveModeEnum.Fly.Code || airborneStart) && !observation.Valid)
             {
+                flightClimbingFrames = 0;
                 SendPathForward(KeyType.KeyUp);
                 await _moveIo.Delay(100, ct);
                 continue;
             }
+            if (waypoint.MoveMode == MoveModeEnum.Fly.Code && !transformed)
+            {
+                if (observation.Motion == MotionStatus.Climb)
+                {
+                    SendPathForward(KeyType.KeyUp);
+                    if (++flightClimbingFrames >= 2 && !flightDetachUsed)
+                    {
+                        flightDetachUsed = true;
+                        _moveIo.CheckInput();
+                        if (_moveDeadline.Value - _moveIo.Clock.GetUtcNow() <= TimeSpan.FromMilliseconds(60))
+                            throw new RetryException("路径点执行超时，放弃整条路径");
+                        void Drop()
+                        {
+                            using var admission = new Fischless.WindowsInput.InputDispatchCapture(() =>
+                            {
+                                ct.ThrowIfCancellationRequested();
+                                if (_moveDeadline.Value - _moveIo.Clock.GetUtcNow() <= TimeSpan.FromMilliseconds(60))
+                                    throw new RetryException("路径点执行超时，放弃整条路径");
+                                if (!observation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2)))
+                                    throw new RetryException("飞行起步脱离输入前原帧过期");
+                            });
+                            _moveIo.Send(GIActions.Drop, KeyType.KeyDown);
+                        }
+                        var dropped = await PathApproachDiagnostics.RunPulseAsync(Drop,
+                            () => _moveIo.Send(GIActions.Drop, KeyType.KeyUp), ms => _moveIo.Delay(ms, ct), _moveIo.Clock, screen);
+                        if (!dropped.HasCompleteReceipt)
+                            throw new RetryException("飞行起步脱离输入未确认，不继续移动");
+                        flightDetachFence = new(observation.Stamp, _moveIo.Clock.GetTimestamp());
+                        _moveIo.Logger.LogDebug("PATH_FLY_START_DETACH node={Node} source={Session}/{Sequence} nativeRequested={Requested} nativeSubmitted={Submitted}",
+                            waypoint.Id, observation.Stamp.SessionId, observation.Stamp.Sequence, dropped.Requested, dropped.Submitted);
+                    }
+                    await _moveIo.Delay(100, ct);
+                    continue;
+                }
+                flightClimbingFrames = 0;
+            }
+            else flightClimbingFrames = 0;
             if (distance < 4 && waypoint.MoveMode == MoveModeEnum.Fly.Code)
             {
                 SendPathForward(KeyType.KeyUp);
@@ -1537,12 +1586,12 @@ public partial class PathExecutor
         _moveIo.Logger.LogDebug("精确接近目标点，位置({x2},{y2})", $"{waypoint.GameX:F1}", $"{waypoint.GameY:F1}");
 
         var stepsTaken = 0;
-        var stationary = 0;
+        var noProgress = 0;
         var recoveryUsed = false;
         var continueFlying = false;
         string? recoveryTerminal = null;
         CaptureFrameStamp previous = default;
-        Point2f? previousPosition = null;
+        double? bestDistance = null;
         PathApproachPulse lastPulse = default;
         var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
         var climbingFrames = 0;
@@ -1564,7 +1613,7 @@ public partial class PathExecutor
             operation.Check();
             using var screen = await PathWorldAvailability.CapturePlayableAsync(_moveIo,
                 _moveIo.Clock.GetUtcNow().Add(operation.Remaining), operation.Token,
-                onBlocked: () => stationary = 0);
+                onBlocked: () => noProgress = 0);
 
             _moveIo.EndJudgment(screen);
 
@@ -1579,7 +1628,7 @@ public partial class PathExecutor
             }
             if (!observation.Valid || detachFence is { } required && !required.Accepts(observation.Stamp))
             {
-                stationary = swimmingFrames = 0;
+                noProgress = swimmingFrames = 0;
                 climbingFrames = 0;
                 await _moveIo.Delay(100, operation.Token);
                 continue;
@@ -1611,7 +1660,7 @@ public partial class PathExecutor
             {
                 // 松开攀爬后的下落/未知姿态不算落地，也不消耗小碎步次数。
                 previous = observation.Stamp;
-                stationary = climbingFrames = 0;
+                noProgress = climbingFrames = 0;
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
@@ -1631,7 +1680,7 @@ public partial class PathExecutor
             {
                 _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
                 previous = observation.Stamp;
-                stationary = 0;
+                noProgress = 0;
                 if (++climbingFrames < 2) { await _moveIo.Delay(100, operation.Token); continue; }
                 if (detachAttempts >= 2)
                 {
@@ -1665,7 +1714,7 @@ public partial class PathExecutor
                 if (!dropped.HasCompleteReceipt) throw new RetryException("攀爬脱离输入未确认，不继续移动");
                 detachFence = attemptedFence;
                 detachFeedbackCaptured = false;
-                previousPosition = null;
+                bestDistance = null;
                 climbingFrames = 0;
                 _moveIo.Logger.LogDebug("PATH_APPROACH_DETACH attempt={Attempt}/2 source={Session}/{Sequence}",
                     detachAttempts, observation.Stamp.SessionId, observation.Stamp.Sequence);
@@ -1685,11 +1734,17 @@ public partial class PathExecutor
                 break;
             }
 
-            stationary = previousPosition is { } old && lastPulse.HasCompleteReceipt &&
-                Math.Abs(position.X - old.X) + Math.Abs(position.Y - old.Y) < .1 ? stationary + 1 : 0;
+            // Sideways jitter is not progress. Accumulate small gains against the best
+            // distance, while allowing brief detours within the original five-pulse window.
+            if (!lastPulse.HasCompleteReceipt || bestDistance == null || distance < bestDistance.Value - .1)
+            {
+                bestDistance = distance;
+                noProgress = 0;
+            }
+            else noProgress++;
+            lastPulse = default; // A receipt can authorize only one progress observation.
             previous = observation.Stamp;
-            previousPosition = position;
-            if (!recoveryUsed && stationary >= 5 && observation.Motion == MotionStatus.Normal &&
+            if (!recoveryUsed && noProgress >= 5 && observation.Motion == MotionStatus.Normal &&
                 waypoint.MoveMode is "walk" or "run" or "climb" or "dash" && !_moveIo.Transformed(screen))
             {
                 recoveryUsed = true;
@@ -1726,7 +1781,7 @@ public partial class PathExecutor
                 approachDiagnostics.RecoveryFinished(recoveryTerminal, _moveIo.Logger);
                 // 最后一次释放输入后也须等待游戏响应，再进入原节点观察。
                 await _moveIo.Delay(60, operation.Token);
-                stationary = 0;
+                noProgress = 0;
                 continue;
             }
 
@@ -1764,7 +1819,7 @@ public partial class PathExecutor
                 !_moveIo.Transformed(current) && currentObservation.Motion != MotionStatus.Normal)
             {
                 // 转向期间也可能爬上障碍物；回到原脱离分支，不能继续W或用平面距离判落地。
-                stationary = 0;
+                noProgress = 0;
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
@@ -1774,7 +1829,7 @@ public partial class PathExecutor
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, current);
             approachDiagnostics.RecordPulse(lastPulse);
             // 松键后的识图也要等待游戏30–60ms响应；按键保持时间不能代替响应后的等待。
-            // 不放宽到达距离或停滞判据，仍由下一张有效源帧确认实际位置。
+            // 仍由下一张有效源帧确认目标进展及原2px到达距离。
             await _moveIo.Delay(60, operation.Token);
         }
 

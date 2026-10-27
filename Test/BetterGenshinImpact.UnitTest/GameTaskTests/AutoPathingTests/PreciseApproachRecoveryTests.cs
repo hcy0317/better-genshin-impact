@@ -58,8 +58,10 @@ public class PreciseApproachRecoveryTests
         Assert.All(replay.Images, frame => Assert.True(frame.SrcMat.IsDisposed));
     }
 
-    [Fact]
-    public async Task BodyBlockedApproachSidestepsThenResumesTheSameWaypointWithoutLongRetreat()
+    [Theory]
+    [InlineData(0f)]
+    [InlineData(.35f)]
+    public async Task BodyBlockedApproachSidestepsThenResumesTheSameWaypointWithoutLongRetreat(float jitter)
     {
         // Noon 606923 -> 607243: generic retreat moved 15 pixels away from the
         // body-blocked target. Model the collision boundary, not an instant arrival.
@@ -68,6 +70,7 @@ public class PreciseApproachRecoveryTests
         var held = GIActions.MoveForward;
         var moving = false;
         var cleared = false;
+        var blockedPulses = 0;
         replay.PositionAt = _ => position;
         replay.OnInput = (action, type) =>
         {
@@ -80,12 +83,17 @@ public class PreciseApproachRecoveryTests
             if (held == GIActions.MoveLeft) position.Y += ms * .02f;
             cleared |= position.Y >= 102;
             if (held == GIActions.MoveBackward) position.X += ms * .01f;
+            // A collision can move the marker sideways without getting closer to the target.
+            if (held == GIActions.MoveForward && !cleared)
+                position.Y = 100 + (++blockedPulses % 2 == 0 ? jitter : -jitter);
             if (held == GIActions.MoveForward && cleared)
             { position.X = Math.Max(100, position.X - .6f); position.Y = Math.Max(100, position.Y - .3f); }
         };
-        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        var error = await Record.ExceptionAsync(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+        Assert.True(error == null, $"blockedPulses={blockedPulses}, recoveryInputs={replay.RecoveryInputs.Count}, error={error}");
         Assert.True(Math.Pow(position.X - 100, 2) + Math.Pow(position.Y - 100, 2) < 4);
-        Assert.Contains(replay.RecoveryInputs, input => input.Action == GIActions.MoveLeft && input.Type == KeyType.KeyDown);
+        Assert.Single(replay.RecoveryInputs.Where(input => input.Action == GIActions.MoveLeft && input.Type == KeyType.KeyDown));
+        Assert.InRange(replay.Inputs.Count(input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown), 1, 24);
         Assert.DoesNotContain(replay.RecoveryInputs, input => input.Action is GIActions.Jump or GIActions.Drop or GIActions.MoveBackward);
         Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
     }
@@ -120,11 +128,22 @@ public class PreciseApproachRecoveryTests
         Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
     }
 
-    [Fact]
-    public async Task BothSidesBlockedStillFailWithinTheOriginalApproachBudget()
+    [Theory]
+    [InlineData(0f, false)]
+    [InlineData(.35f, false)]
+    [InlineData(.35f, true)]
+    public async Task BothSidesBlockedStillFailWithinTheOriginalApproachBudget(float jitter, bool driftingAway)
     {
-        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(104, 100) };
-        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("dash")));
+        var pulses = 0;
+        var replay = new PathReplay { EmitReceipts = true,
+            PositionAt = _ => new Point2f(104 + (driftingAway ? pulses * .1f : 0),
+                100 + (pulses % 2 == 0 ? jitter : -jitter)) };
+        replay.OnInput = (action, type) =>
+        { if (action == GIActions.MoveForward && type == KeyType.KeyDown) pulses++; };
+        var error = await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("dash")));
+        Assert.Equal("精确接近目标点超时，重试当前路线分段", error.Message);
+        Assert.Equal(24, pulses); // One of the original 25 steps runs the sole recovery.
+        Assert.DoesNotContain(replay.RecoveryInputs, input => input.Action is GIActions.Jump or GIActions.Drop or GIActions.MoveBackward);
         Assert.Single(replay.RecoveryInputs.Where(input => input.Action == GIActions.MoveLeft && input.Type == KeyType.KeyDown));
         Assert.Single(replay.RecoveryInputs.Where(input => input.Action == GIActions.MoveRight && input.Type == KeyType.KeyDown));
         Assert.True(replay.Clock.GetUtcNow() - replay.Started < TimeSpan.FromSeconds(60));
@@ -335,8 +354,29 @@ public class PreciseApproachRecoveryTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HealthyApproachAllowsCumulativeSmallGainsAndShortDetoursWithoutRecovery(bool detours)
+    {
+        var pulses = 0;
+        var distances = detours
+            ? new[] { 6f, 6.4f, 6.2f, 6.3f, 5.5f, 5.9f, 5.7f, 5.6f, 5f, 4.8f, 4.5f, 4.7f, 4f, 3.8f, 3.5f, 3.2f, 3.3f, 2.8f, 2.4f, 1.9f }
+            : Enumerable.Range(0, 25).Select(step => 2.9f - .04f * step).ToArray();
+        var replay = new PathReplay { EmitReceipts = true,
+            PositionAt = _ => new Point2f(100 + distances[Math.Min(pulses, distances.Length - 1)], 100) };
+        replay.OnInput = (action, type) =>
+        { if (action == GIActions.MoveForward && type == KeyType.KeyDown) pulses++; };
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.InRange(pulses, 1, 24);
+        Assert.True(distances[pulses] < 2);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
     [InlineData("fallback")]
     [InlineData("duplicate")]
+    [InlineData("stale")]
     [InlineData("transformed")]
     [InlineData("fly")]
     [InlineData("climb")]
@@ -345,7 +385,12 @@ public class PreciseApproachRecoveryTests
     {
         var replay = new PathReplay { EmitReceipts = kind != "no-receipt", Direct = kind != "fallback",
             Duplicate = kind == "duplicate", Transformed = kind == "transformed",
-            PositionAt = _ => new Point2f(103.94f, 100) };
+            PositionAt = frame => new Point2f(103.94f, 100 + (frame % 4 < 2 ? .35f : -.35f)) };
+        if (kind == "stale")
+        {
+            replay.Clock.Advance(TimeSpan.FromSeconds(3));
+            replay.StampTransform = stamp => stamp with { CapturedTimestamp = 0, CapturedAt = replay.Started };
+        }
         if (kind == "fly") replay.MotionAt = _ => MotionStatus.Fly;
         if (kind == "climb") replay.MotionAt = _ => MotionStatus.Climb;
         await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
@@ -360,7 +405,8 @@ public class PreciseApproachRecoveryTests
     public async Task CancellationOrParentDeadlineDuringRecoveryCleansKeysAndCannotSucceed(bool cancel)
     {
         using var cancellation = new CancellationTokenSource();
-        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true, PositionAt = _ => new Point2f(103.94f, 100) };
+        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true,
+            PositionAt = frame => new Point2f(103.94f, 100 + (frame % 4 < 2 ? .35f : -.35f)) };
         replay.OnInput = (_, _) =>
         {
             if (UiOperation.Current?.Name != "path-precise-recovery") return;
