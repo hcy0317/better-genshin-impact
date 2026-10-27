@@ -37,6 +37,7 @@ public class CombatCommand
     public int SourceLine { get; set; } = 1;
     public int SourceColumn { get; set; } = 1;
     internal bool IsCompilerGenerated { get; init; }
+    internal bool HasCompilerGeneratedCondition { get; set; }
     // 内部兼容政策，不增加外部语法；普通片段的真实失败不能按可选增强节点忽略。
     internal bool LegacyOutcomePolicy { get; set; }
     internal double? GuardianDurationLimit { get; init; }
@@ -74,6 +75,7 @@ public class CombatCommand
         SourceLine = source.SourceLine;
         SourceColumn = source.SourceColumn;
         IsCompilerGenerated = source.IsCompilerGenerated;
+        HasCompilerGeneratedCondition = source.HasCompilerGeneratedCondition;
         LegacyOutcomePolicy = source.LegacyOutcomePolicy;
         GuardianDurationLimit = source.GuardianDurationLimit;
         NativeSkillSequence = source.NativeSkillSequence == null ? null : Array.AsReadOnly(
