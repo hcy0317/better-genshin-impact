@@ -95,7 +95,7 @@ internal static partial class CombatFlowValidation
         foreach (var reference in condition.NamedReferences)
         {
             var name = CombatFlowContext.NormalizeName(reference.Name);
-            if (name.StartsWith('$')) throw source.Error("条件不能寻址编译器的保留命名空间");
+            if (name.StartsWith('$') && !condition.IsCompilerGenerated) throw source.Error("条件不能寻址编译器的保留命名空间");
             var declared = reference.Function switch
             {
                 "succeeded" => block.Nodes.Any(node => node.Command.Options.GetValueOrDefault("id") == name),

@@ -8,6 +8,11 @@ public partial class ConditionEvaluator
 {
     /// <summary>复用现有词法/AST，在战斗外编译，运行时保留三值语义。</summary>
     public static CompiledCondition Compile(string expression, IEnumerable<string>? names = null)
+        => CompileCore(expression, names, false);
+
+    internal static CompiledCondition CompileGenerated(string expression) => CompileCore(expression, null, true);
+
+    private static CompiledCondition CompileCore(string expression, IEnumerable<string>? names, bool compilerGenerated)
     {
         if (string.IsNullOrWhiteSpace(expression)) return new(_ => true);
         var identifiers = new HashSet<string>(FunctionNames, StringComparer.OrdinalIgnoreCase);
@@ -16,9 +21,9 @@ public partial class ConditionEvaluator
         var position = 0;
         var ast = ParseOrExpr(tokens, ref position);
         if (tokens[position].Type != TokenType.End) throw new FormatException("条件表达式结尾有多余内容");
-        Validate(ast);
+        Validate(ast, compilerGenerated);
         return new(resolve => EvaluateNode(ast, resolve), Array.AsReadOnly(References(ast).ToArray()),
-            Functions(ast).ToHashSet(StringComparer.OrdinalIgnoreCase), Array.AsReadOnly(References(ast, recordsOnly: false).ToArray()));
+            Functions(ast).ToHashSet(StringComparer.OrdinalIgnoreCase), Array.AsReadOnly(References(ast, recordsOnly: false).ToArray()), compilerGenerated);
     }
 
     private static IEnumerable<string> Functions(AstNode node)
@@ -63,7 +68,7 @@ public partial class ConditionEvaluator
             foreach (var reference in References(unary.Operand, recordsOnly)) yield return reference;
     }
 
-    private static void Validate(AstNode node)
+    private static void Validate(AstNode node, bool compilerGenerated)
     {
         switch (node)
         {
@@ -77,13 +82,13 @@ public partial class ConditionEvaluator
                         if (call.Args[0] is not FuncCallNode { IsInvocation: false } selector)
                             throw new FormatException("条件需要一个显式名称：" + call.Name);
                         if (string.IsNullOrWhiteSpace(selector.Name)) throw new FormatException("条件中的名称不能为空：" + call.Name);
-                        if (selector.Name.StartsWith('$')) throw new FormatException("条件不能寻址编译器的保留命名空间");
+                        if (selector.Name.StartsWith('$') && !compilerGenerated) throw new FormatException("条件不能寻址编译器的保留命名空间");
                     }
                 }
-                foreach (var argument in call.Args) Validate(argument);
+                foreach (var argument in call.Args) Validate(argument, compilerGenerated);
                 break;
-            case BinaryOpNode binary: Validate(binary.Left); Validate(binary.Right); break;
-            case UnaryOpNode unary: Validate(unary.Operand); break;
+            case BinaryOpNode binary: Validate(binary.Left, compilerGenerated); Validate(binary.Right, compilerGenerated); break;
+            case UnaryOpNode unary: Validate(unary.Operand, compilerGenerated); break;
         }
     }
 
@@ -91,14 +96,16 @@ public partial class ConditionEvaluator
     {
         private readonly Func<Func<string, IReadOnlyList<object?>, object?>, object?> _evaluate;
         internal IReadOnlyList<ConditionReference> References { get; }
+        internal bool IsCompilerGenerated { get; }
         internal IReadOnlyList<ConditionReference> NamedReferences { get; }
         private readonly IReadOnlySet<string>? _functions;
         public bool UsesFunction(string name) => _functions?.Contains(name) == true;
         internal CompiledCondition(Func<Func<string, IReadOnlyList<object?>, object?>, object?> evaluate,
             IReadOnlyList<ConditionReference>? references = null, IReadOnlySet<string>? functions = null,
-            IReadOnlyList<ConditionReference>? namedReferences = null)
+            IReadOnlyList<ConditionReference>? namedReferences = null, bool compilerGenerated = false)
         {
             _evaluate = evaluate;
+            IsCompilerGenerated = compilerGenerated;
             References = references ?? Array.Empty<ConditionReference>();
             NamedReferences = namedReferences ?? References;
             _functions = functions;

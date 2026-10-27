@@ -87,7 +87,10 @@ internal static class LegacyCombatFlowAdapter
                 if (depth == 0 && command.Name != previous) { AddBoundary(); previous = command.Name; }
                 if (command.Name == guardian.Actor && guardian.SkipGuardianBody && depth == 0) continue;
                 if (command.Name == guardian.Actor && command.Method == Method.Skill)
-                    command.Options["if"] = $"!record-active({record})";
+                {
+                    command.Options["if"] = $"!record-active(\"{record}\")";
+                    command.HasCompilerGeneratedCondition = true;
+                }
                 else if (strict) command.Options["keep"] = record;
             }
             result.Add(command);

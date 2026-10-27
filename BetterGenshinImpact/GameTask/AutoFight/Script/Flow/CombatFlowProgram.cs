@@ -407,7 +407,11 @@ public sealed partial class CombatFlowProgram
     private static ConditionEvaluator.CompiledCondition? CompileCondition(CombatCommand command, string key)
     {
         if (!command.Options.TryGetValue(key, out var expression)) return null;
-        try { return ConditionEvaluator.Compile(expression); }
+        try
+        {
+            return key == "if" && command.IsCompilerGenerated && command.HasCompilerGeneratedCondition
+                ? ConditionEvaluator.CompileGenerated(expression) : ConditionEvaluator.Compile(expression);
+        }
         catch (Exception exception) when (exception is FormatException or ArgumentException or InvalidOperationException &&
             exception.Data["CombatSourceLocated"] is not true)
         { throw command.Error(exception.Message, exception); }

@@ -2911,8 +2911,20 @@ public class TpTask
         var targetIconTypes = GetMapIconTypesForTargetType(target.TargetTp.Type ?? string.Empty);
         var compatibleIcons = observedIcons.Where(icon => icon.IconTypes.Overlaps(targetIconTypes))
             .Select(icon => icon.Rect).ToArray();
+        Rect? targetIconRect = targetPair?.Observed.Rect;
+        if (!target.Force && targetIconRect == null && target.TargetTp.Type == "TeleportWaypoint")
+        {
+            for (var i = 0; i < _assets.MapChooseIconGreyMatList.Count; i++)
+            {
+                if (GetMapChooseIconType(GetMapChooseIconFileName(_assets.MapChooseIconRoList[i])) != "TeleportWaypoint") continue;
+                if (TeleportOccludedTargetLocator.TryLocate(imageRegion.SrcMat, _assets.MapChooseIconGreyMatList[i],
+                        clickX, clickY, _zoomOutMax1080PRatio, alignment.Pairs.Count, uncertainty, out var outlineRect))
+                    targetIconRect = outlineRect;
+                break;
+            }
+        }
         var targetVisible = MapTargetClickAdmission.Accepts(target.Force, clickX, clickY,
-            targetPair?.Observed.Rect, compatibleIcons);
+            targetIconRect, compatibleIcons);
         var maxAllowedUncertainty = IsFinite(clickView.NearestNeighborScreenDistance) &&
                                     clickView.NearestNeighborScreenDistance > 0
             ? Math.Max(8d * _zoomOutMax1080PRatio,
@@ -2953,7 +2965,7 @@ public class TpTask
                 imageRegion.FrameStamp.SessionId, imageRegion.FrameStamp.Sequence, target.MapName, target.TargetTp.Id, target.TargetTp.Type, target.Force,
                 targetAnchored, clickX, clickY, nearest?.CenterX, nearest?.CenterY,
                 nearest == null ? (double?)null : GetDistance(nearest.CenterX, nearest.CenterY, clickX, clickY), success, targetVisible,
-                targetPair?.Error, targetPair?.Observed.Rect);
+                targetPair?.Error, targetIconRect);
         }
         catch { /* 诊断不能改变目标准入或失败结果。 */ }
         Logger.LogInformation(
