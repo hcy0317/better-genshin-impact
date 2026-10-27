@@ -1067,12 +1067,16 @@ public partial class PathExecutor
             }
             if (flightRotationPending)
             {
-                SendPathForward(KeyType.KeyUp);
                 if (observation.Motion == MotionStatus.Normal && !transformed)
                 {
+                    // 地面与自由落体共用Normal；以逐帧转向前进，不能原地起跳等待飞行。
+                    targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
+                    _moveIo.RotateStep(targetOrientation, screen);
+                    SendPathForward(KeyType.KeyDown);
                     await AdvanceFlyAsync(true);
                     continue;
                 }
+                SendPathForward(KeyType.KeyUp);
                 if (observation.Motion != MotionStatus.Fly && !transformed)
                 {
                     await _moveIo.Delay(100, ct);

@@ -9,6 +9,26 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class FlightHandoffTests
 {
     [Fact]
+    public async Task GroundedFlyStartAdvancesTowardTheEdgeInsteadOfJumpingInPlace()
+    {
+        var replay = new PathReplay { EmitReceipts = true };
+        var advancing = false;
+        var airborne = false;
+        replay.PositionAt = _ => airborne ? new Point2f(100, 100) : new Point2f(120, 100);
+        replay.MotionAt = _ => airborne ? MotionStatus.Fly : MotionStatus.Normal;
+        replay.OnInput = (action, type) =>
+        {
+            if (action == GIActions.MoveForward) advancing = type == KeyType.KeyDown;
+            if (action == GIActions.Jump && type == KeyType.KeyUp && advancing) airborne = true;
+        };
+        replay.OnRotateUntil = () => Assert.True(airborne, "Do not block a falling start on initial heading.");
+        await replay.Executor.MoveTo(replay.Point("fly"));
+        Assert.True(airborne);
+        Assert.Contains(replay.Inputs, input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
     public async Task FallingFlyStartOpensWingsBeforeBlockingInitialRotation()
     {
         var replay = new PathReplay { EmitReceipts = true };
