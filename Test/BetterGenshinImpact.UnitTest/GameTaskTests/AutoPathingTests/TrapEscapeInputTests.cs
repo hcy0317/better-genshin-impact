@@ -6,6 +6,21 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class TrapEscapeInputTests
 {
+    [Theory]
+    [InlineData(MotionStatus.Climb)]
+    [InlineData(MotionStatus.Fly)]
+    public async Task CoarseEscapeDoesNotJumpWhileAttachedOrAlreadyFlying(MotionStatus motion)
+    {
+        var replay = new PathReplay { EmitReceipts = true };
+        replay.MotionAt = _ => motion;
+        var escape = new TrapEscaper(default, replay.Io, () => replay.Started.AddSeconds(25));
+        await escape.RotateAndMove();
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Jump && input.Type is KeyType.KeyDown or KeyType.KeyPress);
+        Assert.Contains(replay.Inputs, input => input.Type == KeyType.KeyDown &&
+            input.Action is GIActions.MoveBackward or GIActions.MoveLeft or GIActions.MoveRight);
+        Assert.All(replay.Images, frame => Assert.True(frame.SrcMat.IsDisposed));
+    }
+
     [Fact]
     public async Task CoarseEscapeHoldsDetachAndJumpAndChecksPoseAfterRelease()
     {
