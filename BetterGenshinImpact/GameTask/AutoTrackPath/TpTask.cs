@@ -1812,14 +1812,15 @@ public class TpTask
     private async Task<double> ScrollMapZoomAndMeasure(int wheelNotches)
     {
         GameCaptureRegion.GameRegionMove((rect, scale) => (rect.Width / 2d, rect.Height / 2d));
-        await Delay(GetTeleportOperationDelay(20), ct);
+        // 地图响应按游戏帧采样，操作加速不能把滚轮脉冲挤进同一帧。
+        await Delay(Math.Max(60, GetTeleportOperationDelay(20)), ct);
         var singleWheelNotch = Math.Sign(wheelNotches);
         for (var i = 0; i < Math.Abs(wheelNotches); i++)
         {
             InputHub.Foreground.Mouse.VerticalScroll(singleWheelNotch);
             if (i + 1 < Math.Abs(wheelNotches))
             {
-                await Delay(GetTeleportOperationDelay(MapZoomWheelBurstIntervalMs), ct);
+                await Delay(Math.Max(60, GetTeleportOperationDelay(MapZoomWheelBurstIntervalMs)), ct);
             }
         }
 

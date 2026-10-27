@@ -153,7 +153,7 @@ public class CombatSafetyIntegrationContractTests
         var useSkill = Slice(
             avatar,
             "public void UseSkill",
-            "/// <summary>\r\n    /// 使用完元素战技的回调");
+            "public double AfterUseSkill");
 
         Assert.Contains("var skillReadyBeforeCast = IsSkillReady()", useSkill,
             StringComparison.Ordinal);

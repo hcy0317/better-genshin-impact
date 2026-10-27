@@ -4238,6 +4238,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         internal Action? OnExclusiveEnd { get; init; }
         internal bool ExternalClockAdvance { get; init; }
         private int _passiveSuppression;
+        public bool PassiveObservationAvailable => _passiveSuppression == 0;
         internal List<bool> MoveByPassiveObservation { get; } = [];
         public IDisposable BeginExclusive(bool allowPassiveObservation)
         {
