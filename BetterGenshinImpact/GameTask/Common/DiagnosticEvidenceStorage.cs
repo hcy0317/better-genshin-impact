@@ -41,6 +41,9 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     private readonly List<object> _evicted = [];
     private int _evictedCount;
     internal bool BudgetExhausted => _budgetExhausted;
+    // 写入失败时仍保守占账，明确为预算用量而非文件系统实测占用。
+    internal long UsedBytes => _usedBytes;
+    internal long MaximumBytes => _maximumBytes;
 
     internal static bool IsTerminalPhase(string phase) => phase is "terminal" or "combat-terminal"
         or "party-terminal" or "selection-terminal" or "skill-terminal-Failed";
@@ -119,13 +122,15 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
         if (_budgetExhausted && !terminal) throw new DiagnosticEvidenceBudgetException();
         if (evidence.RunId != _run || evidence.Sequence <= 0) throw new IOException("Evidence run identity mismatch");
         if (!Cv2.ImEncode(".png", image, out var png)) throw new IOException("PNG encoding failed");
-        // 同源的裁剪/修改图不能误合并；编码与内容摘要仅在后台writer计算。
-        var key = $"{evidence.Source.SessionId:N}/{evidence.Source.Sequence}/{Convert.ToHexString(SHA256.HashData(png))}";
+        // 像素完全相同时跨采集序号复用PNG；每份metadata仍保留自己的真实Source与时间。
+        // 裁剪或修改图的编码摘要不同，不会因Source相同被误合并。
+        var key = Convert.ToHexString(SHA256.HashData(png));
         _images.TryGetValue(key, out var shared);
         var imageFile = shared?.File ?? $"evidence-{evidence.Sequence:D4}.png";
         var document = JObject.FromObject(evidence);
         document["SchemaVersion"] = 2;
         document["ImageFile"] = imageFile;
+        document["ImageContentSha256"] = key;
         document["WrittenAt"] = JToken.FromObject(_clock.GetUtcNow());
         var metadata = JsonBytes(document);
         var bytes = checked((shared == null ? png.LongLength : 0) + metadata.LongLength);

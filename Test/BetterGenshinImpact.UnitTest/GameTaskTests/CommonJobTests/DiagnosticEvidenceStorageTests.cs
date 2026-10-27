@@ -125,6 +125,29 @@ public class DiagnosticEvidenceStorageTests
     }
 
     [Fact]
+    public async Task IdenticalPixelsAcrossCaptureSourcesShareOnlyTheImageAndKeepProvenance()
+    {
+        using var fixture = new EvidenceDirectory();
+        var run = Guid.NewGuid();
+        using var storage = new DiagnosticEvidenceStorage(fixture.Path, run);
+        using var image = new Mat(2, 2, MatType.CV_8UC3, Scalar.Black);
+        var first = new CaptureFrameSource().Next();
+        var second = new CaptureFrameSource().Next();
+        await storage.WriteAsync(new(run, 1, "first", "sample", first, ""), image);
+        await storage.WriteAsync(new(run, 2, "second", "terminal", second, ""), image);
+        image.SetTo(new Scalar(17, 0, 0));
+        await storage.WriteAsync(new(run, 3, "changed", "terminal", second, ""), image);
+        var directory = System.IO.Path.Combine(fixture.Path, run.ToString("N"));
+        Assert.Equal(2, Directory.GetFiles(directory, "*.png").Length);
+        var metadata = Newtonsoft.Json.Linq.JObject.Parse(await File.ReadAllTextAsync(System.IO.Path.Combine(directory, "evidence-0002.json")));
+        Assert.Equal("evidence-0001.png", (string?)metadata["ImageFile"]);
+        Assert.Equal(second.SessionId, (Guid)metadata["Source"]!["SessionId"]!);
+        Assert.Equal(second.Sequence, (long)metadata["Source"]!["Sequence"]!);
+        using var retained = Cv2.ImRead(System.IO.Path.Combine(directory, (string)metadata["ImageFile"]!));
+        Assert.Equal(0, retained.At<Vec3b>(0, 0).Item0);
+    }
+
+    [Fact]
     public void StartupRemovesOnlyExpiredRecognizedInactiveRunsOldestFirst()
     {
         using var fixture = new EvidenceDirectory();
@@ -254,7 +277,10 @@ public class DiagnosticEvidenceStorageTests
         await storage.WriteAsync(new(run, sequence + 1, "battle", "combat-terminal", source.Next(), "unconfirmed"), image);
         await storage.CompleteAsync(new { terminal = sequence + 1 });
         var directory = System.IO.Path.Combine(fixture.Path, run.ToString("N"));
-        Assert.True(File.Exists(System.IO.Path.Combine(directory, $"evidence-{sequence + 1:D4}.png")));
+        var terminal = Newtonsoft.Json.Linq.JObject.Parse(await File.ReadAllTextAsync(
+            System.IO.Path.Combine(directory, $"evidence-{sequence + 1:D4}.json")));
+        Assert.Equal("combat-terminal", (string?)terminal["Phase"]);
+        Assert.True(File.Exists(System.IO.Path.Combine(directory, (string)terminal["ImageFile"]!)));
         Assert.InRange(Directory.GetFiles(directory).Sum(file => new FileInfo(file).Length), 1, maximumBytes);
     }
 

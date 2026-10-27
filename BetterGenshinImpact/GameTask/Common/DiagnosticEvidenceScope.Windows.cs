@@ -15,8 +15,9 @@ internal sealed partial class DiagnosticEvidenceScope
 {
     private sealed record HistoryFrame(CaptureFrameStamp Source, ImageRegion? Image, long Bytes, string? Missing)
     {
-        // 环缓存和末态候选共享不可变像素；仅最后一个所有者释放并扣减预算。
+        // 环缓存、末态候选和writer共享不可变像素；仅最后一个所有者释放并扣减预算。
         internal int References = 1;
+        internal bool Saved;
     }
     private sealed class PendingWindow(string request, string phase, string detail, CaptureFrameStamp anchor, ILogger logger,
         IReadOnlyDictionary<string, string>? fields, Guid? incidentId = null, string occurrence = "first")
@@ -44,12 +45,19 @@ internal sealed partial class DiagnosticEvidenceScope
     }
     private readonly Dictionary<Guid, StormTail> _stormTails = new();
     private readonly int _maxWindows, _maxPendingWindows;
+    private int _routineWindows;
+    private long _savedHistoryBytes;
+    private double _historySampleSeconds = 1;
     private CaptureFrameStamp _lastWindowSource;
     private HistoryFrame? _latestHistory;
     private CaptureFrameStamp _lastHistorySample;
     internal int HistoryCloneCount { get; private set; }
     private const double WindowBeforeSeconds = 10;
     private const double WindowAfterSeconds = 5;
+    // 边界保存相邻真实样本及其真实偏移；最多1s上下文采样间隔加250ms抖动，不接受长时间断帧。
+    private const double BoundaryJitterSeconds = 0.25;
+    private const double BoundaryNeighborSeconds = 1 + BoundaryJitterSeconds;
+    private const double MaximumAfterBoundarySeconds = WindowAfterSeconds + BoundaryNeighborSeconds;
 
     private static double SecondsBetween(CaptureFrameStamp later, CaptureFrameStamp earlier) =>
         (later.CapturedTimestamp - earlier.CapturedTimestamp) / (double)earlier.TimestampFrequency;
@@ -76,12 +84,12 @@ internal sealed partial class DiagnosticEvidenceScope
             {
                 if (tail.Complete || !source.IsAfter(tail.Window.Anchor)) continue;
                 var elapsed = SecondsBetween(source, tail.Window.Anchor);
-                if (elapsed > WindowAfterSeconds) { tail.Complete = true; continue; }
-                if (elapsed - tail.LastAfterSeconds < 1 && elapsed != WindowAfterSeconds) continue;
+                if (elapsed > MaximumAfterBoundarySeconds) { tail.Complete = true; continue; }
+                if (elapsed - tail.LastAfterSeconds < 1 && elapsed < WindowAfterSeconds) continue;
                 var copy = CopyHistory(frame);
                 tail.Frames.Add(copy);
                 tail.LastAfterSeconds = elapsed;
-                tail.Complete = elapsed == WindowAfterSeconds;
+                tail.Complete = elapsed >= WindowAfterSeconds;
             }
             // 后窗口已齐或已越界即交给writer，不把旧故障像素钉到整轮一条龙结束。
             // 否则若干重复故障即可耗尽暂存内存和pending槽，后续终态也无法取得锚点。
@@ -91,39 +99,74 @@ internal sealed partial class DiagnosticEvidenceScope
             {
                 if (!source.IsAfter(window.Anchor)) continue;
                 var elapsed = SecondsBetween(source, window.Anchor);
-                if (elapsed > WindowAfterSeconds)
+                if (elapsed > MaximumAfterBoundarySeconds)
                 {
                     if (window.LastAfterSeconds < WindowAfterSeconds)
                         MissingFrame(window.Request, window.Phase, "window-after-boundary-unavailable", window.Logger);
                     _windows.Remove(window);
                     continue;
                 }
-                if (elapsed - window.LastAfterSeconds >= 1 || elapsed == WindowAfterSeconds)
+                if (elapsed - window.LastAfterSeconds >= 1 || elapsed >= WindowAfterSeconds)
                 {
                     SaveWindowFrame(window, frame, window.Next++);
                     window.LastAfterSeconds = elapsed;
                 }
-                if (elapsed == WindowAfterSeconds) _windows.Remove(window);
+                if (elapsed >= WindowAfterSeconds) _windows.Remove(window);
             }
-            while (_history.TryPeek(out var oldest) && SecondsBetween(source, oldest.Source) > WindowBeforeSeconds)
+            // 保留十秒边界前的一个样本，避免先淘汰它、再要求恰好命中十秒。
+            while (_history.Count > 1 && SecondsBetween(source, _history.ElementAt(1).Source) >= WindowBeforeSeconds)
                 ReleaseHistory(_history.Dequeue());
-            if (_latestHistory != null) { ReleaseHistory(_latestHistory); _latestHistory = null; }
             // 给writer、输入前帧和当前帧留余量；高分辨率时降低采样密度，不增加内存上限。
             long bytes;
             try { bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize()); }
-            catch { _latestHistory = new(source, null, 0, "capture-error"); return; }
+            catch
+            {
+                if (_latestHistory != null) ReleaseHistory(_latestHistory);
+                _latestHistory = new(source, null, 0, "capture-error");
+                return;
+            }
             var historySlots = Math.Clamp(_maximumMemoryBytes / 3 / Math.Max(1, bytes), 2, 11);
-            var sampleSeconds = WindowBeforeSeconds / (historySlots - 1);
-            if (!_lastHistorySample.IsKnown || SecondsBetween(source, _lastHistorySample) >= sampleSeconds)
+            _historySampleSeconds = WindowBeforeSeconds / (historySlots - 1);
+            if (!_lastHistorySample.IsKnown || SecondsBetween(source, _lastHistorySample) >= _historySampleSeconds)
             {
                 _history.Enqueue(CopyHistory(frame));
                 _lastHistorySample = source;
             }
-            else _latestHistory = new(source, null, 0, "anchor-not-sampled:source-pixels-not-retained");
+            UpdateLatestHistory(frame);
         }
     }
 
-    // 故障调用方仍持有原图时，按需强制保留准确锚点；常态帧不再逐帧Clone。
+    private void UpdateLatestHistory(ImageRegion frame)
+    {
+        var previous = _latestHistory;
+        // 单独一个最新帧缓冲可原位更新；writer/末态仍引用时必须另存，不能改写已排队证据。
+        if (previous is { References: 1, Image: { } image } &&
+            image.SrcMat.Size() == frame.SrcMat.Size() && image.SrcMat.Type() == frame.SrcMat.Type())
+        {
+            try
+            {
+                frame.SrcMat.CopyTo(image.SrcMat);
+                image.FrameStamp = frame.FrameStamp;
+                if (previous.Saved) { previous.Saved = false; _savedHistoryBytes -= previous.Bytes; }
+                _latestHistory = previous with { Source = frame.FrameStamp };
+                return;
+            }
+            catch { /* 不保留已部分写入的旧缓冲；继续有界复制或明确报告缺失。 */ }
+        }
+        if (previous != null) ReleaseHistory(previous);
+        _latestHistory = CopyHistory(frame);
+    }
+
+    private HistoryFrame[] BeforeHistory(CaptureFrameStamp anchor)
+    {
+        var prior = _history.Where(item => item.Source.SessionId == anchor.SessionId &&
+            item.Source.TimestampFrequency == anchor.TimestampFrequency && anchor.IsAfter(item.Source)).ToArray();
+        var boundary = prior.LastOrDefault(item => SecondsBetween(anchor, item.Source) >= WindowBeforeSeconds &&
+            SecondsBetween(anchor, item.Source) <= WindowBeforeSeconds + BoundaryNeighborSeconds);
+        return prior.Where(item => item == boundary || SecondsBetween(anchor, item.Source) <= WindowBeforeSeconds).ToArray();
+    }
+
+    // 故障调用方仍持有原图时，按需强制保留准确锚点；最新缓冲及稀疏历史共用原有内存硬限。
     internal bool RequestWindowFromFrame(string request, string phase, ImageRegion anchor, string detail, ILogger? logger = null,
         IReadOnlyDictionary<string, string>? fields = null, string? changeKey = null)
     {
@@ -133,7 +176,8 @@ internal sealed partial class DiagnosticEvidenceScope
             var retained = _latestHistory?.Source == anchor.FrameStamp && _latestHistory.Image != null ? _latestHistory :
                 _history.FirstOrDefault(item => item.Source == anchor.FrameStamp && item.Image != null);
             // 调用方仍持有的旧决策帧也可作准确锚点，不能因生产者已前进而丢失。
-            var owned = !_closed && anchor.FrameStamp.IsKnown && retained == null ? CopyHistory(anchor) : null;
+            var owned = !_closed && anchor.FrameStamp.IsKnown && retained == null
+                ? CopyHistory(anchor, DiagnosticEvidenceStorage.AnchorPriority(phase)) : null;
             try
             {
                 var admitted = RequestWindowCore(request, phase, anchor.FrameStamp, detail, logger, fields, changeKey, owned ?? retained);
@@ -210,10 +254,13 @@ internal sealed partial class DiagnosticEvidenceScope
                 return false;
             }
             var terminal = DiagnosticEvidenceStorage.IsTerminalPhase(phase);
+            var routine = DiagnosticEvidenceStorage.IsRoutineWindowPhase(phase);
             var windowLimit = _maxWindows - (!terminal && _maxWindows > 1 ? 1 : 0);
+            var routineLimit = _maxWindows - _maxWindows / 2;
             var pendingLimit = _maxPendingWindows - (!terminal && _maxPendingWindows > 1 ? 1 : 0);
             var rejection = _closed ? "scope-closed" : !anchor.IsKnown ? "source-unknown" :
-                _windowEvents.Count >= windowLimit ? "window-budget" : _windows.Count >= pendingLimit ? "window-queue-full" : null;
+                _windowEvents.Count >= windowLimit || routine && _routineWindows >= routineLimit ? "window-budget" :
+                _windows.Count >= pendingLimit ? "window-queue-full" : null;
             if (rejection != null)
             {
                 _missingBefore++;
@@ -231,13 +278,12 @@ internal sealed partial class DiagnosticEvidenceScope
             // 分组字段各自有界，避免长Detail截断把后面的关键证据一起丢掉。
             var window = new PendingWindow(request, phase, detail, anchor, logger, snapshot);
             _windowEvents.Add((request, phase));
+            if (routine) _routineWindows++;
             _eventIncidents.Add((request, phase), window.Id);
             _incidents.Add(window.Id, new(window.Id, request, phase, anchor) { LastDetail = changeKey });
             if (ReferenceEquals(_logger, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance)) _logger = logger;
-            var before = _history.Where(item => item.Source.SessionId == anchor.SessionId &&
-                item.Source.TimestampFrequency == anchor.TimestampFrequency && anchor.IsAfter(item.Source) &&
-                SecondsBetween(anchor, item.Source) <= WindowBeforeSeconds).ToArray();
-            if (before.Length == 0 || SecondsBetween(anchor, before[0].Source) < WindowBeforeSeconds)
+            var before = BeforeHistory(anchor);
+            if (!before.Any(item => item.Image != null && SecondsBetween(anchor, item.Source) >= WindowBeforeSeconds))
             {
                 _missingBefore++;
                 MissingFrame(request, phase, "window-before-unavailable", logger);
@@ -246,13 +292,14 @@ internal sealed partial class DiagnosticEvidenceScope
             SaveHistory(window, pivot, 0);
             for (var i = 0; i < before.Length; i++) SaveHistory(window, before[i], i - before.Length);
             // 触发可能稍晚于锚点：只补入环内确实已存在的后帧，不重标来源。
-            foreach (var item in _history.Where(item => item.Source.IsAfter(anchor) &&
-                         SecondsBetween(item.Source, anchor) <= WindowAfterSeconds))
+            foreach (var item in _history.Append(_latestHistory).OfType<HistoryFrame>().Where(item => item.Source.TimestampFrequency == anchor.TimestampFrequency && item.Source.IsAfter(anchor) &&
+                         SecondsBetween(item.Source, anchor) <= MaximumAfterBoundarySeconds).DistinctBy(item => item.Source))
             {
                 var elapsed = SecondsBetween(item.Source, anchor);
-                if (elapsed - window.LastAfterSeconds < 1 && elapsed != WindowAfterSeconds) continue;
+                if (elapsed - window.LastAfterSeconds < 1 && elapsed < WindowAfterSeconds) continue;
                 SaveHistory(window, item, window.Next++);
                 window.LastAfterSeconds = elapsed;
+                if (elapsed >= WindowAfterSeconds) break;
             }
             if (window.LastAfterSeconds < WindowAfterSeconds)
                 if (_lastWindowSource.SessionId != anchor.SessionId || _lastWindowSource.TimestampFrequency != anchor.TimestampFrequency)
@@ -286,7 +333,7 @@ internal sealed partial class DiagnosticEvidenceScope
 
     private void SaveHistory(PendingWindow window, HistoryFrame item, int index)
     {
-        if (item.Image != null) SaveWindowFrame(window, item.Image, index);
+        if (item.Image != null) SaveWindowFrame(window, item.Image, index, item);
         else
         {
             if (index < 0) _missingBefore++;
@@ -294,10 +341,10 @@ internal sealed partial class DiagnosticEvidenceScope
         }
     }
 
-    private void SaveWindowFrame(PendingWindow window, ImageRegion frame, int index)
+    private void SaveWindowFrame(PendingWindow window, ImageRegion frame, int index, HistoryFrame? sharedHistory = null)
     {
         if (TryCaptureWithReason(frame, window.Request, window.Phase, window.Detail, out var reason,
-                window.Logger, window: new(window.Id, window.Anchor, index, SecondsBetween(frame.FrameStamp, window.Anchor), Occurrence: window.Occurrence), fields: window.Fields))
+                window.Logger, window: new(window.Id, window.Anchor, index, SecondsBetween(frame.FrameStamp, window.Anchor), Occurrence: window.Occurrence), fields: window.Fields, sharedHistory: sharedHistory))
         {
             _incidents[window.Id].Queued++;
             return;
@@ -345,9 +392,7 @@ internal sealed partial class DiagnosticEvidenceScope
             if (_stormTails.Remove(incident.Id, out var old))
                 foreach (var item in old.Frames) ReleaseHistory(item);
             var candidate = new StormTail(tail);
-            var retained = _history.Where(item => item.Source.SessionId == anchor.SessionId &&
-                item.Source.TimestampFrequency == anchor.TimestampFrequency && anchor.IsAfter(item.Source) &&
-                SecondsBetween(anchor, item.Source) <= WindowBeforeSeconds).Append(pivot);
+            var retained = BeforeHistory(anchor).Append(pivot);
             foreach (var item in retained) { item.References++; candidate.Frames.Add(item); }
             _stormTails[incident.Id] = candidate;
         }
@@ -358,10 +403,9 @@ internal sealed partial class DiagnosticEvidenceScope
         { MissingFrame(incident.Request, incident.Phase, "change-window-budget", logger); return; }
         var change = new PendingWindow(incident.Request, incident.Phase, detail, anchor, logger, fields, incident.Id, "change");
         SaveHistory(change, pivot, 0);
-        var before = _history.Where(item => item.Source.SessionId == anchor.SessionId && anchor.IsAfter(item.Source) &&
-            SecondsBetween(anchor, item.Source) <= WindowBeforeSeconds).ToArray();
+        var before = BeforeHistory(anchor);
         for (var i = 0; i < before.Length; i++) SaveHistory(change, before[i], i - before.Length);
-        if (before.Length == 0 || SecondsBetween(anchor, before[0].Source) < WindowBeforeSeconds)
+        if (!before.Any(item => item.Image != null && SecondsBetween(anchor, item.Source) >= WindowBeforeSeconds))
             MissingFrame(incident.Request, incident.Phase, "change-before-unavailable", logger);
         _windows.Add(change);
     }
@@ -386,27 +430,33 @@ internal sealed partial class DiagnosticEvidenceScope
                 }
                 finally { ReleaseHistory(item); }
             }
-            if (!nearby.Any(item => SecondsBetween(item.Source, window.Anchor) <= -WindowBeforeSeconds))
+            if (!nearby.Any(item => item.Image != null && SecondsBetween(item.Source, window.Anchor) <= -WindowBeforeSeconds))
                 MissingFrame(window.Request, window.Phase, "last-before-unavailable", window.Logger);
-            if (!nearby.Any(item => SecondsBetween(item.Source, window.Anchor) >= WindowAfterSeconds))
+            if (!nearby.Any(item => item.Image != null && SecondsBetween(item.Source, window.Anchor) >= WindowAfterSeconds))
                 MissingFrame(window.Request, window.Phase, "last-after-unavailable", window.Logger);
         }
     }
 
     private void ReleaseHistory(HistoryFrame item)
     {
-        if (--item.References != 0) return;
-        item.Image?.Dispose();
-        _stagedBytes -= item.Bytes;
+        lock (_gate)
+        {
+            if (--item.References != 0) return;
+            item.Image?.Dispose();
+            _stagedBytes -= item.Bytes;
+            if (item.Saved) _savedHistoryBytes -= item.Bytes;
+        }
     }
 
-    private HistoryFrame CopyHistory(ImageRegion frame)
+    private HistoryFrame CopyHistory(ImageRegion frame, DiagnosticEvidencePriority priority = DiagnosticEvidencePriority.Routine)
     {
         try
         {
             var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
             if (frame.SrcMat.Empty()) return new(frame.FrameStamp, null, 0, "empty-frame");
-            if (!FitsMemory(bytes)) return new(frame.FrameStamp, null, 0, "memory-budget");
+            var terminal = priority >= DiagnosticEvidencePriority.Warning;
+            if (terminal) ReclaimQueuedLowerPriority(bytes, priority);
+            if (!FitsMemory(bytes, terminal: terminal)) return new(frame.FrameStamp, null, 0, "memory-budget");
             var owned = new ImageRegion(frame.SrcMat.Clone(), 0, 0) { FrameStamp = frame.FrameStamp };
             HistoryCloneCount++;
             _stagedBytes += bytes;
