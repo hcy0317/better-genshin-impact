@@ -776,7 +776,7 @@ public partial class PathExecutor
                 var healed = await HealingObservation.WaitAsync(fence, () =>
                 {
                     using var fresh = CaptureToRectArea();
-                    return new(fresh.FrameStamp, Bv.IsInMainUi(fresh), Bv.CurrentAvatarIsLowHp(fresh));
+                    return new(fresh.FrameStamp, Bv.IsInMainUi(fresh), Bv.ObserveCurrentAvatarLowHp(fresh));
                 }, ms => Delay(ms, ct), ct);
                 if (healed) return;
             }

@@ -148,7 +148,7 @@ public partial class PathExecutor
                 using var frame = _moveIo.Capture();
                 DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
                 var result = new HealingFrame(frame.FrameStamp, _moveIo.CombatHud(frame) && !_moveIo.Transformed(frame),
-                    Bv.CurrentAvatarIsLowHp(frame));
+                    Bv.ObserveCurrentAvatarLowHp(frame));
                 lastObservation = result.ToString();
                 lastSource = frame.FrameStamp;
                 evidence?.RememberExactFrame(request, request, frame);
