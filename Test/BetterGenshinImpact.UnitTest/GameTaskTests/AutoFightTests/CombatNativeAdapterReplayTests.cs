@@ -2183,12 +2183,13 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         var adapter = NativeCombatFlowRunner.CreateAdapter(io);
         using var owner = (IDisposable)adapter;
         using var context = new CombatFlowContext(clock);
-        var old = new CombatFlowAction(new("琴", "e"), context, () => true, 1);
+        // Admit a real selection first; this test covers submitted-goal expiry, not low-budget preparation.
+        var old = new CombatFlowAction(new("琴", "e"), context, () => true, 2);
         adapter.BeginStep();
         await adapter.PrepareObservationStepAsync(old, "onfield", default);
         await adapter.AdvanceObservationAsync(default);
         Assert.Single(io.Selections);
-        await io.DelayAsync(1500, default);
+        await io.DelayAsync(2500, default);
         var next = new CombatFlowAction(new("芙宁娜", "e"), context, () => true, context.Now + 4);
         adapter.BeginStep();
         await adapter.AdvanceObservationAsync(default);
