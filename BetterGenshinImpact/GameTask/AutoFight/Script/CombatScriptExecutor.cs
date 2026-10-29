@@ -97,23 +97,29 @@ public static class CombatScriptExecutor
         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(executionFailure!).Throw();
     }
 
-    internal static async Task<CombatExecutionResult> ExecutePathingAsync(CombatScript script, CombatScenes scenes,
-        PathingMacroSession macro, CancellationToken ct)
+    internal static Task<CombatExecutionResult> ExecutePathingAsync(CombatScript script, CombatScenes scenes,
+        PathingMacroSession macro, CancellationToken ct) =>
+        ExecutePathingAsync(script, macro, () => scenes.GetAvatars().Select(avatar => avatar.Name),
+            commands => Flow.NativeCombatFlowRunner.Create(commands, scenes, false,
+                CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing), ct);
+
+    internal static async Task<CombatExecutionResult> ExecutePathingAsync(CombatScript script, PathingMacroSession macro,
+        Func<IEnumerable<string>> getParty, Func<IReadOnlyList<CombatCommand>, NativeCombatFlowRunner> createFlow,
+        CancellationToken ct)
     {
+        async Task<CombatExecutionResult> RunNative(IReadOnlyList<CombatCommand> commands, CancellationToken executionToken)
+        {
+            using var flow = createFlow(commands);
+            using var recoveryOwner = CombatRecoveryOwner.Enter(ct, flow.RetireForRecovery);
+            return FromFlowResult(await flow.RunRoundAsync(executionToken));
+        }
+
         if (script.HasFlowCommands)
         {
             macro.Release();
-            using var full = Flow.NativeCombatFlowRunner.Create(script.CombatCommands, scenes, false,
-                CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing);
-            return FromFlowResult(await full.RunRoundAsync(ct));
+            return await RunNative(script.CombatCommands, ct);
         }
-        return await macro.ExecuteAsync(Flow.LegacyPathingMacroPlan.Create(script, scenes.GetAvatars().Select(avatar => avatar.Name)),
-            async (commands, token) =>
-            {
-                using var flow = Flow.NativeCombatFlowRunner.Create(commands, scenes, false,
-                    CombatScriptExecutionMode.LegacyPartyTemplate, purpose: CombatScriptExecutionPurpose.Pathing);
-                return FromFlowResult(await flow.RunRoundAsync(token));
-            }, ct);
+        return await macro.ExecuteAsync(LegacyPathingMacroPlan.Create(script, getParty()), RunNative, ct);
     }
 
     /// <summary>

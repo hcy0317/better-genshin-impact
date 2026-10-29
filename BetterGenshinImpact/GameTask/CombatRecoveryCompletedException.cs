@@ -35,6 +35,46 @@ internal sealed record ReviveRecoveryFrame(long FrameId, bool MainReady, ReviveU
         (target == null || HasTarget(target) && ActiveIndex == target.Index);
 }
 
+// 战斗仍按原截止推进；只有既有复苏入口确认后才退役战斗并接管父取消。
+internal sealed class CombatRecoveryOwner : IDisposable
+{
+    private static readonly AsyncLocal<CombatRecoveryOwner?> Active = new();
+    private readonly CombatRecoveryOwner? _previous;
+    private readonly CancellationToken _parent;
+    private readonly Action _retireCombat;
+    private bool _started, _disposed;
+
+    private CombatRecoveryOwner(CancellationToken parent, Action retireCombat)
+    {
+        _previous = Active.Value;
+        _parent = parent;
+        _retireCombat = retireCombat;
+        Active.Value = this;
+    }
+
+    internal static CombatRecoveryOwner Enter(CancellationToken parent, Action retireCombat) => new(parent, retireCombat);
+
+    // 仅由新帧确认的复苏入口调用；普通HUD缺失和游泳恢复继续使用原战斗令牌。
+    internal static CancellationToken Start(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
+        if (Active.Value is not { } owner) return ct;
+        ObjectDisposedException.ThrowIf(owner._disposed, owner);
+        owner._parent.ThrowIfCancellationRequested();
+        if (owner._started) return ct; // 保留恢复入口已建立的60秒等子预算。
+        owner._retireCombat();
+        owner._started = true;
+        return owner._parent;
+    }
+
+    public void Dispose()
+    {
+        _disposed = true;
+        if (ReferenceEquals(Active.Value, this)) Active.Value = _previous;
+    }
+}
+
 // Only the completed recovery path can create this signal. It is not victory:
 // the caller must retry the original route/commission within its existing budget.
 internal sealed class CombatRecoveryCompletedException : RetryException

@@ -204,6 +204,7 @@ public partial class Avatar
                 throw new DomainDefeatedRetryException();
             }
 
+            ct = CombatRecoveryOwner.Start(ct);
             var cause = new InvalidOperationException("复苏界面触发神像恢复");
             TaskFailureDiagnostics.CaptureScreenshotOnce(cause,
                 $"原始复苏现场，角色证据={target?.Identity.Name ?? "未知"}，slot={target?.Identity.Index.ToString() ?? "未知"}，尚未退出弹窗或传送");

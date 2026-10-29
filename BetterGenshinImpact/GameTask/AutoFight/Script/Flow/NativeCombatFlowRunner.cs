@@ -34,6 +34,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     private string? _pendingDiagnosticBoundary;
     private IDisposable? _exclusive;
     private bool _disposed;
+    private bool _recoveryRetired;
     private int _advancing;
     private int _consecutiveFailedPasses;
     private long _lastFailedAttemptRevision;
@@ -86,6 +87,12 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     internal void ReleaseHostInput()
     {
         if (_game is NativeGame native) native.ReleaseHeldInput();
+        else _game.ReleaseHeldInput();
+    }
+    internal void RetireForRecovery()
+    {
+        _recoveryRetired = true;
+        if (_game is NativeGame native) native.ReleaseForRecovery();
         else _game.ReleaseHeldInput();
     }
     internal void InspectDefeat(CancellationToken ct) => _game.CheckDefeated(ct);
@@ -241,6 +248,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
     internal async ValueTask<CombatFlowStep> StepAsync(CancellationToken ct, bool allowNewRound)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_recoveryRetired) throw new InvalidOperationException("本场战斗已交由父任务恢复，禁止继续原战斗输入");
         if (Interlocked.CompareExchange(ref _advancing, 1, 0) != 0)
             throw new InvalidOperationException("同一战斗内核不能并发推进两步");
         var outerStarted = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -1249,6 +1257,15 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             return _attempts!.ObserveOptionalReadiness(action, Sample(action, frame, burst.CoolingDown, burst.Ready),
                 active && control.IsObserved && !control.KeyboardBreakoutRequested &&
                 control.Motion is not (MotionStatus.Climb or MotionStatus.Fly or MotionStatus.Swim), retireExpired: true);
+        }
+
+        internal void ReleaseForRecovery()
+        {
+            // 已在本场输入操作内确认复苏；只松键，不销毁恢复仍持有的原因帧。
+            ReleaseHeldEOwner();
+            io.ReleaseInput();
+            _confirmedActor = null;
+            _atomicObservationId = null;
         }
 
         public void ReleaseHeldInput()
