@@ -140,6 +140,90 @@ public class PathExecutionFailureTests
     }
 
     [Fact]
+    public void RecordedCrystalFlyCurrentActorWaitCanResumeWithoutSkippingItsAuthoredWait()
+    {
+        Assert.True(BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.IsProhibited);
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 13).Select(_ => replay.Point("walk")).ToList();
+        points[0].Type = "teleport";
+        points[7].Type = "target";
+        points[7].Action = "combat_script";
+        points[7].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext("wait(3.5)", false);
+        replay.Executor.CurWaypoints = (0, points);
+        replay.Executor.CurWaypoint = (12, points[12]);
+
+        // 原始PATH_HEALING_PREFIX已记录该wait的handlerCompletedBeforeRecovery=True。
+        Assert.True(PathExecutor.CanRestartAfterHealing(points, 12, new HashSet<int> { 7 }));
+
+        replay.Executor.StartSkipOtherOperations(afterHealing: true);
+        replay.Executor.CurWaypoint = (7, points[7]);
+        replay.Executor.TryCloseSkipOtherOperations();
+        Assert.True(replay.Executor.ShouldExecuteWaypointAction(points[7]));
+        Assert.False(replay.Executor.SuccessEnd);
+        Assert.Empty(replay.Inputs);
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("empty")]
+    [InlineData("wrong-index")]
+    public void CurrentActorWaitWithoutCompletedHandlerRecordCannotAuthorizeReturn(string completion)
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 13).Select(_ => replay.Point("walk")).ToList();
+        points[0].Type = "teleport";
+        points[7].Type = "target";
+        points[7].Action = "combat_script";
+        points[7].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext("wait(3.5)", false);
+        IReadOnlySet<int>? completed = completion switch
+        {
+            "empty" => new HashSet<int>(),
+            "wrong-index" => new HashSet<int> { 8 },
+            _ => null
+        };
+
+        Assert.False(PathExecutor.CanRestartAfterHealing(points, 12, completed));
+    }
+
+    [Theory]
+    [InlineData("named")]
+    [InlineData("space")]
+    [InlineData("interaction")]
+    [InlineData("skill")]
+    [InlineData("compound")]
+    [InlineData("flow")]
+    [InlineData("nan")]
+    [InlineData("negative")]
+    [InlineData("orientation")]
+    [InlineData("empty")]
+    public void CompletedHandlerDoesNotAuthorizeUnsafeWaitVariants(string variant)
+    {
+        var replay = new PathReplay();
+        var points = Enumerable.Range(0, 13).Select(_ => replay.Point("walk")).ToList();
+        points[0].Type = "teleport";
+        points[7].Type = "target";
+        points[7].Action = "combat_script";
+        points[7].CombatScript = BetterGenshinImpact.GameTask.AutoFight.Script.CombatScriptParser.ParseContext("wait(3.5)", false);
+        var command = points[7].CombatScript.CombatCommands[0];
+        switch (variant)
+        {
+            case "named": command.Name = "钟离"; break;
+            case "space": command.Method = BetterGenshinImpact.GameTask.AutoFight.Script.Method.KeyPress; command.Args = ["VK_SPACE"]; break;
+            case "interaction": command.Method = BetterGenshinImpact.GameTask.AutoFight.Script.Method.KeyPress; command.Args = ["VK_F"]; break;
+            case "skill": command.Method = BetterGenshinImpact.GameTask.AutoFight.Script.Method.Skill; command.Args = []; break;
+            case "compound": points[7].CombatScript.CombatCommands.Add(new(command.Name, "keypress(VK_SPACE)")); break;
+            case "flow": command.Flags.Add("optional"); break;
+            case "nan": command.Args = ["NaN"]; break;
+            case "negative": command.Args = ["-1"]; break;
+            case "orientation": points[7].Type = "orientation"; break;
+            case "empty": command.Args = []; break;
+        }
+        Assert.False(PathExecutor.CanRestartAfterHealing(points, 12, new HashSet<int> { 7 }));
+        Assert.Empty(replay.Inputs);
+        Assert.False(replay.Executor.SuccessEnd);
+    }
+
+    [Fact]
     public void CompletedSimpleAttackDoesNotBlockHealingAndIsNotExecutedAgainDuringReturn()
     {
         var replay = new PathReplay();
