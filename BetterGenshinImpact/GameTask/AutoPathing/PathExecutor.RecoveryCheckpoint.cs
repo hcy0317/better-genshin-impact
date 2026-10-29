@@ -34,8 +34,9 @@ public partial class PathExecutor
         commands[0].Name == CombatScriptParser.CurrentAvatarName && commands[0].Method == Method.Attack &&
         !commands[0].RequiresFlow;
 
-    internal static bool CanRestartAfterHealing(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex) =>
-        HealingRestartRejection(segment, resumeIndex) == null;
+    internal static bool CanRestartAfterHealing(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex,
+        IReadOnlySet<int>? completedActions = null) =>
+        HealingRestartRejection(segment, resumeIndex, completedActions) == null;
 
     private int HealingResumeIndex() => RecordWaypoints == CurWaypoints && _skipOtherOperations
         ? Math.Max(CurWaypoint.Item1, RecordWaypoint.Item1) : CurWaypoint.Item1;
@@ -45,7 +46,7 @@ public partial class PathExecutor
         var resumeIndex = HealingResumeIndex();
         var request = "revive-resume:" + Guid.NewGuid().ToString("N");
         TraceHealingPrefix(request, resumeIndex);
-        var rejection = HealingRestartRejection(CurWaypoints.Item2, resumeIndex);
+        var rejection = HealingRestartRejection(CurWaypoints.Item2, resumeIndex, _completedWaypointActions);
         try
         {
             _moveIo.Logger.LogDebug("PATH_REVIVE_RESUME request={Request} node={Node} checkpoint={Checkpoint} rejection={Rejection}", request, CurWaypoint.Item1, resumeIndex, rejection ?? "none");
@@ -74,16 +75,31 @@ public partial class PathExecutor
         catch { }
     }
 
-    internal static string? HealingRestartRejection(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex)
+    internal static string? HealingRestartRejection(IReadOnlyList<WaypointForTrack>? segment, int resumeIndex,
+        IReadOnlySet<int>? completedActions = null)
     {
         if (segment is not { Count: > 0 }) return "segment-unavailable";
         if (resumeIndex < 0 || resumeIndex >= segment.Count) return "checkpoint-out-of-range";
         if (segment[0].Type != WaypointType.Teleport.Code) return "original-entry-not-teleport";
         for (var index = 0; index < resumeIndex; index++)
             if (segment[index].Action == ActionEnum.CombatScript.Code && !CanSkipCompletedHealingMacro(segment[index]) &&
-                !CanReplayHealingEntryMacro(segment, index))
+                !CanReplayHealingEntryMacro(segment, index) &&
+                !CanReplayCompletedHealingWait(segment[index], index, completedActions))
                 return "unsafe-macro-prefix:index=" + index;
         return null;
+    }
+
+    // 完成记录仅支持无输入的单次等待；返回途中仍执行原等待，不把它当作可略过的动作。
+    private static bool CanReplayCompletedHealingWait(WaypointForTrack waypoint, int index,
+        IReadOnlySet<int>? completedActions)
+    {
+        if (completedActions?.Contains(index) != true || waypoint.Type != WaypointType.Target.Code ||
+            waypoint.CombatScript?.CombatCommands is not { Count: 1 } commands) return false;
+        var command = commands[0];
+        return command.Name == CombatScriptParser.CurrentAvatarName && command.Method == Method.Wait &&
+               !command.RequiresFlow && command.Args is { Count: 1 } args &&
+               double.TryParse(args[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) &&
+               double.IsFinite(seconds) && seconds >= 0;
     }
 
     // 实际矿路在传送入口用短位移和一次角色战技离开锚点。回血后从同一个
@@ -116,12 +132,12 @@ public partial class PathExecutor
     {
         var resumeIndex = HealingResumeIndex();
         // 能否重放只决定恢复后的路线处理，不能阻止当前低血角色先安全回血。
-        var canRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex);
+        var canRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex, _completedWaypointActions);
         var allowParentReplan = CanRequestParentHealingReplan(CurWaypoints.Item2, resumeIndex, _segmentHasStartedTraversal);
         var request = "healing:" + Guid.NewGuid().ToString("N");
         var context = $"route={CurWaypoint.Item2.PathingTaskFileName} segment={CurWaypoints.Item1} node={CurWaypoint.Item1} " +
             $"checkpoint={resumeIndex} recordedCheckpoint={RecordWaypoint.Item1} skipOtherOperations={_skipOtherOperations} " +
-            $"canRestart={canRestart} rejection={HealingRestartRejection(CurWaypoints.Item2, resumeIndex) ?? "none"} " +
+            $"canRestart={canRestart} rejection={HealingRestartRejection(CurWaypoints.Item2, resumeIndex, _completedWaypointActions) ?? "none"} " +
             $"beforeSource={before.SessionId}/{before.Sequence}";
         var lastObservation = "unavailable:not-observed";
         var lastSource = default(CaptureFrameStamp);
@@ -148,7 +164,7 @@ public partial class PathExecutor
                 using var frame = _moveIo.Capture();
                 DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
                 var result = new HealingFrame(frame.FrameStamp, _moveIo.CombatHud(frame) && !_moveIo.Transformed(frame),
-                    Bv.CurrentAvatarIsLowHp(frame));
+                    Bv.ObserveCurrentAvatarLowHp(frame));
                 lastObservation = result.ToString();
                 lastSource = frame.FrameStamp;
                 evidence?.RememberExactFrame(request, request, frame);

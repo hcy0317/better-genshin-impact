@@ -40,6 +40,41 @@ public class HealingObservationTests
     }
 
     [Fact]
+    public async Task UnknownHealthNeverConfirmsRecoveryWithinOriginalDeadline()
+    {
+        Assert.True(BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.IsProhibited);
+        Assert.Null(System.Windows.Application.Current);
+        using var task = BetterGenshinImpact.GameTask.TaskExecutionScope.BeginOwned();
+        var clock = new FakeTimeProvider();
+        var producer = new CaptureFrameSource(clock);
+        var before = producer.Next();
+        var fence = new CaptureFrameFence(before, clock.GetTimestamp());
+        // 第一帧必须严格晚于输入；否则陈旧帧拒绝会掩盖unknown健康准入缺陷。
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var started = clock.GetTimestamp();
+        var reads = 0;
+
+        var confirmed = await HealingObservation.WaitAsync(fence, () =>
+        {
+            reads++;
+            var frame = new HealingFrame(producer.Next(), true, null);
+            Assert.True(fence.Accepts(frame.Source));
+            Assert.True(frame.Source.IsFresh(clock, TimeSpan.FromSeconds(2)));
+            return frame;
+        }, milliseconds =>
+        {
+            Assert.Equal(100, milliseconds);
+            clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+            return Task.CompletedTask;
+        }, default, clock);
+
+        Assert.False(confirmed);
+        Assert.Equal(TimeSpan.FromSeconds(2), clock.GetElapsedTime(started));
+        Assert.Equal(20, reads);
+        Assert.Null(System.Windows.Application.Current);
+    }
+
+    [Fact]
     public async Task HealingChecksNewPixelsInsteadOfReusingTheLowHpFrame()
     {
         var clock = new FakeTimeProvider();

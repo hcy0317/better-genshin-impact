@@ -227,6 +227,11 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             Common.Ui.UiOperation.Current?.Check();
             if (flow.Context.BattleId != io.BattleId) throw new InvalidOperationException("战斗宿主不能消费另一场运行");
             if (_result != CombatBattleHostResult.Continue) return _result;
+            using var recoveryOwner = CombatRecoveryOwner.Enter(ct, () =>
+            {
+                flow.RetireForRecovery();
+                Stop("verified-revive-recovery-handed-to-parent");
+            });
             _finishRequested |= flow.TakeFinishCheckRequest();
             var now = Now;
             if (options.TimeoutSeconds > 0 && now >= options.TimeoutSeconds)

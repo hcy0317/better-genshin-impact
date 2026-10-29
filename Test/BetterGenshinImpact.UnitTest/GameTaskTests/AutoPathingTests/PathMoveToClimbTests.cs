@@ -13,6 +13,240 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PathMoveToClimbTests
 {
     [Fact]
+    public async Task OrdinaryDashDetachesFreshUnexpectedClimbBeforeResumingOriginalTarget()
+    {
+        Assert.True(BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.IsProhibited);
+        var replay = new PathReplay { EmitReceipts = true, ProducerIntervalMilliseconds = 50 };
+        var forward = false;
+        var moved = false;
+        var normalFeedback = false;
+        DateTimeOffset? dropDown = null;
+        DateTimeOffset? dropReleased = null;
+        replay.PositionAt = _ => moved ? new Point2f(100, 100) : new Point2f(90, 100);
+        replay.MotionAt = _ =>
+        {
+            var detached = dropReleased is { } released &&
+                replay.Clock.GetUtcNow() - released >= TimeSpan.FromMilliseconds(60);
+            normalFeedback |= detached;
+            return detached ? MotionStatus.Normal : MotionStatus.Climb;
+        };
+        replay.OnInput = (action, type) =>
+        {
+            if (action == GIActions.MoveForward)
+            {
+                forward = type == KeyType.KeyDown;
+                if (forward && dropReleased is { } released)
+                {
+                    Assert.True(normalFeedback, "Dash must wait for fresh Normal feedback after detaching.");
+                    Assert.True(replay.Clock.GetUtcNow() - released >= TimeSpan.FromMilliseconds(60));
+                }
+            }
+            if (action != GIActions.Drop) return;
+            Assert.False(forward, "An attached avatar must release forward before detaching.");
+            Assert.NotEqual(KeyType.KeyPress, type);
+            if (type == KeyType.KeyDown) dropDown = replay.Clock.GetUtcNow();
+            if (type == KeyType.KeyUp && dropDown is { } pressed)
+            {
+                Assert.True(replay.Clock.GetUtcNow() - pressed >= TimeSpan.FromMilliseconds(60));
+                dropReleased = replay.Clock.GetUtcNow();
+            }
+        };
+        replay.AfterDelay = _ => { if (forward && normalFeedback) moved = true; };
+
+        await replay.Executor.MoveTo(replay.Point("dash"));
+
+        Assert.True(moved, "Detaching alone cannot count as reaching the original target.");
+        Assert.NotNull(dropReleased);
+        Assert.Single(replay.Inputs.Where(input => input.Action == GIActions.Drop && input.Type == KeyType.KeyDown));
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Jump);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task OrdinaryDashRejectsAQueuedFrameCapturedBeforeThePostReleaseResponseWindow()
+    {
+        var replay = new PathReplay { EmitReceipts = true, ProducerIntervalMilliseconds = 50 };
+        var resumed = false;
+        var earlyFrameDelivered = false;
+        var currentFrameIsEarly = false;
+        DateTimeOffset? releasedAt = null;
+        long releasedTimestamp = 0;
+        replay.PositionAt = _ => resumed ? new Point2f(100, 100) : new Point2f(90, 100);
+        replay.MotionAt = _ => releasedAt != null ? MotionStatus.Normal : MotionStatus.Climb;
+        replay.StampTransform = stamp =>
+        {
+            currentFrameIsEarly = false;
+            if (releasedAt is { } released && !earlyFrameDelivered)
+            {
+                earlyFrameDelivered = currentFrameIsEarly = true;
+                return stamp with { CapturedTimestamp = releasedTimestamp + stamp.TimestampFrequency / 50,
+                    CapturedAt = released.AddMilliseconds(20) };
+            }
+            return stamp;
+        };
+        replay.OnInput = (action, type) =>
+        {
+            if (action == GIActions.Drop && type == KeyType.KeyUp)
+            {
+                releasedAt = replay.Clock.GetUtcNow();
+                releasedTimestamp = replay.Clock.GetTimestamp();
+            }
+            if (action == GIActions.MoveForward && type == KeyType.KeyDown && releasedAt != null)
+            {
+                Assert.False(currentFrameIsEarly, "A late-delivered frame captured only 20ms after release cannot authorize forward input.");
+                resumed = true;
+            }
+        };
+
+        await replay.Executor.MoveTo(replay.Point("dash"));
+
+        Assert.True(earlyFrameDelivered);
+        Assert.True(resumed);
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Jump);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("swim")]
+    [InlineData("fallback")]
+    [InlineData("duplicate")]
+    [InlineData("invalid-position")]
+    public async Task OrdinaryDashInterruptedClimbEvidenceCannotAuthorizeDetaching(string interruption)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true, ProducerIntervalMilliseconds = 50 };
+        Fischless.GameCapture.CaptureFrameStamp previous = default;
+        replay.BeforeCapture = frame =>
+        {
+            replay.Direct = interruption != "fallback" || frame != 4;
+            if (frame == 6) cancellation.Cancel();
+        };
+        replay.PositionAt = frame => interruption == "invalid-position" && frame == 4
+            ? new Point2f(float.NaN, 100) : new Point2f(90, 100);
+        replay.MotionAt = frame => interruption == "swim" && frame == 4 ? MotionStatus.Swim : MotionStatus.Climb;
+        replay.StampTransform = stamp =>
+        {
+            if (interruption == "duplicate" && replay.Frames == 4) return previous;
+            previous = stamp;
+            return stamp;
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => replay.Executor.MoveTo(replay.Point("dash")));
+
+        Assert.DoesNotContain(replay.Inputs, input => input.Action is GIActions.Drop or GIActions.Jump);
+        Assert.Equal((GIActions.MoveForward, KeyType.KeyUp), (replay.Inputs[^1].Action, replay.Inputs[^1].Type));
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("climb")]
+    [InlineData("swim")]
+    [InlineData("duplicate")]
+    [InlineData("fallback")]
+    public async Task OrdinaryDashCannotCompleteFromAttachedSwimmingOrUnusableFeedback(string feedback)
+    {
+        var replay = new PathReplay { EmitReceipts = true, ProducerIntervalMilliseconds = 50,
+            PositionAt = _ => new Point2f(100, 100),
+            MotionAt = _ => feedback == "swim" ? MotionStatus.Swim : MotionStatus.Climb,
+            Duplicate = feedback == "duplicate", Direct = feedback != "fallback" };
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveTo(replay.Point("dash")));
+
+        var drops = replay.Inputs.Where(input => input.Action == GIActions.Drop && input.Type == KeyType.KeyDown);
+        if (feedback == "climb") Assert.Single(drops);
+        else Assert.Empty(drops);
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Jump);
+        Assert.Equal((GIActions.MoveForward, KeyType.KeyUp), (replay.Inputs[^1].Action, replay.Inputs[^1].Type));
+        if (feedback == "swim") Assert.True(replay.Clock.GetUtcNow() - replay.Started < TimeSpan.FromSeconds(1));
+        else Assert.InRange((replay.Clock.GetUtcNow() - replay.Started).TotalSeconds, 240, 240.2);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("cancel", "before")]
+    [InlineData("cancel", "hold")]
+    [InlineData("cancel", "feedback")]
+    [InlineData("deadline", "before")]
+    [InlineData("deadline", "hold")]
+    [InlineData("deadline", "feedback")]
+    public async Task OrdinaryDashCancellationOrOriginalDeadlineCannotExtendDetaching(string stop, string phase)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true, ProducerIntervalMilliseconds = 50,
+            PositionAt = _ => new Point2f(90, 100), MotionAt = _ => MotionStatus.Climb };
+        var held = false;
+        var released = false;
+        var stopped = false;
+        void Stop()
+        {
+            if (stopped) return;
+            stopped = true;
+            if (stop == "cancel") cancellation.Cancel();
+            else replay.Clock.Advance(replay.Started.AddSeconds(240) - replay.Clock.GetUtcNow());
+        }
+        replay.OnCheckInput = () => { if (phase == "before") Stop(); };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.Drop) return;
+            held = type == KeyType.KeyDown;
+            released |= type == KeyType.KeyUp;
+        };
+        replay.AfterDelay = _ =>
+        {
+            if (phase == "hold" && held || phase == "feedback" && released) Stop();
+        };
+
+        if (stop == "cancel")
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => replay.Executor.MoveTo(replay.Point("dash")));
+        else
+            await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveTo(replay.Point("dash")));
+
+        Assert.True(stopped);
+        Assert.False(held);
+        if (phase == "before") Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Drop);
+        else Assert.True(released);
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Jump);
+        Assert.All(replay.Inputs.Where(input => input.At >= replay.Started.AddSeconds(240)),
+            input => Assert.Equal(KeyType.KeyUp, input.Type));
+        Assert.Equal((GIActions.MoveForward, KeyType.KeyUp), (replay.Inputs[^1].Action, replay.Inputs[^1].Type));
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task OrdinaryDashDetachingSharesTheExistingTwoRecoveriesAcrossNodes()
+    {
+        var replay = new PathReplay { EmitReceipts = true, ProducerIntervalMilliseconds = 50 };
+        for (var node = 0; node < 3; node++)
+        {
+            var moved = false;
+            var forward = false;
+            var normal = false;
+            DateTimeOffset? released = null;
+            replay.PositionAt = _ => moved ? new Point2f(100, 100) : new Point2f(90, 100);
+            replay.MotionAt = _ =>
+            {
+                normal = released is { } at && replay.Clock.GetUtcNow() - at >= TimeSpan.FromMilliseconds(60);
+                return normal ? MotionStatus.Normal : MotionStatus.Climb;
+            };
+            replay.OnInput = (action, type) =>
+            {
+                if (action == GIActions.MoveForward) forward = type == KeyType.KeyDown;
+                if (action == GIActions.Drop && type == KeyType.KeyUp) released = replay.Clock.GetUtcNow();
+            };
+            replay.AfterDelay = _ => { if (forward && normal) moved = true; };
+            if (node < 2) await replay.Executor.MoveTo(replay.Point("dash"));
+            else
+            {
+                var error = await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveTo(replay.Point("dash")));
+                Assert.Contains("3次卡死", error.Message);
+            }
+        }
+        Assert.Equal(2, replay.Inputs.Count(input => input.Action == GIActions.Drop && input.Type == KeyType.KeyDown));
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Jump);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
     public async Task FiveMillisecondPollingPreservesWindowAcrossTwentyFpsDuplicateFrames()
     {
         var replay = new PathReplay { ProducerIntervalMilliseconds = 50 };

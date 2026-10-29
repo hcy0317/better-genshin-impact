@@ -45,12 +45,16 @@ public partial class Avatar
         // 先实际释放输入，再进入不受战斗150ms约束的恢复阶段。
         BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
         using var suspension = CombatActionScope.Suspend();
-        using var operation = UiOperation.Begin("selection-recovery", TimeSpan.FromSeconds(60), ct, TaskControl.Logger);
+        var recoveryStarted = TimeProvider.System.GetTimestamp();
         KnownReviveTarget? target = null;
         var after = request.After;
         if (!after.FrameStamp.IsFresh(TimeProvider.System, UiSnapshot.RecoveryMaximumAge))
             throw new InvalidOperationException("选角恢复证据已经过期，不能据此传送");
         var revive = Bv.ReadReviveState(after);
+        if (revive != ReviveUiState.None && !Bv.IsInDomainIncludingRevivePrompt(after))
+            ct = CombatRecoveryOwner.Start(ct);
+        using var operation = UiOperation.Begin("selection-recovery",
+            TimeSpan.FromSeconds(60) - TimeProvider.System.GetElapsedTime(recoveryStarted), ct, TaskControl.Logger);
         if (revive == ReviveUiState.FoodPrompt && request.Before != null &&
             request.InputFence is { } fence && fence.Accepts(after.FrameStamp))
         {
