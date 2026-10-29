@@ -969,7 +969,17 @@ public partial class PathExecutor
         var flightClimbingFrames = 0;
         var flightDetachUsed = false;
         CaptureFrameFence? flightDetachFence = null;
+        var ordinaryDash = waypoint.MoveMode == MoveModeEnum.Dash.Code && !airborneStart;
+        var dashClimbingFrames = 0;
+        var dashDetachUsed = false;
+        CaptureFrameFence? dashDetachFence = null;
         CaptureFrameStamp lastMoveFrame = default;
+        Task WaitForDashFeedbackAsync()
+        {
+            var remaining = (_moveDeadline.Value - _moveIo.Clock.GetUtcNow()).TotalMilliseconds;
+            if (remaining <= 0) throw new RetryException("路径点执行超时，放弃整条路径");
+            return _moveIo.Delay((int)Math.Ceiling(Math.Min(100, remaining)), ct);
+        }
 
         // 飞行先取得有效观测并开翼，再接管前进输入。
         if (waypoint.MoveMode != MoveModeEnum.Fly.Code && !airborneStart)
@@ -988,7 +998,7 @@ public partial class PathExecutor
             }
 
             using var screen = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct,
-                onBlocked: () => { climbWindow.Clear(); swimmingFrames = flightClimbingFrames = 0; });
+                onBlocked: () => { climbWindow.Clear(); swimmingFrames = flightClimbingFrames = dashClimbingFrames = 0; });
             transformed = IsKnownPathTransformation(screen);
 
             _moveIo.EndJudgment(screen);
@@ -1003,6 +1013,7 @@ public partial class PathExecutor
              {
                  SendPathForward(KeyType.KeyUp);
                  climbWindow.Clear();
+                 dashClimbingFrames = 0;
                  await _moveIo.Delay(150, ct);
                  continue;
              }
@@ -1016,7 +1027,7 @@ public partial class PathExecutor
             var progressObservedAt = _moveIo.Clock.GetUtcNow().UtcDateTime;
             if (waypoint.MoveMode == MoveModeEnum.Climb.Code && progressObservedAt >= moveToStartTime.AddSeconds(60))
                 throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
-            var observation = waypoint.MoveMode == MoveModeEnum.Fly.Code || waypoint.MoveMode == MoveModeEnum.Climb.Code || airborneStart
+            var observation = waypoint.MoveMode == MoveModeEnum.Fly.Code || waypoint.MoveMode == MoveModeEnum.Climb.Code || airborneStart || ordinaryDash
                 ? ReadMoveObservation(screen, located, lastMoveFrame) : default;
             // Recognition is synchronous and may itself consume the remaining node budget.
             ct.ThrowIfCancellationRequested();
@@ -1038,6 +1049,7 @@ public partial class PathExecutor
             // 分段重试/传送入口，不能把同一XY当作飞行到达，也不能持续发送起跳。
             if (waypoint.MoveMode != MoveModeEnum.Swim.Code && observation.SourceUsable && observation.Motion == MotionStatus.Swim)
             {
+                dashClimbingFrames = 0;
                 SendPathForward(KeyType.KeyUp);
                 swimmingFrames = observation.Valid ? swimmingFrames + 1 : 0;
                 if (swimmingFrames >= 2)
@@ -1050,6 +1062,64 @@ public partial class PathExecutor
                 continue;
             }
             swimmingFrames = 0;
+            if (ordinaryDash && !transformed)
+            {
+                // 普通dash误攀附不能进入带跳跃的通用脱困。仍共用原脱困次数和节点期限。
+                if (!observation.Valid || dashDetachFence is { } requiredDashFrame &&
+                    (!requiredDashFrame.Accepts(observation.Stamp) ||
+                     observation.Stamp.CapturedTimestamp - requiredDashFrame.InputCompletedTimestamp < observation.Stamp.TimestampFrequency * .06))
+                {
+                    dashClimbingFrames = 0;
+                    SendPathForward(KeyType.KeyUp);
+                    await WaitForDashFeedbackAsync();
+                    continue;
+                }
+                if (observation.Motion == MotionStatus.Climb)
+                {
+                    SendPathForward(KeyType.KeyUp);
+                    if (++dashClimbingFrames >= 2 && !dashDetachUsed)
+                    {
+                        if (++_inTrap > 2) throw new RetryException("此路线出现3次卡死，重试一次路线或放弃此路线！");
+                        dashDetachUsed = true;
+                        _moveIo.CheckInput();
+                        ct.ThrowIfCancellationRequested();
+                        if (_moveDeadline.Value - _moveIo.Clock.GetUtcNow() <= TimeSpan.FromMilliseconds(60))
+                            throw new RetryException("路径点执行超时，放弃整条路径");
+                        void Drop()
+                        {
+                            using var admission = new Fischless.WindowsInput.InputDispatchCapture(() =>
+                            {
+                                ct.ThrowIfCancellationRequested();
+                                if (_moveDeadline.Value - _moveIo.Clock.GetUtcNow() <= TimeSpan.FromMilliseconds(60))
+                                    throw new RetryException("路径点执行超时，放弃整条路径");
+                                if (!observation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2)))
+                                    throw new RetryException("dash攀附脱离输入前原帧过期");
+                            });
+                            _moveIo.Send(GIActions.Drop, KeyType.KeyDown);
+                        }
+                        var dropped = await PathApproachDiagnostics.RunPulseAsync(Drop,
+                            () => _moveIo.Send(GIActions.Drop, KeyType.KeyUp), ms => _moveIo.Delay(ms, ct), _moveIo.Clock, screen);
+                        ct.ThrowIfCancellationRequested();
+                        if (_moveIo.Clock.GetUtcNow() >= _moveDeadline.Value)
+                            throw new RetryException("路径点执行超时，放弃整条路径");
+                        if (!dropped.HasCompleteReceipt)
+                            throw new RetryException("dash攀附脱离输入未确认，不继续移动");
+                        dashDetachFence = new(observation.Stamp, _moveIo.Clock.GetTimestamp());
+                        _moveIo.Logger.LogDebug("PATH_DASH_CLIMB_DETACH node={Node} recovery={Recovery}/2 source={Session}/{Sequence}",
+                            waypoint.Id, _inTrap, observation.Stamp.SessionId, observation.Stamp.Sequence);
+                    }
+                    await WaitForDashFeedbackAsync();
+                    continue;
+                }
+                dashClimbingFrames = 0;
+                if (dashDetachUsed && observation.Motion != MotionStatus.Normal)
+                {
+                    SendPathForward(KeyType.KeyUp);
+                    await WaitForDashFeedbackAsync();
+                    continue;
+                }
+            }
+            else dashClimbingFrames = 0;
             if (waypoint.MoveMode == MoveModeEnum.Fly.Code && observation.Valid && observation.Motion == MotionStatus.Fly)
                 flightObserved = true;
             Debug.WriteLine($"接近目标点中，距离为{distance}");
