@@ -2817,7 +2817,11 @@ public class TpTask
             }
 
             var threshold = Math.Min(_assets.MapChooseIconRoList[i].Threshold, NearbyMapIconTemplateThreshold);
-            var iconRects = MatchTemplateHelper.MatchOnePicForOnePic(searchGrey, template, null, threshold);
+            IReadOnlyList<Rect> iconRects = iconType switch
+            {
+                "TeleportWaypoint" => TeleportTargetIconLocator.FindVisibleWaypoints(searchGrey, template, threshold),
+                _ => MatchTemplateHelper.MatchOnePicForOnePic(searchGrey, template, null, threshold),
+            };
             foreach (var relativeIconRect in iconRects)
             {
                 var rect = new Rect(
