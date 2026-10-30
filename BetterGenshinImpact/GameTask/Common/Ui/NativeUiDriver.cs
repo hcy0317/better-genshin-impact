@@ -197,8 +197,8 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             var control = CombatMotionReader.ReadControl(image, true, reader);
             var transformed = SaurianUiReader.IsKnownTransformation(image);
             var ordinary = !transformed && (reviveDetector?.IsCombatHud(image) ?? Bv.IsCombatHud(image));
-            var messages = image.FindMulti(RecognitionObject.Ocr(image.Width * .15, image.Height * .2,
-                image.Width * .7, image.Height * .5), ocrService: reader);
+            var messages = image.FindMulti(RecognitionObject.Ocr(image.Width * .15, image.Height * .17,
+                image.Width * .7, image.Height * .53), ocrService: reader);
             try
             {
                 var rejected = messages.Any(message =>
