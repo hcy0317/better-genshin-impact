@@ -165,6 +165,7 @@ public sealed class CombatSessionHandle
                 if (_requestedStatus == null) failure = new InvalidOperationException("战斗内核在外部完成前意外退出");
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
+        catch (InputSessionOwnership.RevokedException error) when (IsRequestedStopFor(error)) { }
         catch (Exception error) { failure = error; }
         finally
         {
@@ -190,6 +191,12 @@ public sealed class CombatSessionHandle
         }
         // 即使JS忽略结果/不调用Wait，脚本退休也必须观察到原生失败。
         if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
+    private bool IsRequestedStopFor(InputSessionOwnership.RevokedException error)
+    {
+        lock (_gate)
+            return _requestedStatus != null && ReferenceEquals(error.RevokedOwner, _owner);
     }
 
     private static Exception Combine(Exception? first, Exception second) =>

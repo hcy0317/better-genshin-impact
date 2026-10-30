@@ -108,6 +108,125 @@ public class ExternalCombatSessionTests
         using var next = inputs.Acquire();
     }
 
+    [Theory]
+    [InlineData("progress", "CompletedByExternalProgress")]
+    [InlineData("cancel", "Cancelled")]
+    [InlineData("timeout", "TimedOut")]
+    public async Task RequestedStopClassifiesOnlyTheRunningSessionsRevokedInput(string stop, string expected)
+    {
+        Assert.True(BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.IsProhibited);
+        Assert.Null(System.Windows.Application.Current);
+        using var lifetime = new ScriptAsyncLifetime(default);
+        var clock = new FakeTimeProvider();
+        var frames = new CaptureFrameSource(clock);
+        var backend = new RecordingBackend();
+        var inputs = new InputSessionOwnership(backend);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcher = new Dispatcher(new object(), null!, NullLogger<Dispatcher>.Instance,
+            new(clock, inputs.Acquire, async (_, owner, bind, _) =>
+            {
+                bind(Guid.NewGuid());
+                entered.SetResult();
+                await resume.Task;
+                owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q));
+            }));
+        var session = dispatcher.CreateCombatSession("钟离 attack(.1)", "tower", frames.Next(), 0, 2);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(TimeSpan.FromMilliseconds(50));
+            Assert.True(session.SubmitProgress(session.SessionId, "tower", frames.Next(), 0, 2, false));
+            if (stop == "progress")
+            {
+                Assert.True(session.SubmitProgress(session.SessionId, "tower", frames.Next(), 1, 2, false));
+                clock.Advance(TimeSpan.FromMilliseconds(210));
+                Assert.True(session.SubmitProgress(session.SessionId, "tower", frames.Next(), 1, 2, false));
+            }
+            else if (stop == "cancel") session.Cancel();
+            else clock.Advance(TimeSpan.FromSeconds(30));
+            resume.TrySetResult();
+            var result = await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(expected, result.Status);
+            Assert.Equal(0, backend.Channel.KeyDowns);
+            Assert.Equal(1, backend.Releases);
+            await lifetime.CloseAsync();
+            using var next = inputs.Acquire();
+        }
+        finally
+        {
+            resume.TrySetResult();
+            await session.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConfirmedProgressDoesNotHideOrdinaryOrOtherOwnersFailure(bool foreignOwner)
+    {
+        using var lifetime = new ScriptAsyncLifetime(default);
+        var clock = new FakeTimeProvider();
+        var frames = new CaptureFrameSource(clock);
+        var inputs = new InputSessionOwnership(new RecordingBackend());
+        var otherInputs = new InputSessionOwnership(new RecordingBackend());
+        using var other = otherInputs.Acquire();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcher = new Dispatcher(new object(), null!, NullLogger<Dispatcher>.Instance,
+            new(clock, inputs.Acquire, async (_, _, bind, _) =>
+            {
+                bind(Guid.NewGuid());
+                entered.SetResult();
+                await resume.Task;
+                if (foreignOwner)
+                {
+                    other.CloseAdmission();
+                    other.Invoke(() => otherInputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q));
+                }
+                throw new IOException("runner-fault");
+            }));
+        var session = dispatcher.CreateCombatSession("钟离 attack(.1)", "tower", frames.Next(), 0, 2);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.Advance(TimeSpan.FromMilliseconds(50));
+            Assert.True(session.SubmitProgress(session.SessionId, "tower", frames.Next(), 1, 2, false));
+            clock.Advance(TimeSpan.FromMilliseconds(210));
+            Assert.True(session.SubmitProgress(session.SessionId, "tower", frames.Next(), 1, 2, false));
+            resume.TrySetResult();
+            Assert.Equal("Failed", (await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(5))).Status);
+            var failure = await Record.ExceptionAsync(() => lifetime.CloseAsync());
+            if (foreignOwner)
+                Assert.Same(other, Assert.IsType<InputSessionOwnership.RevokedException>(failure).RevokedOwner);
+            else Assert.Equal("runner-fault", Assert.IsType<IOException>(failure).Message);
+        }
+        finally
+        {
+            resume.TrySetResult();
+            await session.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task SameOwnersRevocationWithoutARequestedSessionStopRemainsAFailure()
+    {
+        using var lifetime = new ScriptAsyncLifetime(default);
+        var clock = new FakeTimeProvider();
+        var inputs = new InputSessionOwnership(new RecordingBackend());
+        var dispatcher = new Dispatcher(new object(), null!, NullLogger<Dispatcher>.Instance,
+            new(clock, inputs.Acquire, (_, owner, bind, _) =>
+            {
+                bind(Guid.NewGuid());
+                owner.CloseAdmission();
+                owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q));
+                return Task.CompletedTask;
+            }));
+        var session = dispatcher.CreateCombatSession("钟离 attack(.1)", "tower", new CaptureFrameSource(clock).Next(), 0, 2);
+        Assert.Equal("Failed", (await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(5))).Status);
+        await Assert.ThrowsAsync<InputSessionOwnership.RevokedException>(() => lifetime.CloseAsync());
+    }
+
     [Fact]
     public async Task ReleaseFailureOverridesCompletionAndIsObservedByScriptRetirement()
     {
@@ -289,8 +408,8 @@ public class ExternalCombatSessionTests
     }
     private sealed class RecordingChannel : InputChannelBase
     {
-        internal int MouseDowns;
-        protected override void OnKeyDown(User32.VK key) { }
+        internal int MouseDowns, KeyDowns;
+        protected override void OnKeyDown(User32.VK key) => KeyDowns++;
         protected override void OnKeyUp(User32.VK key) { }
         protected override void OnMouseButton(InputMouseButton button, bool down) { if (down) MouseDowns++; }
         protected override void OnMoveBy(int x, int y) { }
