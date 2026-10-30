@@ -998,7 +998,12 @@ public partial class PathExecutor
             }
 
             using var screen = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct,
-                onBlocked: () => { climbWindow.Clear(); swimmingFrames = flightClimbingFrames = dashClimbingFrames = 0; });
+                onBlocked: () =>
+                {
+                    PathMovementDiagnostics.SwimGate(_moveIo.LoggerFactory, waypoint.PathingTaskFileName, $"{waypoint.Id}", waypoint.MoveMode,
+                        "reset", "world-blocked", swimmingFrames, 0, lastMoveFrame, null, flightDetachFence, dashDetachFence);
+                    climbWindow.Clear(); swimmingFrames = flightClimbingFrames = dashClimbingFrames = 0;
+                });
             transformed = IsKnownPathTransformation(screen);
 
             _moveIo.EndJudgment(screen);
@@ -1027,8 +1032,9 @@ public partial class PathExecutor
             var progressObservedAt = _moveIo.Clock.GetUtcNow().UtcDateTime;
             if (waypoint.MoveMode == MoveModeEnum.Climb.Code && progressObservedAt >= moveToStartTime.AddSeconds(60))
                 throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
+            var previousMoveFrame = lastMoveFrame;
             var observation = waypoint.MoveMode == MoveModeEnum.Fly.Code || waypoint.MoveMode == MoveModeEnum.Climb.Code || airborneStart || ordinaryDash
-                ? ReadMoveObservation(screen, located, lastMoveFrame) : default;
+                ? ReadMoveObservation(screen, located, previousMoveFrame) : default;
             // Recognition is synchronous and may itself consume the remaining node budget.
             ct.ThrowIfCancellationRequested();
             progressObservedAt = _moveIo.Clock.GetUtcNow().UtcDateTime;
@@ -1051,7 +1057,12 @@ public partial class PathExecutor
             {
                 dashClimbingFrames = 0;
                 SendPathForward(KeyType.KeyUp);
+                var beforeSwimming = swimmingFrames;
                 swimmingFrames = observation.Valid ? swimmingFrames + 1 : 0;
+                PathMovementDiagnostics.SwimGate(_moveIo.LoggerFactory, waypoint.PathingTaskFileName, $"{waypoint.Id}", waypoint.MoveMode,
+                    swimmingFrames >= 2 ? "rejected" : swimmingFrames > 0 ? "candidate" : "reset",
+                    observation.Valid ? "swim" : "invalid-observation", beforeSwimming, swimmingFrames, previousMoveFrame,
+                    observation, flightDetachFence, dashDetachFence);
                 if (swimmingFrames >= 2)
                 {
                     try { DiagnosticEvidenceScope.Current?.RequestWindowFromFrame("path-swim:" + waypoint.Id,
@@ -1061,6 +1072,8 @@ public partial class PathExecutor
                 await _moveIo.Delay(100, ct);
                 continue;
             }
+            PathMovementDiagnostics.SwimGate(_moveIo.LoggerFactory, waypoint.PathingTaskFileName, $"{waypoint.Id}", waypoint.MoveMode,
+                "reset", "not-swimming", swimmingFrames, 0, previousMoveFrame, observation, flightDetachFence, dashDetachFence);
             swimmingFrames = 0;
             if (ordinaryDash && !transformed)
             {
