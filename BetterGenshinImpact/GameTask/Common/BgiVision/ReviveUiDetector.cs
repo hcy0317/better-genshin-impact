@@ -76,6 +76,7 @@ internal sealed class ReviveUiDetector(
             image.Width * 28 / 100, image.Height * 16 / 100));
         var text = ocr().OcrWithoutDetector(title.SrcMat).Replace(" ", "", StringComparison.Ordinal);
         return text.Contains("注意敌人", StringComparison.Ordinal) ||
+            text.Contains("严寒", StringComparison.Ordinal) ||
             text.Contains("注意敵人", StringComparison.Ordinal) ||
             text.Contains("BewareofEnemies", StringComparison.OrdinalIgnoreCase);
     }
