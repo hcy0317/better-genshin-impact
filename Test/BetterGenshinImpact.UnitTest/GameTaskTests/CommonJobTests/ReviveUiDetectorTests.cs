@@ -81,21 +81,34 @@ public class ReviveUiDetectorTests
     [UiRecoveryFact("full-party-defeat-20261003.png")]
     public void ActualDefeatRequiresBothCenterTitleAndBottomButton()
     {
-        using var image = new ImageRegion(Cv2.ImRead(UiRecoveryFixtures.PathFor("full-party-defeat-20261003.png")), 0, 0);
-        Assert.False(image.SrcMat.Empty());
-        var detector = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", image),
-            new DefeatOcr(), "复苏", "使用道具复苏角色");
-        var observed = detector.Observe(image);
-        Assert.Equal(ReviveUiState.FullPartyDefeat, observed.State);
-        Assert.True(observed.DefeatOverlay);
-        Assert.True(observed.ButtonBounds.Y > image.Height * 2 / 3);
+        foreach (var title in new[] { "注意敌人", "严寒" })
+        {
+            using var image = new ImageRegion(Cv2.ImRead(UiRecoveryFixtures.PathFor("full-party-defeat-20261003.png")), 0, 0);
+            Assert.False(image.SrcMat.Empty());
+            var detector = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", image),
+                new DefeatOcr(title), "复苏", "使用道具复苏角色");
+            var observed = detector.Observe(image);
+            Assert.Equal(ReviveUiState.FullPartyDefeat, observed.State);
+            Assert.True(observed.DefeatOverlay);
+            Assert.True(observed.ButtonBounds.Y > image.Height * 2 / 3);
+        }
     }
 
-    private sealed class DefeatOcr : IOcrService
+    [UiRecoveryFact("full-party-defeat-20261003.png")]
+    public void ColdCaptionWithoutTheUniqueReviveButtonCannotAuthorizeRevival()
     {
-        public string Ocr(Mat mat) => "注意敌人";
-        public string OcrWithoutDetector(Mat mat) => "注意敌人";
-        public OcrResult OcrResult(Mat mat) => new([new(new RotatedRect(new Point2f(500, 265), new Size2f(64, 30), 0), "复苏", 1)]);
+        using var image = new ImageRegion(Cv2.ImRead(UiRecoveryFixtures.PathFor("full-party-defeat-20261003.png")), 0, 0);
+        var detector = new ReviveUiDetector(RecognitionAssets.Get("AutoFight", "Confirm", image),
+            new DefeatOcr("严寒", includeButton: false), "复苏", "使用道具复苏角色");
+        Assert.Equal(ReviveUiState.None, detector.Read(image));
+    }
+
+    private sealed class DefeatOcr(string title = "注意敌人", bool includeButton = true) : IOcrService
+    {
+        public string Ocr(Mat mat) => title;
+        public string OcrWithoutDetector(Mat mat) => title;
+        public OcrResult OcrResult(Mat mat) => includeButton
+            ? new([new(new RotatedRect(new Point2f(500, 265), new Size2f(64, 30), 0), "复苏", 1)]) : new([]);
     }
 
     [Fact]
