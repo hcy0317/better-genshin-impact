@@ -3913,6 +3913,8 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public double DpiScale { get; init; } = 1;
         public Microsoft.Extensions.Logging.ILogger Logger { get; init; } = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
         public CombatInputCoordinator InputCoordinator { get; } = new();
+        internal BetterGenshinImpact.Core.Input.InputSessionOwnership.Owner? InputOwner { get; init; }
+        internal int OwnedSubmitAttempts { get; private set; }
         public IReadOnlyList<NativeCombatActor> Actors { get; init; } = new[]
         { new NativeCombatActor("钟离", 1), new("芙宁娜", 2), new("那维莱特", 3), new("琴", 4) };
         public double LastFinishCheckAge => 0;
@@ -4137,6 +4139,17 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public CombatBattleHostInputResult SubmitInput(NativeCombatActor actor, CombatCommand command,
             CombatNativeInputRequest request, Action begin, CancellationToken ct)
         {
+            if (InputOwner is not { } owner) return SubmitInputCore(actor, command, request, begin, ct);
+            OwnedSubmitAttempts++;
+            CombatBattleHostInputResult result = default!;
+            // Match NativeCombatIo.Owned: admission precedes beforeFirstNative and records.
+            owner.Invoke(() => result = SubmitInputCore(actor, command, request, begin, ct));
+            return result;
+        }
+
+        private CombatBattleHostInputResult SubmitInputCore(NativeCombatActor actor, CombatCommand command,
+            CombatNativeInputRequest request, Action begin, CancellationToken ct)
+        {
             ct.ThrowIfCancellationRequested();
             begin();
             var started = Clock.GetTimestamp();
@@ -4249,6 +4262,12 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
         private sealed class Lease(Action? end) : IDisposable { public void Dispose() => end?.Invoke(); }
         public void ReleaseInput()
+        {
+            if (InputOwner is { } owner) owner.ReleaseInput(ReleaseInputCore);
+            else ReleaseInputCore();
+        }
+
+        private void ReleaseInputCore()
         {
             if (InputReleaseError != null) throw InputReleaseError;
             foreach (var key in _heldKeys) KeyEvents.Add((key, true, Now, true));

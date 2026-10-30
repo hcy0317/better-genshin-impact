@@ -19,15 +19,19 @@ public partial class CombatNativeAdapterReplayTests
         var owners = new BetterGenshinImpact.Core.Input.InputSessionOwnership(backend);
         var ready = new TaskCompletionSource<Action>(TaskCreationOptions.RunContinuationsAsynchronously);
         var attacks = 0;
+        var confirmedAttacks = -1;
+        var finalAttacks = -1;
+        Func<int>? countAttacks = null;
+        var samples = new List<string>();
         var progressSubmitted = false;
         var perceptionRetired = false;
         var dispatcher = new BetterGenshinImpact.Core.Script.Dependence.Dispatcher(new object(), null!,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<BetterGenshinImpact.Core.Script.Dependence.Dispatcher>.Instance,
-            new(clock, owners.Acquire, async (script, _, bind, token) =>
+            new(clock, owners.Acquire, async (script, inputOwner, bind, token) =>
             {
                 var complete = await ready.Task.WaitAsync(token);
                 using var physical = new PhysicalReplay(clock, false, 50, LoadProgram("钟离 attack(.1)"))
-                { Actors = [new("钟离", 1)], ExternalClockAdvance = true };
+                { Actors = [new("钟离", 1)], ExternalClockAdvance = true, InputOwner = inputOwner };
                 physical.SetFrontActor("钟离");
                 using var flow = NativeCombatFlowRunner.Create(CombatScriptExecutor.ExternalSessionCommands(script), physical, loop: true);
                 var perceptionStarted = false;
@@ -38,15 +42,18 @@ public partial class CombatNativeAdapterReplayTests
                     try { await Task.Delay(Timeout.Infinite, ct); }
                     finally { perceptionRetired = true; }
                 }
+                countAttacks = () => physical.Primitives.Count(command => command.Method == Method.Attack);
                 var scene = new SceneReplayIo(clock, flow.Context.BattleId) { BeforeObservation = () =>
                 {
                     Assert.True(perceptionStarted);
-                    attacks = physical.Primitives.Count(command => command.Method == Method.Attack);
+                    attacks = countAttacks();
+                    samples.Add($"observe@{clock.GetTimestamp()}={attacks}");
                     if (attacks >= 2 && !progressSubmitted) { progressSubmitted = true; complete(); }
                 } };
                 using var host = new CombatBattleHost(scene, new() { ExternalCompletionAuthority = true,
                     FinishDetectionEnabled = false, SeekEnabled = false });
-                await CombatScriptExecutor.RunExternalSessionCoreAsync(flow, host, bind, Perceive, token);
+                try { await CombatScriptExecutor.RunExternalSessionCoreAsync(flow, host, bind, Perceive, token); }
+                finally { finalAttacks = countAttacks(); samples.Add($"finally@{clock.GetTimestamp()}={finalAttacks} ownedAttempts={physical.OwnedSubmitAttempts} revoked={inputOwner.Revoked}"); }
             }));
         var session = dispatcher.CreateCombatSession("钟离 attack(.1)", "tower-1", source.Next(), 0, 2);
         ready.SetResult(() =>
@@ -56,13 +63,17 @@ public partial class CombatNativeAdapterReplayTests
             Assert.False(session.IsCompleted);
             clock.Advance(TimeSpan.FromMilliseconds(210));
             Assert.True(session.SubmitProgress(session.SessionId, session.TargetId, source.Next(), 1, 2, false));
+            confirmedAttacks = countAttacks!();
+            samples.Add($"confirmed@{clock.GetTimestamp()}={confirmedAttacks}");
         });
         try
         {
             var result = await session.WaitAsync().WaitAsync(TimeSpan.FromSeconds(5));
             Assert.Equal("CompletedByExternalProgress", result.Status);
             Assert.Equal("target-progress-increased", result.Reason);
-            Assert.Equal(2, attacks);
+            Assert.True(attacks == 2, $"Sampled attacks={attacks}, confirmed={confirmedAttacks}, final={finalAttacks}; {string.Join("; ", samples)}");
+            Assert.Equal(2, confirmedAttacks);
+            Assert.Equal(2, finalAttacks);
             Assert.True(perceptionRetired);
             Assert.Equal(1, backend.Releases);
             using var nextOwner = owners.Acquire();

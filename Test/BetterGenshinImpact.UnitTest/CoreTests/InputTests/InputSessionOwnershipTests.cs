@@ -22,7 +22,9 @@ public class InputSessionOwnershipTests
             {
                 entered.TrySetResult();
                 release.Wait();
-                Assert.Throws<InvalidOperationException>(() => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q));
+                var stopped = Assert.Throws<InputSessionOwnership.RevokedException>(
+                    () => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q));
+                Assert.Same(owner, stopped.RevokedOwner);
             }
             finally { inputs.Backend.Foreground.Keyboard.KeyUp(User32.VK.VK_E); }
         }));
@@ -90,7 +92,9 @@ public class InputSessionOwnershipTests
         inputs.Backend.Foreground.Keyboard.KeyUp(User32.VK.VK_E);
         using var owner = inputs.Acquire();
         owner.CloseAdmission();
-        Assert.Throws<InvalidOperationException>(() => owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyPress(User32.VK.VK_Q)));
+        var stopped = Assert.Throws<InputSessionOwnership.RevokedException>(
+            () => owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyPress(User32.VK.VK_Q)));
+        Assert.Same(owner, stopped.RevokedOwner);
         Assert.Throws<InvalidOperationException>(() => inputs.EnterLegacyOperation());
         owner.ReleaseInput(() => inputs.Backend.ReleaseAll());
         Assert.Equal(1, device.Channel.Presses);
@@ -130,6 +134,64 @@ public class InputSessionOwnershipTests
         }
         cachedKeyboard.KeyPress(User32.VK.VK_E);
         Assert.Equal(2, device.Channel.Presses);
+    }
+
+    [Theory]
+    [InlineData("wrong-owner")]
+    [InlineData("cleanup-input")]
+    [InlineData("released")]
+    public void OwnerMisuseIsNotClassifiedAsAnExpectedRevocation(string misuse)
+    {
+        Assert.True(BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.IsProhibited);
+        Assert.Null(System.Windows.Application.Current);
+        var device = new RecordingBackend();
+        var inputs = new InputSessionOwnership(device);
+        using var owner = inputs.Acquire();
+        owner.CloseAdmission();
+        if (misuse == "wrong-owner")
+        {
+            var otherInputs = new InputSessionOwnership(new RecordingBackend());
+            using var otherOwner = otherInputs.Acquire();
+            otherOwner.Invoke(() => Assert.Throws<InvalidOperationException>(
+                () => inputs.Backend.Foreground.Keyboard.KeyPress(User32.VK.VK_Q)));
+        }
+        else if (misuse == "cleanup-input")
+        {
+            owner.ReleaseInput(() => Assert.Throws<InvalidOperationException>(
+                () => inputs.Backend.Foreground.Keyboard.KeyPress(User32.VK.VK_Q)));
+        }
+        else
+        {
+            owner.Dispose();
+            Assert.Throws<InvalidOperationException>(
+                () => owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyPress(User32.VK.VK_Q)));
+        }
+        Assert.Equal(0, device.Channel.Presses);
+    }
+
+    [Fact]
+    public void PoisonRemainsAnOrdinaryFailureInTheRunningOwnersChannelAfterRevocation()
+    {
+        Assert.True(BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.IsProhibited);
+        Assert.Null(System.Windows.Application.Current);
+        var device = new RecordingBackend();
+        var inputs = new InputSessionOwnership(device);
+        var owner = inputs.Acquire();
+        owner.Invoke(() =>
+        {
+            device.FailRelease = true;
+            Assert.Throws<IOException>(inputs.Backend.ReleaseAll);
+            device.FailRelease = false;
+            owner.CloseAdmission();
+            // The sending owner still matches: Poison must win over Revoked.
+            Assert.Throws<InvalidOperationException>(
+                () => inputs.Backend.Foreground.Keyboard.KeyPress(User32.VK.VK_Q));
+        });
+        Assert.Throws<InvalidOperationException>(
+            () => owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyPress(User32.VK.VK_Q)));
+        Assert.Throws<InvalidOperationException>(owner.Dispose);
+        Assert.Throws<InvalidOperationException>(() => inputs.Acquire());
+        Assert.Equal(0, device.Channel.Presses);
     }
 
     private sealed class RecordingBackend : IInputBackend

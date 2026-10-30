@@ -70,8 +70,9 @@ internal sealed class InputSessionOwnership
             if (_owner is { } owner)
             {
                 if (!ReferenceEquals(_sendingOwner, owner) || owner.Poison != null ||
-                    (_cleanupOnly && !release) || (owner.Revoked && !release))
+                    (_cleanupOnly && !release))
                     throw new InvalidOperationException("非当前会话所有者或已撤销的输入请求");
+                if (owner.Revoked && !release) throw new RevokedException(owner);
             }
             try { return action(); }
             catch (Exception error)
@@ -92,6 +93,11 @@ internal sealed class InputSessionOwnership
         }
     }
 
+    internal sealed class RevokedException(Owner revokedOwner) : InvalidOperationException("输入租约已停止准入")
+    {
+        internal Owner RevokedOwner { get; } = revokedOwner;
+    }
+
     internal sealed class Owner : IDisposable
     {
         private readonly InputSessionOwnership _inputs;
@@ -110,8 +116,9 @@ internal sealed class InputSessionOwnership
         {
             lock (_inputs._gate)
             {
-                if (_released || !ReferenceEquals(_inputs._owner, this) || Poison != null || Revoked && !cleanup)
+                if (_released || !ReferenceEquals(_inputs._owner, this) || Poison != null)
                     throw new InvalidOperationException("输入租约已停止准入或释放失败", Poison);
+                if (Revoked && !cleanup) throw new RevokedException(this);
                 _activeCalls++;
             }
             // The capability spans synchronous legacy commands, but the mutex spans only
