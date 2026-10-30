@@ -51,6 +51,8 @@ public class DiagnosticEvidenceTimeWindowTests
     [InlineData("mining-cast-result")]
     [InlineData("host-input-context")]
     [InlineData("path-interaction-context")]
+    [InlineData("commission-before")]
+    [InlineData("commission-exit")]
     public async Task RoutineInputWindowsCannotConsumeFaultPriority(string phase)
     {
         var saved = new List<DiagnosticEvidence>();
@@ -66,6 +68,8 @@ public class DiagnosticEvidenceTimeWindowTests
     [InlineData("mining-cast-result")]
     [InlineData("host-input-context")]
     [InlineData("path-interaction-context")]
+    [InlineData("commission-before")]
+    [InlineData("commission-exit")]
     public async Task RoutineContextDenialCannotConsumeTheReservedTerminalWindow(string phase)
     {
         var saved = new List<DiagnosticEvidence>();
@@ -81,6 +85,40 @@ public class DiagnosticEvidenceTimeWindowTests
         Assert.Null(fallback.Window);
         Assert.Equal(DiagnosticEvidencePriority.Routine, fallback.Priority);
         Assert.Equal(DiagnosticEvidencePriority.Error, Assert.Single(saved.Where(item => item.Request == "failure")).Priority);
+    }
+
+    [Fact]
+    public async Task StableSelectionPreviewKeepsWarningPriorityBeforeTheActualFailure()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; },
+            maxWindows: 2, maxPendingWindows: 2, queueCapacity: 64);
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        Assert.True(scope.RequestWindowFromFrame("preview", "stable-mismatch", frame, "not ready before deadline"));
+        Assert.True(scope.RequestWindowFromFrame("failed", "selection-terminal", frame, "final failure"));
+        await scope.DisposeAsync();
+        Assert.Equal(DiagnosticEvidencePriority.Warning, Assert.Single(saved.Where(item => item.Request == "preview")).Priority);
+        Assert.Equal(DiagnosticEvidencePriority.Error, Assert.Single(saved.Where(item => item.Request == "failed")).Priority);
+    }
+
+    [Theory]
+    [InlineData("commission-result")]
+    [InlineData("script-failed")]
+    [InlineData("http-failed")]
+    [InlineData("deadline")]
+    [InlineData("combat-terminal")]
+    [InlineData("party-terminal")]
+    [InlineData("path-world-blocked")]
+    public async Task FinalAndFaultWindowsKeepErrorPriority(string phase)
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var scope = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var frame = new ImageRegion(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
+        { FrameStamp = new CaptureFrameSource().Next() };
+        Assert.True(scope.RequestWindowFromFrame("actual-result", phase, frame, "preserve final result and failure anchor"));
+        await scope.DisposeAsync();
+        Assert.Equal(DiagnosticEvidencePriority.Error, Assert.Single(saved).Priority);
     }
 
     [Fact]

@@ -48,10 +48,13 @@ internal sealed class DiagnosticEvidenceStorage : IDisposable
     internal static bool IsTerminalPhase(string phase) => phase is "terminal" or "combat-terminal"
         or "party-terminal" or "selection-terminal" or "skill-terminal-Failed";
     internal static bool IsRoutineWindowPhase(string phase) => phase is "selection-before-submit" or "ui-action-feedback"
-        or "mining-cast-result" or "host-input-context" or "path-interaction-context";
+        or "mining-cast-result" or "host-input-context" or "path-interaction-context"
+        or "commission-before" or "commission-exit";
 
+    // 截止前的不匹配是预观测；最终失败仍由deadline/terminal保留。
     internal static DiagnosticEvidencePriority AnchorPriority(string phase) => IsRoutineWindowPhase(phase)
-        ? DiagnosticEvidencePriority.Routine : phase == "unconfirmed" ? DiagnosticEvidencePriority.Warning : DiagnosticEvidencePriority.Error;
+        ? DiagnosticEvidencePriority.Routine : phase is "unconfirmed" or "stable-mismatch"
+            ? DiagnosticEvidencePriority.Warning : DiagnosticEvidencePriority.Error;
 
     internal static DiagnosticEvidencePriority ResolvePriority(string phase, DiagnosticWindowFrame? window,
         DiagnosticEvidencePriority requested)
