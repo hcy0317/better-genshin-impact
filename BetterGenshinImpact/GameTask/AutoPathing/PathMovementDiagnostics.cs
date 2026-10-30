@@ -46,4 +46,24 @@ internal sealed class PathMovementDiagnostics(ILogger logger, TimeProvider? cloc
         }
         catch { /* 只借用已有帧的诊断不能改变导航、恢复或取消结果。 */ }
     }
+
+    internal static void SwimGate(Func<ILogger> getLogger, string? route, string point, string move,
+        string phase, string reason, int before, int after, CaptureFrameStamp previous,
+        PathMoveObservation? observation, CaptureFrameFence? flightFence, CaptureFrameFence? dashFence)
+    {
+        if (before == after) return;
+        try
+        {
+            var sink = getLogger();
+            if (!sink.IsEnabled(LogLevel.Debug)) return;
+            sink.LogDebug("PATH_SWIM_GATE route={Route} point={Point} move={Move} event={Event} reason={Reason} before={Before} after={After} hasObservation={HasObservation} sourceSession={Session} sourceSequence={Sequence} sourceCaptured={Captured} sourceFrequency={Frequency} previousSession={PreviousSession} previousSequence={PreviousSequence} motion={Motion} valid={Valid} sourceUsable={SourceUsable} position={Position} flightFenceSession={FlightSession} flightFenceSource={FlightSource} flightInputCompleted={FlightCompleted} dashFenceSession={DashSession} dashFenceSource={DashSource} dashInputCompleted={DashCompleted}",
+                route, point, move, phase, reason, before, after, observation.HasValue,
+                observation?.Stamp.SessionId, observation?.Stamp.Sequence, observation?.Stamp.CapturedTimestamp,
+                observation?.Stamp.TimestampFrequency, previous.SessionId, previous.Sequence,
+                observation?.Motion, observation?.Valid, observation?.SourceUsable, observation?.Position,
+                flightFence?.Before.SessionId, flightFence?.Before.Sequence, flightFence?.InputCompletedTimestamp,
+                dashFence?.Before.SessionId, dashFence?.Before.Sequence, dashFence?.InputCompletedTimestamp);
+        }
+        catch { /* 记录真实计数变化，诊断失败不能改变原门禁与异常。 */ }
+    }
 }

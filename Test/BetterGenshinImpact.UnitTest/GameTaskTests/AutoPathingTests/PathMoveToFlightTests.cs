@@ -234,6 +234,7 @@ internal sealed class PathReplay
     internal readonly List<int> Delays = new();
     internal readonly List<ImageRegion> Images = new();
     internal int Frames;
+    internal Microsoft.Extensions.Logging.ILogger DiagnosticLogger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     internal Func<int, MotionStatus> MotionAt = _ => MotionStatus.Normal;
     internal readonly PathExecutor Executor;
     internal readonly PathMoveToIo Io;
@@ -269,7 +270,7 @@ internal sealed class PathReplay
         _source = new(Clock);
         Io = new PathMoveToIo
         {
-            LoggerFactory = () => Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+            LoggerFactory = () => DiagnosticLogger,
             Clock = Clock,
             CheckInput = () => OnCheckInput?.Invoke(),
             CameraOrientation = _ => ReadCamera?.Invoke() ?? CameraAngle, Dpi = () => 1,
