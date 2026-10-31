@@ -15,6 +15,8 @@ namespace BetterGenshinImpact.GameTask.AutoPathing;
 internal readonly record struct PathApproachPulse(int Requested, int Submitted, bool Uncertain, double ElapsedMilliseconds,
     DiagnosticInputReceipt? Receipt = null)
 {
+    internal CaptureFrameStamp InputSource { get; init; }
+
     internal bool HasCompleteReceipt => !Uncertain &&
         ((Requested > 0 && Requested == Submitted) ||
          (Receipt is { TransportRequested: > 0, Status: DiagnosticInputStatus.Sent } &&
@@ -61,7 +63,12 @@ internal sealed class PathApproachDiagnostics(string route, string context)
     {
         var fields = new Dictionary<string, string>
         {
-            ["nativeInput"] = _recoveryInput, ["nativeInputEnvironment"] = _recoveryEnvironment, ["rotation"] = _rotation,
+            ["nativeInput"] = _recoveryInput,
+        ["nativeInputScope"] = "ground-recovery",
+        ["approachInput"] = _pulse.Receipt?.Describe() ?? "unknown:no-approach-pulse-observed",
+        ["approachInputSource"] = _pulse.InputSource.IsKnown
+            ? FormattableString.Invariant($"source={_pulse.InputSource.SessionId}/{_pulse.InputSource.Sequence} captured={_pulse.InputSource.CapturedTimestamp} frequency={_pulse.InputSource.TimestampFrequency}")
+            : "unknown:not-supplied", ["nativeInputEnvironment"] = _recoveryEnvironment, ["rotation"] = _rotation,
             ["recoveryStart"] = DescribeRecovery(_recoveryStart), ["recoveryEnd"] = DescribeRecovery(_recoveryEnd),
             ["recoveryOutcome"] = _recoveryOutcome,
             ["recoveryInputs"] = string.Join(";", _recoveryInputs.Select((item, index) => $"{index + 1}:{item.Receipt.RequestId:N}")),
@@ -177,6 +184,8 @@ internal sealed class PathApproachDiagnostics(string route, string context)
     internal static PathApproachPulse RunPulse(Action down, Action up, Action<int> wait, ImageRegion? before = null)
     {
         var clock = TimeProvider.System;
+        // 保存输入开始时的值，调用方可能在等待期间更新同一图像对象的帧身份。
+        var inputSource = before?.FrameStamp ?? default;
         var started = clock.GetTimestamp();
         using var input = new DiagnosticInputAttempt(clock);
         var entered = false;
@@ -192,12 +201,14 @@ internal sealed class PathApproachDiagnostics(string route, string context)
                 catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }
             }
         }
-        return FinishPulse(capture, input, clock, started, failure, before);
+        return FinishPulse(capture, input, clock, started, failure, before, inputSource);
     }
 
     internal static async System.Threading.Tasks.Task<PathApproachPulse> RunPulseAsync(Action down, Action up,
         Func<int, System.Threading.Tasks.Task> wait, TimeProvider clock, ImageRegion? before = null)
     {
+        // 保存输入开始时的值，调用方可能在等待期间更新同一图像对象的帧身份。
+        var inputSource = before?.FrameStamp ?? default;
         var started = clock.GetTimestamp();
         using var input = new DiagnosticInputAttempt(clock);
         var entered = false;
@@ -213,11 +224,11 @@ internal sealed class PathApproachDiagnostics(string route, string context)
                 catch (Exception cleanup) { failure = failure == null ? cleanup : new AggregateException(failure, cleanup); }
             }
         }
-        return FinishPulse(capture, input, clock, started, failure, before);
+        return FinishPulse(capture, input, clock, started, failure, before, inputSource);
     }
 
     private static PathApproachPulse FinishPulse(InputDispatchCapture capture, DiagnosticInputAttempt input,
-        TimeProvider clock, long started, Exception? failure, ImageRegion? before)
+        TimeProvider clock, long started, Exception? failure, ImageRegion? before, CaptureFrameStamp inputSource)
     {
         var receipt = input.Complete(capture.HasDispatch, failure);
         if (failure != null)
@@ -237,6 +248,6 @@ internal sealed class PathApproachDiagnostics(string route, string context)
             ExceptionDispatchInfo.Capture(failure).Throw();
         }
         return new(capture.Requested, capture.Submitted, capture.Uncertain,
-            clock.GetElapsedTime(started).TotalMilliseconds, receipt);
+            clock.GetElapsedTime(started).TotalMilliseconds, receipt) { InputSource = inputSource };
     }
 }
