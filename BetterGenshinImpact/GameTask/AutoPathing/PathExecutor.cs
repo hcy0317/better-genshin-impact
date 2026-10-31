@@ -697,57 +697,36 @@ public partial class PathExecutor
     /// <summary>
     /// 尝试队伍回血，如果单人回血，由于记录检查时是哪位残血，则当作行走位处理。
     /// </summary>
-    private async Task<bool> TryPartyHealing()
+    private Task<bool> TryPartyHealing(Fischless.GameCapture.CaptureFrameStamp before)
     {
-        if (_combatScenes is null) return false;
-        foreach (var avatar in _combatScenes.GetAvatars())
+        var scenes = _combatScenes;
+        if (scenes is null) return Task.FromResult(false);
+        ct.ThrowIfCancellationRequested();
+        scenes.BeforeTask(ct);
+        void CheckParent()
         {
-            if (avatar.Name == "白术")
-            {
-                if (avatar.TrySwitch())
-                {
-                    //1命白术能两次
-                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
-                    await Delay(800, ct);
-                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
-                    await Delay(800, ct);
-                    await SwitchAvatar(PartyConfig.MainAvatarIndex);
-                    await Delay(4000, ct);
-                    return true;
-                }
-
-                break;
-            }
-            else if (avatar.Name == "希格雯")
-            {
-                if (avatar.TrySwitch())
-                {
-                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
-                    await Delay(11000, ct);
-                    await SwitchAvatar(PartyConfig.MainAvatarIndex);
-                    return true;
-                }
-
-                break;
-            }
-            else if (avatar.Name == "珊瑚宫心海")
-            {
-                if (avatar.TrySwitch())
-                {
-                    InputHub.Foreground.SimulateAction(GIActions.ElementalSkill);
-                    await Delay(500, ct);
-                    //尝试Q全队回血
-                    InputHub.Foreground.SimulateAction(GIActions.ElementalBurst);
-                    //单人血只给行走位加血
-                    await SwitchAvatar(PartyConfig.MainAvatarIndex);
-                    await Delay(5000, ct);
-                    return true;
-                }
-            }
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            UiOperation.Current?.Check();
         }
-
-
-        return false;
+        return PathPartyHealing.TryAsync(scenes.GetAvatars().Select(avatar =>
+        {
+            var identity = new AvatarActiveCheckContext();
+            return new PathPartyHealingAvatar(avatar.Name, () => avatar.TrySwitch(),
+                () => InputHub.Foreground.SimulateAction(GIActions.ElementalSkill),
+                () => InputHub.Foreground.SimulateAction(GIActions.ElementalBurst),
+                () => PathPartyHealing.TryGuardedBurst(
+                    admit => avatar.TryUseBurst(timeoutSeconds: 2.4, maxSamples: 16, tryBeginInput: admit),
+                    () =>
+                    {
+                        using var frame = CaptureToRectArea();
+                        scenes.PrepareAvatarObservation(frame, identity, UiSnapshot.CombatMaximumAge);
+                        var active = scenes.GetActiveAvatarIndex(frame, identity);
+                        var ordinary = Bv.IsInMainUi(frame) && !IsKnownPathTransformation(frame);
+                        return new(frame.FrameStamp, ordinary, active, avatar.ObserveBurst(frame, active == avatar.Index));
+                    }, before, avatar.Index, UiSnapshot.CombatMaximumAge, CheckParent, TimeProvider.System));
+        }), async () => await SwitchAvatar(PartyConfig.MainAvatarIndex) != null,
+            milliseconds => Delay(milliseconds, ct), ct);
     }
 
     private async Task RecoverWhenLowHp(WaypointForTrack waypoint)
@@ -770,13 +749,20 @@ public partial class PathExecutor
             _pathingMacro?.Release();
             CaptureLowHpRecoveryEvidence(region,
                 $"route={waypoint.PathingTaskFileName} segment={CurWaypoints.Item1 + 1} node={waypoint.Id} type={waypoint.Type} move={waypoint.MoveMode} action={waypoint.Action} skipOtherOperations={_skipOtherOperations}; before any healing or teleport", Logger);
-            if (await TryPartyHealing())
+            if (await TryPartyHealing(region.FrameStamp))
             {
+                if (!int.TryParse(PartyConfig.MainAvatarIndex, out var expectedMain))
+                    throw new InvalidOperationException("队内治疗后行走位编号无效，禁止确认恢复");
+                var identity = new AvatarActiveCheckContext();
                 var fence = new Fischless.GameCapture.CaptureFrameFence(region.FrameStamp, TimeProvider.System.GetTimestamp());
                 var healed = await HealingObservation.WaitAsync(fence, () =>
                 {
                     using var fresh = CaptureToRectArea();
-                    return new(fresh.FrameStamp, Bv.IsInMainUi(fresh), Bv.ObserveCurrentAvatarLowHp(fresh));
+                    _combatScenes?.PrepareAvatarObservation(fresh, identity, UiSnapshot.RecoveryMaximumAge);
+                    var active = _combatScenes?.GetActiveAvatarIndex(fresh, identity) ?? -1;
+                    var ordinary = Bv.IsInMainUi(fresh) && !IsKnownPathTransformation(fresh);
+                    return PathPartyHealing.HealthFrame(fresh.FrameStamp, ordinary, active, expectedMain,
+                        Bv.ObserveCurrentAvatarLowHp(fresh));
                 }, ms => Delay(ms, ct), ct);
                 if (healed) return;
             }
