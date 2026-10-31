@@ -189,7 +189,12 @@ public sealed partial class CombatFlowExecution : IDisposable
     public bool TakeFinishCheckRequest() => _battle.TakeFinishCheckRequest();
 
     public CombatFlowExecution(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock = null)
-        : this(program, game, new(clock), program.Root, program.Loop, hasRootRounds: true)
+        : this(program, game, clock, yieldAtRootBoundaries: false) { }
+
+    internal CombatFlowExecution(CombatFlowProgram program, ICombatFlowGame game, TimeProvider? clock,
+        bool yieldAtRootBoundaries)
+        : this(program, game, new(clock), program.Root, program.Loop, hasRootRounds: true,
+            yieldAtRootBoundaries: yieldAtRootBoundaries)
     {
         _ownsBattle = true;
     }
@@ -404,6 +409,8 @@ public sealed partial class CombatFlowExecution : IDisposable
                 if (eligible != true)
                 {
                     CompleteNode(frame, command, CombatFlowResult.Skipped);
+                    if (_yieldAtRootBoundaries && _frames.Count == 1)
+                        return new(CombatFlowResult.Skipped, false);
                     continue;
                 }
             }

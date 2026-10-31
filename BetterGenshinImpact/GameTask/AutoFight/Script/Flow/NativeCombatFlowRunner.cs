@@ -116,7 +116,7 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         _diagnosticWriter = new(_diagnosticLogger, clock);
         _readDiagnosticStatistics = () => RuntimeStatistics;
         _game = game;
-        _execution = new(program, _game, clock);
+        _execution = new(program, _game, clock, yieldAtRootBoundaries: program.Loop);
         foreach (var source in program.Sources) TraceStrategy("TXT", source.Path, source.TextHash,
             program.Loop ? "battle" : "fragment", source.Identity, source.EntryPoint, source.SessionId);
         if (game is NativeGame configured) configured.NeedsBurstVision = program.NeedsBurstVision();

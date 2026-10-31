@@ -96,6 +96,24 @@ public class PathWorldEvidenceTests
         await evidence.DisposeAsync();
     }
 
+    [Fact]
+    public async Task ConfirmedLowHpTriggerKeepsFaultPriorityAndBorrowsTheOriginalFrame()
+    {
+        var saved = new List<DiagnosticEvidence>();
+        await using var evidence = new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; });
+        using var frame = Frame(new CaptureFrameSource());
+        var original = frame.FrameStamp;
+        PathExecutor.CaptureLowHpRecoveryEvidence(frame, "confirmed low hp before any recovery",
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        Assert.False(frame.SrcMat.IsDisposed);
+        await evidence.DisposeAsync();
+        var trigger = Assert.Single(saved);
+        Assert.Equal(original, trigger.Source);
+        Assert.Equal("before-recovery", trigger.Phase);
+        Assert.Equal(DiagnosticEvidencePriority.Error, trigger.Priority);
+        Assert.False(frame.SrcMat.IsDisposed);
+    }
+
     private static ImageRegion Frame(CaptureFrameSource source) => new(new Mat(2, 2, MatType.CV_8UC3, Scalar.Black), 0, 0)
     { FrameStamp = source.Next() };
 }
