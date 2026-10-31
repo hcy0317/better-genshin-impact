@@ -424,7 +424,12 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                     }
                     finally
                     {
+                        var beforeUpRequested = nativeScope?.Requested ?? 0;
+                        var beforeUpSubmitted = nativeScope?.Submitted ?? 0;
                         using (operation.Measure(UiOperationPhase.NativeInput)) _device.SetCameraReset(false);
+                        releasedCompletely = nativeScope != null && !nativeScope.Uncertain &&
+                            nativeScope.Requested > beforeUpRequested &&
+                            nativeScope.Submitted - beforeUpSubmitted == nativeScope.Requested - beforeUpRequested;
                     }
                     break;
                 case CombatBattleHostInputKind.Camera:
@@ -500,7 +505,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             // 完整执行块后的局部性能超标不是输入未知。先重验业务/父期限，
             // 且只有真实down/up回执完整时才可转入新帧复核；不豁免任何执行异常。
             if ((input.Kind == CombatBattleHostInputKind.Camera ||
-                 input.Kind == CombatBattleHostInputKind.Approach && releasedCompletely && nativeScope is { Requested: >= 2 }) &&
+                 (input.Kind is CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.CameraReset) &&
+                 releasedCompletely && nativeScope is { Requested: >= 2 }) &&
                 nativeScope is { Uncertain: false, Requested: > 0 } && nativeScope.Requested == nativeScope.Submitted &&
                 operation.Remaining <= TimeSpan.Zero)
             {
