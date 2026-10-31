@@ -804,7 +804,7 @@ public partial class PathExecutor
         {
             var source = frame.FrameStamp;
             DiagnosticEvidenceScope.Current?.TryCapture(frame, $"path-low-hp:{source.SessionId}/{source.Sequence}",
-                "before-recovery", detail, logger);
+                "before-recovery", detail, logger, priority: DiagnosticEvidencePriority.Error);
             logger.LogDebug("PATH_LOW_HP_RECOVERY source={Session}/{Sequence} {Detail}", source.SessionId, source.Sequence, detail);
         }
         catch { /* 取证借用当前帧，不影响恢复、重试或帧所有权。 */ }
