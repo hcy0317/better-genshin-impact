@@ -1,3 +1,10 @@
+function Remove-BetterGIInnerTaskComReference {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$Reference)
+
+    [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Reference)
+}
+
 function Wait-BetterGIInnerScheduledTask {
     param(
         [Parameter(Mandatory)]
@@ -36,18 +43,41 @@ function Wait-BetterGIInnerScheduledTask {
         $TaskSnapshotProvider = {
             param([string]$SnapshotTaskName)
 
-            $snapshotSession = New-CimSession -ErrorAction Stop
+            $scheduler = $null
+            $folder = $null
+            $registeredTask = $null
             try {
-                $task = Get-ScheduledTask -TaskName $SnapshotTaskName -CimSession $snapshotSession -ErrorAction Stop
-                $info = Get-ScheduledTaskInfo -TaskName $SnapshotTaskName -CimSession $snapshotSession -ErrorAction Stop
+                $scheduler = New-Object -ComObject 'Schedule.Service' -ErrorAction Stop
+                $scheduler.Connect()
+                $folder = $scheduler.GetFolder('\')
+                $registeredTask = $folder.GetTask($SnapshotTaskName)
+                # Explicit getters propagate read errors instead of PowerShell converting them to null.
+                $nativeState = [int]$registeredTask.PSObject.Properties['State'].get_Value()
+                $state = switch ($nativeState) {
+                    1 { 'Disabled' }
+                    2 { 'Queued' }
+                    3 { 'Ready' }
+                    4 { 'Running' }
+                    default { throw "Unknown native scheduled task state: $nativeState." }
+                }
                 [pscustomobject]@{
-                    State = [string]$task.State
-                    LastRunTime = $info.LastRunTime
-                    LastTaskResult = $info.LastTaskResult
+                    State = $state
+                    LastRunTime = $registeredTask.PSObject.Properties['LastRunTime'].get_Value()
+                    LastTaskResult = $registeredTask.PSObject.Properties['LastTaskResult'].get_Value()
                 }
             }
             finally {
-                Remove-CimSession -CimSession $snapshotSession -ErrorAction Stop
+                $releaseFailure = $null
+                foreach ($reference in @($registeredTask, $folder, $scheduler)) {
+                    if ($null -eq $reference) { continue }
+                    try {
+                        Remove-BetterGIInnerTaskComReference -Reference $reference -ErrorAction Stop
+                    }
+                    catch {
+                        if ($null -eq $releaseFailure) { $releaseFailure = $_ }
+                    }
+                }
+                if ($null -ne $releaseFailure) { throw $releaseFailure }
             }
         }
     }
