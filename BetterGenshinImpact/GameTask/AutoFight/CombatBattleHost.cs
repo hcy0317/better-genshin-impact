@@ -1055,9 +1055,9 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 }
                 if (result.PerformanceRecheck is { } recheck)
                 {
-                    if (input.Kind is not (CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.Camera) ||
+                    if (input.Kind is not (CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset) ||
                         result.Error != null || result.NativeUncertain ||
-                        result.NativeRequested < (input.Kind == CombatBattleHostInputKind.Approach ? 2 : 1) ||
+                        result.NativeRequested < (input.Kind == CombatBattleHostInputKind.Camera ? 1 : 2) ||
                         result.NativeRequested == null || result.NativeSubmitted != result.NativeRequested ||
                         recheck.RequestId != input.RequestId || recheck.Source != source ||
                         recheck.SelectionGoal != input.SelectionGoal || recheck.DeadlineTimestamp > _inputRequestDeadline ||
@@ -1077,7 +1077,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 {
                     // 同一输入后新帧屏障：原请求期限内等满旧入口的500ms，不把回正记为进展。
                     _inputRecheckKind = input.Kind;
-                    _inputRecheckDeadline = _inputRequestDeadline;
+                    _inputRecheckDeadline = result.PerformanceRecheck?.DeadlineTimestamp ?? _inputRequestDeadline;
                     _inputRecheckNotBefore = Math.Max(completed, result.ObservableAfterTimestamp ?? completed) +
                         io.Clock.TimestampFrequency / 2;
                     Reason = "host-camera-reset-awaiting-fresh-evidence";
