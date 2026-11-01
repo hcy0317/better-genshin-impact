@@ -251,6 +251,7 @@ public class SelectedTeleportPanelTests
             onTitle?.Invoke();
             return title;
         }
-        public OcrResult OcrResult(Mat mat) => new([]);
+        public OcrResult OcrResult(Mat mat) => new([new OcrResultRegion(
+            new RotatedRect(new Point2f(mat.Width / 2f, mat.Height / 2f), new Size2f(100, 30), 0), "传送", 1)]);
     }
 }
