@@ -13,6 +13,7 @@ internal interface IUiDriver
     Task DelayAsync(int milliseconds, CancellationToken ct);
     Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct);
     void MarkInputCompleted(UiSnapshot before) { }
+    void MarkTransitionCompleted(UiTarget target, UiSnapshot observed) { }
 }
 
 internal static class UiTransition
@@ -85,7 +86,11 @@ internal static class UiTransition
                 {
                     confirmed = confirmedSignature == observed.Signature ? confirmed + 1 : 1;
                     confirmedSignature = observed.Signature;
-                    if (confirmed >= 2) return observed;
+                    if (confirmed >= 2)
+                    {
+                        driver.MarkTransitionCompleted(target, observed);
+                        return observed;
+                    }
                 }
                 else
                 {

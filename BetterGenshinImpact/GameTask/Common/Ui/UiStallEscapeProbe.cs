@@ -57,7 +57,7 @@ internal sealed class UiStallEscapeProbe
     /// 奖励遮罩、秘境提示等需要保持输入禁忌的证据。
     /// </summary>
     internal static bool IsUnrecognizedStall(UiSnapshot observed) =>
-        observed.HasUsableEvidence && !observed.MainReady && !observed.CanEscape &&
+        observed.HasUsableEvidence && !observed.LoginNetwork.IsCandidate && !observed.MainReady && !observed.CanEscape &&
         !observed.FullPartyDefeat && !observed.Reward.IsCandidate && !observed.BlackConfirm &&
         !observed.Talk && !observed.Prompt && !observed.Revive && !observed.InDomain &&
         !observed.DomainExit.Visible && !observed.DomainTip.IsCandidate;

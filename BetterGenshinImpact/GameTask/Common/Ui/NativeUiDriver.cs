@@ -29,6 +29,12 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     private bool _rejectionCaptured;
     private readonly string _observationOwner = Guid.NewGuid().ToString("N");
     private string? _unavailableObservationRequest;
+    private enum LoginRecoveryStage { None, AwaitEntry, AwaitWorld, Done, Stopped }
+    private LoginRecoveryStage _loginStage;
+    private string? _loginRoot;
+    private Guid _loginSession;
+    private CaptureFrameStamp _loginWorldFrame;
+    private bool LoginPending => _loginStage is LoginRecoveryStage.AwaitEntry or LoginRecoveryStage.AwaitWorld or LoginRecoveryStage.Stopped;
 
     internal NativeUiDriver(bool inspectWorld = false) : this(NativeUiDriverIo.CreateNative(inspectWorld)) { }
 
@@ -68,6 +74,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
 
     private UiSnapshot UnavailableObservation(ImageRegion image, long started)
     {
+        if (LoginPending) _loginStage = LoginRecoveryStage.Stopped;
         const string reason = "recognition-budget-exhausted";
         var request = "ui-observation:" + (UiOperation.Current?.Id ?? _observationOwner);
         if (_unavailableObservationRequest != request)
@@ -86,8 +93,52 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
 
     private UiSnapshot ReadFeatures(ImageRegion image)
     {
-        var waiting = !_io.NetworkAvailable() ? "network-interface-offline"
-            : WorldFrameAvailability.ReadConnectionWait(image, _io.Ocr);
+        var unavailable = !_io.NetworkAvailable() ? "network-interface-offline"
+            : WorldFrameAvailability.HasServerWaitSpinner(image) ? "server-wait" : null;
+        if (unavailable != null)
+            return new UiSnapshot(image.FrameStamp.Sequence) { NetworkWaitReason = unavailable }
+                .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
+        var login = UiLoginNetworkObservation.Read(image, _io.Ocr);
+        if (login.IsCandidate)
+        {
+            _handbook.Dispose();
+            if (_loginStage != LoginRecoveryStage.None)
+            {
+                _loginStage = LoginRecoveryStage.Stopped;
+                login = login with { Kind = LoginNetworkKind.BlockedModal, ButtonBounds = default };
+            }
+            return new UiSnapshot(image.FrameStamp.Sequence) { LoginNetwork = login }
+                .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
+        }
+        if ((_loginStage is LoginRecoveryStage.None or LoginRecoveryStage.Done) && UiOperation.Current?.Name == "return-main")
+        {
+            var unqualified = UiLoginNetworkObservation.ReadEntry(image, _io.Ocr, requireEntryMarker: true);
+            if (unqualified.IsCandidate)
+                return new UiSnapshot(image.FrameStamp.Sequence)
+                { LoginNetwork = unqualified with { Kind = LoginNetworkKind.BlockedModal, ButtonBounds = default } }
+                    .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
+        }
+        if (LoginPending)
+        {
+            if (_loginRoot != UiOperation.Current?.RootId || _loginSession != image.FrameStamp.SessionId)
+                _loginStage = LoginRecoveryStage.Stopped;
+            if (_loginStage == LoginRecoveryStage.Stopped)
+                return new UiSnapshot(image.FrameStamp.Sequence)
+                { LoginNetwork = new(image.FrameStamp, LoginNetworkKind.AwaitingFeedback, default) }
+                    .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
+            var entry = UiLoginNetworkObservation.ReadEntry(image, _io.Ocr);
+            if (entry.IsCandidate)
+            {
+                if (entry.Kind != LoginNetworkKind.CleanEntry || _loginStage != LoginRecoveryStage.AwaitEntry)
+                {
+                    _loginStage = LoginRecoveryStage.Stopped;
+                    entry = entry with { Kind = LoginNetworkKind.BlockedModal, ButtonBounds = default };
+                }
+                return new UiSnapshot(image.FrameStamp.Sequence) { LoginNetwork = entry }
+                    .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
+            }
+        }
+        var waiting = WorldFrameAvailability.ReadConnectionWait(image, _io.Ocr);
         if (waiting != null)
             return new UiSnapshot(image.FrameStamp.Sequence) { NetworkWaitReason = waiting }
                 .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
@@ -96,8 +147,20 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                 .WithSource(image.FrameStamp, _io.Clock, UiSnapshot.RecoveryMaximumAge);
         _handbook.Dispose();
         var observed = Read(image, ocr: _io.Ocr(), domainTipTexts: _io.Texts(),
-            clock: _io.Clock, readScene: _io.ReadScene,
+            clock: _io.Clock, readScene: LoginPending ? _io.ReadOrdinaryWorld ?? _io.ReadScene : _io.ReadScene,
             inspectReward: UiOperation.Current?.Name == "return-main");
+        if (LoginPending)
+        {
+            if (_loginRoot != UiOperation.Current?.RootId || _loginSession != image.FrameStamp.SessionId)
+                _loginStage = LoginRecoveryStage.Stopped;
+            if (_loginStage == LoginRecoveryStage.Stopped || !observed.Matches(UiTarget.Overworld) || observed.World is not
+                { OrdinaryAvatarHud: true, Transformed: false, ControlObserved: true, KeyboardBreakout: false, Controlled: false })
+                return observed with { LoginNetwork = new(image.FrameStamp, LoginNetworkKind.AwaitingFeedback, default) };
+            if (_loginWorldFrame.IsKnown && (!image.FrameStamp.IsAfter(_loginWorldFrame) ||
+                image.FrameStamp.CapturedTimestamp <= _loginWorldFrame.CapturedTimestamp))
+                return observed with { LoginNetwork = new(image.FrameStamp, LoginNetworkKind.AwaitingFeedback, default) };
+            _loginWorldFrame = image.FrameStamp;
+        }
         _handbook.Remember(image, observed);
         return observed;
     }
@@ -221,6 +284,18 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
     public void MarkInputCompleted(UiSnapshot before) =>
         _inputFence = new(before.SourceStamp, _io.Clock.GetTimestamp());
 
+    public void MarkTransitionCompleted(UiTarget target, UiSnapshot observed)
+    {
+        // The existing transition owns two-frame confirmation. Retire only its
+        // completed login episode, allowing the same driver to handle later UI.
+        if (_loginStage is not (LoginRecoveryStage.AwaitEntry or LoginRecoveryStage.AwaitWorld) ||
+            target is not (UiTarget.Main or UiTarget.Overworld) || _loginRoot != UiOperation.Current?.RootId ||
+            _loginSession != observed.SourceStamp.SessionId || observed.SourceStamp != _loginWorldFrame ||
+            !observed.Matches(UiTarget.Overworld) || observed.World is not
+            { OrdinaryAvatarHud: true, Transformed: false, ControlObserved: true, KeyboardBreakout: false, Controlled: false }) return;
+        _loginStage = LoginRecoveryStage.Done;
+    }
+
     public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -266,6 +341,60 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         switch (action)
         {
+            case UiAction.ConfirmLoginNetworkError:
+                var claimed = false;
+                var root = UiOperation.Current?.RootId;
+                bool LoginAdmitted() => UiOperation.Current?.Name == "return-main" && root != null &&
+                    UiOperation.Current.RootId == root && observed.LoginNetwork.IsFor(observed.SourceStamp) &&
+                    current.LoginNetwork.IsFor(current.SourceStamp) && observed.LoginNetwork.CanConfirm && current.LoginNetwork.CanConfirm &&
+                    current.IsAfter(observed) && current.SourceStamp.CapturedTimestamp > observed.SourceStamp.CapturedTimestamp &&
+                    observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                    current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                    (!claimed ? _loginStage == LoginRecoveryStage.None : _loginStage == LoginRecoveryStage.AwaitEntry &&
+                        _loginRoot == root && _loginSession == current.SourceStamp.SessionId);
+                if (!LoginAdmitted()) return Task.FromResult(false);
+                void AdmitLoginInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!LoginAdmitted()) throw new InvalidOperationException("登录网络确认的场景、来源或原恢复资格失效。");
+                    if (!claimed)
+                    {
+                        claimed = true;
+                        _loginRoot = root;
+                        _loginSession = current.SourceStamp.SessionId;
+                        _loginStage = LoginRecoveryStage.AwaitEntry;
+                    }
+                }
+                try
+                {
+                    _io.Click(image, current.LoginNetwork.ButtonBounds, AdmitLoginInput);
+                    return Task.FromResult(Completed(claimed));
+                }
+                catch { _loginStage = LoginRecoveryStage.Stopped; throw; }
+            case UiAction.ResumeLoginEntry:
+                var entryClaimed = false;
+                var entryRoot = UiOperation.Current?.RootId;
+                bool EntryAdmitted() => UiOperation.Current?.Name == "return-main" && entryRoot != null &&
+                    _loginRoot == entryRoot && UiOperation.Current.RootId == entryRoot && _loginSession == current.SourceStamp.SessionId &&
+                    observed.LoginNetwork.IsFor(observed.SourceStamp) && current.LoginNetwork.IsFor(current.SourceStamp) &&
+                    observed.LoginNetwork.CanEnter && current.LoginNetwork.CanEnter && current.IsAfter(observed) &&
+                    current.SourceStamp.CapturedTimestamp > observed.SourceStamp.CapturedTimestamp &&
+                    observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) && current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                    (!entryClaimed ? _loginStage == LoginRecoveryStage.AwaitEntry : _loginStage == LoginRecoveryStage.AwaitWorld);
+                if (!EntryAdmitted()) return Task.FromResult(false);
+                void AdmitEntryInput()
+                {
+                    ct.ThrowIfCancellationRequested(); UiOperation.Current?.Check();
+                    if (!EntryAdmitted()) throw new InvalidOperationException("登录门的原恢复资格或当前来源失效。");
+                    if (!entryClaimed) { entryClaimed = true; _loginStage = LoginRecoveryStage.AwaitWorld; }
+                }
+                try
+                {
+                    _io.Click(image, current.LoginNetwork.ButtonBounds, AdmitEntryInput);
+                    return Task.FromResult(Completed(entryClaimed));
+                }
+                catch { _loginStage = LoginRecoveryStage.Stopped; throw; }
             case UiAction.ExitDialogue:
             case UiAction.AdvanceDialogueText:
                 bool DialogueAdmitted() => observed.DialogueAction == action && current.DialogueAction == action &&

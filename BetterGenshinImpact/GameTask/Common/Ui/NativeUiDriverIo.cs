@@ -23,6 +23,7 @@ internal sealed class NativeUiDriverIo
     internal Func<ImageRegion> Capture { get; init; } = null!;
     internal Action Focus { get; init; } = null!;
     internal Func<ImageRegion, UiSnapshot> ReadScene { get; init; } = null!;
+    internal Func<ImageRegion, UiSnapshot>? ReadOrdinaryWorld { get; init; }
     internal Func<IOcrService> Ocr { get; init; } = null!;
     internal Func<DomainTipTexts> Texts { get; init; } = null!;
     internal Action<ImageRegion, Rect, Action> Click { get; init; } = null!;
@@ -56,6 +57,7 @@ internal sealed class NativeUiDriverIo
             NetworkAvailable = System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable,
             Focus = () => TaskControl.CheckAndSleep(0),
             ReadScene = image => NativeUiDriver.ReadNativeScene(image, inspectWorld),
+            ReadOrdinaryWorld = image => NativeUiDriver.ReadNativeScene(image, inspectWorld: true),
             Ocr = () => OcrFactory.Paddle,
             Texts = ReadNativeTexts,
             Click = (image, bounds, admission) =>
