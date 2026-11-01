@@ -127,7 +127,7 @@ internal static class UiRecovery
         return UiTransition.WaitAsync("return-main", requireOverworld ? UiTarget.Overworld : UiTarget.Main,
             driver, ct, budget ?? TimeSpan.FromSeconds(20),
             // 退出门图标只能证明菜单存在，不能证明点击会返回HUD；使用已知的关闭动作。
-            observed => observed.Talk ? observed.DialogueAction : observed.CanDismissReward ? UiAction.DismissReward : observed.Reward.IsCandidate ? null : observed.CanConfirmDomainExit
+            observed => observed.LoginRecoveryAction is { } loginAction ? loginAction : observed.LoginNetwork.IsCandidate ? null : observed.Talk ? observed.DialogueAction : observed.CanDismissReward ? UiAction.DismissReward : observed.Reward.IsCandidate ? null : observed.CanConfirmDomainExit
                 ? domainPromptHandled ? null : requireOverworld ? UiAction.ConfirmDomainExit : UiAction.Escape
                 : observed.FullPartyDefeat ? UiAction.ReviveParty :
                 escapedParty != null && observed.Matches(UiTarget.Party) && observed.Closable &&

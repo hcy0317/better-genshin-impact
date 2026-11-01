@@ -5,7 +5,7 @@ using BetterGenshinImpact.GameTask.Common.BgiVision;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 internal enum UiTarget { Main, Overworld, DomainMain, Party, PartyList, PartyOrMain, Menu, Crafting }
-internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward, DetachClimb, CloseParty, ExitDialogue, AdvanceDialogueText }
+internal enum UiAction { Escape, EscapeProbe, RequestDomainExit, ConfirmDomainExit, SelectParty, ApplyParty, OpenMenu, OpenMail, ClaimMail, ReviveParty, OpenParty, DismissDomainTip, DismissReward, DetachClimb, CloseParty, ExitDialogue, AdvanceDialogueText, ConfirmLoginNetworkError, ResumeLoginEntry }
 
 internal enum UiReadinessKind { Ready, TemporarilyUnavailable, Unknown, Terminal }
 internal readonly record struct UiReadiness(UiReadinessKind Kind, string Reason, bool CanProbe = false);
@@ -31,6 +31,9 @@ internal sealed record UiSnapshot(long FrameId)
     internal bool HasFreshSource => SourceBound && SourceStamp.IsFresh(EvidenceClock!, MaximumAge);
     public string? ObservationFailure { get; init; }
     public string? NetworkWaitReason { get; init; }
+    public LoginNetworkObservation LoginNetwork { get; init; }
+    public UiAction? LoginRecoveryAction => !HasUsableEvidence || !LoginNetwork.IsFor(SourceStamp) ? null : LoginNetwork.CanConfirm
+        ? UiAction.ConfirmLoginNetworkError : LoginNetwork.CanEnter ? UiAction.ResumeLoginEntry : null;
     // 未绑定的特征用于逻辑回放；原生驱动必须绑定，未知来源不能授予输入。
     public bool HasUsableEvidence => NetworkWaitReason == null && ObservationFailure == null && MeetsInputFence && (SourceBound
         ? SourceStamp.IsFresh(EvidenceClock!, MaximumAge)
@@ -102,17 +105,17 @@ internal sealed record UiSnapshot(long FrameId)
         return new(UiReadinessKind.Unknown, "awaiting-party-page", CanProbe: true);
     }
 
-    public bool MainReady => HasUsableEvidence && MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
+    public bool MainReady => HasUsableEvidence && !LoginNetwork.IsCandidate && MainHud && !BigMap && !Party && !PartyList && !Talk && !Prompt
         && !Revive && !FullPartyDefeat && !Closable && !ExitDoor && !BlackConfirm && !MenuBack && !Crafting && !Handbook && !TimeSetting && !Cannon && !DomainTip.IsCandidate && !DomainExit.Visible && !Reward.IsCandidate;
-    public bool MapReady => HasUsableEvidence && BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
+    public bool MapReady => HasUsableEvidence && !LoginNetwork.IsCandidate && BigMap && !Party && !PartyList && !Talk && !Prompt && !Revive
         && !FullPartyDefeat && !InDomain && !ExitDoor && !BlackConfirm && !MenuBack && !Handbook && !TimeSetting && !Reward.IsCandidate;
     public bool CanDetachClimb => Matches(UiTarget.Overworld) && World is
         { OrdinaryAvatarHud: true, Transformed: false, ControlObserved: true, KeyboardBreakout: false,
           PartyRejected: false, Motion: MotionStatus.Climb };
     // Domain-tip words alone do not grant Escape. A reward candidate blocks
     // background-page input until the overlay is positively identified or gone.
-    public bool CanEscape => HasUsableEvidence && !Talk && !FullPartyDefeat && !Reward.IsCandidate && !MainReady && (BigMap || Party || PartyList || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || TimeSetting || Cannon || CanConfirmDomainExit);
-    public bool Matches(UiTarget target) => HasUsableEvidence && !FullPartyDefeat && !Reward.IsCandidate && target switch
+    public bool CanEscape => HasUsableEvidence && !LoginNetwork.IsCandidate && !Talk && !FullPartyDefeat && !Reward.IsCandidate && !MainReady && (BigMap || Party || PartyList || Prompt || Revive || Closable || ExitDoor || MenuBack || Handbook || TimeSetting || Cannon || CanConfirmDomainExit);
+    public bool Matches(UiTarget target) => HasUsableEvidence && !LoginNetwork.IsCandidate && !FullPartyDefeat && !Reward.IsCandidate && target switch
     {
         UiTarget.Main => MainReady,
         UiTarget.Overworld => MainReady && !InDomain,
@@ -130,8 +133,9 @@ internal sealed record UiSnapshot(long FrameId)
         | (PartyList ? 8 : 0) | (Talk ? 16 : 0) | (Prompt ? 32 : 0) | (Revive ? 64 : 0)
         | (InDomain ? 128 : 0) | (Closable ? 256 : 0) | (ExitDoor ? 512 : 0) | (BlackConfirm ? 1024 : 0) | (MenuBack ? 2048 : 0) | (Crafting ? 4096 : 0) | (Handbook ? 8192 : 0) | (FullPartyDefeat ? 16384 : 0) | (Cannon ? 32768 : 0)
         | (DomainTip.IsCandidate ? 65536 : 0) | (DomainTip.CanDismiss ? 131072 : 0) | (TimeSetting ? 262144 : 0) | (DomainExit.Visible ? 524288 : 0)
-        | (Reward.IsCandidate ? 1048576 : 0) | (CanDismissReward ? 2097152 : 0);
+        | (Reward.IsCandidate ? 1048576 : 0) | (CanDismissReward ? 2097152 : 0) | (LoginNetwork.IsCandidate ? 4194304 : 0);
     public string Describe() => $"hud={MainHud},map={BigMap},party={Party},list={PartyList},talk={Talk},prompt={Prompt},revive={Revive},domain={InDomain},closable={Closable},exitDoor={ExitDoor},blackConfirm={BlackConfirm},menuBack={MenuBack},crafting={Crafting},handbook={Handbook},timeSetting={TimeSetting},cannon={Cannon},reward={Reward.IsCandidate},rewardDismiss={CanDismissReward},domainTip={DomainTip.IsCandidate},domainTipDismiss={CanDismissDomainTip},domainExit={DomainExit.Visible},fullPartyDefeat={FullPartyDefeat},partyReadiness={PartyEntryReadiness().Reason},ordinaryAvatar={World?.OrdinaryAvatarHud},transformed={World?.Transformed},controlObserved={World?.ControlObserved},motion={World?.Motion}"
+        + (LoginNetwork.IsCandidate ? $",loginNetwork={LoginNetwork.Kind}" : "")
         + (ObservationFailure == null ? "" : $",observationFailure={ObservationFailure}")
         + (NetworkWaitReason == null ? "" : $",networkWait={NetworkWaitReason}");
 }
