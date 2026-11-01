@@ -185,6 +185,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         return SameAxis(old.X, next.X) && SameAxis(old.Y, next.Y);
     }
     private long? _inputRecheckDeadline;
+    private long? _partyRecheckDeadline;
+    private bool _partyCloseSubmitted;
     private long _inputRecheckNotBefore;
     private CombatBattleHostInputKind _inputRecheckKind;
     private bool UsesPartyFinish => options.FinishDetectionEnabled && !options.ExternalCompletionAuthority;
@@ -287,6 +289,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 LastControl = observation.Control;
                 Reason = _inputRecheckKind == CombatBattleHostInputKind.CameraReset
                     ? "host-camera-reset-rechecked" : "host-input-performance-rechecked";
+                if (_inputRecheckKind == CombatBattleHostInputKind.CloseParty && _partyCloseSubmitted && _phase == Phase.CloseParty)
+                    return await AdvancePartyAsync(observation, fresh, newEvidence, ct);
                 return _result; // 只解除屏障，不记进展、不报完成；下一Step再按原策略决策。
             }
             if (_engagementPending && flow.EngagementDemand == CombatEngagementDemand.Unknown)
@@ -866,9 +870,19 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         now >= _motionSettlesAt && (_motionSettlesAt == 0 ||
             io.Clock.GetElapsedTime(_started, observation.Source.CapturedTimestamp).TotalSeconds >= _motionSettlesAt);
 
+    private TimeSpan PartyInputRemaining()
+    {
+        var remaining = Math.Max(0, _partyDeadline - Now);
+        if (_partyRecheckDeadline is { } deadline)
+            remaining = Math.Min(remaining, Math.Max(0, (deadline - io.Clock.GetTimestamp()) / (double)io.Clock.TimestampFrequency));
+        return TimeSpan.FromSeconds(remaining);
+    }
+
     private async ValueTask<CombatBattleHostResult> AdvancePartyAsync(CombatBattleObservation observation, bool fresh,
         bool newEvidence, CancellationToken ct)
     {
+        if (_partyRecheckDeadline is { } recheckDeadline && io.Clock.GetTimestamp() >= recheckDeadline)
+            return Stop("host-party-performance-recheck-deadline");
         var probeDelay = Math.Clamp(options.FinishProbeDelayMilliseconds, 0, 9000) / 1000d;
         // 从第一次进入BeforeParty（包含截图）起计时，未发送不能重开预算。
         if (_partyDeadline == 0) _partyDeadline = Now + Math.Min(10, Math.Max(1.2, probeDelay + .8));
@@ -890,7 +904,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 break;
             case Phase.OpenParty:
                 var opened = await SendRequestAsync(new(CombatBattleHostInputKind.OpenParty), _before.Source, ct,
-                    TimeSpan.FromSeconds(Math.Max(0, _partyDeadline - Now)));
+                    PartyInputRemaining());
                 if (opened.Status != CombatBattleHostInputStatus.Sent || _result != CombatBattleHostResult.Continue)
                 {
                     if (_result == CombatBattleHostResult.Continue) SetPhase(Phase.BeforeParty);
@@ -905,6 +919,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             case Phase.AwaitParty:
                 if (Now < _nextProbe) { await io.DelayAsync(50, ct); break; }
                 var sample = ReadObservation(io.ObservePartyBar);
+                if (_partyRecheckDeadline is { } sampleDeadline && io.Clock.GetTimestamp() >= sampleDeadline)
+                    return Stop("host-party-performance-recheck-deadline");
                 _tracePartySample = sample;
                 var freshPartySource = sample.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
                     _finish!.Fence?.Accepts(sample.Source) == true;
@@ -924,14 +940,18 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 _nextProbe = Now + .1;
                 break;
             case Phase.CloseParty:
-                if (_partyEvidence)
+                if (_partyEvidence && !_partyCloseSubmitted)
                 {
                     var closed = await SendRequestAsync(new(CombatBattleHostInputKind.CloseParty, PartyEvidence: true), _before.Source, ct,
-                        TimeSpan.FromSeconds(Math.Max(0, _partyDeadline - Now)));
+                        PartyInputRemaining());
                     if (closed.Status != CombatBattleHostInputStatus.Sent || _result != CombatBattleHostResult.Continue) return _result;
                     _inputFence = new(_lastSource, closed.CompletedTimestamp!.Value);
+                    _partyCloseSubmitted = true;
+                    if (closed.PerformanceRecheck != null) return _result;
                 }
-                else io.ReleaseInput(); // 没有本次打开UI的证据，不盲发关闭键。
+                else if (!_partyEvidence) io.ReleaseInput(); // 没有本次打开UI的证据，不盲发关闭键。
+                if (_partyRecheckDeadline is { } closeDeadline && io.Clock.GetTimestamp() >= closeDeadline)
+                    return Stop("host-party-performance-recheck-deadline");
                 _partyDeadline = 0;
                 if (_endConfirmed) return _result = CombatBattleHostResult.Completed;
                 // 已发探测先收束；只有新鲜的输入后目标及无编队栏样本允许恢复。
@@ -1055,9 +1075,11 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 }
                 if (result.PerformanceRecheck is { } recheck)
                 {
-                    if (input.Kind is not (CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset) ||
+                    if (input.Kind is not (CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset or
+                        CombatBattleHostInputKind.OpenParty or CombatBattleHostInputKind.CloseParty) ||
                         result.Error != null || result.NativeUncertain ||
-                        result.NativeRequested < (input.Kind == CombatBattleHostInputKind.Camera ? 1 : 2) ||
+                        input.Kind == CombatBattleHostInputKind.CloseParty && !input.PartyEvidence ||
+                        result.NativeRequested < (input.Kind == CombatBattleHostInputKind.Camera ? 1 : input.Kind == CombatBattleHostInputKind.CloseParty ? 4 : 2) ||
                         result.NativeRequested == null || result.NativeSubmitted != result.NativeRequested ||
                         recheck.RequestId != input.RequestId || recheck.Source != source ||
                         recheck.SelectionGoal != input.SelectionGoal || recheck.DeadlineTimestamp > _inputRequestDeadline ||
@@ -1066,12 +1088,18 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                         Stop("host-input-invalid-performance-recheck");
                         return result;
                     }
-                    _inputRecheckKind = input.Kind;
-                    _inputRecheckDeadline = recheck.DeadlineTimestamp;
-                    _inputRecheckNotBefore = input.Kind == CombatBattleHostInputKind.Camera
-                        ? Math.Max(completed, result.ObservableAfterTimestamp ?? completed) + io.Clock.TimestampFrequency * 60 / 1000
-                        : completed;
-                    Reason = "host-input-performance-awaiting-fresh-evidence";
+                    if (input.Kind is CombatBattleHostInputKind.OpenParty or CombatBattleHostInputKind.CloseParty)
+                        _partyRecheckDeadline = Math.Min(_partyRecheckDeadline ?? recheck.DeadlineTimestamp, recheck.DeadlineTimestamp);
+                    if (input.Kind != CombatBattleHostInputKind.OpenParty)
+                    {
+                        _inputRecheckKind = input.Kind;
+                        _inputRecheckDeadline = recheck.DeadlineTimestamp;
+                        _inputRecheckNotBefore = input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CloseParty
+                            ? Math.Max(completed, result.ObservableAfterTimestamp ?? completed) + io.Clock.TimestampFrequency * 60 / 1000
+                            : completed;
+                    }
+                    Reason = input.Kind == CombatBattleHostInputKind.OpenParty
+                        ? "host-party-input-awaiting-post-input-evidence" : "host-input-performance-awaiting-fresh-evidence";
                 }
                 if (input.Kind == CombatBattleHostInputKind.CameraReset)
                 {
@@ -1121,6 +1149,11 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     {
         if (_phase == Phase.Searching && next != Phase.Searching) EndSearchEpisode();
         _phase = next;
+        if (next == Phase.BeforeParty)
+        {
+            _partyCloseSubmitted = false;
+            _partyRecheckDeadline = null;
+        }
     }
 
     private void EndSearchEpisode()
