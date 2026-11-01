@@ -203,7 +203,7 @@ public static class CombatScriptExecutor
     {
         Flow.CombatFlowResult.Succeeded or Flow.CombatFlowResult.SatisfiedExisting => new(CombatExecutionKind.Completed, result.ToString()),
         Flow.CombatFlowResult.Skipped => new(CombatExecutionKind.Skipped, "FLOW_OPTIONAL_SKIPPED"),
-        Flow.CombatFlowResult.Failed => new(CombatExecutionKind.Failed, "FLOW_REQUIREMENT_FAILED"),
+        Flow.CombatFlowResult.Failed => new(CombatExecutionKind.Failed, "FLOW_EXECUTION_FAILED"),
         _ => new(CombatExecutionKind.Deferred, "FLOW_NOT_COMPLETED:" + result)
     };
 
