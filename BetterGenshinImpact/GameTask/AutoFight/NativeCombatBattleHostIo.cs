@@ -385,6 +385,22 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                     throw new TimeoutException("窗口准备后源帧已过期，不能进入原生输入");
             });
             nativeCapture = nativeScope;
+            bool CompletePartyInput() => nativeScope is { Uncertain: false, Requested: > 0 } &&
+                nativeScope.Requested == nativeScope.Submitted &&
+                (input.Kind == CombatBattleHostInputKind.OpenParty && nativeScope.Requested >= 2 ||
+                 input.Kind == CombatBattleHostInputKind.CloseParty && input.PartyEvidence && nativeScope.Requested >= 4);
+            void PartyPulse(Action pulse)
+            {
+                try { pulse(); }
+                catch (TimeoutException error)
+                {
+                    // Evaluate after stack unwinding: an exception filter runs
+                    // before PulseCore finally has submitted its matching up.
+                    if (!operation.IsOwnDeadlineFailure(error) || !CompletePartyInput()) throw;
+                    // PulseCore has already released the key. Only this local
+                    // deadline may proceed to the original post-input recheck.
+                }
+            }
             _device.PrepareInput(); // 生产仍走TaskControl的暂停/焦点入口，回放仅替换操作系统边界。
             operation.Check();
             if (input.Kind != CombatBattleHostInputKind.CloseParty)
@@ -480,7 +496,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                 case CombatBattleHostInputKind.OpenParty:
                     inputAttempted = true;
                     using (operation.Measure(UiOperationPhase.NativeInput))
-                        _device.PressParty();
+                        PartyPulse(_device.PressParty);
                     break;
                 case CombatBattleHostInputKind.Breakout:
                     if (!controlRecovery) throw new InvalidOperationException("普通宿主不能借用控制恢复输入");
@@ -495,7 +511,13 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
                         return;
                     }
                     inputAttempted = true;
-                    using (operation.Measure(UiOperationPhase.NativeInput)) CloseParty(input.PartyEvidence);
+                    using (operation.Measure(UiOperationPhase.NativeInput)) PartyPulse(() => CloseParty(input.PartyEvidence, () =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        TaskExecutionScope.ThrowIfFailed();
+                        businessParent?.Check();
+                        operation.Check();
+                    }));
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(input));
@@ -506,7 +528,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             // 且只有真实down/up回执完整时才可转入新帧复核；不豁免任何执行异常。
             if ((input.Kind == CombatBattleHostInputKind.Camera ||
                  (input.Kind is CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.CameraReset) &&
-                 releasedCompletely && nativeScope is { Requested: >= 2 }) &&
+                 releasedCompletely && nativeScope is { Requested: >= 2 } ||
+                 CompletePartyInput()) &&
                 nativeScope is { Uncertain: false, Requested: > 0 } && nativeScope.Requested == nativeScope.Submitted &&
                 operation.Remaining <= TimeSpan.Zero)
             {
@@ -689,10 +712,14 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
         catch { /* 诊断输出不能改变已判定的输入结果。 */ }
     }
 
-    private void CloseParty(bool evidence)
+    private void CloseParty(bool evidence, Action admitNext)
     {
         _device.PressDrop();
-        if (evidence) _device.PressParty();
+        if (evidence)
+        {
+            admitNext();
+            _device.PressParty();
+        }
     }
 
     public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => _device.DelayAsync(milliseconds, ct);

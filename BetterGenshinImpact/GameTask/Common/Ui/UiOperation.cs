@@ -118,6 +118,9 @@ internal sealed class UiOperation : IDisposable
         }
     }
 
+    private TimeoutException? _ownDeadlineFailure;
+    internal bool IsOwnDeadlineFailure(Exception error) => _ownDeadlineFailure != null && ReferenceEquals(_ownDeadlineFailure, error);
+
     public void Check()
     {
         _firstCheckAtMilliseconds ??= Elapsed.TotalMilliseconds;
@@ -127,7 +130,12 @@ internal sealed class UiOperation : IDisposable
         TaskExecutionScope.ThrowIfFailed();
         if (_callerToken.IsCancellationRequested && !(_parent?.Token.IsCancellationRequested ?? false))
             _callerToken.ThrowIfCancellationRequested();
-        if (Remaining <= TimeSpan.Zero || _deadline.IsCancellationRequested) throw Timeout();
+        if (Remaining <= TimeSpan.Zero || _deadline.IsCancellationRequested)
+        {
+            var failure = Timeout();
+            _ownDeadlineFailure = failure;
+            throw failure;
+        }
         try { _parent?.Check(); }
         catch (TimeoutException parentTimeout)
         {

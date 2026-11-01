@@ -2689,6 +2689,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public int Preparations { get; private set; }
         public List<string> Inputs { get; } = [];
         public Action? AfterParty { get; init; }
+        public Action? AfterDrop { get; init; }
         public Action? AfterCamera { get; init; }
         public Action<int>? AdvanceClock { get; init; }
         public double PreparationDelayMs { get; init; }
@@ -2714,6 +2715,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             Inputs.Add("drop");
             if (NativeReceipts) new WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0)
                 .DispatchInput(new User32.INPUT[2]);
+            AfterDrop?.Invoke();
         }
         public void PressParty()
         {
