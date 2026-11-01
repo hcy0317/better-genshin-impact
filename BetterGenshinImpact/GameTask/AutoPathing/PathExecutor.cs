@@ -1030,10 +1030,23 @@ public partial class PathExecutor
                 throw new RetryException("攀爬途经点超过60秒仍未完成，重试当前路线分段");
             lastMoveFrame = screen.FrameStamp;
             if (flightDetachFence is { } requiredFlightFrame &&
-                (!observation.Valid || !requiredFlightFrame.Accepts(observation.Stamp)))
+                (!observation.Valid || !requiredFlightFrame.Accepts(observation.Stamp) ||
+                 previousMoveFrame.IsKnown && observation.Stamp.CapturedTimestamp <= previousMoveFrame.CapturedTimestamp ||
+                 observation.Stamp.CapturedTimestamp - requiredFlightFrame.InputCompletedTimestamp < observation.Stamp.TimestampFrequency * .06))
             {
                 flightClimbingFrames = 0;
                 SendPathForward(KeyType.KeyUp);
+                await _moveIo.Delay(100, ct);
+                continue;
+            }
+            // Complete key submission is not a physical detach. Two distinct post-input
+            // climb observations retire this attempt before arrival or further flight input.
+            if (flightDetachUsed && waypoint.MoveMode == MoveModeEnum.Fly.Code &&
+                observation.Valid && observation.Motion == MotionStatus.Climb)
+            {
+                SendPathForward(KeyType.KeyUp);
+                if (++flightClimbingFrames >= 2)
+                    throw new RetryException("飞行起步脱离后仍在攀爬，重试原路线分段");
                 await _moveIo.Delay(100, ct);
                 continue;
             }
@@ -1148,6 +1161,10 @@ public partial class PathExecutor
                     if (++flightClimbingFrames >= 2 && !flightDetachUsed)
                     {
                         flightDetachUsed = true;
+                        if (_moveDeadline.Value - _moveIo.Clock.GetUtcNow() <= TimeSpan.FromMilliseconds(120))
+                            throw new RetryException("路径点执行超时，放弃整条路径");
+                        await _moveIo.Delay(60, ct);
+                        ct.ThrowIfCancellationRequested();
                         _moveIo.CheckInput();
                         if (_moveDeadline.Value - _moveIo.Clock.GetUtcNow() <= TimeSpan.FromMilliseconds(60))
                             throw new RetryException("路径点执行超时，放弃整条路径");
@@ -1168,6 +1185,7 @@ public partial class PathExecutor
                         if (!dropped.HasCompleteReceipt)
                             throw new RetryException("飞行起步脱离输入未确认，不继续移动");
                         flightDetachFence = new(observation.Stamp, _moveIo.Clock.GetTimestamp());
+                        flightClimbingFrames = 0;
                         _moveIo.Logger.LogDebug("PATH_FLY_START_DETACH node={Node} source={Session}/{Sequence} nativeRequested={Requested} nativeSubmitted={Submitted}",
                             waypoint.Id, observation.Stamp.SessionId, observation.Stamp.Sequence, dropped.Requested, dropped.Submitted);
                     }
