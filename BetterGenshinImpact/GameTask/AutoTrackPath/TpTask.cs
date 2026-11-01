@@ -442,8 +442,8 @@ public class TpTask
         await SwitchToTeleportTargetMap(target);
 
         var clickView = await PrepareTeleportClickView(target);
-        await ClickTeleportTargetMapPoint(target, clickView);
-        await ClickTpPointAfterMapPointSelected(target);
+        var selectedPanelSource = await ClickTeleportTargetMapPoint(target, clickView);
+        await ClickTpPointAfterMapPointSelected(target, selectedPanelSource);
         await WaitForTeleportCompletion();
 
         s_lastSuccessfulTeleportMapName = target.MapName;
@@ -905,7 +905,7 @@ public class TpTask
         return GetCurrentBigMapZoomLevel();
     }
 
-    private async Task ClickTeleportTargetMapPoint(
+    private async Task<CaptureFrameStamp> ClickTeleportTargetMapPoint(
         TeleportTargetContext target,
         TeleportClickView clickView)
     {
@@ -916,6 +916,13 @@ public class TpTask
         for (var attempt = 0; attempt < AbsoluteMapClickRetryCount; attempt++)
         {
             using var clickCapture = CaptureToRectArea();
+            if (SelectedTeleportPanel.Matches(clickCapture, target.TargetTp.Type, target.TargetTp.Name, target.Force, ct))
+            {
+                Logger.LogDebug("MAP_TARGET_ALREADY_SELECTED source={Session}/{Sequence} targetId={TargetId} type={Type} title={Title}; no target click sent",
+                    clickCapture.FrameStamp.SessionId, clickCapture.FrameStamp.Sequence, target.TargetTp.Id,
+                    target.TargetTp.Type, target.TargetTp.Name);
+                return clickCapture.FrameStamp;
+            }
             if (TryGetAbsoluteTeleportClickPosition(
                     clickCapture,
                     target,
@@ -955,7 +962,7 @@ public class TpTask
                     }
                     catch { }
                 }
-                return;
+                return default;
             }
             try
             {
@@ -1017,9 +1024,9 @@ public class TpTask
         return GetBigMapZoomLevel(capture);
     }
 
-    private async Task ClickTpPointAfterMapPointSelected(TeleportTargetContext target)
+    private async Task ClickTpPointAfterMapPointSelected(TeleportTargetContext target, CaptureFrameStamp selectedPanelSource)
     {
-        if (await WaitForTeleportPanelAndConfirm(target.TargetTp))
+        if (await WaitForTeleportPanelAndConfirm(target.TargetTp, selectedPanelSource))
         {
             return;
         }
@@ -1027,7 +1034,7 @@ public class TpTask
         throw new TeleportPanelNotOpenedException("点击目标后仍未确认传送面板，原因尚不明确；本次未发送传送确认");
     }
 
-    private async Task<bool> WaitForTeleportPanelAndConfirm(GiTpPosition? targetTp)
+    private async Task<bool> WaitForTeleportPanelAndConfirm(GiTpPosition? targetTp, CaptureFrameStamp selectedPanelSource)
     {
         var timeoutMilliseconds = GetTeleportPanelTimeoutMilliseconds();
         await Delay(Math.Max(TeleportPanelInitialDelayMs,
@@ -1041,7 +1048,7 @@ public class TpTask
             }
 
             using var teleportCapture = CaptureToRectArea();
-            var result = await HandleTeleportPanel(teleportCapture, targetTp);
+            var result = await HandleTeleportPanel(teleportCapture, targetTp, selectedPanelSource);
             switch (result)
             {
                 case TeleportPanelResult.Confirmed:
@@ -1058,10 +1065,10 @@ public class TpTask
         return false;
     }
 
-    private async Task ClickTargetMapPoint(TeleportTargetContext target)
+    private async Task<CaptureFrameStamp> ClickTargetMapPoint(TeleportTargetContext target)
     {
         var clickView = await PrepareTeleportClickView(target);
-        await ClickTeleportTargetMapPoint(target, clickView);
+        return await ClickTeleportTargetMapPoint(target, clickView);
     }
 
     private double GetNearestNeighborScreenDistance(
@@ -2692,9 +2699,9 @@ public class TpTask
 
     private async Task<TeleportPanelResult> HandleTeleportPanel(
         ImageRegion imageRegion,
-        GiTpPosition? targetTp)
+        GiTpPosition? targetTp, CaptureFrameStamp selectedPanelSource)
     {
-        if (await ConfirmTeleportPanel(imageRegion))
+        if (await ConfirmTeleportPanel(imageRegion, targetTp, selectedPanelSource))
         {
             return TeleportPanelResult.Confirmed;
         }
@@ -2709,7 +2716,7 @@ public class TpTask
         // 4. 已点选项列表中的传送点（未激活点位也会出现在列表里），等待传送按钮。
         for (var clickAttempt = 1; clickAttempt <= MapChooseCandidateClickRetryCount; clickAttempt++)
         {
-            var result = await WaitAndPressTeleportConfirm(targetTp);
+            var result = await WaitAndPressTeleportConfirm(targetTp, selectedPanelSource);
             if (result == TeleportPanelResult.Confirmed)
             {
                 return result;
@@ -2737,7 +2744,7 @@ public class TpTask
         return TeleportPanelResult.RetryPoint;
     }
 
-    private async Task<TeleportPanelResult> WaitAndPressTeleportConfirm(GiTpPosition? targetTp)
+    private async Task<TeleportPanelResult> WaitAndPressTeleportConfirm(GiTpPosition? targetTp, CaptureFrameStamp selectedPanelSource)
     {
         var stopwatch = Stopwatch.StartNew();
         var candidateStillVisibleChecks = 0;
@@ -2748,7 +2755,7 @@ public class TpTask
 
             var screen = CaptureToRectArea();
             using var ownedScreen = screen;
-            if (await ConfirmTeleportPanel(screen))
+            if (await ConfirmTeleportPanel(screen, targetTp, selectedPanelSource))
             {
                 return TeleportPanelResult.Confirmed;
             }
@@ -2778,10 +2785,14 @@ public class TpTask
         return TeleportPanelResult.RetryPoint;
     }
 
-    private async Task<bool> ConfirmTeleportPanel(ImageRegion image)
+    private async Task<bool> ConfirmTeleportPanel(ImageRegion image, GiTpPosition? targetTp, CaptureFrameStamp selectedPanelSource)
     {
         _arrivalProgress = new TeleportArrivalProgress(TimeProvider.System);
-        var confirmed = await TeleportPanelConfirmation.TryConfirmNativeAsync(image, ct, _arrivalProgress);
+        Func<ImageRegion, bool>? canConfirm = selectedPanelSource.IsKnown
+            ? frame => SelectedTeleportPanel.Matches(frame, targetTp?.Type, targetTp?.Name, false, ct,
+                selectedSource: selectedPanelSource)
+            : null;
+        var confirmed = await TeleportPanelConfirmation.TryConfirmNativeAsync(image, ct, _arrivalProgress, canConfirm);
         if (!confirmed && _mapTargetEvidenceRequest != null)
         {
             try { DiagnosticEvidenceScope.Current?.TryCapture(image, _mapTargetEvidenceRequest, "panel-unconfirmed",
