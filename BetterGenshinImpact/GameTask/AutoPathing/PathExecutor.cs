@@ -723,7 +723,7 @@ public partial class PathExecutor
                         scenes.PrepareAvatarObservation(frame, identity, UiSnapshot.CombatMaximumAge);
                         var active = scenes.GetActiveAvatarIndex(frame, identity);
                         var ordinary = Bv.IsInMainUi(frame) && !IsKnownPathTransformation(frame);
-                        return new(frame.FrameStamp, ordinary, active, avatar.ObserveBurst(frame, active == avatar.Index));
+                        return new(frame.FrameStamp, ordinary, active, Avatar.ObserveBurst(frame, active == avatar.Index));
                     }, before, avatar.Index, UiSnapshot.CombatMaximumAge, CheckParent, TimeProvider.System));
         }), async () => await SwitchAvatar(PartyConfig.MainAvatarIndex) != null,
             milliseconds => Delay(milliseconds, ct), ct);
