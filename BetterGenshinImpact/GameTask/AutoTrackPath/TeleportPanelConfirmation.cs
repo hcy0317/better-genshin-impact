@@ -32,10 +32,11 @@ internal static class TeleportPanelConfirmation
         Func<int, CancellationToken, Task> delay, CancellationToken ct,
         IOcrService? ocr = null, TimeProvider? clock = null, Action<ImageRegion>? observe = null,
         Action<CaptureFrameStamp>? mapClosed = null, Func<ImageRegion, bool>? loading = null,
-        Action<ImageRegion, string>? checkpoint = null)
+        Action<ImageRegion, string>? checkpoint = null, Func<ImageRegion, bool>? canConfirm = null)
     {
         clock ??= TimeProvider.System;
         if (!image.FrameStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) || !Bv.IsInBigMapUi(image)) return false;
+        if (canConfirm != null && !canConfirm(image)) return false;
         if (!await TryConfirmAsync(image, token =>
         {
             token.ThrowIfCancellationRequested();
@@ -79,6 +80,7 @@ internal static class TeleportPanelConfirmation
             return await WaitForMapClosed(10, "loading-feedback-last");
         using var button = current.Find(RecognitionAssets.Get("QuickTeleport", "TeleportButton", current));
         if (IsMarkerEditor(current, ocr) || !button.IsExist()) return false;
+        if (canConfirm != null && !canConfirm(current)) return false;
         var bounds = ReadButtonBody(current, ocr ?? OcrFactory.Paddle);
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
@@ -91,7 +93,7 @@ internal static class TeleportPanelConfirmation
     }
 
     internal static async Task<bool> TryConfirmNativeAsync(ImageRegion previous, CancellationToken ct,
-        TeleportArrivalProgress? arrival = null)
+        TeleportArrivalProgress? arrival = null, Func<ImageRegion, bool>? canConfirm = null)
     {
         ApplicationHostBootstrapGuard.EnsureAllowed();
         TaskControl.CheckAndSleep(0);
@@ -147,7 +149,7 @@ internal static class TeleportPanelConfirmation
             {
                 try { DiagnosticEvidenceScope.Current?.TryCapture(frame, request, phase,
                     "传送反馈边界原帧；此记录不代表反馈有效或地图已关闭", TaskControl.Logger); } catch { }
-            });
+            }, canConfirm: canConfirm);
         if (!confirmed && confirmationAttempted) throw new TeleportConfirmationUnconfirmedException();
         return confirmed;
     }
