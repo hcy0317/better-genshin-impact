@@ -18,8 +18,8 @@ public class PathPartyHealingTests
         var avatar = Avatar(name, actions);
         var result = await PathPartyHealing.TryAsync([avatar],
             () => { actions.Add("restore-main"); return Task.FromResult(true); },
-            ms => { actions.Add("wait:" + ms); return Task.CompletedTask; }, CancellationToken.None);
-        Assert.True(result);
+            ms => { actions.Add("wait:" + ms); return Task.CompletedTask; }, CancellationToken.None, static () => { }, 1);
+        Assert.IsType<PathPartyHealing.Outcome.Attempted>(result);
         var expected = name switch
         {
             "白术" => new[] { "select:白术", "skill:白术", "wait:800", "skill:白术", "wait:800", "restore-main", "wait:4000" },
@@ -35,8 +35,8 @@ public class PathPartyHealingTests
         var actions = new List<string>();
         var result = await PathPartyHealing.TryAsync([Avatar("钟离", actions), Avatar("芙宁娜", actions), Avatar("那维莱特", actions), Avatar("琴", actions)],
             () => { actions.Add("restore-main"); return Task.FromResult(true); },
-            ms => { actions.Add("wait:" + ms); return Task.CompletedTask; }, CancellationToken.None);
-        Assert.True(result, "当前琴在队且有可用爆发时，生产队内治疗分派不能直接落入神像恢复");
+            ms => { actions.Add("wait:" + ms); return Task.CompletedTask; }, CancellationToken.None, static () => { }, 1);
+        Assert.IsType<PathPartyHealing.Outcome.Attempted>(result);
         Assert.Equal(new[] { "select:琴", "native-burst:琴", "restore-main" }, actions.ToArray());
     }
 
@@ -46,23 +46,65 @@ public class PathPartyHealingTests
         var actions = new List<string>();
         var result = await PathPartyHealing.TryAsync([Avatar("钟离", actions), Avatar("那维莱特", actions)],
             () => throw new Exception("Unsupported party must not switch"),
-            _ => throw new Exception("Unsupported party must not wait"), CancellationToken.None);
-        Assert.False(result);
+            _ => throw new Exception("Unsupported party must not wait"), CancellationToken.None, static () => { }, 1);
+        Assert.IsType<PathPartyHealing.Outcome.NotAttempted>(result);
         Assert.Empty(actions);
+    }
+
+    [Theory]
+    [InlineData(BurstCastResult.NotReady)]
+    [InlineData(BurstCastResult.Unknown)]
+    public async Task UnsentJeanBurstDefersWalkingRestoreToStatue(BurstCastResult cast)
+    {
+        var actions = new List<string>();
+        var avatar = Avatar("琴", actions) with { NativeBurst = () => { actions.Add("native-burst:琴"); return cast; } };
+        var result = await PathPartyHealing.TryAsync([avatar],
+            () => { actions.Add("restore-main"); return Task.FromResult(true); },
+            _ => throw new Exception("No fixed cooldown wait is permitted"), CancellationToken.None, static () => { }, 1);
+        Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(result);
+        Assert.Equal(new[] { "select:琴", "native-burst:琴" }, actions.ToArray());
+    }
+
+    [Theory]
+    [InlineData(BurstCastResult.NotReady)]
+    [InlineData(BurstCastResult.Unknown)]
+    public async Task PendingJeanRestoresExactlyOnceAfterStatueBeforeMainHealth(BurstCastResult cast)
+    {
+        var actions = new List<string>();
+        var active = 4;
+        var restores = 0;
+        var avatar = Avatar("琴", actions) with { NativeBurst = () => { actions.Add("native-burst:琴"); return cast; } };
+        var outcome = await PathPartyHealing.TryAsync([avatar],
+            () => { restores++; actions.Add("restore-main"); active = 1; return Task.FromResult(true); },
+            _ => throw new Exception("No new cooldown wait is permitted"), CancellationToken.None, static () => { }, 1);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        Assert.Equal(1, pending.ExpectedMainIndex);
+        await pending.RecoverAtStatueAsync(() => { actions.Add("statue"); return Task.CompletedTask; });
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var fence = new CaptureFrameFence(before, clock.GetTimestamp());
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var healed = await HealingObservation.WaitAsync(fence, () =>
+        {
+            actions.Add("main-health");
+            return PathPartyHealing.HealthFrame(source.Next(), true, active, pending.ExpectedMainIndex, false);
+        }, ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, CancellationToken.None, clock);
+        Assert.True(healed);
+        Assert.Equal(1, restores);
+        Assert.Equal(new[] { "select:琴", "native-burst:琴", "statue", "restore-main", "main-health" }, actions.ToArray());
     }
 
     [Theory]
     [InlineData(BurstCastResult.Confirmed, true)]
     [InlineData(BurstCastResult.Unconfirmed, true)]
-    [InlineData(BurstCastResult.NotReady, false)]
-    [InlineData(BurstCastResult.Unknown, false)]
-    public async Task EveryJeanCastOutcomeRestoresTheWalkingAvatar(BurstCastResult cast, bool attempted)
+    public async Task IssuedJeanCastOutcomesRestoreTheWalkingAvatar(BurstCastResult cast, bool attempted)
     {
         var actions = new List<string>();
         var avatar = Avatar("琴", actions) with { NativeBurst = () => { actions.Add("native-burst:琴"); return cast; } };
         var result = await PathPartyHealing.TryAsync([avatar],
-            () => { actions.Add("restore-main"); return Task.FromResult(true); }, _ => Task.CompletedTask, CancellationToken.None);
-        Assert.Equal(attempted, result);
+            () => { actions.Add("restore-main"); return Task.FromResult(true); }, _ => Task.CompletedTask, CancellationToken.None, static () => { }, 1);
+        Assert.Equal(attempted, result is PathPartyHealing.Outcome.Attempted);
         Assert.Equal(new[] { "select:琴", "native-burst:琴", "restore-main" }, actions.ToArray());
     }
 
@@ -72,8 +114,8 @@ public class PathPartyHealingTests
         var actions = new List<string>();
         var avatar = Avatar("琴", actions) with { TrySwitch = () => { actions.Add("select-unconfirmed"); return false; } };
         var result = await PathPartyHealing.TryAsync([avatar],
-            () => { actions.Add("restore-main"); return Task.FromResult(true); }, _ => Task.CompletedTask, CancellationToken.None);
-        Assert.False(result);
+            () => { actions.Add("restore-main"); return Task.FromResult(true); }, _ => Task.CompletedTask, CancellationToken.None, static () => { }, 1);
+        Assert.IsType<PathPartyHealing.Outcome.NotAttempted>(result);
         Assert.Equal(new[] { "select-unconfirmed", "restore-main" }, actions.ToArray());
     }
 
@@ -86,7 +128,7 @@ public class PathPartyHealingTests
     {
         var actions = new List<string>();
         await Assert.ThrowsAsync<InvalidOperationException>(() => PathPartyHealing.TryAsync([Avatar(name, actions)],
-            () => Task.FromResult(false), _ => Task.CompletedTask, CancellationToken.None));
+            () => Task.FromResult(false), _ => Task.CompletedTask, CancellationToken.None, static () => { }, 1));
     }
 
     [Theory]
@@ -105,7 +147,7 @@ public class PathPartyHealingTests
             () => { actions.Add("cast"); if (stage == "cast") cts.Cancel(); return BurstCastResult.Confirmed; });
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PathPartyHealing.TryAsync([avatar],
             () => { actions.Add("restore"); if (stage == "restored") cts.Cancel(); return Task.FromResult(true); },
-            _ => Task.CompletedTask, cts.Token));
+            _ => Task.CompletedTask, cts.Token, static () => { }, 1));
         var expected = stage switch { "before" => Array.Empty<string>(), "selected" => ["select"], "cast" => ["select", "cast"], _ => new[] { "select", "cast", "restore" } };
         Assert.Equal(expected, actions.ToArray());
     }
@@ -120,7 +162,7 @@ public class PathPartyHealingTests
         using var cts = new CancellationTokenSource();
         var avatar = Avatar(name, actions) with { TrySwitch = () => { actions.Add("select"); cts.Cancel(); return true; } };
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PathPartyHealing.TryAsync([avatar],
-            () => throw new Exception("Cancelled selection must not restore"), _ => Task.CompletedTask, cts.Token));
+            () => throw new Exception("Cancelled selection must not restore"), _ => Task.CompletedTask, cts.Token, static () => { }, 1));
         Assert.Equal(new[] { "select" }, actions.ToArray());
     }
 
@@ -133,7 +175,7 @@ public class PathPartyHealingTests
         using var cts = new CancellationTokenSource();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PathPartyHealing.TryAsync([Avatar(name, actions)],
             () => throw new Exception("Cancelled wait must not restore"),
-            _ => { cts.Cancel(); return Task.CompletedTask; }, cts.Token));
+            _ => { cts.Cancel(); return Task.CompletedTask; }, cts.Token, static () => { }, 1));
         Assert.Equal(new[] { "select:" + name, "skill:" + name }, actions.ToArray());
     }
 
@@ -144,9 +186,198 @@ public class PathPartyHealingTests
         var failure = new InvalidOperationException("native fixture failure");
         var avatar = Avatar("琴", actions) with { NativeBurst = () => throw failure };
         var actual = await Assert.ThrowsAsync<InvalidOperationException>(() => PathPartyHealing.TryAsync([avatar],
-            () => throw new Exception("Failure must not select another avatar"), _ => Task.CompletedTask, CancellationToken.None));
+            () => throw new Exception("Failure must not select another avatar"), _ => Task.CompletedTask, CancellationToken.None, static () => { }, 1));
         Assert.Same(failure, actual);
         Assert.Equal(new[] { "select:琴" }, actions.ToArray());
+    }
+
+    [Fact]
+    public async Task PendingWalkingRestoreCannotBeConsumedTwice()
+    {
+        var statues = 0;
+        var restores = 0;
+        var avatar = Avatar("琴", new()) with { NativeBurst = () => BurstCastResult.NotReady };
+        var outcome = await PathPartyHealing.TryAsync([avatar],
+            () => { restores++; return Task.FromResult(true); }, _ => Task.CompletedTask,
+            CancellationToken.None, static () => { }, 1);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        await pending.RecoverAtStatueAsync(() => { statues++; return Task.CompletedTask; });
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            pending.RecoverAtStatueAsync(() => { statues++; return Task.CompletedTask; }));
+        Assert.Equal(1, statues);
+        Assert.Equal(1, restores);
+    }
+
+    [Theory]
+    [InlineData("statue")]
+    [InlineData("restore-unconfirmed")]
+    [InlineData("restore-throws")]
+    public async Task PendingRecoveryFailureNeverStartsASecondInputGroup(string stage)
+    {
+        var statues = 0;
+        var restores = 0;
+        var failure = new InvalidOperationException("original recovery failure");
+        var avatar = Avatar("琴", new()) with { NativeBurst = () => BurstCastResult.Unknown };
+        var outcome = await PathPartyHealing.TryAsync([avatar], () =>
+        {
+            restores++;
+            if (stage == "restore-throws") throw failure;
+            return Task.FromResult(stage != "restore-unconfirmed");
+        }, _ => Task.CompletedTask, CancellationToken.None, static () => { }, 1);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        var actual = await Record.ExceptionAsync(() => pending.RecoverAtStatueAsync(() =>
+        {
+            statues++;
+            if (stage == "statue") throw failure;
+            return Task.CompletedTask;
+        }));
+        Assert.NotNull(actual);
+        if (stage != "restore-unconfirmed") Assert.Same(failure, actual);
+        Assert.Equal(stage == "statue" ? 0 : 1, restores);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            pending.RecoverAtStatueAsync(() => { statues++; return Task.CompletedTask; }));
+        Assert.Equal(1, statues);
+        Assert.Equal(stage == "statue" ? 0 : 1, restores);
+    }
+
+    [Theory]
+    [InlineData("before-statue")]
+    [InlineData("after-statue")]
+    [InlineData("after-restore")]
+    public async Task OriginalParentCancellationPreventsLateRecoveryInputs(string stage)
+    {
+        using var cts = new CancellationTokenSource();
+        var actions = new List<string>();
+        var avatar = Avatar("琴", new()) with { NativeBurst = () => BurstCastResult.NotReady };
+        var outcome = await PathPartyHealing.TryAsync([avatar], () =>
+        {
+            actions.Add("restore-main");
+            if (stage == "after-restore") cts.Cancel();
+            return Task.FromResult(true);
+        }, _ => Task.CompletedTask, cts.Token, static () => { }, 1);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        if (stage == "before-statue") cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.RecoverAtStatueAsync(() =>
+        {
+            actions.Add("statue");
+            if (stage == "after-statue") cts.Cancel();
+            return Task.CompletedTask;
+        }));
+        var expected = stage switch
+        {
+            "before-statue" => Array.Empty<string>(),
+            "after-statue" => new[] { "statue" },
+            _ => new[] { "statue", "restore-main" }
+        };
+        Assert.Equal(expected, actions.ToArray());
+    }
+
+    [Theory]
+    [InlineData("before-statue")]
+    [InlineData("after-statue")]
+    [InlineData("after-restore")]
+    public async Task OriginalParentDeadlineIsNeverRestartedDuringHandoff(string stage)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        var actions = new List<string>();
+        void CheckParent()
+        {
+            if (clock.GetElapsedTime(started) >= TimeSpan.FromMilliseconds(100))
+                throw new TimeoutException("original parent expired");
+        }
+        var avatar = Avatar("琴", new()) with { NativeBurst = () => BurstCastResult.Unknown };
+        var outcome = await PathPartyHealing.TryAsync([avatar], () =>
+        {
+            actions.Add("restore-main");
+            if (stage == "after-restore") clock.Advance(TimeSpan.FromMilliseconds(100));
+            return Task.FromResult(true);
+        }, _ => Task.CompletedTask, CancellationToken.None, CheckParent, 1);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        if (stage == "before-statue") clock.Advance(TimeSpan.FromMilliseconds(100));
+        await Assert.ThrowsAsync<TimeoutException>(() => pending.RecoverAtStatueAsync(() =>
+        {
+            actions.Add("statue");
+            if (stage == "after-statue") clock.Advance(TimeSpan.FromMilliseconds(100));
+            return Task.CompletedTask;
+        }));
+        var expected = stage switch
+        {
+            "before-statue" => Array.Empty<string>(),
+            "after-statue" => new[] { "statue" },
+            _ => new[] { "statue", "restore-main" }
+        };
+        Assert.Equal(expected, actions.ToArray());
+    }
+
+    [Fact]
+    public async Task ParentExpiryDuringHealerSelectionCannotCreatePendingRestore()
+    {
+        var expired = false;
+        var actions = new List<string>();
+        var failure = new TimeoutException("selection exceeded the original parent");
+        var avatar = Avatar("琴", actions) with
+        {
+            TrySwitch = () => { actions.Add("select:琴"); expired = true; return true; },
+            NativeBurst = () => throw new Exception("Expired parent must not admit Q")
+        };
+        var actual = await Assert.ThrowsAsync<TimeoutException>(() => PathPartyHealing.TryAsync([avatar],
+            () => throw new Exception("Expired parent must not restore"), _ => Task.CompletedTask,
+            CancellationToken.None, () => { if (expired) throw failure; }, 1));
+        Assert.Same(failure, actual);
+        Assert.Equal(new[] { "select:琴" }, actions.ToArray());
+    }
+
+    [Theory]
+    [InlineData(BurstCastResult.NotReady)]
+    [InlineData(BurstCastResult.Unknown)]
+    public async Task CancellationAfterUnsentBurstCannotPublishPending(BurstCastResult cast)
+    {
+        using var cts = new CancellationTokenSource();
+        var avatar = Avatar("琴", new()) with { NativeBurst = () => { cts.Cancel(); return cast; } };
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PathPartyHealing.TryAsync([avatar],
+            () => throw new Exception("Cancelled parent must not restore"), _ => Task.CompletedTask,
+            cts.Token, static () => { }, 1));
+    }
+
+    [Theory]
+    [InlineData("other-avatar")]
+    [InlineData("unknown-avatar")]
+    [InlineData("unknown-health")]
+    [InlineData("not-main")]
+    public async Task PendingRecoveryCannotCreditHealerHealthOrUnknownMain(string kind)
+    {
+        var restores = 0;
+        var avatar = Avatar("琴", new()) with { NativeBurst = () => BurstCastResult.NotReady };
+        var outcome = await PathPartyHealing.TryAsync([avatar],
+            () => { restores++; return Task.FromResult(true); }, _ => Task.CompletedTask,
+            CancellationToken.None, static () => { }, 1);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        await pending.RecoverAtStatueAsync(() => Task.CompletedTask);
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var fence = new CaptureFrameFence(before, clock.GetTimestamp());
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var healed = await HealingObservation.WaitAsync(fence, () => PathPartyHealing.HealthFrame(
+            source.Next(), kind != "not-main", kind == "other-avatar" ? 4 : kind == "unknown-avatar" ? -1 : 1,
+            pending.ExpectedMainIndex, kind == "unknown-health" ? null : false),
+            ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, CancellationToken.None, clock);
+        Assert.False(healed);
+        Assert.Equal(1, restores);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(5)]
+    public async Task InvalidWalkingIdentityDoesNotStartHealerSelection(int index)
+    {
+        var actions = new List<string>();
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => PathPartyHealing.TryAsync([Avatar("琴", actions)],
+            () => throw new Exception("Invalid main must not restore"), _ => Task.CompletedTask,
+            CancellationToken.None, static () => { }, index));
+        Assert.Empty(actions);
     }
 
     [Theory]
