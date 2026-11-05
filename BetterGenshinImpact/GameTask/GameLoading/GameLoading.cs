@@ -63,9 +63,56 @@ public class GameLoadingTrigger : ITaskTrigger
     private bool _recognizedDoorClickSucceeded;
     private int _doorFallbackClickCount;
     private List<Region> _latestLoadingOcrRegions = [];
+    private readonly GameLoadingAgreement _officialAgreement = new();
 
     public GameLoadingTrigger()
     {
+    }
+
+    private bool HandleOfficialAgreement(ImageRegion frame, IReadOnlyList<Region> regions,
+        Fischless.GameCapture.CaptureFrameStamp source,
+        BetterGenshinImpact.GameTask.Runtime.GameRuntime targetRuntime, IntPtr targetWindow)
+    {
+        if (!frame.FrameStamp.Equals(source) || !ReferenceEquals(TaskContext.Instance().Runtime, targetRuntime) ||
+            targetRuntime.Window.Handle != targetWindow) return true;
+        var ageConfirmationVisible = false;
+        if (_officialAgreement.AwaitingDismissal && regions.Any(region =>
+                region.Text.Contains("适龄") || region.Text.Contains("监护")))
+        {
+            using var ageConfirmation = frame.Find(ElementRecognition.Get("BtnWhiteConfirm", frame));
+            ageConfirmationVisible = !ageConfirmation.IsEmpty();
+        }
+        return _officialAgreement.HandleAttempt(regions.Select(region =>
+                new GameLoadingAgreementText(region.Text, region.ToRect())).ToArray(), source,
+            new OpenCvSharp.Size(frame.Width, frame.Height), TimeProvider.System, bounds =>
+            {
+                var target = regions.FirstOrDefault(region => region.ToRect().Equals(bounds));
+                if (target == null) return false;
+                var invoked = false;
+                var sent = GameLoadingInputPolicy.TryClick(true,
+                    prepareInput: () =>
+                    {
+                        if (!ReferenceEquals(TaskContext.Instance().Runtime, targetRuntime) || targetRuntime.Window.Handle != targetWindow) return;
+                        targetRuntime.Window.Activate();
+                        Thread.Sleep(100);
+                    },
+                    clickRecognizedTarget: () =>
+                    {
+                        if (invoked || !ReferenceEquals(TaskContext.Instance().Runtime, targetRuntime) ||
+                            targetRuntime.Window.Handle != targetWindow ||
+                            !source.IsFresh(TimeProvider.System, GameLoadingAgreement.MaximumFrameAge)) return;
+                        invoked = true;
+                        target.Click();
+                    },
+                    clickCenterFallback: () => { }, out var failure);
+                if (!invoked)
+                    _logger.LogWarning(failure, "协议同意未进入目标点击，等待重新取得两份新鲜识别");
+                else if (!sent)
+                    _logger.LogWarning(failure, "协议同意目标调用结果未确认，已消费一次，等待弹窗消失；不重复点击");
+                else
+                    _logger.LogInformation("检测到明确官方协议更新，已尝试同意一次，等待弹窗消失");
+                return invoked;
+            }, milliseconds => Thread.Sleep(milliseconds), ageConfirmationVisible, targetRuntime, targetWindow);
     }
 
     internal bool RearmForStartupRetry()
@@ -105,7 +152,14 @@ public class GameLoadingTrigger : ITaskTrigger
         if ((DateTime.Now - _prevAgePromptOcrTime).TotalMilliseconds >= 1000)
         {
             _prevAgePromptOcrTime = DateTime.Now;
-            _latestLoadingOcrRegions = content.CaptureRectArea.FindMulti(RecognitionObject.OcrThis);
+            var ocrRuntime = TaskContext.Instance().Runtime;
+            var ocrWindow = ocrRuntime?.Window.Handle ?? IntPtr.Zero;
+            var ocrFrame = content.CaptureRectArea;
+            var ocrSource = ocrFrame.FrameStamp;
+            var ocrRegions = ocrFrame.FindMulti(RecognitionObject.OcrThis);
+            _latestLoadingOcrRegions = ocrRegions;
+            if (_config.AutoEnterGameEnabled && (ocrRuntime == null ||
+                HandleOfficialAgreement(ocrFrame, ocrRegions, ocrSource, ocrRuntime, ocrWindow))) return;
             if (_latestLoadingOcrRegions.Any(region =>
                     region.Text.Contains("适龄") || region.Text.Contains("监护")))
             {

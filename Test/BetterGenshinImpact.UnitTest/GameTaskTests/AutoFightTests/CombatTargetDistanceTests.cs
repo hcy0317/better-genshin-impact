@@ -20,7 +20,8 @@ public class CombatTargetDistanceTests
     public void FixedBossBarDoesNotHideFloatingTargetPosition()
     {
         var decision = AutoFightSeek.SelectSeekDecision(
-            [new(757, 82, 406, 9, 3654), new(910, 400, 100, 4, 400)], 1920, 1080);
+            [new(757, 82, 406, 9, 3654), new(910, 400, 100, 4, 400)], 1920, 1080,
+            scene: CombatSceneCapabilities.AlgorithmOfSemiIntransientMatrix);
         Assert.Equal(SeekCueKind.HealthBar, decision.Cue);
         Assert.Equal(400, decision.Visual!.Value.Y);
         Assert.Equal(82, decision.FixedTopHealth!.Value.Y);

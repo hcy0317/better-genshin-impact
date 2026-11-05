@@ -626,8 +626,8 @@ public partial class AutoPickTrigger : ITaskTrigger
             return PickListDecision.DoNotPick;
         }
 
-        // 单个字符不拾取
-        if (normalizedText.Length <= 1)
+        // 单个字符不拾取，保留上游盐、糖例外；仍继续检查黑白名单。
+        if (normalizedText.Length <= 1 && normalizedText is not ("盐" or "糖"))
         {
             return PickListDecision.TooShort;
         }
