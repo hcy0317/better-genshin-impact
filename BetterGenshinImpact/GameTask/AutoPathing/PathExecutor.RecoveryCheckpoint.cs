@@ -1,3 +1,4 @@
+using BetterGenshinImpact.GameTask.AutoFight.Model;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -128,8 +129,29 @@ public partial class PathExecutor
         return skillCount == 1 && movementSeconds is > 0 and <= 2;
     }
 
-    private async Task RecoverAtStatueAndRestartAsync(CaptureFrameStamp before)
+    private async Task RecoverAtStatueAndRestartAsync(CaptureFrameStamp before,
+        PathPartyHealing.Outcome.PendingMainRestore? pendingMainRestore = null)
     {
+        var parent = UiOperation.Current;
+        void CheckParent()
+        {
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            parent?.Check();
+        }
+        CheckParent();
+        var expectedMain = pendingMainRestore?.ExpectedMainIndex ??
+            (int.TryParse(PartyConfig.MainAvatarIndex, out var configuredMain) ? configuredMain : -1);
+        if (expectedMain is < 1 or > 4)
+            throw new InvalidOperationException("神像恢复缺少有效行走位身份，禁止传送后确认回血");
+        var identity = new AvatarActiveCheckContext();
+        async Task Recover()
+        {
+            CheckParent();
+            if (pendingMainRestore is null) await TpStatueOfTheSeven();
+            else await pendingMainRestore.RecoverAtStatueAsync(TpStatueOfTheSeven);
+            CheckParent();
+        }
         var resumeIndex = HealingResumeIndex();
         // 能否重放只决定恢复后的路线处理，不能阻止当前低血角色先安全回血。
         var canRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex, _completedWaypointActions);
@@ -159,17 +181,27 @@ public partial class PathExecutor
         TraceHealingPrefix(request, resumeIndex);
         try
         {
-            await ConfirmHealingRestartAsync(before, TpStatueOfTheSeven, () =>
+            await ConfirmHealingRestartAsync(before, Recover, () =>
             {
+                CheckParent();
                 using var frame = _moveIo.Capture();
                 DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
-                var result = new HealingFrame(frame.FrameStamp, _moveIo.CombatHud(frame) && !_moveIo.Transformed(frame),
+                _combatScenes?.PrepareAvatarObservation(frame, identity, UiSnapshot.RecoveryMaximumAge);
+                var active = _combatScenes?.GetActiveAvatarIndex(frame, identity) ?? -1;
+                var result = PathPartyHealing.HealthFrame(frame.FrameStamp,
+                    _moveIo.CombatHud(frame) && !_moveIo.Transformed(frame), active, expectedMain,
                     Bv.ObserveCurrentAvatarLowHp(frame));
+                CheckParent();
                 lastObservation = result.ToString();
                 lastSource = frame.FrameStamp;
                 evidence?.RememberExactFrame(request, request, frame);
                 return result;
-            }, milliseconds => _moveIo.Delay(milliseconds, ct), ct, _moveIo.Clock, canRestart, allowParentReplan);
+            }, async milliseconds =>
+            {
+                CheckParent();
+                await _moveIo.Delay(milliseconds, ct);
+                CheckParent();
+            }, ct, _moveIo.Clock, canRestart, allowParentReplan);
         }
         catch (HealingRecoveryCompletedException) { Trace("healed-restart-confirmed", false); throw; }
         catch (Exception error) { Trace("failed:" + error.GetType().Name, true); throw; }
