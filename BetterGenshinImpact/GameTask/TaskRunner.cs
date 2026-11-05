@@ -278,6 +278,9 @@ public class TaskRunner
 
         // 激活原神窗口；遮罩的显示由下一帧上报给 IMaskWindowHost 后自动恢复
         runtime?.Window.Activate();
+
+        // 游戏获焦后再退休已记录的模拟输入，避免抬起事件落到 BGI 界面。
+        InputHub.ReleaseAll();
     }
 
     public void End()

@@ -5,6 +5,17 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPickTests;
 public class AutoPickTriggerTests
 {
     [Theory]
+    [InlineData("盐")]
+    [InlineData("糖")]
+    public void SingleCharacterMaterialsRemainEligibleForNormalPickup(string name)
+    {
+        var decision = AutoPickTrigger.EvaluatePickLists(name, false,
+            new AutoPickConfig { Mode = AutoPickMode.Blacklist }, new HashSet<string>(), [], new HashSet<string>(), out var normalized);
+        Assert.Equal(name, normalized);
+        Assert.Equal(AutoPickTrigger.PickListDecision.Allow, decision);
+    }
+
+    [Theory]
     [InlineData("")]
     [InlineData("A")]
     [InlineData("şÉ")]
