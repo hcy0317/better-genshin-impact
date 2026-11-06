@@ -334,11 +334,32 @@ public partial class PathExecutor
                             //战斗前的节点记录，用于游泳检测回到战斗节点
                             AutoFightTask.FightWaypoint = waypoint.Action == ActionEnum.Fight.Code ? waypoint : null;
 
+                            // A verified navigation result ends only its ambient owner.
+                            // Keep the absolute ticket for any later recovery return.
+                            var navigationHandedOff = !string.IsNullOrWhiteSpace(waypoint.Action) &&
+                                _lastReachedNavigation is { } reached && reached.Index == currentIndex &&
+                                reached.Source.IsFresh(_moveIo.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                                reached.Source.TimestampFrequency == _moveIo.Clock.TimestampFrequency &&
+                                waypoint.Type is "path" or "target" && waypoint.MoveMode is "walk" or "run" or "dash" or "climb" &&
+                                waypoint.Action != ActionEnum.UpDownGrabLeaf.Code;
+                            if (navigationHandedOff)
+                            {
+                                _waypointBudget.Check(_moveIo.Clock, ct);
+                                if (_returningToCurrent && _waypointBudget.CurrentIndex == currentIndex)
+                                {
+                                    _resumeCurrent = null;
+                                    _returningToCurrent = false;
+                                }
+                                // Dispose is idempotent and restores the original parent;
+                                // the using cleanup cannot restore it a second time.
+                                nodeOwner.Dispose();
+                            }
                             // 执行 action
                             await AfterMoveToTarget(waypoint);
                             ct.ThrowIfCancellationRequested();
                             TaskExecutionScope.ThrowIfFailed();
-                            _waypointBudget.Check(_moveIo.Clock, ct);
+                            UiOperation.Current?.Check();
+                            if (!navigationHandedOff) _waypointBudget.Check(_moveIo.Clock, ct);
                             _completedWaypointActions.Add(CurWaypoint.Item1);
                             if (_lastActionOutcome is { } settled) _actionSettlements[CurWaypoint.Item1] = new(CurWaypoint.Item1, NavigationResumePlan.CommandDigest(waypoint), settled);
                         }
