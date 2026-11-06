@@ -113,7 +113,7 @@ public class CameraRotateTask(CancellationToken ct)
     /// </summary>
     /// <param name="targetOrientation">目标角度</param>
     /// <param name="maxDiff">最大误差</param>
-    /// <param name="maxTryTimes">最大尝试次数（超时时间）</param>
+    /// <param name="maxTryTimes">最大控制输入轮数；耗尽时可在原期限内只读终验一次，不再发送输入。</param>
     /// <returns></returns>
     public async Task<bool> WaitUntilRotatedTo(int targetOrientation, int maxDiff, int maxTryTimes = 50)
         => await WaitUntilRotatedTo(targetOrientation, maxDiff, maxTryTimes, null);
@@ -127,6 +127,49 @@ public class CameraRotateTask(CancellationToken ct)
         float? previousDiff = null;
         CaptureFrameStamp previous = default;
         CaptureFrameFence? inputFence = null;
+        TimeSpan FinalFeedbackRemaining()
+        {
+            var now = io.Clock.GetUtcNow();
+            var remaining = deadline - now;
+            if (Deadline?.Invoke() is { } parent && parent - now < remaining) remaining = parent - now;
+            if (UiOperation.Current is { } operation && operation.Remaining < remaining) remaining = operation.Remaining;
+            return remaining;
+        }
+        async Task<bool> ConfirmFinalInputAsync()
+        {
+            ct.ThrowIfCancellationRequested();
+            if (inputFence is not { } lastInput || FinalFeedbackRemaining() <= TimeSpan.FromMilliseconds(60)) return false;
+            scope?.Check();
+            UiOperation.Current?.Check();
+            await io.Delay(60, ct);
+            ct.ThrowIfCancellationRequested();
+            if (FinalFeedbackRemaining() <= TimeSpan.Zero) return false;
+            scope?.Check();
+            UiOperation.Current?.Check();
+            // One read-only sample, never another control round or capture-wait loop.
+            using var feedback = io.Capture();
+            ct.ThrowIfCancellationRequested();
+            var accepted = FinalFeedbackRemaining() > TimeSpan.Zero &&
+                feedback.FrameStamp.IsAfter(previous) && lastInput.Accepts(feedback.FrameStamp) &&
+                feedback.FrameStamp.TimestampFrequency == io.Clock.TimestampFrequency &&
+                io.Clock.GetElapsedTime(lastInput.InputCompletedTimestamp, feedback.FrameStamp.CapturedTimestamp).TotalMilliseconds >= 60 &&
+                feedback.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                PathWorldAvailability.IsPlayable(io, feedback);
+            ct.ThrowIfCancellationRequested();
+            if (!accepted || FinalFeedbackRemaining() <= TimeSpan.Zero) return false;
+            scope?.Check();
+            UiOperation.Current?.Check();
+            var reading = io.CameraReading?.Invoke(feedback) ??
+                new CameraOrientation.Reading(io.CameraOrientation(feedback), null, null, false);
+            ct.ThrowIfCancellationRequested();
+            if (FinalFeedbackRemaining() <= TimeSpan.Zero || !float.IsFinite(reading.Angle) ||
+                !feedback.FrameStamp.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge)) return false;
+            scope?.Check();
+            UiOperation.Current?.Check();
+            var finalDiff = (reading.Angle - targetOrientation + 180) % 360 - 180;
+            finalDiff += finalDiff < -180 ? 360 : 0;
+            return Math.Abs(finalDiff) < maxDiff;
+        }
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -154,6 +197,7 @@ public class CameraRotateTask(CancellationToken ct)
             previousDiff = diff;
             if (++count >= maxTryTimes || unchanged >= 10)
             {
+                if (count >= maxTryTimes && unchanged < 10 && await ConfirmFinalInputAsync()) return true;
                 io.Logger.LogWarning("视角转动未收敛，停止转动与前进");
                 return false;
             }
