@@ -23,6 +23,34 @@ public sealed class MaskWindowDrawingBoard : IMaskWindowDrawingBoard, IMaskWindo
 
     public event Action? Changed;
 
+    private int _recognitionSuppressions;
+
+    internal IDisposable SuppressRecognition()
+    {
+        var lease = new RecognitionLease(this);
+        bool changed;
+        lock (_lock)
+        {
+            _recognitionSuppressions++;
+            var names = _entries.Where(x => x.Value.Group.Kind == MaskWindowDrawingKind.Recognition && x.Value.Group.IsAutomaticDiagnostic).Select(x => x.Key).ToArray();
+            changed = names.Length != 0;
+            if (changed) { _entries = _entries.RemoveRange(names); PublishLocked(); }
+        }
+        try { if (changed) Changed?.Invoke(); return lease; }
+        catch { lease.Dispose(); throw; }
+    }
+
+    private void ResumeRecognition()
+    {
+        lock (_lock) _recognitionSuppressions--;
+    }
+
+    private sealed class RecognitionLease(MaskWindowDrawingBoard owner) : IDisposable
+    {
+        private MaskWindowDrawingBoard? _owner = owner;
+        public void Dispose() => Interlocked.Exchange(ref _owner, null)?.ResumeRecognition();
+    }
+
     public void Set(MaskWindowDrawingGroup group, IReadOnlyList<MaskWindowDrawingShape>? shapes)
     {
         if (shapes == null || shapes.Count == 0)
@@ -35,6 +63,7 @@ public sealed class MaskWindowDrawingBoard : IMaskWindowDrawingBoard, IMaskWindo
         var copy = shapes.ToArray();
         lock (_lock)
         {
+            if (_recognitionSuppressions != 0 && group.Kind == MaskWindowDrawingKind.Recognition && group.IsAutomaticDiagnostic) return;
             if (_entries.TryGetValue(group.Name, out var existing)
                 && existing.Group == group
                 && existing.Shapes.SequenceEqual(copy))
@@ -53,7 +82,8 @@ public sealed class MaskWindowDrawingBoard : IMaskWindowDrawingBoard, IMaskWindo
     {
         lock (_lock)
         {
-            if (!_entries.ContainsKey(group.Name))
+            if (!_entries.TryGetValue(group.Name, out var existing) ||
+                group.IsAutomaticDiagnostic && !existing.Group.IsAutomaticDiagnostic)
             {
                 return;
             }

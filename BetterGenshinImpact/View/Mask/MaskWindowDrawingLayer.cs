@@ -90,13 +90,9 @@ public sealed class MaskWindowDrawingLayer : FrameworkElement
         var metrics = MaskWindowLayerMetrics.From(this);
         var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
 
-        foreach (var entry in snapshot.Entries)
+        foreach (var entry in MaskWindowDrawingVisibility.GetEntries(snapshot, showRecognition))
         {
             var isRecognition = entry.Group.Kind == MaskWindowDrawingKind.Recognition;
-            if (isRecognition && !showRecognition)
-            {
-                continue;
-            }
 
             foreach (var shape in entry.Shapes)
             {

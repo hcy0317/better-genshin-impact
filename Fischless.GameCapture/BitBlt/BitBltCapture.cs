@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using OpenCvSharp;
 using Vanara.PInvoke;
 using static System.Console;
@@ -17,6 +17,9 @@ public class BitBltCapture : IGameCapture
 
     private volatile bool _lastCaptureFailed;
     private bool _captureFromDesktop;
+
+    // Actual Start settings on this running capture, not session/config heuristics.
+    public bool CapturesDesktop => IsCapturing && _captureFromDesktop;
 
     public void Dispose()
     {

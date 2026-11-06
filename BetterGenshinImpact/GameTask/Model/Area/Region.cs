@@ -221,6 +221,9 @@ public class Region : IDisposable
         DrawRect(0, 0, Width, Height, name, pen);
     }
 
+    internal void DrawAutomaticRecognition(string name, Pen? pen = null) =>
+        DrawingBoard.Set(MaskWindowDrawingGroup.Automatic(name), SelfToMaskWindowDrawingRect(pen));
+
     /// <summary>
     /// 直接在遮罩窗口绘制当前区域下的【指定区域】
     /// </summary>

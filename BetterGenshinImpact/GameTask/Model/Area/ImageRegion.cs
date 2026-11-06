@@ -213,7 +213,7 @@ public class ImageRegion : Region
                         newRa.MatchScore = bestMatch.Score;
                         if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                         {
-                            newRa.DrawSelf(ro.Name, ro.DrawOnWindowPen);
+                            newRa.DrawAutomaticRecognition(ro.Name, ro.DrawOnWindowPen);
                         }
 
                         successAction?.Invoke(newRa);
@@ -223,7 +223,7 @@ public class ImageRegion : Region
                     {
                         if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                         {
-                            DrawingBoard.Clear(ro.Name);
+                            DrawingBoard.Clear(MaskWindowDrawingGroup.Automatic(ro.Name));
                         }
 
                         failAction?.Invoke();
@@ -312,7 +312,7 @@ public class ImageRegion : Region
                     var drawList = result.Regions.Select(item =>
                         this.ToMaskWindowDrawingRect(item.Rect.BoundingRect() + effectiveRegionOfInterest.Location,
                             ro.DrawOnWindowPen)).ToList();
-                    DrawingBoard.Set(ro.Name, drawList);
+                    DrawingBoard.Set(MaskWindowDrawingGroup.Automatic(ro.Name), drawList);
                 }
 
                 successAction?.Invoke(newRa);
@@ -322,7 +322,7 @@ public class ImageRegion : Region
             {
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
-                    DrawingBoard.Clear(ro.Name);
+                    DrawingBoard.Clear(MaskWindowDrawingGroup.Automatic(ro.Name));
                 }
 
                 failAction?.Invoke();
@@ -367,7 +367,7 @@ public class ImageRegion : Region
                     var drawList = result.Regions.Select(item =>
                         this.ToMaskWindowDrawingRect(item.Rect.BoundingRect() + effectiveRegionOfInterest.Location,
                             ro.DrawOnWindowPen)).ToList();
-                    DrawingBoard.Set(ro.Name, drawList);
+                    DrawingBoard.Set(MaskWindowDrawingGroup.Automatic(ro.Name), drawList);
                 }
 
                 if (effectiveRegionOfInterest != default)
@@ -388,7 +388,7 @@ public class ImageRegion : Region
             {
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
-                    DrawingBoard.Clear(ro.Name);
+                    DrawingBoard.Clear(MaskWindowDrawingGroup.Automatic(ro.Name));
                 }
 
                 failAction?.Invoke();
@@ -482,7 +482,7 @@ public class ImageRegion : Region
 
                         if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                         {
-                            DrawingBoard.Set(ro.Name,
+                            DrawingBoard.Set(MaskWindowDrawingGroup.Automatic(ro.Name),
                                 resRaList.Select(ra => ra.SelfToMaskWindowDrawingRect()).ToList());
                         }
 
@@ -493,7 +493,7 @@ public class ImageRegion : Region
                     {
                         if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                         {
-                            DrawingBoard.Clear(ro.Name);
+                            DrawingBoard.Clear(MaskWindowDrawingGroup.Automatic(ro.Name));
                         }
 
                         failAction?.Invoke();
@@ -554,7 +554,7 @@ public class ImageRegion : Region
                 {
                     // 画出OCR识别到的区域
                     var drawList = resRaList.Select(item => item.SelfToMaskWindowDrawingRect(ro.DrawOnWindowPen)).ToList();
-                    DrawingBoard.Set(ro.Name, drawList);
+                    DrawingBoard.Set(MaskWindowDrawingGroup.Automatic(ro.Name), drawList);
                 }
 
                 successAction?.Invoke(resRaList);
@@ -564,7 +564,7 @@ public class ImageRegion : Region
             {
                 if (ro.DrawOnWindow && !string.IsNullOrEmpty(ro.Name))
                 {
-                    DrawingBoard.Clear(ro.Name);
+                    DrawingBoard.Clear(MaskWindowDrawingGroup.Automatic(ro.Name));
                 }
 
                 failAction?.Invoke();

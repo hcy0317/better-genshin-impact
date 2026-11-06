@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
         <TargetFramework>net8.0-windows10.0.22621.0</TargetFramework>
@@ -31,6 +31,10 @@
 
     <ItemGroup>
       <Folder Include="Assets\AutoFight\" />
+      <None Update="Fixtures\Mask\DesktopRecognition\talk-red-roi.png" CopyToOutputDirectory="PreserveNewest" TargetPath="Assets\Mask\DesktopRecognition\talk-red-roi.png" />
+      <None Update="Fixtures\Mask\DesktopRecognition\talk-clean-roi.png" CopyToOutputDirectory="PreserveNewest" TargetPath="Assets\Mask\DesktopRecognition\talk-clean-roi.png" />
+      <None Update="Fixtures\Mask\DesktopRecognition\disabled-ui.png" CopyToOutputDirectory="PreserveNewest" TargetPath="Assets\Mask\DesktopRecognition\disabled-ui.png" />
+      <None Update="Fixtures\Mask\DesktopRecognition\provenance.json" CopyToOutputDirectory="PreserveNewest" TargetPath="Assets\Mask\DesktopRecognition\provenance.json" />
       <None Update="Fixtures\Ui\*.png" CopyToOutputDirectory="PreserveNewest" />
       <None Update="Fixtures\Pathing\*.json" CopyToOutputDirectory="PreserveNewest" />
       <None Update="Fixtures\Combat\*.json" CopyToOutputDirectory="PreserveNewest" />

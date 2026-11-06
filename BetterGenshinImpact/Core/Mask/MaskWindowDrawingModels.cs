@@ -26,6 +26,11 @@ public enum MaskWindowDrawingKind
 /// </summary>
 public readonly record struct MaskWindowDrawingGroup(string Name, MaskWindowDrawingKind Kind = MaskWindowDrawingKind.Recognition)
 {
+    // Explicit public Region drawing keeps its original Recognition preference contract.
+    public bool IsAutomaticDiagnostic { get; init; }
+
+    internal static MaskWindowDrawingGroup Automatic(string name) => new(name) { IsAutomaticDiagnostic = true };
+
     public static implicit operator MaskWindowDrawingGroup(string name) => new(name);
 }
 
