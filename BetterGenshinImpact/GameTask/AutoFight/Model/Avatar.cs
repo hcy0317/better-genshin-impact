@@ -157,7 +157,7 @@ public partial class Avatar
     }
 
     private static readonly Lazy<BgiYoloPredictor> ESkillClassifierLazy = new(() =>
-        App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().CreateYoloPredictor(BgiOnnxModel.BgiEClassify));
+        App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().GetOrCreateYoloPredictor(BgiOnnxModel.BgiEClassify));
 
     // E 技能分类模型由所有角色共享，串行执行推理，避免并发调用同一会话。
     private static readonly object ESkillClassifierLock = new();
@@ -956,61 +956,16 @@ public partial class Avatar
     public (SkillCdState State, string? Code) IsESkillReadyByClassify(ImageRegion imageRegion, bool onlyCode01Ready = true)
     {
         var eRect1080 = AutoFightAssets.Get(imageRegion).ERectForClassify;
-        using var eRa = imageRegion.DeriveCrop(eRect1080);
-        YoloResult<Classification> result;
+        ESkillClassification reading;
         lock (ESkillClassifierLock)
+            reading = CombatHudReader.ReadESkillClassification(imageRegion, ESkillClassifierLazy.Value,
+                CombatAvatar.NameEn, onlyCode01Ready);
+        var classifyResult = (State: reading.State switch
         {
-            result = ESkillClassifierLazy.Value.Predictor.Classify(eRa.CacheImage);
-        }
-        var topClass = result.GetTopClass();
-        var topClassName = topClass.Name.Name;
-        // Logger.LogInformation("E技能就绪分类：{ClassName}，置信度：{Confidence:F2}", topClassName, topClass.Confidence);
-
-        (SkillCdState State, string? Code) classifyResult;
-
-        // 置信度不足时，直接返回未知，避免误判导致漏放/乱放
-        if (topClass.Confidence <= 0.7)
-        {
-            // Logger.LogInformation("E技能就绪分类置信度不足：{Confidence:F2}，类别：{ClassName}", topClass.Confidence, topClassName);
-            classifyResult = (SkillCdState.Unknown, null);
-        }
-        else
-        {
-            // e_classify_sim 模型实际输出类别名格式: "<前缀> <角色名> <编号> <状态>"，
-            // 实测样本: "S Arlecchino 01 nocd" (confidence 1.0) 表示无冷却/就绪。
-            // 第 2 段为角色英文名，与当前 Avatar 的 CombatAvatar.NameEn 做不区分大小写比对；
-            // 不匹配说明分类结果不属于本角色（模型未覆盖该角色或截图与当前 Avatar 错位），返回未知避免误判。
-            var parts = topClassName.Split(' ');
-            if (parts.Length < 4 ||
-                !string.Equals(parts[1], CombatAvatar.NameEn, StringComparison.OrdinalIgnoreCase))
-            {
-                classifyResult = (SkillCdState.Unknown, null);
-            }
-            else
-            {
-                // 编号段（第 3 段）必须为 "01" 才视为就绪；其他编号对应 E 技能开启后的特殊状态图标，
-                // 保守视为冷却中，避免在该状态下误判为就绪而错放技能。
-                if (onlyCode01Ready &&
-                    !string.Equals(parts[2], "01", StringComparison.OrdinalIgnoreCase))
-                {
-                    classifyResult = (SkillCdState.Cooldown, parts[2]);
-                }
-                else if (topClassName.Contains("nocd", StringComparison.OrdinalIgnoreCase))
-                {
-                    classifyResult = (SkillCdState.Ready, parts[2]);
-                }
-                // 冷却状态实测样本: "S Arlecchino 01 cd"
-                // 顺序重要：nocd 含 cd 子串，必须先判断 nocd 再判断 cd。
-                else if (topClassName.Contains("cd", StringComparison.OrdinalIgnoreCase))
-                {
-                    classifyResult = (SkillCdState.Cooldown, parts[2]);
-                }
-                else
-                {
-                    classifyResult = (SkillCdState.Unknown, parts[2]);
-                }
-            }
-        }
+            ESkillReadiness.Ready => SkillCdState.Ready,
+            ESkillReadiness.Cooldown => SkillCdState.Cooldown,
+            _ => SkillCdState.Unknown
+        }, Code: reading.Code);
 
         // 识别结果写入 VM，由需要显示的模块（如 AutoComboRunTask）订阅 INPC 变更后绘制（数据与显示解耦）
         var domainToCaptureFactor = (double)TaskContext.Instance().SystemInfo.CaptureAreaRect.Width / imageRegion.Width;
@@ -1167,6 +1122,14 @@ public partial class Avatar
         Ct.ThrowIfCancellationRequested();
         using var capture = CaptureToRectArea();
         return IsSkillReadyFromCurrentFrame(capture);
+    }
+
+    internal ESkillObservation ReadCurrentSkillObservation(ImageRegion capture, IOcrService ocr, BgiYoloPredictor? preparedPredictor)
+    {
+        Ct.ThrowIfCancellationRequested();
+        if (!IsActive(capture)) return new(double.NaN, null);
+        return CombatHudReader.ReadESkillObservation(capture, CombatAvatar.NameEn, ocr,
+            preparedPredictor, EnableESkillClassify);
     }
 
     internal bool IsSkillReadyFromCurrentFrame(ImageRegion capture, double? observedCooldown = null)

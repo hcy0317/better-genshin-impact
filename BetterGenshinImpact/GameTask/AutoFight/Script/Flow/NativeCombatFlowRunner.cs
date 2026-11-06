@@ -1540,12 +1540,20 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             {
                 if (active)
                 {
-                    var cd = io.ReadSkillCooldown(avatar, _capture);
-                    if (!double.IsFinite(cd) || cd < 0) return null;
-                    _observations[("e-cd", target)] = cd > 0 ? cd : null;
-                    var ready = io.IsSkillReady(avatar, _capture, cd);
+                    var observation = io.ReadSkillObservation(avatar, _capture);
+                    if (!_capture.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge)) return null;
+                    var cd = observation.Cooldown;
+                    var ready = observation.Ready;
+                    if (ready == true && observation.Classification is { State: ESkillReadiness.Ready })
+                    {
+                        var control = _capture.ReadOnce((io, typeof(CombatControlObservation)), () => io.ReadControl(_capture));
+                        if (!control.IsObserved || control.KeyboardBreakoutRequested ||
+                            control.Motion is MotionStatus.Fly or MotionStatus.Climb or MotionStatus.Swim) ready = null;
+                    }
+                    if (!_capture.FrameStamp.IsFresh(io.Clock, UiSnapshot.CombatMaximumAge)) return null;
+                    _observations[("e-cd", target)] = double.IsFinite(cd) && cd > 0 ? cd : null;
                     _observations[("e-ready", target)] = ready;
-                    return function == "e-cd" ? cd > 0 ? cd : null : ready;
+                    return function == "e-cd" ? double.IsFinite(cd) && cd > 0 ? cd : null : ready;
                 }
                 // 后台的已知正 CD 能证明尚未就绪；计时归零不能证明当前 UI 真正可施放。
                 return io.TryGetKnownSkillCooldown(target, out var known) && known > 0

@@ -38,6 +38,12 @@ internal interface INativeCombatIo
     bool? IsActorActive(NativeCombatActor actor, ImageRegion frame);
     double ReadSkillCooldown(NativeCombatActor actor, ImageRegion frame);
     bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown);
+    ESkillObservation ReadSkillObservation(NativeCombatActor actor, ImageRegion frame)
+    {
+        var cooldown = ReadSkillCooldown(actor, frame);
+        return new(cooldown, double.IsFinite(cooldown) && cooldown >= 0
+            ? IsSkillReady(actor, frame, cooldown) : null);
+    }
     BurstObservation ReadBurst(ImageRegion frame, bool active);
     bool? ReadLowHp(ImageRegion frame);
     HashSet<int> ReadSideBurstReady(ImageRegion frame);

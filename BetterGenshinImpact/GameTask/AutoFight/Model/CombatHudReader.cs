@@ -44,6 +44,55 @@ internal static class CombatHudReader
             return new CooldownReading(raw, seconds);
         });
 
+    internal static ESkillClassification DecodeESkillClassification(string? label, double confidence,
+        string expectedActor, bool onlyCode01Ready = true)
+    {
+        if (string.IsNullOrWhiteSpace(label) || !double.IsFinite(confidence) || confidence <= .7)
+            return new(label, confidence, null, ESkillReadiness.Unknown);
+        var parts = label.Split(' ');
+        if (parts.Length < 4 || !string.Equals(parts[1], expectedActor, StringComparison.OrdinalIgnoreCase))
+            return new(label, confidence, null, ESkillReadiness.Unknown);
+        var state = onlyCode01Ready && !string.Equals(parts[2], "01", StringComparison.OrdinalIgnoreCase)
+            ? ESkillReadiness.Cooldown
+            : label.Contains("nocd", StringComparison.OrdinalIgnoreCase) ? ESkillReadiness.Ready
+            : label.Contains("cd", StringComparison.OrdinalIgnoreCase) ? ESkillReadiness.Cooldown : ESkillReadiness.Unknown;
+        return new(label, confidence, parts[2], state);
+    }
+
+    internal static ESkillClassification ReadESkillClassification(ImageRegion frame, BgiYoloPredictor predictor,
+        string expectedActor, bool onlyCode01Ready = true) =>
+        frame.ReadOnce((typeof(CombatHudReader), "e-classification", predictor, expectedActor, onlyCode01Ready), () =>
+        {
+            using var area = frame.DeriveCrop(AutoFightAssets.Get(frame).ERectForClassify);
+            var top = predictor.UsePredictor(value => value.Classify(area.CacheImage).GetTopClass());
+            return DecodeESkillClassification(top.Name.Name, top.Confidence, expectedActor, onlyCode01Ready);
+        });
+
+    internal static ESkillObservation ReadESkillObservation(ImageRegion frame, string expectedActor, IOcrService ocr,
+        BgiYoloPredictor? preparedPredictor, bool classificationEnabled) =>
+        frame.ReadOnce((typeof(CombatHudReader), "e-observation", expectedActor, preparedPredictor, classificationEnabled), () =>
+        {
+            var cooldown = ReadCooldown(frame, ocr).Seconds;
+            if (!classificationEnabled)
+                return new ESkillObservation(cooldown, double.IsFinite(cooldown) && cooldown >= 0
+                    ? cooldown > 0 ? false : !HasCooldownPixels(frame, burst: false) : null);
+            var classification = preparedPredictor == null ? default : ReadESkillClassification(frame, preparedPredictor, expectedActor);
+            return CombineESkillObservation(cooldown,
+                double.IsFinite(cooldown) && cooldown == 0 && !HasCooldownPixels(frame, burst: false),
+                classification, classificationEnabled: true);
+        });
+
+    internal static ESkillObservation CombineESkillObservation(double cooldown, bool numericReady,
+        ESkillClassification classification, bool classificationEnabled)
+    {
+        // A classification can grant readiness, never a numeric cooldown or successful effect.
+        bool? ready = double.IsFinite(cooldown) && cooldown > 0 ? false
+            : classificationEnabled && classification.State == ESkillReadiness.Ready ? true
+            : classificationEnabled && classification.State == ESkillReadiness.Cooldown ? false
+            : double.IsFinite(cooldown) && cooldown == 0 ? numericReady : null;
+        return new(cooldown, ready, classificationEnabled ? classification : null);
+    }
+
     internal static BurstReading ReadBurst(ImageRegion frame, BgiYoloPredictor predictor) =>
         frame.ReadOnce((typeof(CombatHudReader), "burst"), () =>
         {
