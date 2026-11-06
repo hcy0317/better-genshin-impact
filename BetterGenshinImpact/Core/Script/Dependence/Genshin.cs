@@ -26,6 +26,12 @@ public class Genshin
     private readonly TaskExecutionScope.Guard _taskGuard = TaskExecutionScope.Capture();
     private RECT captureAreaRect = TaskContext.Instance().SystemInfo.CaptureAreaRect;
     private readonly ILogger<Genshin> _logger = App.GetLogger<Genshin>();
+    private readonly CurrentPlayerUidTask _currentPlayerUid;
+
+    public Genshin()
+    {
+        _currentPlayerUid = CurrentPlayerUidTask.CreateNative(_logger);
+    }
 
     /// <summary>
     /// 游戏宽度
@@ -51,9 +57,10 @@ public class Genshin
     /// 通过 OCR 识别当前角色的 UID
     /// </summary>
     /// <returns>UID 数字，如果识别失败则返回 0</returns>
-    public Task<int> Uid()
+    public async Task<int> Uid()
     {
-        return Task.FromResult(Bv.Uid());
+        using var ownedTask = _taskGuard.Enter();
+        return await _currentPlayerUid.Start(CancellationContext.Instance.Cts.Token);
     }
     
     public Lazy<NavigationInstance> LazyNavigationInstance { get; } = new(() =>

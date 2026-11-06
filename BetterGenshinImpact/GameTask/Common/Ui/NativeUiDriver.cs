@@ -165,8 +165,11 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         return observed;
     }
 
-    public UiSnapshot Capture()
+    public UiSnapshot Capture() => CaptureOwned(static (_, snapshot) => snapshot);
+
+    internal T CaptureOwned<T>(Func<ImageRegion, UiSnapshot, T> project)
     {
+        ArgumentNullException.ThrowIfNull(project);
         ObjectDisposedException.ThrowIf(_disposed, this);
         UiOperation.Current?.Check();
         ImageRegion CaptureMeasured()
@@ -194,7 +197,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             }
             catch { }
         }
-        return _inputFence is { } fence ? snapshot.AfterInput(fence) : snapshot;
+        return project(image, _inputFence is { } fence ? snapshot.AfterInput(fence) : snapshot);
     }
 
     internal static UiSnapshot Read(ImageRegion image, bool inspectWorld = false, IOcrService? ocr = null,
