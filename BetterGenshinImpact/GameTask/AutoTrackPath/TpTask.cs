@@ -1240,6 +1240,31 @@ public class TpTask
     private async Task<bool> TryToOpenBigMapUi(string? mapName)
     {
         var request = "map-open:" + Guid.NewGuid().ToString("N");
+        var runtime = TaskContext.Instance().Runtime;
+        var targetWindow = runtime?.Window.Handle ?? IntPtr.Zero;
+        var captureProvider = runtime?.Capture;
+        var goal = new BigMapGoalFeedback(TimeProvider.System, () => runtime != null &&
+            ReferenceEquals(TaskContext.Instance().Runtime, runtime) && ReferenceEquals(runtime.Capture, captureProvider) &&
+            runtime.Window.Handle == targetWindow, request);
+        string Environment()
+        {
+            string ProcessBinding(IntPtr handle)
+            {
+                if (handle == IntPtr.Zero) return "hwnd=unknown pid=unknown session=unknown";
+                try
+                {
+                    User32.GetWindowThreadProcessId(handle, out var pid);
+                    using var process = System.Diagnostics.Process.GetProcessById((int)pid);
+                    return $"hwnd=0x{handle.ToInt64():X} pid={pid} session={process.SessionId}";
+                }
+                catch { return $"hwnd=0x{handle.ToInt64():X} pid=unknown session=unknown"; }
+            }
+            var foreground = (IntPtr)User32.GetForegroundWindow();
+            return NativeInputEnvironment.Read(GIActions.OpenMap.ToActionKey().ToVK()) +
+                $" captureProvider={captureProvider?.GetType().FullName ?? "unknown"} inputBackend={runtime?.Input.GetType().FullName ?? "unknown"} " +
+                $"runtimeWindow=[{ProcessBinding(targetWindow)}] foregroundSample=[{ProcessBinding(foreground)}] " +
+                "captureActualHwnd=unknown inputActualHwnd=unknown captureActualPid=unknown captureActualSession=unknown inputActualPid=unknown inputActualSession=unknown";
+        }
         var result = BigMapOpenOutcome.SourceUnavailable;
         Exception? interruption = null;
         try
@@ -1249,17 +1274,18 @@ public class TpTask
                     WorldFrameAvailability.ReadConnectionWait(image, () => BetterGenshinImpact.Core.Recognition.OCR.OcrFactory.Paddle),
                 () => CheckAndSleep(0), () => InputHub.Foreground.SimulateActionPulse(GIActions.OpenMap), Delay, ct,
                 TimeSpan.FromMilliseconds(GetBigMapOpenTimeoutMilliseconds(mapName)), TimeProvider.System,
-                () => NativeInputEnvironment.Read(GIActions.OpenMap.ToActionKey().ToVK()),
+                Environment,
                 (phase, image, detail) =>
                 {
                     Logger.LogDebug("MAP_OPEN_EVIDENCE request={Request} phase={Phase} source={Source} detail={Detail}",
                         request, phase, image.FrameStamp, detail);
                     if (phase is "failure-before" or "timeout" or "input-failed" or "network-wait" or "source-unavailable" or "input-unconfirmed")
                         DiagnosticEvidenceScope.Current?.RequestWindowFromFrame(request, "map-open-" + phase, image, detail);
-                });
+                }, goal.Arm);
         }
         catch (NetworkInterruptionException error) { interruption = error; }
-        return await BigMapOpenAttempt.CompleteAsync(result, interruption, ReturnMainUiTask.WaitForNetworkAsync, ct);
+        return await BigMapOpenAttempt.CompleteWithGoalAsync(result, interruption,
+            (failure, token) => ReturnMainUiTask.WaitForMapGoalAsync(failure, goal, token), ct, goal.IsCurrent);
     }
 
     internal static bool ShouldCloseBigMapAfterTeleportFailure(bool isInBigMapUi)

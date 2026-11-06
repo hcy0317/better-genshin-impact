@@ -57,7 +57,13 @@ public class ReturnMainUiTask
         }
     }
 
-    internal static async Task<bool> WaitForNetworkAsync(Exception failure, CancellationToken ct)
+    internal static async Task<bool> WaitForNetworkAsync(Exception failure, CancellationToken ct) =>
+        (await WaitForFeedbackAsync(failure, ct, null)).Outcome == PassiveRecoveryOutcome.NetworkRecovered;
+
+    internal static Task<PassiveRecoveryResult> WaitForMapGoalAsync(Exception failure, BigMapGoalFeedback goal, CancellationToken ct) =>
+        WaitForFeedbackAsync(failure, ct, goal);
+
+    private static async Task<PassiveRecoveryResult> WaitForFeedbackAsync(Exception failure, CancellationToken ct, BigMapGoalFeedback? goal)
     {
         // The failed UI operation keeps its original deadline. The separate passive wait
         // owns no inputs, and uses the actual user token rather than that expired deadline.
@@ -95,11 +101,12 @@ public class ReturnMainUiTask
             }
             return observed;
         }
-        return await NetworkRecovery.WaitAsync(failure is NetworkInterruptionException { Reason: "reconnect-panel" or "network-interface-offline" },
+        return await NetworkRecovery.WaitOutcomeAsync(failure is NetworkInterruptionException { Reason: "reconnect-panel" or "network-interface-offline" },
             Capture, InputHub.ReleaseAll, System.Net.NetworkInformation.NetworkInterface.GetIsNetworkAvailable,
             (ms, token) => Task.Delay(ms, token), userToken,
             trace: (state, observed) => Logger.LogInformation("NETWORK_RECOVERY request={Request} state={State} source={Source} reason={Reason}",
-                request, state, observed?.SourceStamp, observed?.NetworkWaitReason ?? "unknown"));
+                request, state, observed?.SourceStamp, observed?.NetworkWaitReason ?? "unknown"),
+            goalFeedback: goal == null ? null : goal.Observe);
     }
 }
 
