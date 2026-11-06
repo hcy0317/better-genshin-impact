@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using Fischless.GameCapture;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing;
@@ -14,12 +17,19 @@ internal sealed record PathPartyHealingAvatar(string Name, Func<bool> TrySwitch,
 internal readonly record struct PathPartyBurstFrame(CaptureFrameStamp Source, bool MainReady,
     int ActiveIndex, BurstObservation Burst);
 
+internal readonly record struct PathPartyHealingEntry(CaptureFrameStamp Source, CaptureFrameStamp TriggerSource,
+    bool MainReady, int ActiveIndex, string? ActiveName, string? MainName, string? HealthText);
+
+internal sealed record PathPartyHealingAdmission(CaptureFrameStamp Source, bool? LowHp,
+    Func<PathPartyHealingEntry?> ObserveEntry, Action BeginRecovery);
+
 // 结果区分治疗尝试和唯一待恢复行走位的交接；任何结果都不代替原健康门。
 internal static class PathPartyHealing
 {
     internal abstract class Outcome
     {
         private Outcome() { }
+        internal sealed class NotAdmitted : Outcome { }
         internal sealed class NotAttempted : Outcome { }
         internal sealed class Attempted : Outcome { }
         internal sealed class PendingMainRestore : Outcome
@@ -51,11 +61,30 @@ internal static class PathPartyHealing
     }
 
     internal static async Task<Outcome> TryAsync(IEnumerable<PathPartyHealingAvatar> avatars,
-        Func<Task<bool>> restoreMain, Func<int, Task> delay, CancellationToken ct, Action checkParent, int expectedMainIndex)
+        Func<Task<bool>> restoreMain, Func<int, Task> delay, CancellationToken ct, Action checkParent, int expectedMainIndex,
+        PathPartyHealingAdmission? admission = null, TimeProvider? clock = null)
     {
         CheckParent(ct, checkParent);
         if (expectedMainIndex is < 1 or > 4)
             throw new ArgumentOutOfRangeException(nameof(expectedMainIndex), "未确认行走位编号，禁止开始队内治疗");
+        if (admission is { } request)
+        {
+            if (request.LowHp == false) return new Outcome.NotAdmitted();
+            if (request.LowHp == true) request.BeginRecovery();
+            CheckParent(ct, checkParent);
+            var entry = request.ObserveEntry();
+            CheckParent(ct, checkParent);
+            if (entry is { } observed && observed.TriggerSource == request.Source &&
+                CanDeferFaintedMain(observed, expectedMainIndex, clock ?? TimeProvider.System))
+            {
+                if (request.LowHp != true) request.BeginRecovery();
+                CheckParent(ct, checkParent);
+                if (!observed.Source.IsFresh(clock ?? TimeProvider.System, UiSnapshot.RecoveryMaximumAge))
+                    throw new InvalidOperationException("行走位零血证据已经过期，禁止交接恢复");
+                return new Outcome.PendingMainRestore(restoreMain, checkParent, ct, expectedMainIndex);
+            }
+            if (request.LowHp != true) return new Outcome.NotAdmitted();
+        }
         foreach (var avatar in avatars)
         {
             CheckParent(ct, checkParent);
@@ -122,6 +151,25 @@ internal static class PathPartyHealing
             }
         }
         return new Outcome.NotAttempted();
+    }
+
+    private static bool CanDeferFaintedMain(PathPartyHealingEntry entry, int expectedMainIndex, TimeProvider clock)
+    {
+        if (!entry.MainReady || entry.ActiveIndex != expectedMainIndex || string.IsNullOrWhiteSpace(entry.MainName) ||
+            !string.Equals(entry.ActiveName, entry.MainName, StringComparison.Ordinal) ||
+            !entry.TriggerSource.IsKnown || !entry.Source.IsKnown ||
+            entry.Source.SessionId != entry.TriggerSource.SessionId ||
+            entry.Source.TimestampFrequency != entry.TriggerSource.TimestampFrequency ||
+            entry.Source.Sequence < entry.TriggerSource.Sequence ||
+            entry.Source.CapturedTimestamp < entry.TriggerSource.CapturedTimestamp ||
+            entry.HealthText == null)
+            return false;
+        var parts = string.Concat(entry.HealthText.Where(c => !char.IsWhiteSpace(c))).Split('/');
+        if (parts.Length != 2 || parts.Any(part => part.Length is < 1 or > 7 || part.Any(c => c is < '0' or > '9')))
+            return false;
+        return int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var current) && current == 0 &&
+            int.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var maximum) && maximum > 0 &&
+            entry.Source.IsFresh(clock, UiSnapshot.RecoveryMaximumAge);
     }
 
     private static async Task RestoreMainAsync(Func<Task<bool>> restoreMain, CancellationToken ct, Action checkParent)

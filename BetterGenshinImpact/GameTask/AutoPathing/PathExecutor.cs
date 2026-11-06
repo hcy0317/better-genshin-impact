@@ -697,13 +697,19 @@ public partial class PathExecutor
     /// <summary>
     /// 尝试队伍回血，如果单人回血，由于记录检查时是哪位残血，则当作行走位处理。
     /// </summary>
-    private Task<PathPartyHealing.Outcome> TryPartyHealing(Fischless.GameCapture.CaptureFrameStamp before)
+    private Task<PathPartyHealing.Outcome> TryPartyHealing(ImageRegion beforeFrame, bool? lowHp, Action beginRecovery)
     {
+        var before = beforeFrame.FrameStamp;
         var parent = UiOperation.Current;
-        var scenes = _combatScenes;
-        if (scenes is null) return Task.FromResult<PathPartyHealing.Outcome>(new PathPartyHealing.Outcome.NotAttempted());
         ct.ThrowIfCancellationRequested();
-        scenes.BeforeTask(ct);
+        if (lowHp == false) return Task.FromResult<PathPartyHealing.Outcome>(new PathPartyHealing.Outcome.NotAdmitted());
+        var scenes = _combatScenes;
+        if (scenes is null)
+        {
+            if (lowHp != true) return Task.FromResult<PathPartyHealing.Outcome>(new PathPartyHealing.Outcome.NotAdmitted());
+            beginRecovery();
+            return Task.FromResult<PathPartyHealing.Outcome>(new PathPartyHealing.Outcome.NotAttempted());
+        }
         void CheckParent()
         {
             ct.ThrowIfCancellationRequested();
@@ -713,6 +719,40 @@ public partial class PathExecutor
         var mainAvatarIndex = PartyConfig.MainAvatarIndex;
         if (!int.TryParse(mainAvatarIndex, out var expectedMain) || expectedMain is < 1 or > 4)
             throw new InvalidOperationException("队内治疗行走位编号无效，禁止切换治疗角色");
+        PathPartyHealingEntry? ObserveEntry()
+        {
+            CheckParent();
+            PathPartyHealingEntry? entry = null;
+            if (beforeFrame.Width * 9 == beforeFrame.Height * 16 && beforeFrame.Height > 0 &&
+                Bv.IsInMainUi(beforeFrame) && !IsKnownPathTransformation(beforeFrame) &&
+                !Bv.IsCombatHud(beforeFrame) && Bv.ReadReviveState(beforeFrame) == ReviveUiState.None)
+            {
+                var main = scenes.GetAvatars().FirstOrDefault(avatar => avatar.Index == expectedMain);
+                if (main != null)
+                {
+                    var target = new ReviveTarget(main.Name, expectedMain);
+                    var observed = scenes.ReadRecoveryFrame(beforeFrame, target);
+                    if (observed.SourceStamp == before && observed.HasUsableEvidence && observed.MainReady &&
+                        observed.Revive == ReviveUiState.None && observed.ActiveIndex == expectedMain && observed.HasTarget(target))
+                    {
+                        var scale = beforeFrame.Height / 1080d;
+                        using var health = beforeFrame.DeriveCrop(new Rect((int)Math.Round(beforeFrame.Width / 2d - 90 * scale),
+                            (int)Math.Round(996 * scale), (int)Math.Round(225 * scale), (int)Math.Round(30 * scale)));
+                        var text = OcrFactory.Paddle.OcrWithoutDetector(health.SrcMat);
+                        entry = new(observed.SourceStamp, before, true, observed.ActiveIndex,
+                            observed.Party[expectedMain], main.Name, text);
+                    }
+                }
+            }
+            CheckParent();
+            return entry;
+        }
+        void BeginRecovery()
+        {
+            CheckParent();
+            scenes.BeforeTask(ct);
+            beginRecovery();
+        }
         return PathPartyHealing.TryAsync(scenes.GetAvatars().Select(avatar =>
         {
             var identity = new AvatarActiveCheckContext();
@@ -730,7 +770,8 @@ public partial class PathExecutor
                         return new(frame.FrameStamp, ordinary, active, Avatar.ObserveBurst(frame, active == avatar.Index));
                     }, before, avatar.Index, UiSnapshot.CombatMaximumAge, CheckParent, TimeProvider.System));
         }), async () => await SwitchAvatar(mainAvatarIndex) != null,
-            milliseconds => Delay(milliseconds, ct), ct, CheckParent, expectedMain);
+            milliseconds => Delay(milliseconds, ct), ct, CheckParent, expectedMain,
+            new PathPartyHealingAdmission(before, lowHp, ObserveEntry, BeginRecovery));
     }
 
     private async Task RecoverWhenLowHp(WaypointForTrack waypoint)
@@ -755,14 +796,17 @@ public partial class PathExecutor
 
         using var region = CaptureToRectArea();
         if (IsKnownPathTransformation(region)) return;
-        if (Bv.CurrentAvatarIsLowHp(region))
+        var lowHp = Bv.ObserveCurrentAvatarLowHp(region);
+        CheckParent();
+        var healing = await TryPartyHealing(region, lowHp, () =>
         {
             _pathingMacro?.Release();
             CaptureLowHpRecoveryEvidence(region,
                 $"route={waypoint.PathingTaskFileName} segment={CurWaypoints.Item1 + 1} node={waypoint.Id} type={waypoint.Type} move={waypoint.MoveMode} action={waypoint.Action} skipOtherOperations={_skipOtherOperations}; before any healing or teleport", Logger);
-            CheckParent();
-            var healing = await TryPartyHealing(region.FrameStamp);
-            CheckParent();
+        });
+        CheckParent();
+        if (healing is not PathPartyHealing.Outcome.NotAdmitted)
+        {
             if (healing is PathPartyHealing.Outcome.Attempted)
             {
                 if (!int.TryParse(PartyConfig.MainAvatarIndex, out var expectedMain))

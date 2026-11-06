@@ -8,6 +8,297 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PathPartyHealingTests
 {
+    [Fact]
+    public async Task UnknownLowHpMustReachFaintedMainThroughActualHealingAdmission()
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var entry = new PathPartyHealingEntry(before, before, true, 1, "钟离", "钟离", "0 / 53210");
+        var actions = new List<string>();
+        var reads = 0;
+        var mainActive = false;
+        var admission = new PathPartyHealingAdmission(before, null, () =>
+        {
+            reads++;
+            actions.Add("read-original-frame");
+            return entry;
+        }, () => actions.Add("begin-recovery"));
+        var outcome = await PathPartyHealing.TryAsync([Avatar("琴", actions)], () =>
+        {
+            actions.Add("restore-main");
+            mainActive = true;
+            return Task.FromResult(true);
+        }, _ => throw new Exception("No new wait is permitted"), CancellationToken.None,
+            static () => { }, 1, admission, clock);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        Assert.Equal(new[] { "read-original-frame", "begin-recovery" }, actions.ToArray());
+        await pending.RecoverAtStatueAsync(() => { actions.Add("statue"); return Task.CompletedTask; });
+        var fence = new CaptureFrameFence(before, clock.GetTimestamp());
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var healed = await HealingObservation.WaitAsync(fence, () =>
+        {
+            actions.Add("main-health");
+            return PathPartyHealing.HealthFrame(source.Next(), true, mainActive ? 1 : 4, pending.ExpectedMainIndex, false);
+        }, ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, CancellationToken.None, clock);
+        Assert.True(healed);
+        Assert.Equal(1, reads);
+        Assert.Equal(new[] { "read-original-frame", "begin-recovery", "statue", "restore-main", "main-health" }, actions.ToArray());
+    }
+
+    [Fact]
+    public async Task ConfirmedHealthyAdmissionDoesNotReadOrStartRecovery()
+    {
+        var source = new CaptureFrameSource(new FakeTimeProvider());
+        var actions = new List<string>();
+        var admission = new PathPartyHealingAdmission(source.Next(), false,
+            () => throw new Exception("Healthy node must not read fainted-main evidence"),
+            () => throw new Exception("Healthy node must not begin recovery"));
+        var outcome = await PathPartyHealing.TryAsync([Avatar("琴", actions)],
+            () => throw new Exception("Healthy node must not restore"), _ => Task.CompletedTask,
+            CancellationToken.None, static () => { }, 1, admission);
+        Assert.IsType<PathPartyHealing.Outcome.NotAdmitted>(outcome);
+        Assert.Empty(actions);
+    }
+
+    [Theory]
+    [InlineData("no-entry")]
+    [InlineData("unknown-health")]
+    [InlineData("nonzero-critical")]
+    [InlineData("zero-maximum")]
+    [InlineData("unknown-identity")]
+    [InlineData("wrong-identity")]
+    [InlineData("wrong-slot")]
+    [InlineData("not-main-ui")]
+    [InlineData("stale")]
+    [InlineData("different-trigger")]
+    public async Task UnknownLowHpWithoutBoundZeroMainDoesNotBeginAnyRecovery(string kind)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var laterTrigger = source.Next();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var current = source.Next();
+        PathPartyHealingEntry? entry = new(current, before, true, 1, "钟离", "钟离", "0 / 53210");
+        entry = kind switch
+        {
+            "no-entry" => null,
+            "unknown-health" => entry.Value with { HealthText = null },
+            "nonzero-critical" => entry.Value with { HealthText = "80 / 46597" },
+            "zero-maximum" => entry.Value with { HealthText = "0 / 0" },
+            "unknown-identity" => entry.Value with { ActiveName = null },
+            "wrong-identity" => entry.Value with { ActiveName = "琴" },
+            "wrong-slot" => entry.Value with { ActiveIndex = 4 },
+            "not-main-ui" => entry.Value with { MainReady = false },
+            "different-trigger" => entry.Value with { TriggerSource = laterTrigger },
+            _ => entry
+        };
+        if (kind == "stale") clock.Advance(TimeSpan.FromMilliseconds(2001));
+        var reads = 0;
+        var actions = new List<string>();
+        var admission = new PathPartyHealingAdmission(before, null, () => { reads++; return entry; },
+            () => actions.Add("begin-recovery"));
+        var outcome = await PathPartyHealing.TryAsync([Avatar("琴", actions)],
+            () => { actions.Add("restore-main"); return Task.FromResult(true); }, _ => Task.CompletedTask,
+            CancellationToken.None, static () => { }, 1, admission, clock);
+        Assert.IsType<PathPartyHealing.Outcome.NotAdmitted>(outcome);
+        Assert.Equal(1, reads);
+        Assert.Empty(actions);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnknownHealthReadCannotOutliveOriginalParent(bool cancelled)
+    {
+        using var cts = new CancellationTokenSource();
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var expired = false;
+        var actions = new List<string>();
+        var admission = new PathPartyHealingAdmission(before, null, () =>
+        {
+            if (cancelled) cts.Cancel();
+            else expired = true;
+            return new PathPartyHealingEntry(before, before, true, 1, "钟离", "钟离", "0 / 53210");
+        }, () => actions.Add("begin-recovery"));
+        var error = await Record.ExceptionAsync(() => PathPartyHealing.TryAsync([Avatar("琴", actions)],
+            () => { actions.Add("restore-main"); return Task.FromResult(true); }, _ => Task.CompletedTask,
+            cts.Token, () => { if (expired) throw new TimeoutException("original parent expired"); }, 1, admission, clock));
+        if (cancelled) Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<TimeoutException>(error);
+        Assert.Empty(actions);
+    }
+
+    [Fact]
+    public async Task BeginningRecoveryCannotReuseExpiredOriginalFrame()
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var actions = new List<string>();
+        var admission = new PathPartyHealingAdmission(before, null,
+            () => new PathPartyHealingEntry(before, before, true, 1, "钟离", "钟离", "0 / 53210"),
+            () => { actions.Add("begin-recovery"); clock.Advance(TimeSpan.FromMilliseconds(2001)); });
+        await Assert.ThrowsAsync<InvalidOperationException>(() => PathPartyHealing.TryAsync([Avatar("琴", actions)],
+            () => { actions.Add("restore-main"); return Task.FromResult(true); }, _ => Task.CompletedTask,
+            CancellationToken.None, static () => { }, 1, admission, clock));
+        Assert.Equal(new[] { "begin-recovery" }, actions.ToArray());
+    }
+
+    [Fact]
+    public async Task FaintedMainBeforeHealingDefersOnlyUnstartedRestoreToStatue()
+    {
+        var actions = new List<string>();
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var entry = new PathPartyHealingEntry(before, before, true, 1, "钟离", "钟离", "0 / 53210");
+        var statueReturned = false;
+        var active = 1;
+        var hp = 0;
+        var healer = Avatar("琴", actions) with
+        {
+            TrySwitch = () => { actions.Add("select-unconfirmed:琴"); return false; },
+            NativeBurst = () => throw new Exception("Fainted main must not admit Q")
+        };
+        var outcome = await PathPartyHealing.TryAsync([healer], () =>
+        {
+            actions.Add("restore-main");
+            if (statueReturned) { active = 1; hp = 53210; }
+            return Task.FromResult(statueReturned);
+        }, _ => throw new Exception("No new fixed wait is permitted"), CancellationToken.None,
+            static () => { }, 1, new PathPartyHealingAdmission(entry.TriggerSource, true, () => entry, static () => { }), clock);
+        var pending = Assert.IsType<PathPartyHealing.Outcome.PendingMainRestore>(outcome);
+        Assert.Empty(actions);
+        await pending.RecoverAtStatueAsync(() =>
+        {
+            actions.Add("statue");
+            statueReturned = true;
+            active = 4;
+            hp = 26392;
+            return Task.CompletedTask;
+        });
+        var fence = new CaptureFrameFence(entry.Source, clock.GetTimestamp());
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var healed = await HealingObservation.WaitAsync(fence, () =>
+        {
+            actions.Add("main-health");
+            return PathPartyHealing.HealthFrame(source.Next(), true, active, pending.ExpectedMainIndex, hp == 0);
+        }, ms => { clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }, CancellationToken.None, clock);
+        Assert.True(healed);
+        Assert.Equal(new[] { "statue", "restore-main", "main-health" }, actions.ToArray());
+        await Assert.ThrowsAsync<InvalidOperationException>(() => pending.RecoverAtStatueAsync(() =>
+        { actions.Add("unexpected-second-statue"); return Task.CompletedTask; }));
+        Assert.Equal(3, actions.Count);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("0")]
+    [InlineData("0 / 0")]
+    [InlineData("O / 53210")]
+    [InlineData("80 / 46597")]
+    [InlineData("1 / 53210")]
+    [InlineData("-0 / 53210")]
+    [InlineData("+0 / 53210")]
+    [InlineData("0 / -1")]
+    [InlineData("0 / ?")]
+    [InlineData("0 / 53210 / 1")]
+    [InlineData("0 / 0.1")]
+    [InlineData("０ / 53210")]
+    [InlineData("0 / 10000000")]
+    public async Task NonzeroOrUnknownHealthCannotBorrowFaintedMainHandoff(string? text)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var entry = new PathPartyHealingEntry(before, before, true, 1, "钟离", "钟离", text);
+        var actions = new List<string>();
+        var healer = Avatar("琴", actions) with
+        { TrySwitch = () => { actions.Add("select-unconfirmed:琴"); return false; } };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => PathPartyHealing.TryAsync([healer],
+            () => { actions.Add("restore-main"); return Task.FromResult(false); },
+            _ => throw new Exception("No new wait is permitted"), CancellationToken.None, static () => { }, 1, new PathPartyHealingAdmission(entry.TriggerSource, true, () => entry, static () => { }), clock));
+        Assert.Equal(new[] { "select-unconfirmed:琴", "restore-main" }, actions.ToArray());
+    }
+
+    [Theory]
+    [InlineData("unknown-main-name")]
+    [InlineData("unknown-active-name")]
+    [InlineData("wrong-name")]
+    [InlineData("wrong-slot")]
+    [InlineData("unknown-slot")]
+    [InlineData("not-main-ui")]
+    [InlineData("unknown-source")]
+    [InlineData("unknown-trigger")]
+    [InlineData("foreign-source")]
+    [InlineData("frequency-mismatch")]
+    [InlineData("reordered-sequence")]
+    [InlineData("earlier-capture")]
+    [InlineData("stale")]
+    [InlineData("future-capture")]
+    public async Task UnboundOrUnknownMainEvidenceCannotBorrowFaintedHandoff(string kind)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        source.Next();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var before = source.Next();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        var current = source.Next();
+        var entry = new PathPartyHealingEntry(current, before, true, 1, "钟离", "钟离", "0 / 53210");
+        entry = kind switch
+        {
+            "unknown-main-name" => entry with { MainName = null },
+            "unknown-active-name" => entry with { ActiveName = null },
+            "wrong-name" => entry with { ActiveName = "琴" },
+            "wrong-slot" => entry with { ActiveIndex = 4 },
+            "unknown-slot" => entry with { ActiveIndex = -1 },
+            "not-main-ui" => entry with { MainReady = false },
+            "unknown-source" => entry with { Source = default },
+            "unknown-trigger" => entry with { TriggerSource = default },
+            "foreign-source" => entry with { Source = current with { SessionId = Guid.NewGuid() } },
+            "frequency-mismatch" => entry with { Source = current with { TimestampFrequency = clock.TimestampFrequency + 1 } },
+            "reordered-sequence" => entry with { Source = current with { Sequence = before.Sequence - 1 } },
+            "earlier-capture" => entry with { Source = current with { CapturedTimestamp = before.CapturedTimestamp - 1 } },
+            "future-capture" => entry with { Source = current with { CapturedTimestamp = clock.GetTimestamp() + 1 } },
+            _ => entry
+        };
+        if (kind == "stale") clock.Advance(TimeSpan.FromMilliseconds(2001));
+        var actions = new List<string>();
+        var healer = Avatar("琴", actions) with
+        { TrySwitch = () => { actions.Add("select-unconfirmed:琴"); return false; } };
+        await Assert.ThrowsAsync<InvalidOperationException>(() => PathPartyHealing.TryAsync([healer],
+            () => { actions.Add("restore-main"); return Task.FromResult(false); },
+            _ => throw new Exception("No new wait is permitted"), CancellationToken.None, static () => { }, 1, new PathPartyHealingAdmission(entry.TriggerSource, true, () => entry, static () => { }), clock));
+        Assert.Equal(new[] { "select-unconfirmed:琴", "restore-main" }, actions.ToArray());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FaintedMainCannotTransferAfterOriginalParentExpiresOrCancels(bool cancelled)
+    {
+        var clock = new FakeTimeProvider();
+        var source = new CaptureFrameSource(clock);
+        var before = source.Next();
+        var entry = new PathPartyHealingEntry(before, before, true, 1, "钟离", "钟离", "0 / 53210");
+        using var cts = new CancellationTokenSource();
+        if (cancelled) cts.Cancel();
+        var actions = new List<string>();
+        var error = await Record.ExceptionAsync(() => PathPartyHealing.TryAsync([Avatar("琴", actions)],
+            () => { actions.Add("restore-main"); return Task.FromResult(true); },
+            _ => Task.CompletedTask, cts.Token, () => throw new TimeoutException("original parent expired"), 1, new PathPartyHealingAdmission(entry.TriggerSource, true, () => entry, static () => { }), clock));
+        if (cancelled) Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<TimeoutException>(error);
+        Assert.Empty(actions);
+    }
+
     [Theory]
     [InlineData("白术")]
     [InlineData("希格雯")]
