@@ -55,7 +55,7 @@ internal static class SereniteaPotExitController
         for (var cycle = 0; cycle < maxCycles; cycle++)
         {
             ct.ThrowIfCancellationRequested();
-            if (observeState() == SereniteaPotExitState.MainUi)
+            if (ObserveAndCheck(observeState, ct) == SereniteaPotExitState.MainUi)
             {
                 return true;
             }
@@ -83,7 +83,8 @@ internal static class SereniteaPotExitController
             }
         }
 
-        return observeState() == SereniteaPotExitState.MainUi;
+        ct.ThrowIfCancellationRequested();
+        return ObserveAndCheck(observeState, ct) == SereniteaPotExitState.MainUi;
     }
 
     internal static Task<bool> ExitConversationAsync(
@@ -123,10 +124,17 @@ internal static class SereniteaPotExitController
         while (dialogueAttempts < maxAttempts || optionAttempts < maxAttempts)
         {
             ct.ThrowIfCancellationRequested();
-            var state = observeState();
-            if (!IsConversationState(state))
+            var state = ObserveAndCheck(observeState, ct);
+            if (state is SereniteaPotExitState.MainUi or SereniteaPotExitState.ClosableUi)
             {
                 return true;
+            }
+            if (!IsConversationState(state))
+            {
+                if (dialogueAttempts < maxAttempts) dialogueAttempts++;
+                else optionAttempts++;
+                await delay(retryDelayMs, ct);
+                continue;
             }
 
             if (state == SereniteaPotExitState.TalkUi)
@@ -150,13 +158,13 @@ internal static class SereniteaPotExitController
             optionAttempts++;
             var selectedGoodbye = await trySelectGoodbye(ct);
             await delay(retryDelayMs, ct);
-            state = observeState();
-            if (!IsConversationState(state))
+            state = ObserveAndCheck(observeState, ct);
+            if (state is SereniteaPotExitState.MainUi or SereniteaPotExitState.ClosableUi)
             {
                 return true;
             }
 
-            if (state == SereniteaPotExitState.TalkUi || selectedGoodbye)
+            if (!IsConversationState(state) || state == SereniteaPotExitState.TalkUi || selectedGoodbye)
             {
                 continue;
             }
@@ -168,7 +176,8 @@ internal static class SereniteaPotExitController
             await delay(retryDelayMs, ct);
         }
 
-        return !IsConversationState(observeState());
+        ct.ThrowIfCancellationRequested();
+        return ObserveAndCheck(observeState, ct) is SereniteaPotExitState.MainUi or SereniteaPotExitState.ClosableUi;
     }
 
     internal static async Task<bool> ExitInterfaceAsync(
@@ -185,7 +194,7 @@ internal static class SereniteaPotExitController
         for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
             ct.ThrowIfCancellationRequested();
-            var state = observeState();
+            var state = ObserveAndCheck(observeState, ct);
             if (state == SereniteaPotExitState.MainUi)
             {
                 return true;
@@ -195,32 +204,25 @@ internal static class SereniteaPotExitController
                 return false;
             }
 
-            if (state == SereniteaPotExitState.OtherUi)
+            if (state != SereniteaPotExitState.ClosableUi)
             {
                 await delay(retryDelayMs, ct);
-                state = observeState();
-                if (state == SereniteaPotExitState.MainUi)
-                {
-                    return true;
-                }
-                if (IsConversationState(state))
-                {
-                    return false;
-                }
+                continue;
             }
 
-            if (state == SereniteaPotExitState.ClosableUi)
-            {
-                closeKnownInterface();
-            }
-            else
-            {
-                pressEscape();
-            }
+            closeKnownInterface();
             await delay(retryDelayMs, ct);
         }
 
-        return observeState() == SereniteaPotExitState.MainUi;
+        ct.ThrowIfCancellationRequested();
+        return ObserveAndCheck(observeState, ct) == SereniteaPotExitState.MainUi;
+    }
+
+    private static SereniteaPotExitState ObserveAndCheck(Func<SereniteaPotExitState> observeState, CancellationToken ct)
+    {
+        var state = observeState();
+        ct.ThrowIfCancellationRequested();
+        return state;
     }
 
     private static bool IsConversationState(SereniteaPotExitState state)
