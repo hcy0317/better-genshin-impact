@@ -130,7 +130,16 @@ public class ClaimMailRewardsTask
             await openMenu(operation.Token);
             operation.Check();
             operation.Action(UiAction.OpenMenu, true, 1, 1);
-            await UiTransition.WaitAsync(operation, UiTarget.Menu, driver);
+            var menu = await UiTransition.WaitAsync(operation, UiTarget.Menu, driver);
+            if (menu.SourceBound && menu.SourceStamp.IsKnown)
+            {
+                try
+                {
+                    DiagnosticEvidenceScope.Current?.RequestWindow($"own-menu:{operation.Id}", "menu-ready",
+                        menu.SourceStamp, "page=Menu; purpose=uid-layout; identity=not-read", logger);
+                }
+                catch { /* Evidence remains best effort and never changes mail actions or outcome. */ }
+            }
             var openedMail = await openMail(operation.Token);
             operation.Check();
             operation.Action(UiAction.OpenMail, openedMail, 1, 1);
