@@ -1935,6 +1935,25 @@ public partial class PathExecutor
                 continue;
             }
             previous = currentObservation.Stamp;
+            // Rotation can outlive the position used to choose its heading. Reuse
+            // the already captured direct observation before granting arrival or W.
+            position = currentObservation.Position;
+            distance = Navigation.GetDistance(waypoint, position);
+            if (distance < 2)
+            {
+                _moveIo.Logger.LogDebug("已到达路径点");
+                operation.Check();
+                continueFlying = waypoint.MoveMode == MoveModeEnum.Fly.Code &&
+                    currentObservation.Motion == MotionStatus.Fly && !_moveIo.Transformed(current) &&
+                    currentObservation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2));
+                break;
+            }
+            if (Navigation.GetTargetOrientation(waypoint, position) != targetOrientation)
+            {
+                // Re-enter the existing observation/rotation policy and step budget;
+                // a successful rotation towards the old target is not a new heading.
+                continue;
+            }
             lastPulse = await PathApproachDiagnostics.RunPulseAsync(
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, current);
