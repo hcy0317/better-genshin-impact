@@ -1956,13 +1956,30 @@ public partial class PathExecutor
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
-            if (++stepsTaken > 25)
-            {
-                approachDiagnostics.Exhausted(screen, location, new((float)waypoint.X, (float)waypoint.Y), observation.Motion.ToString(), _moveIo.Logger);
-                throw new RetryException("精确接近目标点超时，重试当前路线分段");
-            }
             position = location.Point;
             var distance = Navigation.GetDistance(waypoint, position);
+            if (stepsTaken >= 25)
+            {
+                // This frame was already captured. Only the last complete pulse's
+                // valid arrival can finish; no further control opportunity is granted.
+                var finalArrival = !waterAdvancing && distance < 2 &&
+                    (observation.Motion == MotionStatus.Normal || observation.Motion == MotionStatus.Fly &&
+                        (transformed || waypoint.MoveMode == MoveModeEnum.Fly.Code)) &&
+                    lastPulse.HasCompleteReceipt &&
+                    (lastPulse.Requested >= 2 || lastPulse.Receipt is { TransportRequested: >= 2 }) &&
+                    lastPulse.Receipt is { } finalInput && lastPulse.InputSource.IsKnown &&
+                    finalInput.Frequency == _moveIo.Clock.TimestampFrequency &&
+                    observation.Stamp.TimestampFrequency == finalInput.Frequency &&
+                    new CaptureFrameFence(lastPulse.InputSource, finalInput.CompletedAt).Accepts(observation.Stamp) &&
+                    _moveIo.Clock.GetElapsedTime(finalInput.CompletedAt, observation.Stamp.CapturedTimestamp).TotalMilliseconds >= 60 &&
+                    observation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2));
+                if (!finalArrival)
+                {
+                    approachDiagnostics.Exhausted(screen, location, new((float)waypoint.X, (float)waypoint.Y), observation.Motion.ToString(), _moveIo.Logger);
+                    throw new RetryException("精确接近目标点超时，重试当前路线分段");
+                }
+            }
+            else stepsTaken++;
             approachDiagnostics.Observe(screen, position, new Point2f((float)waypoint.X, (float)waypoint.Y), distance, stepsTaken, _moveIo.Logger, location.IsDirect,
                 NavigationFrameEvidence.Read(screen, waypoint.MapName, waypoint.MapMatchMethod, waypoint.MapLayerSelector), observation.Motion.ToString(), location.Source);
             // 地面路线误爬到岩壁/钟离柱时，继续短按W不能完成接近；不能把平面距离当落地。
