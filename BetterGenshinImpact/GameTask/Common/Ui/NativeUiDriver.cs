@@ -299,6 +299,39 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         _loginStage = LoginRecoveryStage.Done;
     }
 
+    private bool SendEscapeOwned(ImageRegion image, UiSnapshot current, CancellationToken ct)
+    {
+        void AdmitEscapeInput()
+        {
+            ct.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
+            if (!current.CanEscape || !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                throw new InvalidOperationException("Escape source expired before native input.");
+        }
+        return _io.OtherAction(UiAction.Escape, image, AdmitEscapeInput);
+    }
+
+    internal bool EscapeOwnedMenu(ImageRegion image, UiSnapshot observed, UiSnapshot current, CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        _io.Focus();
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        if (!observed.SourceBound || !observed.HasUsableEvidence || !current.HasUsableEvidence ||
+            !observed.Matches(UiTarget.Menu) || !current.Matches(UiTarget.Menu) || current.Talk ||
+            !observed.CanEscape || !current.CanEscape || current.SourceStamp != image.FrameStamp ||
+            !observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) ||
+            !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) ||
+            observed.SourceStamp.SessionId != current.SourceStamp.SessionId || !current.IsAfter(observed) ||
+            current.SourceStamp.CapturedTimestamp <= observed.SourceStamp.CapturedTimestamp ||
+            (_inputFence is { } fence && !fence.Accepts(current.SourceStamp))) return false;
+        var applied = SendEscapeOwned(image, current, ct);
+        if (applied) MarkInputCompleted(current);
+        return applied;
+    }
+
     public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -485,14 +518,7 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
                 _io.Click(image, current.ReviveButtonBounds, AdmitReviveInput);
                 return Task.FromResult(Completed(true));
             case UiAction.Escape when !current.Talk && escapeProposed && current.IsAfter(observed) && current.CanEscape:
-                void AdmitEscapeInput()
-                {
-                    ct.ThrowIfCancellationRequested();
-                    UiOperation.Current?.Check();
-                    if (!current.CanEscape || !current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
-                        throw new InvalidOperationException("Escape source expired before native input.");
-                }
-                return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitEscapeInput)));
+                return Task.FromResult(Completed(SendEscapeOwned(image, current, ct)));
             case UiAction.EscapeProbe when !observed.Talk && !current.Talk && escapeProbeProposed &&
                 current.IsAfter(observed) && UiStallEscapeProbe.IsUnrecognizedStall(current):
                 void AdmitEscapeProbeInput()

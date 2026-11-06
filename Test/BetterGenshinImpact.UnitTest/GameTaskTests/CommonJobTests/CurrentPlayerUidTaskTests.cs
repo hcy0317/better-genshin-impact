@@ -181,14 +181,91 @@ public class CurrentPlayerUidTaskTests
             throw new InvalidOperationException("The factory contract test must not execute OCR");
     }
 
+    [Fact]
+    public async Task RealMenuSceneLatencyStillReturnsUidAfterTwoFreshWorldFramesWithinOriginalFiveSeconds()
+    {
+        var io = new FakeIo { MeasuredLatency = true };
+        Assert.Equal(123456789, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Equal(1, io.MenuInputs);
+        Assert.Equal(1, io.EscapeInputs);
+        Assert.True(io.WorldCapturesAfterReturn >= 2);
+        Assert.True(io.Clock.GetUtcNow() - io.Started < TimeSpan.FromSeconds(5));
+    }
+
+    [Theory]
+    [InlineData("late-menu")]
+    [InlineData("no-world")]
+    [InlineData("foreign-world")]
+    [InlineData("replayed-world")]
+    public async Task MeasuredLatencyNeverPublishesWithoutTimelyTwoFreshOwnedWorldFrames(string failure)
+    {
+        var io = new FakeIo { MeasuredLatency = true, ExtraOpeningFrames = failure == "late-menu" ? 2 : 0,
+            BlockReturn = failure == "no-world", ForeignWorld = failure == "foreign-world", ReplayWorld = failure == "replayed-world" };
+        Assert.Equal(0, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Equal(1, io.MenuInputs);
+        Assert.InRange(io.EscapeInputs, 0, 1);
+    }
+
+    [Fact]
+    public async Task AlreadyMenuWithRealSceneStartStampClosesAndReturnsWithinOriginalBudget()
+    {
+        var io = new FakeIo { MeasuredLatency = true, Menu = true };
+        Assert.Equal(123456789, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Equal(0, io.MenuInputs);
+        Assert.Equal(1, io.EscapeInputs);
+        Assert.Equal(1, io.MenuOcrReads);
+        Assert.False(io.Menu);
+        Assert.True(io.WorldCapturesAfterReturn >= 2);
+        Assert.True(io.Clock.GetUtcNow() - io.Started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task AcceptedMenuCandidateSurvivesTwoFreshSevenHundredMillisecondWorldFrames()
+    {
+        var io = new FakeIo { MeasuredLatency = true, WorldCaptureMs = 700 };
+        Assert.Equal(123456789, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Equal(1, io.MenuInputs);
+        Assert.Equal(1, io.EscapeInputs);
+        Assert.True(io.WorldCapturesAfterReturn >= 2);
+        Assert.True(io.Clock.GetUtcNow() - io.Started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task ExpiredSeedIntentUsesFreshRemainingRecoveryWithoutBlindEscapeOrLeavingMenu()
+    {
+        var io = new FakeIo { MeasuredLatency = true, Menu = true, ExtraMenuReadMs = 300 };
+        Assert.Equal(123456789, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Equal(0, io.MenuInputs);
+        Assert.Equal(1, io.EscapeInputs);
+        Assert.Equal(1, io.MenuOcrReads);
+        Assert.False(io.Menu);
+        Assert.True(io.WorldCapturesAfterReturn >= 2);
+        Assert.True(io.Clock.GetUtcNow() - io.Started < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task ExpiredSeedCleanupSentWithoutWorldConsumesOnlyOneEscapeAuthorization()
+    {
+        var io = new FakeIo { MeasuredLatency = true, Menu = true, ExtraMenuReadMs = 300, BlockReturn = true };
+        Assert.Equal(0, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Equal(0, io.MenuInputs);
+        Assert.Equal(1, io.EscapeInputs);
+    }
+
     private sealed class FakeIo : ICurrentPlayerUidIo
     {
         internal FakeTimeProvider Clock { get; } = new();
         internal DateTimeOffset Started;
         private readonly Guid _session = Guid.NewGuid();
         private long _sequence;
-        internal bool Menu, BlockReturn, BlockMenu;
-        internal int MenuInputs, EscapeInputs, WorldCapturesAfterReturn, Captures;
+        internal bool Menu, BlockReturn, BlockMenu, MeasuredLatency;
+        private bool _openingFramePending;
+        internal int ExtraOpeningFrames;
+        internal int WorldCaptureMs = 600, ExtraMenuReadMs;
+        internal bool ForeignWorld, ReplayWorld;
+        private UiSnapshot? _lastWorld;
+        private readonly Guid _foreignSession = Guid.NewGuid();
+        internal int MenuInputs, EscapeInputs, WorldCapturesAfterReturn, Captures, MenuOcrReads;
         internal string? Footer;
         internal string Defect = string.Empty;
         internal Action? AfterMenuRead;
@@ -196,21 +273,35 @@ public class CurrentPlayerUidTaskTests
         internal FakeIo() { Started = Clock.GetUtcNow(); }
         public UiSnapshot Capture()
         {
-            Clock.Advance(TimeSpan.FromMilliseconds(20));
+            var source = new CaptureFrameStamp(_session, ++_sequence, Clock.GetTimestamp(), Clock.TimestampFrequency, Clock.GetUtcNow());
+            Clock.Advance(TimeSpan.FromMilliseconds(MeasuredLatency ? (_returned && !Menu ? WorldCaptureMs : 600) : 20));
+            if (_openingFramePending) { if (ExtraOpeningFrames > 0) ExtraOpeningFrames--; else { _openingFramePending = false; Menu = !BlockMenu; } return WorldOpeningFrame(source); }
             Captures++;
             if (_returned && !Menu) WorldCapturesAfterReturn++;
-            var source = new CaptureFrameStamp(_session, ++_sequence, Clock.GetTimestamp(), Clock.TimestampFrequency, Clock.GetUtcNow());
-            return new UiSnapshot(_sequence) { MainHud = !Menu, MenuBack = Menu }.WithSource(source, Clock, UiSnapshot.RecoveryMaximumAge);
+            var scene = new UiSnapshot(_sequence) { MainHud = !Menu, MenuBack = Menu }.WithSource(source, Clock, UiSnapshot.RecoveryMaximumAge);
+            if (_returned && !Menu)
+            {
+                if (ReplayWorld && _lastWorld != null) return _lastWorld;
+                if (ForeignWorld) scene = scene.WithSource(new(_foreignSession, _sequence, source.CapturedTimestamp, source.TimestampFrequency, source.CapturedAt), Clock, UiSnapshot.RecoveryMaximumAge);
+                _lastWorld = scene;
+            }
+            return scene;
         }
-        public CurrentPlayerUidFrame ReadUidFrame()
+        private UiSnapshot WorldOpeningFrame(CaptureFrameStamp source)
+        {
+            Captures++;
+            return new UiSnapshot(_sequence) { MainHud = true }.WithSource(source, Clock, UiSnapshot.RecoveryMaximumAge);
+        }
+        public CurrentPlayerUidFrame ReadUidFrame(Func<CurrentPlayerUidFrame, CurrentPlayerUidInput?>? chooseInput = null, bool readMenuUid = true)
         {
             if (Defect == "normal-end") throw new NormalEndException("synthetic normal end");
             if (Defect == "capture-failed") throw new InvalidOperationException("synthetic capture unavailable");
             var scene = Capture();
             var text = new List<CurrentPlayerUidText>();
             if (!Menu && Footer != null) text.Add(new(Footer, 1685, 1053, 220, 23));
-            if (Menu)
+            if (Menu && readMenuUid)
             {
+                MenuOcrReads++;
                 if (Defect != "missing-card") text.AddRange(new[] {
                     new CurrentPlayerUidText("冒险等阶", 315, 170, 100, 24),
                     new CurrentPlayerUidText("世界等级", 315, 250, 100, 24),
@@ -223,15 +314,29 @@ public class CurrentPlayerUidTaskTests
                 if (Defect == "split") text.Add(new("123456789", 159, 195, 125, 30));
                 if (Defect == "conflicting") text.Add(new("UID 234567891", 115, 200, 182, 30));
                 if (Defect == "wrong-page") scene = scene with { MenuBack = false };
-                if (Defect == "wrong-session") scene = scene.WithSource(new(Guid.NewGuid(), _sequence, Clock.GetTimestamp(), Clock.TimestampFrequency, Clock.GetUtcNow()), Clock, UiSnapshot.RecoveryMaximumAge);
+                if (Defect == "wrong-session") scene = scene.WithSource(scene.SourceStamp with { SessionId = Guid.NewGuid() }, Clock, UiSnapshot.RecoveryMaximumAge);
+                if (MeasuredLatency) Clock.Advance(TimeSpan.FromMilliseconds(460 + ExtraMenuReadMs));
                 AfterMenuRead?.Invoke();
             }
-            return new(scene, 1920, 1080, text);
+            var frame = new CurrentPlayerUidFrame(scene, 1920, 1080, text);
+            var input = chooseInput?.Invoke(frame);
+            if (input?.Action == UiAction.OpenMenu)
+            {
+                UiOperation.Current!.Token.ThrowIfCancellationRequested();
+                MenuInputs++; Menu = !BlockMenu; if (MeasuredLatency) { Menu = false; _openingFramePending = true; }
+                Clock.Advance(TimeSpan.FromMilliseconds(60));
+                return frame with { SubmittedInput = UiAction.OpenMenu };
+            }
+            if (input?.Action == UiAction.Escape && SubmitEscape(UiOperation.Current!.Token))
+                return frame with { SubmittedInput = UiAction.Escape };
+            return frame;
         }
         public Task<bool> OpenMenuAsync(UiSnapshot observed, CancellationToken ct)
-        { ct.ThrowIfCancellationRequested(); MenuInputs++; Menu = !BlockMenu; Clock.Advance(TimeSpan.FromMilliseconds(60)); return Task.FromResult(true); }
+        { ct.ThrowIfCancellationRequested(); MenuInputs++; Menu = !BlockMenu; if (MeasuredLatency) { Menu = false; _openingFramePending = true; Clock.Advance(TimeSpan.FromMilliseconds(420)); } Clock.Advance(TimeSpan.FromMilliseconds(60)); return Task.FromResult(true); }
+        private bool SubmitEscape(CancellationToken ct)
+        { ct.ThrowIfCancellationRequested(); EscapeInputs++; if (!BlockReturn) { Menu = false; _returned = true; } Clock.Advance(TimeSpan.FromMilliseconds(60)); return true; }
         public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
-        { ct.ThrowIfCancellationRequested(); EscapeInputs++; if (!BlockReturn) { Menu = false; _returned = true; } Clock.Advance(TimeSpan.FromMilliseconds(60)); return Task.FromResult(!BlockReturn); }
+        { ct.ThrowIfCancellationRequested(); if (MeasuredLatency) Clock.Advance(TimeSpan.FromMilliseconds(600)); return Task.FromResult(SubmitEscape(ct)); }
         public Task DelayAsync(int milliseconds, CancellationToken ct)
         { ct.ThrowIfCancellationRequested(); Clock.Advance(TimeSpan.FromMilliseconds(milliseconds)); return Task.CompletedTask; }
     }
