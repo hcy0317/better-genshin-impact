@@ -4,6 +4,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Input;
 using BetterGenshinImpact.Core.Recognition;
+using BetterGenshinImpact.Core.Recognition.OCR;
+using Fischless.GameCapture;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Element.Assets;
@@ -15,6 +17,17 @@ using OpenCvSharp;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
 
 namespace BetterGenshinImpact.GameTask.Common.Job;
+
+internal sealed class PartyNameOcrPage(ImageRegion image, List<Region> names, Func<Rect, string> readLine)
+{
+    internal CaptureFrameStamp Source { get; } = image.FrameStamp;
+    internal List<Region> Names { get; } = names;
+    internal string ReadLine(Rect band)
+    {
+        if (image.FrameStamp != Source) throw new InvalidOperationException("队伍名字行来源已改变");
+        return readLine(band);
+    }
+}
 
 // Only capture/perception/OS boundaries. The public task retains the traversal and handoff owners.
 internal sealed class SwitchPartyTaskIo
@@ -28,7 +41,7 @@ internal sealed class SwitchPartyTaskIo
     internal required Func<ImageRegion, UiSnapshot> Read { get; init; }
     internal required Func<ImageRegion, string, Region> Element { get; init; }
     internal required Func<ImageRegion, RecognitionObject, string> OcrOne { get; init; }
-    internal required Func<ImageRegion, RecognitionObject, List<Region>> OcrMany { get; init; }
+    internal required Func<ImageRegion, RecognitionObject, PartyNameOcrPage> ReadNames { get; init; }
     internal required Action<ImageRegion, double, double> Click { get; init; }
     internal required Action<ImageRegion, Point2d> MovePointer { get; init; }
     internal required Func<(Action Down, Action Up, Func<bool> Current)> BindLeftButton { get; init; }
@@ -96,7 +109,17 @@ internal sealed class SwitchPartyTaskIo
             Read = image => NativeUiDriver.Read(image),
             Element = (image, name) => image.Find(ElementRecognition.Get(name, image)),
             OcrOne = (image, ro) => { using var result = image.Find(ro); return result.Text; },
-            OcrMany = (image, ro) => image.FindMulti(ro), Click = (image, x, y) => image.ClickTo(x, y),
+            ReadNames = (image, ro) =>
+            {
+                // Borrow the already prepared service once for this page and bind both reads to it.
+                var prepared = OcrFactory.Paddle;
+                return new PartyNameOcrPage(image, image.FindMulti(ro, ocrService: prepared), band =>
+                {
+                    using var line = new Mat(image.SrcMat, band);
+                    return prepared.OcrWithoutDetector(line);
+                });
+            },
+            Click = (image, x, y) => image.ClickTo(x, y),
             MovePointer = (image, point) => image.MoveTo((int)Math.Round(point.X, MidpointRounding.AwayFromZero), (int)Math.Round(point.Y, MidpointRounding.AwayFromZero)),
             BindLeftButton = () =>
             {

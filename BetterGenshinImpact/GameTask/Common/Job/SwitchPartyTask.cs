@@ -207,24 +207,42 @@ public class SwitchPartyTask
                     throw new PartySetupFailedException("队伍列表捕获会话改变，不能继续分页");
                 var recognitionObject = new RecognitionObject
                 { RecognitionType = RecognitionTypes.Ocr, RegionOfInterest = regionOfInterest, DrawOnWindow = true, Name = "队伍识别区域" };
-                var names = _io.OcrMany(page, recognitionObject);
+                var namePage = _io.ReadNames(page, recognitionObject);
+                var names = namePage.Names;
                 try
                 {
-                    if (!observed.HasUsableEvidence || !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
+                    if (!observed.HasUsableEvidence || namePage.Source != page.FrameStamp || !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
                         throw new PartySetupFailedException("队伍OCR完成后来源或窗口已失效，不能判定末页或继续输入");
                     var titles = names.Where(t => t.X > 35 * _assetScale && t.X < 100 * _assetScale).ToArray();
                     var state = PartyListPageObservation.Read(page.SrcMat, page.FrameStamp, _assetScale, titles.Select(t => new PartyListRow(t.Text, new Rect(t.X, t.Y, t.Width, t.Height))));
                     if (previousPage != null && !state.AdvancesFrom(previousPage, previousInputCompleted, _io.Clock))
                         throw new PartySetupFailedException("队伍列表翻页未取得新页正证，停止继续输入");
-                    foreach (var title in titles)
+                    async Task SelectTitle(Region title)
                     {
-                        if (!matches(title.Text)) continue;
                         AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
                         _io.Click(page, title.Right + 100 * _assetScale, title.Bottom);
                         await Delay(400, ct);
                         await ConfirmParty(driver, ct, deferApplyToCaller);
                         _io.ClearCombatScenes();
-                        return true;
+                    }
+                    foreach (var title in titles)
+                    {
+                        if (!matches(title.Text)) continue;
+                        await SelectTitle(title); return true;
+                    }
+                    foreach (var title in titles)
+                    {
+                        var left = Math.Max(regionOfInterest.Left, (int)(35 * _assetScale));
+                        if (title.Width <= 0 || title.Height <= 0 || title.Right <= left || title.Right > regionOfInterest.Right ||
+                            title.Y < regionOfInterest.Top || title.Bottom > regionOfInterest.Bottom) continue;
+                        var band = new Rect(left, title.Y, title.Right - left, title.Height);
+                        CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true);
+                        if (namePage.Source != page.FrameStamp) throw new PartySetupFailedException("队伍名字行来源不属于当前页");
+                        var completeName = namePage.ReadLine(band);
+                        CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true);
+                        if (namePage.Source != page.FrameStamp) throw new PartySetupFailedException("队伍名字行读取期间来源改变");
+                        if (!matches(completeName)) continue;
+                        await SelectTitle(title); return true;
                     }
                     if (state.End == PartyListEnd.End)
                     { Logger.LogInformation("已确认队伍列表滚动到底，当前页未找到目标"); break; }

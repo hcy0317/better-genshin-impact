@@ -188,12 +188,65 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
         Assert.Equal(0, os.Drags); Assert.False(os.LeftHeld);
     }
 
+    [Fact]
+    public async Task PublicStartUsesRecordedCompleteNameLineBeforeTheRecordedGeometryGuard()
+    {
+        var os = new GeometryOs { RecordedPage = true }; bool found = false;
+        var error = await Record.ExceptionAsync(async () => found = await new SwitchPartyTask(os.Io()).Start("矿物", default));
+        output.WriteLine($"recorded publicStart found={found} selected={os.Selected} drags={os.Drags} error={error?.GetType().Name} nativeInputs=0");
+        Assert.Null(error); Assert.True(found); Assert.True(os.Selected); Assert.Equal("world", os.Scene); Assert.Equal(0, os.Drags);
+        Assert.Equal(223,os.SelectedX); Assert.Equal(473,os.SelectedY); Assert.All(os.LineAttempts.Values,n=>Assert.Equal(1,n));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("物")]
+    [InlineData("药物")]
+    public async Task RecordedPartialOrDifferentLineNeverSelectsMineral(string text)
+    {
+        var os = new GeometryOs { RecordedPage = true, LineOverride = text };
+        Assert.NotNull(await Record.ExceptionAsync(() => new SwitchPartyTask(os.Io()).Start("矿物", default)));
+        Assert.False(os.Selected); Assert.Equal(0, os.Drags); Assert.All(os.LineAttempts.Values, n => Assert.Equal(1,n));
+    }
+
+    [Theory]
+    [InlineData("stale-line")]
+    [InlineData("foreign-line")]
+    [InlineData("frequency-line")]
+    [InlineData("focus-line")]
+    [InlineData("window-line")]
+    [InlineData("cancel-line")]
+    [InlineData("deadline-line")]
+    [InlineData("foreign-name-page")]
+    public async Task RecordedLineRequiresTheOriginalPageAdmissionAfterRecognition(string fault)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var os = new GeometryOs { RecordedPage = true, Fault = fault, Cancellation = cancellation };
+        var error = await Record.ExceptionAsync(() => new SwitchPartyTask(os.Io()).Start("矿物", cancellation.Token));
+        Assert.NotNull(error); Assert.False(os.Selected); Assert.Equal(0, os.Drags); Assert.False(os.LeftHeld);
+        if (fault == "cancel-line") Assert.IsAssignableFrom<OperationCanceledException>(error);
+        Assert.All(os.LineAttempts.Values, n => Assert.Equal(1,n));
+    }
+
+    [Fact]
+    public async Task FullPageExactNameRetainsItsFastPathWithoutAnyLineRead()
+    {
+        var os = new GeometryOs { RecordedPage = true, FakeExactName = true };
+        Assert.True(await new SwitchPartyTask(os.Io()).Start("矿物", default));
+        Assert.Empty(os.LineAttempts); Assert.Equal(223,os.SelectedX); Assert.Equal(473,os.SelectedY);
+    }
+
     internal sealed class GeometryOs : IUiDriver
     {
         internal readonly FakeTimeProvider Clock = new();
         private readonly CaptureFrameSource _source;
         private readonly CaptureFrameSource _foreign;
         internal string Fault = "";
+        internal bool RecordedPage, FakeExactName;
+        internal string? LineOverride;
+        internal double SelectedX, SelectedY;
+        internal System.Collections.Generic.Dictionary<Rect,int> LineAttempts = new();
+        private static string FixturePath(string extension) => System.IO.Path.Combine(AppContext.BaseDirectory,"Fixtures","Ui","party-name-history-0550."+extension);
         internal CancellationTokenSource? Cancellation;
         private bool _sameTarget = true;
         internal bool Foreground = true;
@@ -226,11 +279,12 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
         internal SwitchPartyTaskIo Io() => new()
         {
             Scale = 1, Clock = Clock, Logger = NullLogger.Instance, Driver = () => this,
-            Capture = Image, Read = Read, Element = (image, name) => name == "PartyBtnDelete" ? image.Derive(620, 990, 52, 50) : image.Derive(20, 30, 50, 30),
-            OcrOne = (_, _) => "水", OcrMany = (image, _) => Names(image),
-            Click = (_, _, y) =>
+            Capture = Image, Read = Read, Element = (image, name) => name == "PartyBtnDelete" ? RecordedPage ? image.Derive(628,1000,40,40) : image.Derive(620, 990, 52, 50) : image.Derive(20, 30, 50, 30),
+            OcrOne = (_, _) => "水", ReadNames = (image, _) => BindNames(image),
+            Click = (_, x, y) =>
             {
                 if (Scene == "party") { Scene = "list"; return; }
+                if (RecordedPage) { SelectedX=x; SelectedY=y; Selected = x == 223 && y == 473; return; }
                 var row = Enumerable.Range(0, Count).OrderBy(i => Math.Abs(RowTop(i) - Offset + 25 - y)).First();
                 Selected = row == 14;
             },
@@ -263,8 +317,8 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
         private ImageRegion Image()
         {
             Clock.Advance(TimeSpan.FromMilliseconds(2));
-            var pixels = new Mat(1080, 1920, MatType.CV_8UC3, new Scalar(35, 45, 55));
-            if (Scene == "list")
+            var pixels = RecordedPage && Scene == "list" ? Cv2.ImRead(FixturePath("png")) : new Mat(1080, 1920, MatType.CV_8UC3, new Scalar(35, 45, 55));
+            if (Scene == "list" && !RecordedPage)
             {
                 foreach (var row in VisibleRows())
                 {
@@ -273,12 +327,47 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
                     Cv2.PutText(pixels, "team" + row, new Point(70, y + 20), HersheyFonts.HersheySimplex, 0.7, Scalar.White);
                 }
             }
-            if (Scene == "list" && Fault != "bad-track") Cv2.Rectangle(pixels, new Rect(698, ThumbTop, 6, ThumbHeight), new Scalar(205, 205, 205), -1);
+            if (Scene == "list" && !RecordedPage && Fault != "bad-track") Cv2.Rectangle(pixels, new Rect(698, ThumbTop, 6, ThumbHeight), new Scalar(205, 205, 205), -1);
             return new GameCaptureRegion(pixels, 0, 0) { FrameStamp = Fault == "foreign-source" && Drags > 0 ? _foreign.Next() : _source.Next() };
         }
+        private PartyNameOcrPage BindNames(ImageRegion image)
+        {
+            var names = Names(image);
+            if (Fault == "foreign-name-page")
+            {
+                using var foreign = new ImageRegion(image.SrcMat.Clone(),0,0) { FrameStamp = _foreign.Next() };
+                return new PartyNameOcrPage(foreign,names,_ => "矿物");
+            }
+            return new PartyNameOcrPage(image,names,band => ReadNameLine(image,band));
+        }
+
+        private string ReadNameLine(ImageRegion image, Rect band)
+        {
+            LineAttempts[band] = LineAttempts.GetValueOrDefault(band) + 1;
+            if (!RecordedPage) return string.Empty;
+            using var data = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(FixturePath("json")));
+            var line = data.RootElement.GetProperty("line"); var expected = line.GetProperty("band").EnumerateArray().Select(n => n.GetInt32()).ToArray();
+            if (band != new Rect(expected[0],expected[1],expected[2],expected[3])) return string.Empty;
+            if (Fault == "stale-line") Clock.Advance(TimeSpan.FromSeconds(3));
+            if (Fault == "deadline-line") Clock.Advance(TimeSpan.FromSeconds(61));
+            if (Fault == "foreign-line") image.FrameStamp = _foreign.Next();
+            if (Fault == "frequency-line") { var s=image.FrameStamp; image.FrameStamp = new CaptureFrameStamp(s.SessionId,s.Sequence,s.CapturedTimestamp,s.TimestampFrequency+1,s.CapturedAt); }
+            if (Fault == "focus-line") Foreground=false;
+            if (Fault == "window-line") _sameTarget=false;
+            if (Fault == "cancel-line") Cancellation!.Cancel();
+            return LineOverride ?? line.GetProperty("text").GetString()!;
+        }
+
         private List<Region> Names(ImageRegion image)
         {
             var result = new List<Region>();
+            if (RecordedPage)
+            {
+                using var data = System.Text.Json.JsonDocument.Parse(System.IO.File.ReadAllText(FixturePath("json")));
+                foreach (var row in data.RootElement.GetProperty("recordedRows").EnumerateArray())
+                { var hit = image.Derive(row.GetProperty("X").GetInt32(),row.GetProperty("Y").GetInt32(),row.GetProperty("Width").GetInt32(),row.GetProperty("Height").GetInt32()); hit.Text = row.GetProperty("Text").GetString()!; if (FakeExactName && hit.Text == "物") hit.Text="矿物"; result.Add(hit); }
+                return result;
+            }
             if (FragmentLastObservedRow && Drags == 0)
             {
                 _confirmedRows = new[] { 0, 1, 3 };
@@ -314,6 +403,8 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
 
     internal sealed class Replay : IUiDriver
     {
+        private PartyNameOcrPage BindNames(ImageRegion image) => new(image,Names(image),_ => string.Empty);
+        private string ReadNameLine(ImageRegion image, Rect band) => string.Empty;
         internal readonly FakeTimeProvider Time = new();
         private readonly CaptureFrameSource _source;
         private readonly CaptureFrameSource _foreignSource;
@@ -332,8 +423,8 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
             Scale = 1, Clock = Time, Logger = NullLogger.Instance,
             Driver = () => this, Capture = Image, Read = Read,
             Element = (image, name) => name == "PartyBtnDelete" ? image.Derive(620, 990, 52, 50) : image.Derive(20, 30, 50, 30),
-            OcrOne = (_, _) => "水", OcrMany = (image, _) => Names(image),
-            Click = (_, _, y) => { if (Scene == "party") Scene = "list"; else if (Page == 1) Selected = true; else { PageActions++; Page = 1; } },
+            OcrOne = (_, _) => "水", ReadNames = (image, _) => BindNames(image),
+            Click = (_, x, y) => { if (Scene == "party") Scene = "list"; else if (Page == 1) Selected = true; else { PageActions++; Page = 1; } },
             MovePointer = (_, point) => { _pointer = point; },
             BindLeftButton = () => (() => { _leftHeld = true; },
             () =>
