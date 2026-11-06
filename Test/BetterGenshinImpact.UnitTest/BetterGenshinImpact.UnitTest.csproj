@@ -36,6 +36,7 @@
       <None Update="Fixtures\Mask\DesktopRecognition\disabled-ui.png" CopyToOutputDirectory="PreserveNewest" TargetPath="Assets\Mask\DesktopRecognition\disabled-ui.png" />
       <None Update="Fixtures\Mask\DesktopRecognition\provenance.json" CopyToOutputDirectory="PreserveNewest" TargetPath="Assets\Mask\DesktopRecognition\provenance.json" />
       <None Update="Fixtures\Ui\*.png" CopyToOutputDirectory="PreserveNewest" />
+      <None Update="Fixtures\Ui\party-name-history-0550.json" CopyToOutputDirectory="PreserveNewest" />
       <None Update="Fixtures\Pathing\*.json" CopyToOutputDirectory="PreserveNewest" />
       <None Update="Fixtures\Combat\*.json" CopyToOutputDirectory="PreserveNewest" />
       <None Update="Fixtures\Combat\*.png" CopyToOutputDirectory="PreserveNewest" />

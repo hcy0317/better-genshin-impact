@@ -1,0 +1,276 @@
+{
+  "source": {
+    "run": "50308b2c-5283-4d6e-b25b-991ae0b25afa",
+    "sequence": 14661,
+    "sha256": "CB8AF5C267F0F9DC613577801107E3B1866C1D1349937BF07C1B3BD7131F39D7",
+    "control": "historical0550-currentConfig-not-exact-runtime-replay"
+  },
+  "model": 8,
+  "provider": "CPU",
+  "rawTotal": 37,
+  "recordedRows": [
+    {
+      "Text": "岩",
+      "X": 71,
+      "Y": 98,
+      "Width": 23,
+      "Height": 24,
+      "Kept": true
+    },
+    {
+      "Text": "风",
+      "X": 71,
+      "Y": 271,
+      "Width": 26,
+      "Height": 24,
+      "Kept": true
+    },
+    {
+      "Text": "物",
+      "X": 89,
+      "Y": 446,
+      "Width": 34,
+      "Height": 27,
+      "Kept": true
+    },
+    {
+      "Text": "探索",
+      "X": 68,
+      "Y": 619,
+      "Width": 57,
+      "Height": 31,
+      "Kept": true
+    },
+    {
+      "Text": "拾取",
+      "X": 27,
+      "Y": 793,
+      "Width": 44,
+      "Height": 19,
+      "Kept": false
+    },
+    {
+      "Text": "风队情",
+      "X": 65,
+      "Y": 788,
+      "Width": 67,
+      "Height": 40,
+      "Kept": true
+    },
+    {
+      "Text": "O",
+      "X": 145,
+      "Y": 797,
+      "Width": 12,
+      "Height": 9,
+      "Kept": false
+    },
+    {
+      "Text": "激约",
+      "X": 153,
+      "Y": 794,
+      "Width": 33,
+      "Height": 16,
+      "Kept": false
+    },
+    {
+      "Text": "心钓鱼",
+      "X": 193,
+      "Y": 794,
+      "Width": 51,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "[05:54:02 INF",
+      "X": 26,
+      "Y": 833,
+      "Width": 95,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "22.40",
+      "X": 54,
+      "Y": 825,
+      "Width": 35,
+      "Height": 7,
+      "Kept": true
+    },
+    {
+      "Text": "开始尝试识别摩拉",
+      "X": 128,
+      "Y": 833,
+      "Width": 100,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "05:54:05",
+      "X": 28,
+      "Y": 849,
+      "Width": 64,
+      "Height": 12,
+      "Kept": false
+    },
+    {
+      "Text": "INE",
+      "X": 92,
+      "Y": 848,
+      "Width": 28,
+      "Height": 12,
+      "Kept": true
+    },
+    {
+      "Text": "通知发送成功：当前摩拉如图",
+      "X": 129,
+      "Y": 846,
+      "Width": 158,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "05:54:05",
+      "X": 28,
+      "Y": 863,
+      "Width": 62,
+      "Height": 12,
+      "Kept": false
+    },
+    {
+      "Text": "INF",
+      "X": 90,
+      "Y": 860,
+      "Width": 32,
+      "Height": 16,
+      "Kept": true
+    },
+    {
+      "Text": "成功识别到摩拉数值",
+      "X": 127,
+      "Y": 858,
+      "Width": 120,
+      "Height": 19,
+      "Kept": false
+    },
+    {
+      "Text": "[05:54:09",
+      "X": 27,
+      "Y": 877,
+      "Width": 62,
+      "Height": 12,
+      "Kept": false
+    },
+    {
+      "Text": "开始执行普道",
+      "X": 129,
+      "Y": 875,
+      "Width": 69,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "[05:54:09",
+      "X": 27,
+      "Y": 891,
+      "Width": 62,
+      "Height": 12,
+      "Kept": false
+    },
+    {
+      "Text": "[05:54:09",
+      "X": 27,
+      "Y": 905,
+      "Width": 64,
+      "Height": 12,
+      "Kept": false
+    },
+    {
+      "Text": "WRN",
+      "X": 93,
+      "Y": 906,
+      "Width": 24,
+      "Height": 9,
+      "Kept": true
+    },
+    {
+      "Text": "可选路线目录",
+      "X": 127,
+      "Y": 903,
+      "Width": 72,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "线/清怪",
+      "X": 24,
+      "Y": 917,
+      "Width": 47,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "[05:54:09 INF]正在尝试切换至矿物",
+      "X": 26,
+      "Y": 932,
+      "Width": 214,
+      "Height": 13,
+      "Kept": false
+    },
+    {
+      "Text": "[05:54:09 INF]",
+      "X": 26,
+      "Y": 945,
+      "Width": 97,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "尝试切换至队伍：矿物",
+      "X": 126,
+      "Y": 945,
+      "Width": 127,
+      "Height": 15,
+      "Kept": false
+    },
+    {
+      "Text": "[05:54:20 INF]",
+      "X": 25,
+      "Y": 960,
+      "Width": 100,
+      "Height": 14,
+      "Kept": false
+    },
+    {
+      "Text": "切换队伍，当前队伍名称：水，使用正则表达式规则进行模糊匹配",
+      "X": 128,
+      "Y": 959,
+      "Width": 354,
+      "Height": 15,
+      "Kept": false
+    }
+  ],
+  "omittedNonTitleRows": 7,
+  "omissionReason": "Omitted rows have X>=200 and fail original title X>35 && X<100 filter",
+  "delete": [
+    628,
+    1000,
+    40,
+    40
+  ],
+  "roi": [
+    0,
+    80,
+    668,
+    920
+  ],
+  "line": {
+    "band": [
+      35,
+      446,
+      88,
+      27
+    ],
+    "text": "矿物"
+  }
+}
