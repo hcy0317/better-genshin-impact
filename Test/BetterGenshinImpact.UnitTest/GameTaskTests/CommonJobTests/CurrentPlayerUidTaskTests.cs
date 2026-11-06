@@ -252,6 +252,41 @@ public class CurrentPlayerUidTaskTests
         Assert.Equal(1, io.EscapeInputs);
     }
 
+    [Fact]
+    public async Task ReadonlySceneWorkDoesNotAddResponseSleepsBetweenSevenFreshCaptures()
+    {
+        var io = new FakeIo { MeasuredLatency = true, ExtraNonconfirmingWorldFrames = 1 };
+        Assert.Equal(123456789, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Equal(7, io.Captures);
+        Assert.Equal(1, io.MenuInputs);
+        Assert.Equal(1, io.EscapeInputs);
+        Assert.Equal(2, io.ConfirmedWorldCaptures);
+        Assert.True(io.Clock.GetUtcNow() - io.Started < TimeSpan.FromSeconds(5));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PotentialOwnedEscapeKeepsResponseAfterReadReturnWithoutAppliedReceipt(bool noNativeSubmit)
+    {
+        var io = new FakeIo { MeasuredLatency = true, HideOwnedEscapeReceipt = true, DropOwnedEscapeSubmit = noNativeSubmit };
+        var result = await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None);
+        Assert.Equal(noNativeSubmit ? 0 : 123456789, result);
+        Assert.NotEmpty(io.PostInputCaptureGapsMs);
+        Assert.All(io.PostInputCaptureGapsMs, gap => Assert.True(gap >= 60, $"post-input capture gap {gap:F3}ms"));
+        Assert.InRange(io.EscapeInputs, 0, 1);
+    }
+
+    [Fact]
+    public async Task PotentialFallbackEscapeKeepsResponseAfterActReturnEvenWhenNotApplied()
+    {
+        var io = new FakeIo { MeasuredLatency = true, Menu = true, ExtraMenuReadMs = 300, HideFallbackActReceipt = true };
+        Assert.Equal(123456789, await new CurrentPlayerUidTask(io, io.Clock).Start(CancellationToken.None));
+        Assert.Single(io.PostInputCaptureGapsMs);
+        Assert.True(io.PostInputCaptureGapsMs[0] >= 60);
+        Assert.Equal(1, io.EscapeInputs);
+    }
+
     private sealed class FakeIo : ICurrentPlayerUidIo
     {
         internal FakeTimeProvider Clock { get; } = new();
@@ -260,9 +295,12 @@ public class CurrentPlayerUidTaskTests
         private long _sequence;
         internal bool Menu, BlockReturn, BlockMenu, MeasuredLatency;
         private bool _openingFramePending;
-        internal int ExtraOpeningFrames;
+        internal int ExtraOpeningFrames, ExtraNonconfirmingWorldFrames, ConfirmedWorldCaptures;
         internal int WorldCaptureMs = 600, ExtraMenuReadMs;
         internal bool ForeignWorld, ReplayWorld;
+        internal bool HideOwnedEscapeReceipt, DropOwnedEscapeSubmit, HideFallbackActReceipt;
+        internal List<double> PostInputCaptureGapsMs { get; } = new();
+        private long? _inputReturnedAt;
         private UiSnapshot? _lastWorld;
         private readonly Guid _foreignSession = Guid.NewGuid();
         internal int MenuInputs, EscapeInputs, WorldCapturesAfterReturn, Captures, MenuOcrReads;
@@ -273,12 +311,16 @@ public class CurrentPlayerUidTaskTests
         internal FakeIo() { Started = Clock.GetUtcNow(); }
         public UiSnapshot Capture()
         {
+            if (_inputReturnedAt is { } returned) { PostInputCaptureGapsMs.Add(Clock.GetElapsedTime(returned).TotalMilliseconds); _inputReturnedAt = null; }
             var source = new CaptureFrameStamp(_session, ++_sequence, Clock.GetTimestamp(), Clock.TimestampFrequency, Clock.GetUtcNow());
             Clock.Advance(TimeSpan.FromMilliseconds(MeasuredLatency ? (_returned && !Menu ? WorldCaptureMs : 600) : 20));
             if (_openingFramePending) { if (ExtraOpeningFrames > 0) ExtraOpeningFrames--; else { _openingFramePending = false; Menu = !BlockMenu; } return WorldOpeningFrame(source); }
             Captures++;
             if (_returned && !Menu) WorldCapturesAfterReturn++;
-            var scene = new UiSnapshot(_sequence) { MainHud = !Menu, MenuBack = Menu }.WithSource(source, Clock, UiSnapshot.RecoveryMaximumAge);
+            var confirmingWorld = !Menu;
+            if (_returned && !Menu && ExtraNonconfirmingWorldFrames > 0) { ExtraNonconfirmingWorldFrames--; confirmingWorld = false; }
+            if (_returned && confirmingWorld) ConfirmedWorldCaptures++;
+            var scene = new UiSnapshot(_sequence) { MainHud = confirmingWorld, MenuBack = Menu }.WithSource(source, Clock, UiSnapshot.RecoveryMaximumAge);
             if (_returned && !Menu)
             {
                 if (ReplayWorld && _lastWorld != null) return _lastWorld;
@@ -325,10 +367,15 @@ public class CurrentPlayerUidTaskTests
                 UiOperation.Current!.Token.ThrowIfCancellationRequested();
                 MenuInputs++; Menu = !BlockMenu; if (MeasuredLatency) { Menu = false; _openingFramePending = true; }
                 Clock.Advance(TimeSpan.FromMilliseconds(60));
+                _inputReturnedAt = Clock.GetTimestamp();
                 return frame with { SubmittedInput = UiAction.OpenMenu };
             }
-            if (input?.Action == UiAction.Escape && SubmitEscape(UiOperation.Current!.Token))
-                return frame with { SubmittedInput = UiAction.Escape };
+            if (input?.Action == UiAction.Escape)
+            {
+                if (!DropOwnedEscapeSubmit) SubmitEscape(UiOperation.Current!.Token);
+                _inputReturnedAt = Clock.GetTimestamp();
+                return HideOwnedEscapeReceipt ? frame : frame with { SubmittedInput = UiAction.Escape };
+            }
             return frame;
         }
         public Task<bool> OpenMenuAsync(UiSnapshot observed, CancellationToken ct)
@@ -336,7 +383,7 @@ public class CurrentPlayerUidTaskTests
         private bool SubmitEscape(CancellationToken ct)
         { ct.ThrowIfCancellationRequested(); EscapeInputs++; if (!BlockReturn) { Menu = false; _returned = true; } Clock.Advance(TimeSpan.FromMilliseconds(60)); return true; }
         public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
-        { ct.ThrowIfCancellationRequested(); if (MeasuredLatency) Clock.Advance(TimeSpan.FromMilliseconds(600)); return Task.FromResult(SubmitEscape(ct)); }
+        { ct.ThrowIfCancellationRequested(); if (MeasuredLatency) Clock.Advance(TimeSpan.FromMilliseconds(600)); var submitted = SubmitEscape(ct); _inputReturnedAt = Clock.GetTimestamp(); return Task.FromResult(HideFallbackActReceipt ? false : submitted); }
         public Task DelayAsync(int milliseconds, CancellationToken ct)
         { ct.ThrowIfCancellationRequested(); Clock.Advance(TimeSpan.FromMilliseconds(milliseconds)); return Task.CompletedTask; }
     }

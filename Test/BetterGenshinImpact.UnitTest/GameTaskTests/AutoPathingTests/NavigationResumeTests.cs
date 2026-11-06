@@ -64,6 +64,95 @@ public class NavigationResumeTests
 
     [Theory]
     [InlineData("completed")]
+    [InlineData("parent-tight")]
+    [InlineData("action-expired")]
+    [InlineData("action-failed")]
+    [InlineData("cancelled")]
+    [InlineData("no-direct-arrival")]
+    [InlineData("transformed-arrival")]
+    [InlineData("authored-flight")]
+    public async Task PublicPathingHandsLateReachedNavigationToTheActionsOriginalOwner(string scenario)
+    {
+        using var modelData = new ModelDataFixture();
+        using var cancellation = new CancellationTokenSource();
+        var replay = new PathReplay(cancellation.Token);
+        replay.PositionAt = _ => new Point2f(100, 100);
+        replay.MotionAt = _ => scenario == "authored-flight" ? BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Fly : BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Normal;
+        var actionCalls = 0;
+        replay.AfterDelay = milliseconds =>
+        {
+            if (actionCalls != 0 || milliseconds != 1000) return;
+            if (scenario == "no-direct-arrival") replay.Direct = false;
+            if (scenario == "transformed-arrival") replay.Transformed = true;
+        };
+        DateTimeOffset? navigationStarted = null;
+        double navigationSeconds = 0;
+        var actionOwnerBudget = TimeSpan.Zero;
+        var scene = new PathExecutor.PathingSceneIo
+        {
+            Prepare = (_, _) => Task.FromResult(true),
+            Convert = (point, map) => new WaypointForTrack(point, map, value => value),
+            Teleport = (_, _) => Task.CompletedTask,
+            LowHp = (_, point) =>
+            {
+                if (point.Id == 2)
+                {
+                    navigationStarted = replay.Clock.GetUtcNow();
+                    replay.Clock.Advance(TimeSpan.FromSeconds(scenario == "authored-flight" ? 239.5 : 238.5));
+                }
+                return false;
+            },
+            RecoverAtStatue = _ => throw new InvalidOperationException("No healing requested"),
+            ReadHealing = frame => new(frame.FrameStamp, true, false),
+            MacroFactory = () => null,
+            RunAction = async (_, token) =>
+            {
+                actionCalls++;
+                navigationSeconds = (replay.Clock.GetUtcNow() - navigationStarted!.Value).TotalSeconds;
+                return await BetterGenshinImpact.GameTask.Common.Ui.UiOperation.RunAsync(
+                    "recorded-path-fragment", TimeSpan.FromSeconds(9.25), token, async action =>
+                    {
+                        actionOwnerBudget = action.Remaining;
+                        await replay.Io.Delay(scenario == "action-expired" ? 10000 : 1000, action.Token);
+                        if (scenario == "cancelled") cancellation.Cancel();
+                        action.Check();
+                        if (scenario == "action-failed") throw new InvalidOperationException("Original action failed");
+                        return CombatScriptExecutor.FromFlowResult(CombatFlowResult.Succeeded);
+                    }, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, replay.Clock);
+            }
+        };
+        var subject = new PathExecutor(cancellation.Token, replay.Io, sceneIo: scene)
+            { PartyConfig = new() { MainAvatarIndex = "1" } };
+        var route = new PathingTask { FileName = "late-original-action", FullPath = "late-original-action.json", Positions =
+        [
+            new() { Id = 1, X = 100, Y = 100, Type = "teleport", MoveMode = "walk" },
+            new() { Id = 2, X = 100, Y = 100, Type = "target", MoveMode = scenario == "authored-flight" ? "fly" : "walk", Action = "combat_script", ActionParams = "钟离 wait(1)" }
+        ] };
+        using var parent = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin(
+            "original-path-parent", scenario == "parent-tight" ? TimeSpan.FromSeconds(240) : TimeSpan.FromMinutes(10), clock: replay.Clock);
+
+        var error = await Record.ExceptionAsync(() => subject.Pathing(route));
+
+        Assert.True(actionCalls == 1, $"actionCalls={actionCalls} navigationSeconds={navigationSeconds} error={error}");
+        Assert.InRange(navigationSeconds, 239.49, 239.75);
+        Assert.Same(parent, BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current);
+        if (scenario != "completed")
+        {
+            Assert.NotNull(error);
+            Assert.False(subject.SuccessEnd);
+            Assert.False(subject.ActionSettlements.ContainsKey(1));
+            if (scenario is "parent-tight" or "no-direct-arrival" or "transformed-arrival" or "authored-flight")
+                Assert.InRange(actionOwnerBudget.TotalSeconds, 0, 1.51);
+            return;
+        }
+        Assert.Null(error);
+        Assert.Equal(TimeSpan.FromSeconds(9.25), actionOwnerBudget);
+        Assert.True(subject.SuccessEnd);
+        Assert.Equal(CombatExecutionKind.Completed, subject.ActionSettlements[1].Outcome.Kind);
+    }
+
+    [Theory]
+    [InlineData("completed")]
     [InlineData("skipped")]
     [InlineData("foreign-healing")]
     [InlineData("digest-changed")]
@@ -76,6 +165,9 @@ public class NavigationResumeTests
     [InlineData("direct-stale-after-await")]
     [InlineData("direct-foreign-frame")]
     [InlineData("legacy-safe")]
+    [InlineData("legacy-late-action")]
+    [InlineData("legacy-late-parent-tight")]
+    [InlineData("legacy-late-no-direct")]
     [InlineData("legacy-owner-expired")]
     public async Task PublicPathingResumesOnlyNavigationAfterConsumedMacroAndConfirmedHealing(string scenario)
     {
@@ -90,12 +182,24 @@ public class NavigationResumeTests
         DateTimeOffset? originalCurrentDeadline = null;
         DateTimeOffset? returnedCurrentDeadline = null;
         var legacy = scenario.StartsWith("legacy-", StringComparison.Ordinal);
+        var lateLegacyAction = scenario.StartsWith("legacy-late-", StringComparison.Ordinal);
+        var completedLegacyActions = 0;
+        var lateLegacyArrivalSettled = false;
+        var legacyActionBudget = TimeSpan.Zero;
+        var legacyActionNavigationRemaining = TimeSpan.Zero;
         var directCounter = scenario is "cache-near-direct-far" or "direct-stale-after-await" or "direct-foreign-frame";
         var position = new Point2f(100,100);
         var movementTarget = position;
         replay.PositionAt = _ => position;
         replay.AfterDelay = milliseconds =>
         {
+            if (lateLegacyAction && healed && milliseconds == 1000 && macroCalls == 0 && originalCurrentDeadline is { } original &&
+                Math.Abs(position.X - 120) + Math.Abs(position.Y - 100) < 2)
+            {
+                lateLegacyArrivalSettled = true;
+                var late = original - replay.Clock.GetUtcNow() - TimeSpan.FromMilliseconds(500);
+                if (late > TimeSpan.Zero) replay.Clock.Advance(late);
+            }
             var forward = replay.Inputs.FirstOrDefault(input => input.Action.ToString() == "MoveForward");
             if (forward.Action.ToString() != "MoveForward" || !replay.Io.IsDown(forward.Action) || healed && scenario == "unreachable") return;
             var delta = movementTarget - position;
@@ -121,7 +225,7 @@ public class NavigationResumeTests
             {
                 if (healed && teleports > 1 && scenario == "direct-stale-after-await") replay.Clock.Advance(TimeSpan.FromSeconds(3));
                 if (healed && teleports > 1 && scenario == "direct-foreign-frame") frame.FrameStamp = frame.FrameStamp with { SessionId=Guid.NewGuid() };
-                return (await replay.Io.Locate(frame,point)) with { Point=healed && teleports > 1 && directCounter && scenario != "cache-near-direct-far" ? new((float)point.X,(float)point.Y) : position, IsDirect=true, Source=PathPositionSource.Direct };
+                return (await replay.Io.Locate(frame,point)) with { Point=healed && teleports > 1 && directCounter && scenario != "cache-near-direct-far" ? new((float)point.X,(float)point.Y) : position, IsDirect=!(scenario == "legacy-late-no-direct" && lateLegacyArrivalSettled && point.Id == 3), Source=PathPositionSource.Direct };
             }
         };
         var scene = new PathExecutor.PathingSceneIo
@@ -131,7 +235,15 @@ public class NavigationResumeTests
             Teleport = (point,_) => { teleports++; position=new((float)point.X,(float)point.Y); if (scenario == "legacy-owner-expired" && teleports > 1) replay.Clock.Advance(TimeSpan.FromSeconds(25)); return Task.CompletedTask; },
             LowHp = (_,point) =>
             {
-                if (point.Id == 3 && legacy && healed) returnedCurrentDeadline = replay.Clock.GetUtcNow() + BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!.Remaining;
+                if (point.Id == 3 && legacy && healed)
+                {
+                    returnedCurrentDeadline = replay.Clock.GetUtcNow() + BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!.Remaining;
+                    if (lateLegacyAction)
+                    {
+                        var prepare = returnedCurrentDeadline.Value - replay.Clock.GetUtcNow() - TimeSpan.FromSeconds(25);
+                        if (prepare > TimeSpan.Zero) replay.Clock.Advance(prepare);
+                    }
+                }
                 if (point.Id != 3 || (scenario == "tickets-exhausted" ? recoveries >= 3 : healed)) return false;
                 if (legacy)
                 {
@@ -150,10 +262,23 @@ public class NavigationResumeTests
                 return Task.CompletedTask;
             },
             ReadHealing = frame => new(scenario == "foreign-healing" ? frame.FrameStamp with { SessionId = Guid.NewGuid() } : frame.FrameStamp, true, false),
-            RunAction = (point,_) =>
+            RunAction = async (point, token) =>
             {
                 macroCalls++;
-                return Task.FromResult(CombatScriptExecutor.FromFlowResult(scenario == "skipped" && point.Id == 2 ? CombatFlowResult.Skipped : CombatFlowResult.Succeeded));
+                if (lateLegacyAction && point.Id == 3)
+                {
+                    legacyActionNavigationRemaining = originalCurrentDeadline!.Value - replay.Clock.GetUtcNow();
+                    return await BetterGenshinImpact.GameTask.Common.Ui.UiOperation.RunAsync(
+                        "legacy-original-fragment", TimeSpan.FromSeconds(9.25), token, async action =>
+                        {
+                            legacyActionBudget = action.Remaining;
+                            await replay.Io.Delay(1000, action.Token);
+                            action.Check();
+                            completedLegacyActions++;
+                            return CombatScriptExecutor.FromFlowResult(CombatFlowResult.Succeeded);
+                        }, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, replay.Clock);
+                }
+                return CombatScriptExecutor.FromFlowResult(scenario == "skipped" && point.Id == 2 ? CombatFlowResult.Skipped : CombatFlowResult.Succeeded);
             },
             MacroFactory = () => null
         };
@@ -163,22 +288,41 @@ public class NavigationResumeTests
         [
             new() { Id=1, X=100,Y=100, Type="teleport",MoveMode="walk" },
             new() { Id=2, X=110,Y=100, Type="path",MoveMode=scenario == "unsupported-jump" ? "jump" : "walk",Action=legacy ? "" : "combat_script",ActionParams=legacy ? "" : "钟离 d(0.2),e" },
-            new() { Id=3, X=120,Y=100, Type="path",MoveMode="walk" },
+            new() { Id=3, X=120,Y=100, Type=lateLegacyAction ? "target" : "path",MoveMode="walk",Action=lateLegacyAction ? "combat_script" : "",ActionParams=lateLegacyAction ? "钟离 wait(1)" : "" },
             new() { Id=4, X=130,Y=100, Type="path",MoveMode="walk",Action="combat_script",ActionParams="attack(0.1)" }
         ] };
-        using var parent = scenario == "parent-expired" ? BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin("navigation-parent", TimeSpan.FromSeconds(10), clock: replay.Clock) : null;
-        if (scenario is not ("completed" or "skipped" or "legacy-safe"))
+        using var parent = scenario is "parent-expired" or "legacy-late-parent-tight"
+            ? BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin("navigation-parent",
+                TimeSpan.FromSeconds(scenario == "legacy-late-parent-tight" ? 240 : 10), clock: replay.Clock) : null;
+        if (scenario is not ("completed" or "skipped" or "legacy-safe" or "legacy-late-action"))
         {
             var error = await Assert.ThrowsAnyAsync<Exception>(() => subject.Pathing(route));
             Assert.DoesNotContain("Application host", error.ToString());
             Assert.DoesNotContain("NullReferenceException", error.ToString());
             Assert.False(subject.SuccessEnd);
-            Assert.Equal(legacy ? 0 : 1, macroCalls);
+            Assert.Equal(lateLegacyAction ? 1 : legacy ? 0 : 1, macroCalls);
+            if (lateLegacyAction)
+            {
+                Assert.Equal(0, completedLegacyActions);
+                Assert.False(subject.ActionSettlements.ContainsKey(2));
+                Assert.Equal(originalCurrentDeadline, returnedCurrentDeadline);
+                Assert.InRange(legacyActionNavigationRemaining.TotalSeconds, .49, .75);
+                Assert.InRange(legacyActionBudget.TotalSeconds, 0, .75);
+            }
             Assert.Equal(scenario == "tickets-exhausted" ? 3 : 1, recoveries);
             if (scenario == "tickets-exhausted") Assert.Equal(3, teleports); // no third projection ticket
             return;
         }
-        await subject.Pathing(route);
+        var traversalError = await Record.ExceptionAsync(() => subject.Pathing(route));
+        if (lateLegacyAction)
+        {
+            Assert.Equal(1, completedLegacyActions);
+            Assert.Equal(TimeSpan.FromSeconds(9.25), legacyActionBudget);
+            Assert.InRange(legacyActionNavigationRemaining.TotalSeconds, .49, .75);
+            Assert.True(traversalError == null, $"legacy completed={completedLegacyActions} currentSettlement={subject.ActionSettlements.ContainsKey(2)} error={traversalError}");
+            Assert.Equal(CombatExecutionKind.Completed, subject.ActionSettlements[2].Outcome.Kind);
+        }
+        Assert.Null(traversalError);
         Assert.True(subject.SuccessEnd);
         if (legacy) Assert.Equal(originalCurrentDeadline, returnedCurrentDeadline);
         if (!legacy)
@@ -187,7 +331,7 @@ public class NavigationResumeTests
             Assert.Equal(scenario == "skipped" ? CombatExecutionKind.Skipped : CombatExecutionKind.Completed, subject.ActionSettlements[1].Outcome.Kind);
         }
         Assert.True(healed);
-        Assert.Equal(legacy ? 1 : 2, macroCalls); // original prefix and original suffix, no prefix replay
+        Assert.Equal(lateLegacyAction ? 2 : legacy ? 1 : 2, macroCalls); // original prefix and original suffix, no prefix replay
         Assert.Equal(2, teleports); // original route entry only, initial and original-entry projection
         Assert.Equal(legacy ? "" : "钟离 d(0.2),e", route.Positions[1].ActionParams);
         Assert.Equal(legacy ? "" : "combat_script", route.Positions[1].Action);
