@@ -9,6 +9,110 @@ using System.Threading.Tasks;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.Model.GameUI
 {
+    public class GridScrollMotionTests
+    {
+        [Fact]
+        public void HighConfidenceVerticalTranslationDoesNotSignalBottom()
+        {
+            using var before = CreateTexture(104729);
+            using var after = Translate(before, 0, 16);
+            using var beforeFloat = new Mat();
+            using var afterFloat = new Mat();
+            before.ConvertTo(beforeFloat, MatType.CV_32FC1);
+            after.ConvertTo(afterFloat, MatType.CV_32FC1);
+            using var window = new Mat();
+            var measured = Cv2.PhaseCorrelate(beforeFloat, afterFloat, window, out var response);
+            Assert.True(response > 0.95, $"Fixture must have high real correlation: response={response:R}");
+            Assert.InRange(measured.Y, 15.9, 16.1);
+            Assert.True(GridScroller.IsScrolling(before, after, out var shift),
+                $"Actual vertical movement must not signal bottom: response={response:R}, shift={measured}, actual={shift}");
+        }
+
+        [Fact]
+        public void HighConfidenceUpwardTranslationAlsoCountsAsMovement()
+        {
+            using var before = CreateTexture(104729);
+            using var after = Translate(before, 0, -16);
+            Assert.True(GridScroller.IsScrolling(before, after, out var shift));
+            Assert.InRange(shift.Y, -16.1, -15.9);
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(16)]
+        [InlineData(-16)]
+        public void StationaryAndHorizontalFramesDoNotSignalVerticalScroll(int x)
+        {
+            using var before = CreateTexture(104729);
+            using var after = Translate(before, x, 0);
+            Assert.False(GridScroller.IsScrolling(before, after, out _));
+        }
+
+        [Theory]
+        [InlineData(0.25)]
+        [InlineData(-0.25)]
+        public void SubPixelVerticalChangeDoesNotPassOnePixelMovementGate(double y)
+        {
+            using var before = CreateTexture(104729);
+            using var after = Translate(before, 0, y, InterpolationFlags.Linear);
+            Assert.False(GridScroller.IsScrolling(before, after, out var shift));
+            Assert.InRange(Math.Abs(shift.Y), 0, 1);
+        }
+
+        [Fact]
+        public void LowConfidenceUnrelatedTexturesDoNotTurnLargeShiftIntoMovement()
+        {
+            using var before = CreateTexture(104729);
+            using var after = CreateTexture(130363);
+            using var beforeFloat = new Mat();
+            using var afterFloat = new Mat();
+            before.ConvertTo(beforeFloat, MatType.CV_32FC1);
+            after.ConvertTo(afterFloat, MatType.CV_32FC1);
+            using var window = new Mat();
+            var measured = Cv2.PhaseCorrelate(beforeFloat, afterFloat, window, out var response);
+            Assert.True(response < 0.5, $"Fixture must have low real correlation: {response:R}");
+            Assert.True(Math.Abs(measured.Y) > 1, $"Fixture must expose the unsafe large-shift OR: {measured}");
+            Assert.False(GridScroller.IsScrolling(before, after, out _));
+        }
+
+        [Fact]
+        public void UniformFramesDoNotProvideMovementEvidence()
+        {
+            using var blank = new Mat(256, 256, MatType.CV_8UC1, Scalar.Black);
+            Assert.False(GridScroller.IsScrolling(blank, blank, out _));
+        }
+
+        [Theory]
+        [InlineData(double.NaN)]
+        [InlineData(double.PositiveInfinity)]
+        [InlineData(double.NegativeInfinity)]
+        public void NonFiniteImageDataDoesNotBecomeMovement(double value)
+        {
+            using var before = new Mat(256, 256, MatType.CV_32FC1, Scalar.All(value));
+            using var after = new Mat(256, 256, MatType.CV_32FC1, Scalar.All(value));
+            Assert.False(GridScroller.IsScrolling(before, after, out _));
+        }
+
+        private static Mat CreateTexture(int seed)
+        {
+            var result = new Mat(256, 256, MatType.CV_8UC1);
+            var pixels = new byte[256 * 256];
+            new Random(seed).NextBytes(pixels);
+            System.Runtime.InteropServices.Marshal.Copy(pixels, 0, result.Data, pixels.Length);
+            return result;
+        }
+
+        private static Mat Translate(Mat source, double x, double y, InterpolationFlags interpolation = InterpolationFlags.Nearest)
+        {
+            using var transform = Mat.Eye(2, 3, MatType.CV_64FC1).ToMat();
+            transform.Set(0, 2, x);
+            transform.Set(1, 2, y);
+            var result = new Mat();
+            Cv2.WarpAffine(source, result, transform, source.Size(), interpolation, BorderTypes.Wrap);
+            return result;
+        }
+    }
+
     [Collection("Init Collection")]
     public class GridScreenTests
     {

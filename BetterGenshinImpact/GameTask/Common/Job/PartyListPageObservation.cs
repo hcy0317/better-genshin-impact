@@ -7,11 +7,63 @@ using OpenCvSharp;
 namespace BetterGenshinImpact.GameTask.Common.Job;
 
 internal enum PartyListEnd { Unknown, More, End }
+internal readonly record struct PartyListRow(string Text, Rect Bounds);
+internal readonly record struct PartyListDragPlan(CaptureFrameStamp Source, Point2d Start, Point2d Finish, Rect Viewport, double ContentAdvance);
+
 internal sealed record PartyListPageObservation(CaptureFrameStamp Source, PartyListEnd End, Rect Track, Rect Thumb, string NamesSignature)
 {
+    internal IReadOnlyList<PartyListRow> Rows { get; init; } = Array.Empty<PartyListRow>();
+
+    internal bool TryPlanPage(Rect content, out PartyListDragPlan plan)
+    {
+        plan = default;
+        if (End != PartyListEnd.More || !Source.IsKnown || Thumb.Width <= 0 || Thumb.Height <= 0 ||
+            Thumb.Height >= Track.Height || content.Width <= 0) return false;
+        var top = Math.Max(Track.Top, content.Top); var bottom = Math.Min(Track.Bottom, content.Bottom);
+        if (bottom <= top) return false;
+        var viewport = new Rect(content.X, top, content.Width, bottom - top);
+        var labels = Rows.Where(r => r.Bounds.Width > 0 && r.Bounds.Height > 0 && r.Bounds.X >= content.X &&
+            r.Bounds.Right <= content.Right && r.Bounds.Top >= top && r.Bounds.Bottom <= bottom && !string.IsNullOrWhiteSpace(r.Text))
+            .Select(r => r.Bounds).OrderBy(r => r.Y).ToArray();
+        var physicalRows = new List<Rect>();
+        foreach (var box in labels)
+        {
+            if (physicalRows.Count == 0 || box.Top >= physicalRows[^1].Bottom) { physicalRows.Add(box); continue; }
+            var previous = physicalRows[^1];
+            var overlap = Math.Min(previous.Bottom, box.Bottom) - Math.Max(previous.Top, box.Top);
+            if (overlap * 2 < Math.Min(previous.Height, box.Height) || box.Top - previous.Top > Math.Min(previous.Height, box.Height) / 2d)
+                return false; // Partial/ambiguous vertical overlap is not another confirmed physical row.
+            var left = Math.Min(previous.X, box.X); var rowTop = Math.Min(previous.Y, box.Y);
+            physicalRows[^1] = new Rect(left, rowTop, Math.Max(previous.Right, box.Right) - left, Math.Max(previous.Bottom, box.Bottom) - rowTop);
+        }
+        var rows = physicalRows.ToArray();
+        if (rows.Length < 2) return false;
+        var labelHeight = rows.Max(r => r.Height);
+        // Separators and missed OCR rows can create larger gaps; confirmed row anchors still bound overlap.
+        var gaps = rows.Zip(rows.Skip(1), (a, b) => b.Y - a.Y).Where(y => y >= labelHeight * 2).ToArray();
+        if (gaps.Length == 0) return false;
+        var pitch = gaps.Min();
+        if (viewport.Height <= 2 * pitch) return false;
+        // Keep the last two confirmed rows fully visible after the move, including one label-height margin.
+        var contentAdvance = Math.Min(viewport.Height - 2d * pitch, rows[^2].Top - top - labelHeight);
+        if (contentAdvance < pitch / 2d) return false;
+        var thumbAdvance = Math.Round(contentAdvance * Thumb.Height / viewport.Height, MidpointRounding.AwayFromZero);
+        var targetTop = Math.Min(Track.Bottom - Thumb.Height, Thumb.Top + thumbAdvance);
+        if (targetTop - Thumb.Top <= 2 || targetTop < Track.Top) return false;
+        var x = Thumb.X + Thumb.Width / 2d; var y = Thumb.Y + Thumb.Height / 2d;
+        plan = new(Source, new Point2d(x, y), new Point2d(x, targetTop + Thumb.Height / 2d), viewport,
+            (targetTop - Thumb.Top) * viewport.Height / (double)Thumb.Height);
+        return true;
+    }
+
     // This is the existing party scrollbar used by the original (700,125) top reset, scaled to capture pixels.
     internal static PartyListPageObservation Read(Mat image, CaptureFrameStamp source, double scale, IEnumerable<(string Text, int Y)> names)
+        => Read(image, source, scale, names.Select(n => new PartyListRow(n.Text, new Rect(0, n.Y, 0, 0))));
+
+    internal static PartyListPageObservation Read(Mat image, CaptureFrameStamp source, double scale, IEnumerable<PartyListRow> observedRows)
     {
+        var rows = observedRows.ToArray();
+        var names = rows.Select(r => (Text: r.Text, Y: r.Bounds.Y));
         var track = new Rect((int)Math.Round(694 * scale), (int)Math.Round(105 * scale),
             Math.Max(8, (int)Math.Round(16 * scale)), Math.Max(1, (int)Math.Round(850 * scale)));
         // OCR names/positions are independent evidence from scrollbar geometry.
@@ -37,7 +89,7 @@ internal sealed record PartyListPageObservation(CaptureFrameStamp Source, PartyL
         if (candidates.Count != 1) return Unknown();
         var thumb = candidates[0];
         var end = thumb.Bottom >= track.Bottom - Math.Max(4, (int)Math.Round(8 * scale)) ? PartyListEnd.End : PartyListEnd.More;
-        return new(source, end, track, thumb, namesSignature);
+        return new(source, end, track, thumb, namesSignature) { Rows = rows };
     }
 
     internal bool AdvancesFrom(PartyListPageObservation previous, long inputCompleted, TimeProvider clock) =>

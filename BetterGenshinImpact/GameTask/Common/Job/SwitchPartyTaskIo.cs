@@ -30,13 +30,58 @@ internal sealed class SwitchPartyTaskIo
     internal required Func<ImageRegion, RecognitionObject, string> OcrOne { get; init; }
     internal required Func<ImageRegion, RecognitionObject, List<Region>> OcrMany { get; init; }
     internal required Action<ImageRegion, double, double> Click { get; init; }
-    internal required Action<ImageRegion, Rect> ScrollDown { get; init; }
+    internal required Action<ImageRegion, Point2d> MovePointer { get; init; }
+    internal required Func<(Action Down, Action Up, Func<bool> Current)> BindLeftButton { get; init; }
+
+    internal async Task DragPageAsync(ImageRegion image, PartyListDragPlan plan, CancellationToken token, Action check)
+    {
+        var button = BindLeftButton();
+        void Admit()
+        {
+            token.ThrowIfCancellationRequested(); check();
+            if (!button.Current()) throw new InvalidOperationException("队伍拖动输入通道已改变");
+        }
+        Admit();
+        if (plan.Source != image.FrameStamp || !image.FrameStamp.IsFresh(Clock, UiSnapshot.RecoveryMaximumAge) ||
+            !double.IsFinite(plan.Start.X) || !double.IsFinite(plan.Start.Y) || !double.IsFinite(plan.Finish.X) ||
+            !double.IsFinite(plan.Finish.Y) || plan.Finish.X != plan.Start.X || plan.Finish.Y <= plan.Start.Y)
+            throw new InvalidOperationException("队伍拖动计划的来源或几何无效");
+        async Task Settle()
+        {
+            Admit();
+            if (UiOperation.Current is { } operation && operation.Remaining <= TimeSpan.FromMilliseconds(60))
+                throw new TimeoutException("队伍拖动的原期限不足以等待游戏响应");
+            await Delay(60, token); Admit();
+        }
+        MovePointer(image, plan.Start); Admit();
+        var held = false; Exception? failure = null;
+        try
+        {
+            Admit(); held = true; button.Down(); Admit();
+            await Settle();
+            Admit(); MovePointer(image, plan.Finish); Admit();
+            await Settle();
+        }
+        catch (Exception error) { failure = error; }
+        finally
+        {
+            if (held)
+            {
+                try { Admit(); } catch (Exception error) { failure ??= error; }
+                try { button.Up(); } catch (Exception error) { failure ??= error; }
+                try { Admit(); } catch (Exception error) { failure ??= error; }
+            }
+        }
+        if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        Admit();
+    }
     internal required Func<CancellationToken, Task> ResetTop { get; init; }
     internal required Func<int, CancellationToken, Task> Delay { get; init; }
     internal required Func<CancellationToken, Task> ReturnMain { get; init; }
     internal required Func<ImageRegion, Rect, bool> Confirm { get; init; }
     internal required Action Prepare { get; init; }
     internal required Func<bool> SameTarget { get; init; }
+    internal required Func<bool> ForegroundReady { get; init; }
     internal required Action ClearDrawings { get; init; }
     internal required Action ClearCombatScenes { get; init; }
 
@@ -52,7 +97,13 @@ internal sealed class SwitchPartyTaskIo
             Element = (image, name) => image.Find(ElementRecognition.Get(name, image)),
             OcrOne = (image, ro) => { using var result = image.Find(ro); return result.Text; },
             OcrMany = (image, ro) => image.FindMulti(ro), Click = (image, x, y) => image.ClickTo(x, y),
-            ScrollDown = (image, roi) => { image.MoveTo(roi.X + roi.Width / 2, roi.Y + roi.Height / 2); InputHub.Foreground.Mouse.VerticalScroll(-3); },
+            MovePointer = (image, point) => image.MoveTo((int)Math.Round(point.X, MidpointRounding.AwayFromZero), (int)Math.Round(point.Y, MidpointRounding.AwayFromZero)),
+            BindLeftButton = () =>
+            {
+                var mouse = InputHub.Foreground.Mouse;
+                return (() => mouse.LeftButtonDown(), () => mouse.LeftButtonUp(),
+                    () => ReferenceEquals(InputHub.Foreground.Mouse, mouse));
+            },
             ResetTop = async token =>
             {
                 await Task.Delay(50, token); GameCaptureRegion.GameRegion1080PPosClick(700, 125);
@@ -63,6 +114,7 @@ internal sealed class SwitchPartyTaskIo
             Delay = (ms, token) => TaskControl.Delay(ms, token), ReturnMain = token => new ReturnMainUiTask().Start(token),
             Confirm = (image, roi) => Bv.ClickWhiteConfirmButton(image, roi), Prepare = () => CheckAndSleep(0),
             SameTarget = () => runtime != null && ReferenceEquals(TaskContext.Instance().Runtime, runtime) && runtime.Window.Handle == window,
+            ForegroundReady = () => runtime != null && Vanara.PInvoke.User32.GetForegroundWindow() == window,
             ClearDrawings = () => TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll(),
             ClearCombatScenes = () => RunnerContext.Instance.ClearCombatScenes()
         };

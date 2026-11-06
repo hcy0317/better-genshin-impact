@@ -370,7 +370,10 @@ namespace BetterGenshinImpact.GameTask.Model.GameUI
             shift = Cv2.PhaseCorrelate(prev, next, window, out double response);
             // 相位相关性
             //logger?.LogInformation($"response={response:F3}, shift=({shift.X:F2}, {shift.Y:F2})");
-            return response > lowerThreshold && response < upperThreshold;
+            // High correlation can be a clean translation; reject stationary/highlight changes by measured Y instead.
+            // Retain upperThreshold for existing callers; it no longer excludes verified vertical movement.
+            return double.IsFinite(response) && response > lowerThreshold &&
+                double.IsFinite(shift.X) && double.IsFinite(shift.Y) && Math.Abs(shift.Y) > 1;
         }
     }
 }
