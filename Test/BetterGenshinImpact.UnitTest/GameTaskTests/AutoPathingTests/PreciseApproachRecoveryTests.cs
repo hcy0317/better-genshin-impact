@@ -10,6 +10,132 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public class PreciseApproachRecoveryTests
 {
     [Fact]
+    public async Task PostTurnPositionCrossingTargetCannotUseTheOldForwardHeading()
+    {
+        var position = new Point2f(97, 100);
+        var rotations = 0;
+        var oldHeadingForward = false;
+        var forwardHeld = false;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position };
+        replay.OnRotateUntil = () =>
+        {
+            rotations++;
+            if (rotations == 1) position = new Point2f(103, 100);
+        };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown)
+            {
+                oldHeadingForward |= rotations == 1;
+                forwardHeld = true;
+            }
+            if (type == KeyType.KeyUp && forwardHeld)
+            {
+                forwardHeld = false;
+                position = new Point2f(100, 100);
+            }
+        };
+
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+
+        Assert.False(oldHeadingForward, "The post-turn position crossed the target, but W used the previous heading.");
+        Assert.InRange(rotations, 2, 25);
+        Assert.False(forwardHeld);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task PostTurnFreshArrivalCannotSendAnUnnecessaryForwardPulse()
+    {
+        var position = new Point2f(104, 100);
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position };
+        replay.OnRotateUntil = () => position = new Point2f(101, 100);
+
+        await replay.Executor.MoveCloseTo(replay.Point("walk"));
+
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
+        Assert.Contains(1000, replay.Delays); // The original positive arrival settling still runs.
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("invalid")]
+    [InlineData("duplicate")]
+    [InlineData("swim")]
+    [InlineData("climb")]
+    public async Task PostTurnIneligibleObservationCannotGrantNearbyArrivalOrForwardInput(string kind)
+    {
+        var rotated = false;
+        var replay = new PathReplay { EmitReceipts = true,
+            PositionAt = _ => rotated ? new Point2f(101, 100) : new Point2f(104, 100),
+            MotionAt = _ => rotated && kind == "swim" ? MotionStatus.Swim :
+                rotated && kind == "climb" ? MotionStatus.Climb : MotionStatus.Normal };
+        replay.OnRotateUntil = () =>
+        {
+            rotated = true;
+            if (kind == "invalid") replay.Direct = false;
+            if (kind == "duplicate") replay.Duplicate = true;
+        };
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown);
+        Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PostTurnCancellationOrDeadlineCannotBecomeArrival(bool cancel)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var arrived = false;
+        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true,
+            PositionAt = _ => arrived ? new Point2f(100, 100) : new Point2f(104, 100) };
+        replay.OnRotateUntil = () =>
+        {
+            arrived = true;
+            if (cancel) cancellation.Cancel();
+            else replay.Clock.Advance(TimeSpan.FromMinutes(1));
+        };
+
+        var error = await Record.ExceptionAsync(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+
+        Assert.NotNull(error);
+        if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<RetryException>(error);
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown);
+        Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task PostTurnHeadingChangesStillExhaustOnlyTheOriginalTwentyFiveSteps()
+    {
+        var position = new Point2f(97, 100);
+        var rotations = 0;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position };
+        replay.OnRotateUntil = () =>
+        {
+            rotations++;
+            position = new Point2f(position.X < 100 ? 103 : 97, 100);
+        };
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+
+        Assert.Equal(25, rotations);
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
     public async Task TransformationEnteringWaterDuringRotationCannotSendGroundMovement()
     {
         var rotated = false;
@@ -405,15 +531,20 @@ public class PreciseApproachRecoveryTests
     public async Task CancellationOrParentDeadlineDuringRecoveryCleansKeysAndCannotSucceed(bool cancel)
     {
         using var cancellation = new CancellationTokenSource();
+        var recoveryEntered = false;
+        // Keep both captures of a step on the same heading. Per-frame direction
+        // changes exercise re-rotation instead of the recovery under test.
         var replay = new PathReplay(cancellation.Token) { EmitReceipts = true,
-            PositionAt = frame => new Point2f(103.94f, 100 + (frame % 4 < 2 ? .35f : -.35f)) };
+            PositionAt = _ => new Point2f(104, 100) };
         replay.OnInput = (_, _) =>
         {
             if (UiOperation.Current?.Name != "path-precise-recovery") return;
+            recoveryEntered = true;
             if (cancel) cancellation.Cancel();
             else replay.Clock.Advance(TimeSpan.FromSeconds(11));
         };
         var error = await Record.ExceptionAsync(() => replay.Executor.MoveCloseTo(replay.Point("walk")));
+        Assert.True(recoveryEntered, "The cancellation/deadline must occur inside the actual recovery.");
         Assert.NotNull(error);
         if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(error);
         else Assert.IsType<RetryException>(error);
