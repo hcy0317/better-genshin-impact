@@ -40,13 +40,22 @@ internal sealed partial class CurrentPlayerUidTask
                 var io = _createIo();
                 using var ownedIo = io as IDisposable;
                 operation.Check();
+                var inputResponse = new InputResponseClock(_clock);
                 var firstCaptureStarted = _clock.GetTimestamp();
-                var first = io.ReadUidFrame(frame =>
+                var openingRequested = false;
+                CurrentPlayerUidFrame first;
+                try
                 {
-                    operation.Check();
-                    return Usable(frame) && frame.Scene.Matches(UiTarget.Overworld) && Decode(frame, false) == 0 &&
-                        operation.Remaining > ReturnReserve ? new CurrentPlayerUidInput(UiAction.OpenMenu, frame.Scene) : null;
-                }, readMenuUid: false);
+                    first = io.ReadUidFrame(frame =>
+                    {
+                        operation.Check();
+                        var input = Usable(frame) && frame.Scene.Matches(UiTarget.Overworld) && Decode(frame, false) == 0 &&
+                            operation.Remaining > ReturnReserve ? new CurrentPlayerUidInput(UiAction.OpenMenu, frame.Scene) : null;
+                        openingRequested |= input != null;
+                        return input;
+                    }, readMenuUid: false);
+                }
+                finally { if (openingRequested) inputResponse.RecordReturned(); }
                 operation.Check();
                 if (!Usable(first)) return 0;
                 if (first.Scene.Matches(UiTarget.Overworld))
@@ -58,7 +67,7 @@ internal sealed partial class CurrentPlayerUidTask
                     await io.DelayAsync(60, operation.Token);
                 }
                 else if (!first.Scene.Matches(UiTarget.Menu)) return 0;
-                var driver = new MenuReadDriver(this, io, operation, first.Scene.Matches(UiTarget.Menu) ? first.Scene : null, firstCaptureStarted, first.Scene.SourceStamp.SessionId);
+                var driver = new MenuReadDriver(this, io, operation, first.Scene.Matches(UiTarget.Menu) ? first.Scene : null, firstCaptureStarted, first.Scene.SourceStamp.SessionId, inputResponse);
                 UiSnapshot menu;
                 try { menu = await UiTransition.WaitAsync(operation, UiTarget.Menu, driver); }
                 catch (UidObservationUnavailable)
@@ -89,15 +98,25 @@ internal sealed partial class CurrentPlayerUidTask
         catch (Exception error) when (error is not (OperationCanceledException or NormalEndException) && !ct.IsCancellationRequested) { return 0; }
     }
 
-    private Task<UiSnapshot> WaitForOwnedWorldAsync(UiOperation operation, MenuReadDriver driver)
+    private async Task<UiSnapshot> WaitForOwnedWorldAsync(UiOperation operation, MenuReadDriver driver)
     {
         driver.ObserveWorld = true;
-        return UiTransition.WaitAsync(operation, UiTarget.Overworld, driver,
+        await driver.WaitForInputResponseAsync(operation.Token);
+        operation.Check();
+        return await UiTransition.WaitAsync(operation, UiTarget.Overworld, driver,
             observed => driver.CanRequestCleanupEscape(observed) ? UiAction.Escape : null);
     }
 
+    private sealed class InputResponseClock(TimeProvider clock)
+    {
+        private long? _returnedAt;
+        internal void RecordReturned() => _returnedAt = clock.GetTimestamp();
+        internal int RemainingMilliseconds => _returnedAt is { } at
+            ? (int)Math.Ceiling(Math.Max(0, 60 - clock.GetElapsedTime(at).TotalMilliseconds)) : 0;
+    }
+
     private sealed class UidObservationUnavailable : Exception { }
-    private sealed class MenuReadDriver(CurrentPlayerUidTask owner, ICurrentPlayerUidIo io, UiOperation operation, UiSnapshot? seed, long seedCaptureStarted, Guid ownerSession) : IUiDriver
+    private sealed class MenuReadDriver(CurrentPlayerUidTask owner, ICurrentPlayerUidIo io, UiOperation operation, UiSnapshot? seed, long seedCaptureStarted, Guid ownerSession, InputResponseClock inputResponse) : IUiDriver
     {
         private UiSnapshot? _previousMenu;
         private long _captureStarted;
@@ -128,15 +147,22 @@ internal sealed partial class CurrentPlayerUidTask
                 return scene;
             }
             var previous = _previousMenu;
-            var frame = io.ReadUidFrame(current =>
+            var closingRequested = false;
+            CurrentPlayerUidFrame frame;
+            try
             {
-                operation.Check();
-                if (!owner.Usable(current) || !current.Scene.Matches(UiTarget.Menu) || !current.Scene.IsAfter(previous) ||
-                    current.Scene.SourceStamp.CapturedTimestamp <= previous.SourceStamp.CapturedTimestamp ||
-                    current.Scene.Signature != previous.Signature ||
-                    !previous.SourceStamp.IsFresh(owner._clock, UiSnapshot.RecoveryMaximumAge)) return null;
-                return TryAuthorizeEscape() ? new CurrentPlayerUidInput(UiAction.Escape, previous) : null;
-            });
+                frame = io.ReadUidFrame(current =>
+                {
+                    operation.Check();
+                    if (!owner.Usable(current) || !current.Scene.Matches(UiTarget.Menu) || !current.Scene.IsAfter(previous) ||
+                        current.Scene.SourceStamp.CapturedTimestamp <= previous.SourceStamp.CapturedTimestamp ||
+                        current.Scene.Signature != previous.Signature ||
+                        !previous.SourceStamp.IsFresh(owner._clock, UiSnapshot.RecoveryMaximumAge) || !TryAuthorizeEscape()) return null;
+                    closingRequested = true;
+                    return new CurrentPlayerUidInput(UiAction.Escape, previous);
+                });
+            }
+            finally { if (closingRequested) inputResponse.RecordReturned(); }
             operation.Check();
             if (!owner.Usable(frame) || frame.Scene.SourceStamp.SessionId != previous.SourceStamp.SessionId || !frame.Scene.Matches(UiTarget.Menu))
                 throw new UidObservationUnavailable();
@@ -146,15 +172,24 @@ internal sealed partial class CurrentPlayerUidTask
         }
         public Task DelayAsync(int milliseconds, CancellationToken ct)
         {
-            // Preserve the existing start-to-start observation cadence without adding it again after slow recognition.
+            ct.ThrowIfCancellationRequested();
+            operation.Check();
             var elapsed = owner._clock.GetElapsedTime(_captureStarted).TotalMilliseconds;
-            return io.DelayAsync((int)Math.Ceiling(Math.Max(60, milliseconds - elapsed)), ct);
+            var wait = (int)Math.Ceiling(Math.Max(Math.Max(0, milliseconds - elapsed), inputResponse.RemainingMilliseconds));
+            return wait > 0 ? io.DelayAsync(wait, ct) : Task.CompletedTask;
         }
-        public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
+        internal Task WaitForInputResponseAsync(CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            if (action != UiAction.Escape || !CanRequestCleanupEscape(observed) || !TryAuthorizeEscape()) return Task.FromResult(false);
-            return io.ActAsync(action, observed, ct);
+            var wait = inputResponse.RemainingMilliseconds;
+            return wait > 0 ? io.DelayAsync(wait, ct) : Task.CompletedTask;
+        }
+        public async Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (action != UiAction.Escape || !CanRequestCleanupEscape(observed) || !TryAuthorizeEscape()) return false;
+            try { return await io.ActAsync(action, observed, ct); }
+            finally { inputResponse.RecordReturned(); }
         }
         public void MarkInputCompleted(UiSnapshot before) => io.MarkInputCompleted(before);
         public void MarkTransitionCompleted(UiTarget target, UiSnapshot observed) => io.MarkTransitionCompleted(target, observed);
