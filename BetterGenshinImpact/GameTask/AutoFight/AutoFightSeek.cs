@@ -2422,6 +2422,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             // The horizontal run must be made of the verified health-fill color itself.
             // An unrelated long red contour plus scattered salmon highlights is not a bar.
             var requiredRun = (int)Math.Ceiling(candidate.Width * 0.60);
+            // Filled HUD bands retain two parallel side edges through their middle rows.
+            // Allow one raster edge pixel at the current viewport scale; petal lobes are not a band.
+            var edgeTolerance = Math.Max(1, (int)Math.Ceiling(source.Height / 1080d));
             var supportedRows = 0;
             for (var y = 0; y < salmonMask.Height; y++)
             {
@@ -2429,7 +2432,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 for (var x = 0; x < salmonMask.Width; x++)
                 {
                     run = salmonMask.At<byte>(y, x) != 0 ? run + 1 : 0;
-                    if (run >= requiredRun)
+                    if (run >= requiredRun && x - run + 1 <= edgeTolerance &&
+                        x >= salmonMask.Width - 1 - edgeTolerance)
                     {
                         supportedRows++;
                         break;
