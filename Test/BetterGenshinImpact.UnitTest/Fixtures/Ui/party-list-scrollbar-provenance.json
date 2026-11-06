@@ -1,0 +1,34 @@
+{
+  "run": "349bf9c4-bf6d-476e-b1db-b0c2d8c7ab26",
+  "originalViewport": [
+    1920,
+    1080
+  ],
+  "losslessCrop": [
+    694,
+    105,
+    16,
+    850
+  ],
+  "note": "Only the party-list scrollbar strip. No UID, party names or lower log/private paths are retained. Raw source and derived image hashes are distinct.",
+  "frames": [
+    {
+      "source": 1742,
+      "capturedAt": "2026-11-06T11:00:01.3994683+00:00",
+      "originalFile": "evidence-0248.png",
+      "originalSha256": "6D2E2B13FC0963F5EC5E03318B9A4637A2E21D118FBA05F21EF1E4C8BF8E950B",
+      "fixture": "party-list-scrollbar-1742.png",
+      "fixtureSha256": "B4702BA76682A610982138D7DC9CEDA90FAF840FDCE1EFA27CA35AE9A528C296",
+      "cropPixelInfinityNorm": 0
+    },
+    {
+      "source": 1818,
+      "capturedAt": "2026-11-06T11:00:04.0607193+00:00",
+      "originalFile": "evidence-0250.png",
+      "originalSha256": "E4CB3EC2CA898A5C7B986D2A7DE0B3EF56CCF2F453E15F27294B65FD54C3882F",
+      "fixture": "party-list-scrollbar-1818.png",
+      "fixtureSha256": "8DC321A619BE1D71215860CB9BC8621EF29402608D098F339DF7BC5D1D6C2AE0",
+      "cropPixelInfinityNorm": 0
+    }
+  ]
+}

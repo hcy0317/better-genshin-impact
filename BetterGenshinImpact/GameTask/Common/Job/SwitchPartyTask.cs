@@ -21,11 +21,16 @@ namespace BetterGenshinImpact.GameTask.Common.Job;
 
 public class SwitchPartyTask
 {
-    private readonly double _assetScale = TaskContext.Instance().SystemInfo.AssetScale;
+    private readonly SwitchPartyTaskIo _io;
+    private readonly double _assetScale;
+    private Microsoft.Extensions.Logging.ILogger Logger => _io.Logger;
+
+    public SwitchPartyTask() : this(SwitchPartyTaskIo.CreateNative()) { }
+    internal SwitchPartyTask(SwitchPartyTaskIo io) { _io = io; _assetScale = io.Scale; }
 
     public string Name => "切换队伍";
 
-    private readonly ReturnMainUiTask _returnMainUiTask = new();
+    private Task Delay(int milliseconds, CancellationToken token) => _io.Delay(milliseconds, token);
 
     public Task<bool> Start(string partyName, CancellationToken ct)
         => StartCore(partyName, name => PartyNameAliases.IsMatch(name, partyName), false, ct);
@@ -54,7 +59,7 @@ public class SwitchPartyTask
         bool stayInPartyViewOnFailure, CancellationToken ct, bool deferApplyToCaller = false)
         => UiOperation.RunAsync("party-setup", TimeSpan.FromSeconds(60), ct,
             operation => StartVerifiedCore(partyName, matches, stayInPartyViewOnFailure, operation.Token, deferApplyToCaller),
-            Logger, captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
+            Logger, clock: _io.Clock, captureFailure: _io.NativeDiagnostics ? (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context) : null);
 
     internal static async Task<ImageRegion> CapturePartyFrameAsync(Func<ImageRegion> capture,
         Func<ImageRegion, UiSnapshot> read, Func<int, CancellationToken, Task> delay,
@@ -102,7 +107,8 @@ public class SwitchPartyTask
         bool stayInPartyViewOnFailure, CancellationToken ct, bool deferApplyToCaller)
     {
         bool isInPartyViewUi = false;
-        using var driver = new NativeUiDriver(inspectWorld: true);
+        var driver = _io.Driver();
+        using var driverLifetime = driver as IDisposable;
 
         Logger.LogInformation("尝试切换至队伍: {Name}", partyName);
         var initial = driver.Capture();
@@ -112,29 +118,29 @@ public class SwitchPartyTask
         if (!initial.Party && !initial.PartyList && !deferApplyToCaller)
         {
             isInPartyViewUi = true;
-            await _returnMainUiTask.Start(ct);
+            await _io.ReturnMain(ct);
 
             // 原8.4秒预算内只提交一次探测；危险世界由外层现有恢复owner处理。
             await UiTransition.EnterPartyAsync(driver, ct, Logger);
         }
 
-        using var ra = await CapturePartyFrameAsync(() => CaptureToRectArea(), image => NativeUiDriver.Read(image),
-            (milliseconds, token) => Delay(milliseconds, token), ct, prepare: async token =>
+        using var ra = await CapturePartyFrameAsync(() => _io.Capture(), image => _io.Read(image),
+            (milliseconds, token) => Delay(milliseconds, token), ct, _io.Clock, prepare: async token =>
             {
                 await UiTransition.WaitAsync("party-ready", UiTarget.Party, driver, token, TimeSpan.FromSeconds(10), logger: Logger);
                 await Delay(500, token);
             });
-        using var partyViewBtn = ra.Find(ElementRecognition.Get("PartyBtnChooseView", ra));
+        using var partyViewBtn = _io.Element(ra, "PartyBtnChooseView");
         if (!partyViewBtn.IsExist()) throw new PartySetupFailedException("编队页面已变化，不能读取队伍名称");
 
         // OCR 当前队伍名称（无法单字，中间禁止空格）
-        using var currTeamNameRegion = ra.Find(new RecognitionObject
+        var currTeamName = _io.OcrOne(ra, new RecognitionObject
         {
             RecognitionType = RecognitionTypes.Ocr,
             RegionOfInterest = new Rect(partyViewBtn.Right, partyViewBtn.Top, (int)(350 * _assetScale),
                 partyViewBtn.Height)
         });
-        var currTeamName = currTeamNameRegion.Text;
+
         
         var tempName = currTeamName
             .Replace("\"", "")        // 移除所有双引号（核心新增，解决日志里的""问题）
@@ -160,105 +166,81 @@ public class SwitchPartyTask
             return true;
         }
 
-        using (var current = CaptureToRectArea())
-        using (var choose = current.Find(ElementRecognition.Get("PartyBtnChooseView", current)))
+        using (var current = _io.Capture())
+        using (var choose = _io.Element(current, "PartyBtnChooseView"))
         {
-            if (!NativeUiDriver.Read(current).Matches(UiTarget.Party) || !choose.IsExist())
+            if (!_io.Read(current).Matches(UiTarget.Party) || !choose.IsExist())
                 throw new PartySetupFailedException("当前编队页面或队伍列表按钮未确认，不能点击");
             ct.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
-            choose.Click();
+            AdmitPartyInput(current, _io.Read(current), UiTarget.Party, ct);
+            _io.Click(current, choose.Right, choose.Bottom);
         }
         await UiTransition.WaitAsync("party-list-open", UiTarget.PartyList, driver, ct, TimeSpan.FromSeconds(5), logger: Logger);
         Rect regionOfInterest;
-        using (var current = CaptureToRectArea())
-        using (var delete = current.Find(ElementRecognition.Get("PartyBtnDelete", current)))
+        using (var current = _io.Capture())
+        using (var delete = _io.Element(current, "PartyBtnDelete"))
         {
             if (!delete.IsExist()) throw new PartySetupFailedException("队伍列表已变化，不能继续使用旧截图");
             regionOfInterest = new Rect(0, (int)(80 * _assetScale), delete.Right, delete.Top - (int)(80 * _assetScale));
         }
 
-        // 点击到最上方
-        await Task.Delay(50, ct);
-        GameCaptureRegion.GameRegion1080PPosClick(700, 125);
-        await Task.Delay(50, ct);
-        InputHub.Foreground.Mouse.LeftButtonDown();
-        try { await Task.Delay(450, ct); }
-        finally { InputHub.Foreground.Mouse.LeftButtonUp(); }
-        await Task.Delay(100, ct);
-
-        RecognitionObject recognitionObject = new RecognitionObject
+        // Original top reset, 16-page cap and parent deadline remain the traversal owner.
+        using (var admission = _io.Capture())
+            AdmitPartyInput(admission, _io.Read(admission), UiTarget.PartyList, ct);
+        await _io.ResetTop(ct);
+        PartyListPageObservation? previousPage = null;
+        long previousInputCompleted = 0;
+        Guid? listSession = null;
+        for (var i = 0; i < 16; i++)
         {
-            RecognitionType = RecognitionTypes.Ocr,
-            RegionOfInterest = regionOfInterest,
-            DrawOnWindow = true,
-            Name = "队伍名称",
-            DrawOnWindowPen= System.Drawing.Pens.White
-        };
-        // 逐页查找
-        try
-        {
-            for (var i = 0; i < 16; i++)    // 6.0版本最多20个队伍
+            await Delay(50, ct);
+            try
             {
-                using var page = CaptureToRectArea();
-                if (!NativeUiDriver.Read(page).Matches(UiTarget.PartyList))
-                    throw new PartySetupFailedException("队伍列表已变化或出现遮挡，不能继续翻页或选队");
-
-                var partySwitchNameRaList = page.FindMulti(recognitionObject);
-
-                if (partySwitchNameRaList == null || partySwitchNameRaList.Count <= 0)
+                using var page = _io.Capture();
+                var observed = _io.Read(page);
+                if (!observed.Matches(UiTarget.PartyList) || !observed.SourceBound || observed.SourceStamp != page.FrameStamp ||
+                    !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
+                    throw new PartySetupFailedException("队伍列表当前来源或窗口失效，不能继续分页");
+                listSession ??= page.FrameStamp.SessionId;
+                if (listSession != page.FrameStamp.SessionId)
+                    throw new PartySetupFailedException("队伍列表捕获会话改变，不能继续分页");
+                var recognitionObject = new RecognitionObject
+                { RecognitionType = RecognitionTypes.Ocr, RegionOfInterest = regionOfInterest, DrawOnWindow = true, Name = "队伍识别区域" };
+                var names = _io.OcrMany(page, recognitionObject);
+                try
                 {
-                    Logger.LogInformation("管理队伍界面文字识别失败");
-                    break;
-                }
-
-                // 当前页存在则直接点击
-                foreach (var textRegion in partySwitchNameRaList)
-                {
-                    if (matches(textRegion.Text))
+                    if (!observed.HasUsableEvidence || !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
+                        throw new PartySetupFailedException("队伍OCR完成后来源或窗口已失效，不能判定末页或继续输入");
+                    var titles = names.Where(t => t.X > 35 * _assetScale && t.X < 100 * _assetScale).ToArray();
+                    var state = PartyListPageObservation.Read(page.SrcMat, page.FrameStamp, _assetScale, titles.Select(t => (t.Text, t.Y)));
+                    if (previousPage != null && !state.AdvancesFrom(previousPage, previousInputCompleted, _io.Clock))
+                        throw new PartySetupFailedException("队伍列表翻页未取得新页正证，停止继续输入");
+                    foreach (var title in titles)
                     {
-                        page.ClickTo(textRegion.Right + 100 * _assetScale, textRegion.Bottom);
-                        await Delay(200, ct);
+                        if (!matches(title.Text)) continue;
+                        AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
+                        _io.Click(page, title.Right + 100 * _assetScale, title.Bottom);
+                        await Delay(400, ct);
                         await ConfirmParty(driver, ct, deferApplyToCaller);
-                        Logger.LogInformation(deferApplyToCaller ? "队伍选择已确认，等待调用方开始挑战: {Text}" : "切换队伍成功: {Text}", textRegion.Text);
-
-                        RunnerContext.Instance.ClearCombatScenes();
+                        _io.ClearCombatScenes();
                         return true;
                     }
+                    if (state.End == PartyListEnd.End)
+                    { Logger.LogInformation("已确认队伍列表滚动到底，当前页未找到目标"); break; }
+                    if (state.End != PartyListEnd.More || titles.Length == 0)
+                        throw new PartySetupFailedException("队伍列表剩余页状态未知，不能盲目翻页或宣称搜索结束");
+                    if (i == 15) break;
+                    AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
+                    _io.ScrollDown(page, regionOfInterest);
+                    previousInputCompleted = _io.Clock.GetTimestamp();
+                    previousPage = state;
+                    await Delay(400, ct);
                 }
-
-                Region? lowest = partySwitchNameRaList.Where(r => r.X > 35 * _assetScale && r.X < 100 * _assetScale).OrderBy(r => r.Y).LastOrDefault();
-                if (lowest == null)
-                {
-                    Logger.LogWarning("管理队伍界面无法识别到底部队伍文字，当前识别结果：{Text}", string.Join(" | ", partySwitchNameRaList.Select(r => r.Text)));
-                    break;
-                }
-                lowest.DrawSelf("底部的队伍");
-
-                if (lowest.Y < 777 * _assetScale)   // 如果最底下是空队伍则不会有队伍名，以此判断是否已遍历完成
-                {
-                    Logger.LogInformation("已抵达最后一个队伍");
-                    break;
-                }
-
-                // 点击下一页
-                if (i == 0)
-                {
-                    // #ebe4d8 首次点一下第一个，防止第五个被点击过
-                    page.ClickTo(600 * _assetScale, 200 * _assetScale);
-                    await Task.Delay(300, ct); // 等待动画
-                }
-
-                page.ClickTo(regionOfInterest.X + regionOfInterest.Width / 2, lowest.Bottom); // 点击最下方队伍下移
-                await Delay(400, ct);
+                finally { foreach (var region in names) region.Dispose(); }
             }
+            finally { _io.ClearDrawings(); }
         }
-        finally
-        {
-            TaskContext.Instance().Runtime?.MaskWindowDrawingBoard.ClearAll();
-        }
-
-        // 未找到
         if (stayInPartyViewOnFailure && !isInPartyViewUi)
         {
             Logger.LogWarning("未找到推荐队伍: {Name}，关闭队伍列表并回退默认队伍", partyName);
@@ -269,8 +251,20 @@ public class SwitchPartyTask
         }
         Logger.LogError("未找到队伍: {Name}，返回主界面", partyName);
         Logger.LogInformation("如果找不到设定的队伍名，有可能是文字识别效果不佳，请尝试正则表达式");
-        await _returnMainUiTask.Start(ct);
+        await _io.ReturnMain(ct);
         return false;
+    }
+
+    private void AdmitPartyInput(ImageRegion image, UiSnapshot observed, UiTarget target, CancellationToken ct)
+    {
+        void Check()
+        {
+            ct.ThrowIfCancellationRequested(); UiOperation.Current?.Check();
+            if (!_io.SameTarget() || !observed.Matches(target) || !observed.SourceBound || observed.SourceStamp != image.FrameStamp ||
+                !image.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+                throw new PartySetupFailedException("队伍输入的当前列表、来源或窗口正证失效");
+        }
+        Check(); _io.Prepare(); Check();
     }
 
     private async Task ConfirmParty(IUiDriver driver, CancellationToken ct, bool deferApplyToCaller)
@@ -279,17 +273,18 @@ public class SwitchPartyTask
         {
             token.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
-            CheckAndSleep(0);
-            using var image = CaptureToRectArea();
+            _io.Prepare();
+            using var image = _io.Capture();
             var target = left ? UiTarget.PartyList : UiTarget.Party;
-            var observed = NativeUiDriver.Read(image);
+            var observed = _io.Read(image);
             UiOperation.Current?.Observe(observed, target, "pre-input");
             token.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
             if (!observed.Matches(target)) return Task.FromResult(false);
+            AdmitPartyInput(image, observed, target, token);
             var roi = new Rect(left ? 0 : image.Width - image.Width / 4, image.Height / 4,
                 image.Width / 4, image.Height - image.Height / 4);
-            return Task.FromResult(Bv.ClickWhiteConfirmButton(image, roi));
+            return Task.FromResult(_io.Confirm(image, roi));
         }
 
         await UiRecovery.ConfirmPartyAsync(driver, token => ClickConfirm(token, true),
