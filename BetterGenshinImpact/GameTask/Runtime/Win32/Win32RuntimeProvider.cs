@@ -73,6 +73,8 @@ public sealed class Win32RuntimeProvider(
 
         var window = new Win32GameWindow(hWnd);
         IGameCapture? capture = null;
+        GameRuntime? runtime = null;
+        BetterGenshinImpact.Core.Input.IInputBackend? input = null;
         try
         {
             if (window.IsMinimized)
@@ -87,8 +89,10 @@ public sealed class Win32RuntimeProvider(
                 hWnd, GameCaptureSettings.From(config), GameCaptureFactory.Create);
             if (capture is Fischless.GameCapture.BitBlt.BitBltCapture && (isChildSession || isRemoteSession))
                 logger.LogInformation("远程/桌面分身 BitBlt 使用前台游戏客户区的桌面像素，避免窗口 DC 返回无效背景。");
-            var runtime = new GameRuntime(Kind, window, capture, new Win32InputBackend(hWnd),
-                maskWindowDrawingBoard, maskWindowMapState);
+            input = new Win32InputBackend(hWnd);
+            runtime = new GameRuntime(Kind, window, capture, input,
+                maskWindowDrawingBoard, maskWindowMapState,
+                capture is Fischless.GameCapture.BitBlt.BitBltCapture { CapturesDesktop: true });
 
             // 自动查找、关联启动、手动选窗都经过这里；同一个游戏进程只通知一次
             StarwardPlaytime.TryRecord(window, config.GenshinStartConfig);
@@ -96,8 +100,12 @@ public sealed class Win32RuntimeProvider(
         }
         catch
         {
-            capture?.Dispose();
-            window.Dispose();
+            try
+            {
+                if (runtime != null) runtime.Dispose();
+                else { try { capture?.Dispose(); } finally { window.Dispose(); } }
+            }
+            finally { input?.Dispose(); }
             throw;
         }
     }

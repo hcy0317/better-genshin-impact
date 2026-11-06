@@ -1,0 +1,52 @@
+{
+  "sourceRun": "82d76b8991914d898e7ff84fac6ebce7",
+  "originalCanvas": [
+    1920,
+    1080
+  ],
+  "crop": [
+    0,
+    0,
+    640,
+    135
+  ],
+  "note": "Fixtures are lossless crops, not original full Source images. Reconstruction uses an otherwise black original-size canvas.",
+  "mode": "CCoeffNormed",
+  "threshold": 0.8,
+  "useMask": false,
+  "channels": "BGR2GRAY",
+  "template": {
+    "file": "disabled-ui.png",
+    "size": [
+      28,
+      20
+    ],
+    "sha256": "96759FB9B99F85D274C888718FF102EF47F31BD17CF939BA813FFDA556F0DD5F"
+  },
+  "frames": [
+    {
+      "frame": 181,
+      "originalSourceSha256": "C55F063FB42324BBB307BDB84653E9E64F1B310897AE1EA8311EC1A72CFA2ADC",
+      "derivedRoiFile": "talk-red-roi.png",
+      "derivedRoiSha256": "BD9F7D242456B74A09925693FECB99920E1B3D1CE3E6C1BA0C02B95BD2C1A83C",
+      "decodedCropPixelInfinityNorm": 0,
+      "score": 0.6294117569923401,
+      "position": [
+        266,
+        38
+      ]
+    },
+    {
+      "frame": 182,
+      "originalSourceSha256": "40F87C817361ACBD0BFE1FF546C700D4B69A8F509F2633BB0D5A3FCE566EBF68",
+      "derivedRoiFile": "talk-clean-roi.png",
+      "derivedRoiSha256": "89E1753D6256AA003E27625B0D004461A7C8ABEC85EB67490E5B8D211DD5F64A",
+      "decodedCropPixelInfinityNorm": 0,
+      "score": 0.9934465289115906,
+      "position": [
+        266,
+        38
+      ]
+    }
+  ]
+}

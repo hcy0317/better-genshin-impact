@@ -15,7 +15,8 @@ public sealed class GameRuntime(
     IGameCapture capture,
     IInputBackend input,
     IMaskWindowDrawingBoard maskWindowDrawingBoard,
-    IMaskWindowMapState maskWindowMapState) : IDisposable
+    IMaskWindowMapState maskWindowMapState,
+    bool desktopSampling = false) : IDisposable
 {
     public GameRuntimeKind Kind { get; } = kind;
 
@@ -45,12 +46,21 @@ public sealed class GameRuntime(
     public IMaskWindowMapState MaskWindowMapState { get; } =
         maskWindowMapState ?? throw new ArgumentNullException(nameof(maskWindowMapState));
 
+    private readonly IDisposable? _recognitionDrawingLease = desktopSampling && capture.IsCapturing &&
+        maskWindowDrawingBoard is MaskWindowDrawingBoard board ? board.SuppressRecognition() : null;
+    private int _disposed;
+
     /// <summary>
     /// 释放截图器和窗口监听。不关闭游戏，也不释放 <see cref="Input"/>、<see cref="MaskWindowDrawingBoard"/>、<see cref="MaskWindowMapState"/>
     /// </summary>
     public void Dispose()
     {
-        Capture.Dispose();
-        Window.Dispose();
+        if (System.Threading.Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        try { Capture.Dispose(); }
+        finally
+        {
+            try { Window.Dispose(); }
+            finally { _recognitionDrawingLease?.Dispose(); }
+        }
     }
 }
