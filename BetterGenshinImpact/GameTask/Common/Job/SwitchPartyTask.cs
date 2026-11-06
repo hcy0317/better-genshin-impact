@@ -213,7 +213,7 @@ public class SwitchPartyTask
                     if (!observed.HasUsableEvidence || !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
                         throw new PartySetupFailedException("队伍OCR完成后来源或窗口已失效，不能判定末页或继续输入");
                     var titles = names.Where(t => t.X > 35 * _assetScale && t.X < 100 * _assetScale).ToArray();
-                    var state = PartyListPageObservation.Read(page.SrcMat, page.FrameStamp, _assetScale, titles.Select(t => (t.Text, t.Y)));
+                    var state = PartyListPageObservation.Read(page.SrcMat, page.FrameStamp, _assetScale, titles.Select(t => new PartyListRow(t.Text, new Rect(t.X, t.Y, t.Width, t.Height))));
                     if (previousPage != null && !state.AdvancesFrom(previousPage, previousInputCompleted, _io.Clock))
                         throw new PartySetupFailedException("队伍列表翻页未取得新页正证，停止继续输入");
                     foreach (var title in titles)
@@ -232,10 +232,13 @@ public class SwitchPartyTask
                         throw new PartySetupFailedException("队伍列表剩余页状态未知，不能盲目翻页或宣称搜索结束");
                     if (i == 15) break;
                     AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
-                    _io.ScrollDown(page, regionOfInterest);
+                    if (!state.TryPlanPage(regionOfInterest, out var pagePlan))
+                        throw new PartySetupFailedException("当前队伍行与滚动条不足以规划有重叠的新页，停止输入");
+                    await _io.DragPageAsync(page, pagePlan, ct, () => CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true));
                     previousInputCompleted = _io.Clock.GetTimestamp();
                     previousPage = state;
-                    await Delay(400, ct);
+                    // Two 60ms drag settles share the existing 400ms per-page wait.
+                    await Delay(280, ct);
                 }
                 finally { foreach (var region in names) region.Dispose(); }
             }
@@ -255,16 +258,17 @@ public class SwitchPartyTask
         return false;
     }
 
+    private void CheckPartyInput(ImageRegion image, UiSnapshot observed, UiTarget target, CancellationToken ct, bool requireForeground = false)
+    {
+        ct.ThrowIfCancellationRequested(); UiOperation.Current?.Check();
+        if (!_io.SameTarget() || (requireForeground && !_io.ForegroundReady()) || !observed.Matches(target) || !observed.SourceBound || observed.SourceStamp != image.FrameStamp ||
+            !image.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+            throw new PartySetupFailedException("队伍输入的当前列表、来源或窗口正证失效");
+    }
+
     private void AdmitPartyInput(ImageRegion image, UiSnapshot observed, UiTarget target, CancellationToken ct)
     {
-        void Check()
-        {
-            ct.ThrowIfCancellationRequested(); UiOperation.Current?.Check();
-            if (!_io.SameTarget() || !observed.Matches(target) || !observed.SourceBound || observed.SourceStamp != image.FrameStamp ||
-                !image.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
-                throw new PartySetupFailedException("队伍输入的当前列表、来源或窗口正证失效");
-        }
-        Check(); _io.Prepare(); Check();
+        CheckPartyInput(image, observed, target, ct); _io.Prepare(); CheckPartyInput(image, observed, target, ct, requireForeground: true);
     }
 
     private async Task ConfirmParty(IUiDriver driver, CancellationToken ct, bool deferApplyToCaller)
