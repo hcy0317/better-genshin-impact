@@ -9,6 +9,487 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 
 public class PreciseApproachRecoveryTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WaterEpisodesCannotReuseAConsumedNormalProgressAnchor(bool secondEpisodeProgress)
+    {
+        var position = new Point2f(108, 100);
+        var motion = MotionStatus.Swim;
+        var stage = "first-swimming";
+        var normalPulses = 0;
+        var firstResponses = 0;
+        var secondSwimObservations = 0;
+        var secondResponses = 0;
+        var held = false;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position };
+        replay.MotionAt = _ =>
+        {
+            if (stage == "second-swimming") secondSwimObservations++;
+            return motion;
+        };
+        replay.StampTransform = stamp =>
+        {
+            if (stage == "first-feedback") firstResponses++;
+            if (stage == "second-feedback") secondResponses++;
+            return stamp;
+        };
+        replay.OnRotateUntil = () =>
+        {
+            if (stage != "second-swimming") return;
+            motion = MotionStatus.Normal;
+            position = new Point2f(102.0005f, 100);
+            stage = "second-normal";
+        };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                if (motion == MotionStatus.Swim)
+                {
+                    motion = MotionStatus.Normal;
+                    position = new Point2f(103, 100);
+                    stage = "first-normal";
+                }
+                else if (++normalPulses == 1)
+                {
+                    position = new Point2f(102.5f, 100);
+                    stage = "first-feedback";
+                }
+                else if (normalPulses == 2)
+                {
+                    motion = MotionStatus.Swim;
+                    stage = "second-swimming";
+                }
+                else
+                {
+                    position = new Point2f(secondEpisodeProgress ? 101.5f : 101.9995f, 100);
+                    stage = "second-feedback";
+                }
+            }
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        var error = await Record.ExceptionAsync(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.True(firstResponses >= 2, "The first episode must actually consume two fresh Normal responses.");
+        Assert.True(secondSwimObservations >= 2, "The second swimming episode must be admitted independently.");
+        Assert.True(secondResponses > 0);
+        if (secondEpisodeProgress) Assert.Null(error);
+        else Assert.True(error is RetryException,
+            $"The second episode reused consumed anchor 3 with only .001 progress: responses={secondResponses}, Normal pulses={normalPulses}.");
+        Assert.Equal(3, normalPulses);
+        Assert.Equal(4, replay.Inputs.Count(input => input.Type == KeyType.KeyDown));
+        Assert.False(held);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("fresh")]
+    [InlineData("duplicate")]
+    [InlineData("before-fence")]
+    public async Task ReswimmingRetiresTheOldNormalPulseProofAfterInvalidPostTurn(string feedbackKind)
+    {
+        var position = new Point2f(108, 100);
+        var motion = MotionStatus.Swim;
+        var stage = "swimming";
+        var held = false;
+        var normalPulses = 0;
+        var returnedToSwimming = false;
+        var invalidPostTurn = false;
+        var feedbackReads = 0;
+        var normalCompleted = 0L;
+        Fischless.GameCapture.CaptureFrameStamp first = default;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position, MotionAt = _ => motion };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                if (motion == MotionStatus.Swim)
+                {
+                    motion = MotionStatus.Normal;
+                    position = new Point2f(102.0005f, 100);
+                    stage = "normal";
+                }
+                else
+                {
+                    normalPulses++;
+                    normalCompleted = replay.Clock.GetTimestamp();
+                    motion = MotionStatus.Swim;
+                    stage = "reswimming";
+                    returnedToSwimming = true;
+                }
+            }
+        };
+        replay.OnRotateUntil = () =>
+        {
+            if (stage != "reswimming") return;
+            replay.Direct = false;
+            invalidPostTurn = true;
+            stage = "invalid-postturn";
+        };
+        replay.AfterDelay = milliseconds =>
+        {
+            if (stage != "invalid-postturn" || milliseconds != 100) return;
+            replay.Direct = true;
+            motion = MotionStatus.Normal;
+            position = new Point2f(101.9995f, 100);
+            stage = "normal-feedback";
+        };
+        replay.StampTransform = stamp =>
+        {
+            if (stage != "normal-feedback") return stamp;
+            feedbackReads++;
+            if (feedbackKind == "fresh") return stamp;
+            if (feedbackKind == "before-fence")
+                return stamp with { CapturedTimestamp = normalCompleted + replay.Clock.TimestampFrequency / 100 };
+            if (!first.IsKnown) first = stamp;
+            return first;
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        var error = await Record.ExceptionAsync(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.True(returnedToSwimming);
+        Assert.True(invalidPostTurn);
+        Assert.True(feedbackReads > 0);
+        Assert.True(error is RetryException,
+            $"Retired Normal proof granted arrival after {feedbackReads} same-position Normal frames; only .001 target change followed re-swimming.");
+        Assert.Equal(1, normalPulses);
+        Assert.Equal(2, replay.Inputs.Count(input => input.Type == KeyType.KeyDown));
+        Assert.False(held);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task ConfirmedSwimmingAdvancesTheAuthoredGroundTargetBeforeOrdinaryArrival()
+    {
+        var position = new Point2f(108, 100);
+        var motion = MotionStatus.Swim;
+        var swimmingPulses = 0;
+        var normalPulses = 0;
+        var held = false;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position, MotionAt = _ => motion };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                if (motion == MotionStatus.Swim)
+                {
+                    swimmingPulses++;
+                    position.X -= 1.5f;
+                    if (swimmingPulses == 2) motion = MotionStatus.Normal;
+                }
+                else { normalPulses++; position.X -= 1; }
+            }
+        };
+        var target = replay.Point("run");
+        target.Type = "target";
+
+        await replay.Executor.MoveCloseTo(target);
+
+        Assert.Equal(2, swimmingPulses);
+        Assert.InRange(normalPulses, 2, 23);
+        Assert.False(held);
+        Assert.InRange(replay.Inputs.Count(input => input.Type == KeyType.KeyDown), 4, 25);
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown && input.Action != GIActions.MoveForward);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task StillSwimmingUsesOnlyOriginalGroundTargetOpportunitiesAndNeverArrives()
+    {
+        var replay = new PathReplay { EmitReceipts = true,
+            PositionAt = _ => new Point2f(108, 100), MotionAt = _ => MotionStatus.Swim };
+        var target = replay.Point("run");
+        target.Type = "target";
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.Equal(25, replay.Inputs.Count(input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown));
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown && input.Action != GIActions.MoveForward);
+        Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("unknown-target")]
+    [InlineData("fly")]
+    [InlineData("climb")]
+    [InlineData("same-xy-swim")]
+    [InlineData("normal-without-normal-movement")]
+    [InlineData("unknown-receipt")]
+    [InlineData("missing-release-receipt")]
+    [InlineData("wrong-runtime")]
+    [InlineData("climb-after-pulse")]
+    public async Task WaterMovementNeverConvertsMissingEvidenceIntoGroundArrival(string kind)
+    {
+        var pulsed = false;
+        var held = false;
+        var replay = new PathReplay { EmitReceipts = kind != "unknown-receipt" };
+        replay.PositionAt = _ => kind == "same-xy-swim" || pulsed && kind == "normal-without-normal-movement"
+            ? new Point2f(100, 100) : new Point2f(108, 100);
+        replay.MotionAt = _ => pulsed && kind == "normal-without-normal-movement" ? MotionStatus.Normal :
+            pulsed && kind == "climb-after-pulse" ? MotionStatus.Climb : MotionStatus.Swim;
+        replay.StampTransform = stamp => pulsed && kind == "wrong-runtime"
+            ? stamp with { SessionId = Guid.Parse("502b7d53-c026-41b8-9a18-5cb1372ad604") } : stamp;
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown)
+            {
+                held = true;
+                if (kind == "missing-release-receipt") replay.EmitReceipts = false;
+            }
+            else if (type == KeyType.KeyUp && held) { held = false; pulsed = true; }
+        };
+        var target = replay.Point(kind is "fly" or "climb" ? kind : "run");
+        target.Type = kind == "unknown-target" ? "path" : "target";
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
+
+        var forward = replay.Inputs.Count(input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown);
+        if (kind is "unknown-target" or "fly" or "climb" or "same-xy-swim") Assert.Equal(0, forward);
+        else Assert.Equal(1, forward);
+        Assert.False(held);
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown && input.Action != GIActions.MoveForward);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("transform")]
+    [InlineData("duplicate")]
+    [InlineData("fallback")]
+    [InlineData("missing-hud")]
+    [InlineData("expired-control-read")]
+    public async Task WaterMovementCannotUsePostTurnEvidenceFromAnotherControlState(string kind)
+    {
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => new Point2f(108, 100), MotionAt = _ => MotionStatus.Swim };
+        var afterTurn = false;
+        replay.ReadTransformation = _ =>
+        {
+            if (afterTurn && kind == "expired-control-read") replay.Clock.Advance(TimeSpan.FromMinutes(1));
+            return replay.Transformed;
+        };
+        replay.OnRotateUntil = () =>
+        {
+            afterTurn = true;
+            if (kind == "transform") replay.Transformed = true;
+            if (kind == "duplicate") replay.Duplicate = true;
+            if (kind == "fallback") replay.Direct = false;
+            if (kind == "missing-hud") replay.Hud = false;
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task OneNormalPulseIntoArrivalNeedsTwoFreshResponsesNotAnotherPulse()
+    {
+        var position = new Point2f(108, 100);
+        var motion = MotionStatus.Swim;
+        var waterPulses = 0;
+        var normalPulses = 0;
+        var held = false;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position, MotionAt = _ => motion };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                if (motion == MotionStatus.Swim)
+                {
+                    if (++waterPulses == 2) { motion = MotionStatus.Normal; position = new Point2f(102.5f, 100); }
+                    else position = new Point2f(106, 100);
+                }
+                else { normalPulses++; position = new Point2f(101.5f, 100); }
+            }
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        await replay.Executor.MoveCloseTo(target);
+
+        Assert.Equal(2, waterPulses);
+        Assert.Equal(1, normalPulses);
+        Assert.False(held);
+        Assert.Equal(3, replay.Inputs.Count(input => input.Type == KeyType.KeyDown));
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("before-fence")]
+    public async Task OneNormalResponseCannotBeReusedAsTwoNearTargetObservations(string kind)
+    {
+        var position = new Point2f(108, 100);
+        var motion = MotionStatus.Swim;
+        var waterPulses = 0;
+        var normalPulses = 0;
+        var held = false;
+        var feedbackReads = 0;
+        var completed = 0L;
+        Fischless.GameCapture.CaptureFrameStamp first = default;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position, MotionAt = _ => motion };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                if (motion == MotionStatus.Swim)
+                {
+                    if (++waterPulses == 2) { motion = MotionStatus.Normal; position = new Point2f(102.5f, 100); }
+                    else position = new Point2f(106, 100);
+                }
+                else { normalPulses++; position = new Point2f(101.5f, 100); completed = replay.Clock.GetTimestamp(); }
+            }
+        };
+        replay.StampTransform = stamp =>
+        {
+            if (normalPulses == 0) return stamp;
+            if (++feedbackReads == 1) { first = stamp; return stamp; }
+            return kind == "duplicate" ? first : stamp with { CapturedTimestamp = completed + replay.Clock.TimestampFrequency / 100 };
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.True(feedbackReads >= 2);
+        Assert.Equal(1, normalPulses);
+        Assert.Equal(3, replay.Inputs.Count(input => input.Type == KeyType.KeyDown));
+        Assert.False(held);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task SubthresholdNormalJitterCannotRestoreNearTargetMovementAuthority()
+    {
+        var position = new Point2f(108, 100);
+        var motion = MotionStatus.Swim;
+        var waterPulses = 0;
+        var normalPulses = 0;
+        var held = false;
+        var replay = new PathReplay { EmitReceipts = true, PositionAt = _ => position, MotionAt = _ => motion };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                if (motion == MotionStatus.Swim)
+                {
+                    if (++waterPulses == 2) { motion = MotionStatus.Normal; position = new Point2f(102.0005f, 100); }
+                    else position = new Point2f(106, 100);
+                }
+                else { normalPulses++; position = new Point2f(101.9995f, 100); }
+            }
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.Equal(1, normalPulses);
+        Assert.Equal(3, replay.Inputs.Count(input => input.Type == KeyType.KeyDown));
+        Assert.False(held);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData(true, "hold")]
+    [InlineData(false, "hold")]
+    [InlineData(true, "feedback")]
+    [InlineData(false, "feedback")]
+    public async Task WaterMovementKeepsOriginalCancellationAndDeadline(bool cancel, string phase)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var held = false;
+        var released = false;
+        var stopped = false;
+        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true,
+            PositionAt = _ => new Point2f(108, 100), MotionAt = _ => MotionStatus.Swim };
+        void Stop()
+        {
+            if (stopped) return;
+            stopped = true;
+            if (cancel) cancellation.Cancel();
+            else replay.Clock.Advance(TimeSpan.FromMinutes(1));
+        }
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) { held = true; if (phase == "hold") Stop(); }
+            else if (type == KeyType.KeyUp && held) { held = false; released = true; }
+        };
+        replay.AfterDelay = milliseconds => { if (phase == "feedback" && released && milliseconds == 60) Stop(); };
+        var target = replay.Point("run"); target.Type = "target";
+
+        var error = await Record.ExceptionAsync(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.True(stopped);
+        if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<RetryException>(error);
+        Assert.Single(replay.Inputs.Where(input => input.Type == KeyType.KeyDown));
+        Assert.False(held);
+        Assert.Equal(KeyType.KeyUp, replay.Inputs[^1].Type);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("queued-before-response")]
+    public async Task WaterMovementDoesNotSpendAnotherInputOnUnacceptedPulseFeedback(string kind)
+    {
+        var held = false;
+        var pulsed = false;
+        var completed = 0L;
+        Fischless.GameCapture.CaptureFrameStamp before = default;
+        var replay = new PathReplay { EmitReceipts = true,
+            PositionAt = _ => new Point2f(108, 100), MotionAt = _ => MotionStatus.Swim };
+        replay.StampTransform = stamp =>
+        {
+            if (!pulsed) { before = stamp; return stamp; }
+            return kind == "duplicate" ? before : stamp with { CapturedTimestamp = completed + replay.Clock.TimestampFrequency / 100 };
+        };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held) { held = false; pulsed = true; completed = replay.Clock.GetTimestamp(); }
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveCloseTo(target));
+
+        Assert.Single(replay.Inputs.Where(input => input.Type == KeyType.KeyDown));
+        Assert.False(held);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.All(replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
     [Fact]
     public async Task PostTurnPositionCrossingTargetCannotUseTheOldForwardHeading()
     {

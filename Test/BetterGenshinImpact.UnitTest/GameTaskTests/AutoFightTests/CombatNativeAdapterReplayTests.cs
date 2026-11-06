@@ -1362,6 +1362,67 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         }
     }
 
+    [Fact]
+    public async Task ExpiredKnownSkillCanRecoverItsOwnActorThroughTheExistingSelectionMovement()
+    {
+        using var task = TaskExecutionScope.BeginOwned();
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("""
+            strategy(loop=battle)
+            timing(盾,cd=12,duration=20)
+            钟离 e(hold,wait,timing=盾,record=护盾,maintain=护盾,watch=护盾,before=4,required)
+            班尼特 attack(.1)
+            """);
+        using var io = new PhysicalReplay(clock, false, 50, program)
+        {
+            Actors = [new("钟离", 1), new("娜维娅", 2), new("班尼特", 3), new("香菱", 4)],
+            SelectionNeedsMovement = true,
+            DropSkillsBeforeMovement = true,
+            ObservedMotion = MotionStatus.Unknown,
+            CompleteSkillReceipts = true,
+            CompleteSelectionReceipts = true
+        };
+        io.SetFrontActor("钟离");
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        var native = new NativeCombatBattleHostIo(runner, io.ControlDevice);
+        var scene = new SceneReplayIo(clock, runner.Context.BattleId, io.Producer)
+        { AlignedTarget = true, SendInput = native.SendAsync };
+        using var host = new CombatBattleHost(scene, new() { FinishDetectionEnabled = false });
+        var displaced = false;
+        var sawRecoverySelection = false;
+        var admittedScene = scene.ObserveTarget();
+        Assert.Equal(MotionStatus.Unknown, admittedScene.Motion);
+        Assert.Equal(MotionStatus.Unknown, admittedScene.Control.Motion);
+        Assert.True(admittedScene.Control.IsObserved);
+        Assert.True(CombatBattleHost.CanApproach(admittedScene, runner.Context.BattleId, clock, selectionAssistance: true));
+        var error = await Record.ExceptionAsync(async () =>
+        {
+            for (var i = 0; i < 1200 && runner.Context.Now < 35 && !double.IsFinite(io.FirstShieldConfirmed); i++)
+            {
+                if (!displaced && io.SkillDispatchRequests.Count > 0 &&
+                    clock.GetTimestamp() >= io.SkillDispatchRequests[0].DeadlineTimestamp)
+                {
+                    // A fake game observation, never a successful target switch: target 1 is now off field.
+                    io.SetFrontActor("班尼特");
+                    displaced = true;
+                }
+                await host.AdvanceAsync(runner, default);
+                if (displaced && io.SelectionDispatchRequests.Count >= 2 && runner.HasAwaitingObservation &&
+                    !runner.HasPendingConfirmation && !runner.IsAtomic) sawRecoverySelection = true;
+            }
+        });
+        Assert.True(displaced);
+        Assert.True(sawRecoverySelection, "the counterexample must reach the submitted recovery selection, not fail during setup");
+        output.WriteLine($"displaced={displaced} recoverySelection={sawRecoverySelection} switches={io.SelectionDispatchRequests.Count} movement={io.ApproachPulses} shield={io.FirstShieldConfirmed}");
+        Assert.Null(error);
+        Assert.True(double.IsFinite(io.FirstShieldConfirmed), "expired input blocks the movement needed to observe its original actor again");
+        Assert.InRange(io.ApproachPulses, 1, 12);
+        Assert.NotEmpty(io.SelectionDispatchRequests);
+        Assert.All(io.SelectionDispatchRequests, pulse => Assert.Equal(1, pulse.Index));
+        Assert.Equal(io.SelectionDispatchRequests.Count, io.SelectionDispatchRequests.Select(pulse => pulse.Request.Id).Distinct().Count());
+        Assert.False(io.HoldingInput);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -3897,11 +3958,14 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public bool ResourceEvents { get; init; }
         public bool DropFirstSkill { get; init; }
         public bool DropAllSkills { get; init; }
+        public bool DropSkillsBeforeMovement { get; init; }
         // Synthetic observed cooldown for actors outside this replay's timing catalog.
         // This is fake game I/O, not a change to production skill data.
         public double? SimulatedSkillCooldown { get; init; }
         public bool CompleteSkillReceipts { get; init; }
         public List<Guid> SkillRequests { get; } = [];
+        public List<CombatNativeInputRequest> SkillDispatchRequests { get; } = [];
+        public List<(int Index, CombatNativeInputRequest Request)> SelectionDispatchRequests { get; } = [];
         public bool RockEnergyEvents { get; init; }
         public double FirstRockDemandAt { get; private set; } = double.PositiveInfinity;
         public void SetFrontActor(string actor) { _actor = actor; _selected = null; }
@@ -4085,6 +4149,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             CombatActionScope.Current?.Check();
             LastSelectionTimestamp = Clock.GetTimestamp();
             Selections.Add(index);
+            SelectionDispatchRequests.Add((index, request));
             ct.ThrowIfCancellationRequested();
             var actor = Actors.Single(item => item.Index == index).Name;
             // OS已接收不代表游戏能立刻换人：此窗口内游戏明确忽略按键。
@@ -4119,7 +4184,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         {
             if (Inputs.Count == 0) FirstInputCooldownSources = _cooldownReadSources.ToArray();
             Inputs.Add((actor.Name, skill, Now));
-            if (DropAllSkills || DropFirstSkill && Inputs.Count == 1)
+            if (DropAllSkills || DropFirstSkill && Inputs.Count == 1 || DropSkillsBeforeMovement && ApproachPulses == 0)
             {
                 WaitForSelection(hold ? 1000 : 50, default);
                 return;
@@ -4155,7 +4220,11 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             ct.ThrowIfCancellationRequested();
             begin();
             var started = Clock.GetTimestamp();
-            if (command.Method == Method.Skill || command.Method == Method.Burst) SkillRequests.Add(request.Id);
+            if (command.Method == Method.Skill || command.Method == Method.Burst)
+            {
+                SkillRequests.Add(request.Id);
+                SkillDispatchRequests.Add(request);
+            }
             if (command.NativeSkillSequence is { } sequence)
             {
                 if (Inputs.Count == 0) FirstInputCooldownSources = _cooldownReadSources.ToArray();

@@ -16,7 +16,7 @@ internal static class BigMapOpenAttempt
         Func<ImageRegion, bool> isMap, Func<ImageRegion, string?> connectionWait,
         Action focus, Action send, Func<int, CancellationToken, Task> delay, CancellationToken ct,
         TimeSpan budget, TimeProvider clock, Func<string> environment,
-        Action<string, ImageRegion, string>? evidence = null)
+        Action<string, ImageRegion, string>? evidence = null, Action<CaptureFrameFence>? inputFence = null)
     {
         var started = clock.GetTimestamp();
         void Check() { ct.ThrowIfCancellationRequested(); TaskExecutionScope.ThrowIfFailed(); UiOperation.Current?.Check(); }
@@ -68,13 +68,16 @@ internal static class BigMapOpenAttempt
                 throw terminal;
             }
         }
-        Record("input-result", before, receipt.Describe() + "; " + context);
+        string afterEnvironment;
+        try { afterEnvironment = environment(); } catch { afterEnvironment = "unknown:environment-unavailable"; }
+        Record("input-result", before, receipt.Describe() + "; " + context + "; afterInput=" + afterEnvironment);
         if (receipt.Status != DiagnosticInputStatus.Sent)
         {
             Record("input-unconfirmed", before, receipt.Describe() + "; " + context);
             return BigMapOpenOutcome.InputUnconfirmed;
         }
         var fence = new CaptureFrameFence(before.FrameStamp, receipt.CompletedAt);
+        inputFence?.Invoke(fence);
         var last = before.FrameStamp;
         var accepted = 0;
         var mapFrames = 0;
@@ -117,8 +120,20 @@ internal static class BigMapOpenAttempt
 
     internal static async Task<bool> CompleteAsync(BigMapOpenOutcome result, Exception? interruption,
         Func<Exception, CancellationToken, Task<bool>> waitForNetwork, CancellationToken ct)
+        => await CompleteCoreAsync(result, interruption, async (error, token) =>
+            new PassiveRecoveryResult(await waitForNetwork(error, token) ? PassiveRecoveryOutcome.NetworkRecovered : PassiveRecoveryOutcome.Unconfirmed), ct, null);
+
+    internal static Task<bool> CompleteWithGoalAsync(BigMapOpenOutcome result, Exception? interruption,
+        Func<Exception, CancellationToken, Task<PassiveRecoveryResult>> waitForRecovery, CancellationToken ct,
+        Func<bool> goalStillCurrent) => CompleteCoreAsync(result, interruption, waitForRecovery, ct, goalStillCurrent);
+
+    private static async Task<bool> CompleteCoreAsync(BigMapOpenOutcome result, Exception? interruption,
+        Func<Exception, CancellationToken, Task<PassiveRecoveryResult>> waitForRecovery, CancellationToken ct,
+        Func<bool>? goalStillCurrent)
     {
         ct.ThrowIfCancellationRequested();
+        var owner = TaskExecutionScope.Capture();
+        var operation = UiOperation.Current;
         if (interruption == null && result == BigMapOpenOutcome.Opened) return true;
         if (interruption == null && result == BigMapOpenOutcome.TimedOut) return false;
         var failure = interruption ?? new InvalidOperationException(
@@ -127,7 +142,17 @@ internal static class BigMapOpenAttempt
         try
         {
             // 延后的等待画面仍由原有被动网络窗口确认；普通HUD不能清除此失败。
-            if (await waitForNetwork(failure, ct))
+            var recovery = await waitForRecovery(failure, ct);
+            ct.ThrowIfCancellationRequested();
+            if (recovery.Outcome == PassiveRecoveryOutcome.GoalCompleted && interruption == null &&
+                result == BigMapOpenOutcome.NoVisualFeedback && recovery.GoalWindowCurrent && goalStillCurrent?.Invoke() == true)
+            {
+                ct.ThrowIfCancellationRequested();
+                owner.Check();
+                operation?.Check();
+                if (recovery.GoalWindowCurrent) return true;
+            }
+            if (recovery.Outcome == PassiveRecoveryOutcome.NetworkRecovered)
             {
                 ct.ThrowIfCancellationRequested();
                 TaskExecutionScope.EnsureNetworkReplaySafe(failure);
@@ -147,5 +172,46 @@ internal static class BigMapOpenAttempt
             TaskExecutionScope.Capture().Report(terminal);
             throw terminal;
         }
+    }
+}
+// One original M request; no image ownership and no input/retry authority.
+internal sealed class BigMapGoalFeedback(TimeProvider clock, Func<bool> sameTarget, string requestId = "unknown")
+{
+    private readonly TaskExecutionScope.Guard _owner = TaskExecutionScope.Capture();
+    private readonly UiOperation? _operation = UiOperation.Current;
+    private CaptureFrameFence? _fence;
+    private CaptureFrameStamp _previous;
+    private int _mapFrames;
+    internal string RequestId => requestId;
+
+    internal void Arm(CaptureFrameFence fence)
+    {
+        _owner.Check();
+        if (sameTarget()) _fence = fence;
+    }
+
+    internal bool Observe(UiSnapshot observed)
+    {
+        _owner.Check();
+        var source = observed.SourceStamp;
+        if (_fence is not { } fence || !sameTarget() || !observed.SourceBound || !observed.MapReady ||
+            !observed.HasUsableEvidence || observed.NetworkWaitReason != null ||
+            !source.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) || !fence.Accepts(source) ||
+            clock.GetElapsedTime(fence.InputCompletedTimestamp, source.CapturedTimestamp) < TimeSpan.FromMilliseconds(60) ||
+            _previous.IsKnown && (!source.IsAfter(_previous) || source.CapturedTimestamp <= _previous.CapturedTimestamp))
+        { _mapFrames = 0; return false; }
+        _operation?.Check();
+        _previous = source;
+        return ++_mapFrames >= 2;
+    }
+
+    internal bool IsCurrent()
+    {
+        _owner.Check();
+        _operation?.Check();
+        var current = _mapFrames >= 2 && sameTarget() && _previous.IsFresh(clock, UiSnapshot.RecoveryMaximumAge);
+        _owner.Check();
+        _operation?.Check();
+        return current;
     }
 }

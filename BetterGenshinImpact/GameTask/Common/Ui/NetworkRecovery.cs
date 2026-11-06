@@ -13,14 +13,30 @@ internal sealed class NetworkInterruptionException(string reason) : Exception("�
 // safe UI handoff before replay, and still requires a real task completion result.
 internal sealed class NetworkTaskRetryException(Exception original) : Exception("网络或服务器等待已恢复，重新执行当前任务", original);
 
+internal enum PassiveRecoveryOutcome { Unconfirmed, NetworkRecovered, GoalCompleted }
+
+// Carries the same passive start to the final owner; it cannot create or renew a window.
+internal readonly record struct PassiveRecoveryResult(PassiveRecoveryOutcome Outcome, TimeProvider? GoalClock = null, long GoalStarted = 0)
+{
+    internal bool GoalWindowCurrent => GoalClock != null && GoalClock.GetElapsedTime(GoalStarted) < TimeSpan.FromMinutes(3);
+}
+
 internal static class NetworkRecovery
 {
     internal static async Task<bool> WaitAsync(bool confirmedInterruption, Func<UiSnapshot> capture,
         Action release, Func<bool> networkAvailable, Func<int, CancellationToken, Task> delay,
-        CancellationToken ct, TimeProvider? clock = null, Action<string, UiSnapshot?>? trace = null)
+        CancellationToken ct, TimeProvider? clock = null, Action<string, UiSnapshot?>? trace = null) =>
+        (await WaitOutcomeAsync(confirmedInterruption, capture, release, networkAvailable, delay, ct, clock, trace)).Outcome ==
+            PassiveRecoveryOutcome.NetworkRecovered;
+
+    internal static async Task<PassiveRecoveryResult> WaitOutcomeAsync(bool confirmedInterruption, Func<UiSnapshot> capture,
+        Action release, Func<bool> networkAvailable, Func<int, CancellationToken, Task> delay,
+        CancellationToken ct, TimeProvider? clock = null, Action<string, UiSnapshot?>? trace = null,
+        Func<UiSnapshot, bool>? goalFeedback = null)
     {
         clock ??= TimeProvider.System;
         var started = clock.GetTimestamp();
+        var goalWindow = new PassiveRecoveryResult(PassiveRecoveryOutcome.GoalCompleted, clock, started);
         var interrupted = confirmedInterruption;
         UiSnapshot? previous = null;
         long? readySince = null;
@@ -43,6 +59,17 @@ internal static class NetworkRecovery
             var fresh = observed.SourceBound
                 ? observed.SourceStamp.IsFresh(clock, UiSnapshot.RecoveryMaximumAge) : observed.FrameId > 0;
             var advancing = previous == null || observed.IsAfter(previous);
+            // Reuse this passive sample; exact goal completion is not network recovery.
+            if (!interrupted && online && goalWindow.GoalWindowCurrent && goalFeedback?.Invoke(observed) == true)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (goalWindow.GoalWindowCurrent)
+                {
+                    Trace("goal-complete-no-replay", observed);
+                    ct.ThrowIfCancellationRequested();
+                    if (goalWindow.GoalWindowCurrent) return goalWindow;
+                }
+            }
             if (!online || fresh && advancing && observed.NetworkWaitReason != null)
             {
                 if (!online || observed.NetworkWaitReason != "connection-panel-unconfirmed" && ++blockedFrames >= 2)
@@ -67,7 +94,7 @@ internal static class NetworkRecovery
                 if (++readyFrames >= 3 && clock.GetElapsedTime(readySince.Value) >= TimeSpan.FromSeconds(3))
                 {
                     Trace("stable-candidate-verify-before-retry", observed);
-                    return true;
+                    return new(PassiveRecoveryOutcome.NetworkRecovered);
                 }
             }
             else
@@ -81,7 +108,7 @@ internal static class NetworkRecovery
             if (!interrupted && clock.GetElapsedTime(started) >= TimeSpan.FromMinutes(3))
             {
                 Trace("unconfirmed-stop", observed);
-                return false;
+                return new(PassiveRecoveryOutcome.Unconfirmed);
             }
             await delay(1000, ct);
         }

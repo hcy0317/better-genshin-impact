@@ -328,6 +328,29 @@ public sealed class CombatSkillAttempts(Guid battleId) : IDisposable
         lock (_gate) return !_closed && _slots.TryGetValue((actor, skill), out var slot) && !slot.CreditTaken;
     }
 
+    // This grants only same-owner movement for observing this expired request again;
+    // it neither retires the slot nor reports a cast or permits another skill input.
+    internal bool CanYieldExpiredForReadiness(CombatSkillAttempt attempt, double now)
+    {
+        lock (_gate)
+        {
+            if (_closed || attempt.BattleId != battleId || !double.IsFinite(now) || now < attempt.Deadline ||
+                !_slots.TryGetValue((attempt.Actor, attempt.Skill), out var slot) || slot.Attempt != attempt ||
+                slot.Confirmed || slot.CreditTaken || !slot.RecoveryEligible ||
+                slot.OriginalRequest is not { } request || request == Guid.Empty ||
+                !CompletePair(slot.OriginalReceipt, slot.OriginalFence) ||
+                _slots.Values.Any(other => other.Attempt.AttemptId != attempt.AttemptId && !other.CreditTaken)) return false;
+            return !slot.RecoveryDispatchStarted || slot.RecoveryRequest != Guid.Empty &&
+                CompletePair(slot.RecoveryReceipt, slot.InputFence);
+        }
+    }
+
+    private static bool CompletePair(CombatBattleHostInputResult? receipt, CaptureFrameFence? fence) =>
+        receipt is { Status: CombatBattleHostInputStatus.Sent, Error: null, NativeRequested: 2, NativeSubmitted: 2,
+            StartedTimestamp: { } started, CompletedTimestamp: { } completed } &&
+        fence is { } input && input.Before.IsKnown && started >= input.Before.CapturedTimestamp &&
+        started <= completed && completed == input.InputCompletedTimestamp;
+
     internal Guid? GetDiagnosticAttemptId(string actor, Method skill)
     {
         lock (_gate) return _slots.TryGetValue((actor, skill), out var slot) ? slot.Attempt.AttemptId : null;

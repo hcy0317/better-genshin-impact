@@ -81,15 +81,12 @@ public sealed class Win32RuntimeProvider(
             }
 
             var config = configService.Get();
-            capture = GameCaptureFactory.Create(GetCaptureMode(config));
-            var captureSettings = GameCaptureSettings.From(config);
-            if (capture is Fischless.GameCapture.BitBlt.BitBltCapture &&
-                InstanceBootstrap.Current.Context.InstanceType == BetterGiInstanceType.ChildSession)
-            {
-                captureSettings["captureFromDesktop"] = true;
-                logger.LogInformation("桌面分身 BitBlt 使用前台游戏客户区的桌面像素，避免窗口 DC 返回纯白背景。");
-            }
-            capture.Start(hWnd, captureSettings);
+            var isRemoteSession = RemoteSessionDetector.IsRemoteSession();
+            var isChildSession = InstanceBootstrap.Current.Context.InstanceType == BetterGiInstanceType.ChildSession;
+            capture = RemoteSessionCaptureModePolicy.Start(GetCaptureMode(config), isRemoteSession, isChildSession,
+                hWnd, GameCaptureSettings.From(config), GameCaptureFactory.Create);
+            if (capture is Fischless.GameCapture.BitBlt.BitBltCapture && (isChildSession || isRemoteSession))
+                logger.LogInformation("远程/桌面分身 BitBlt 使用前台游戏客户区的桌面像素，避免窗口 DC 返回无效背景。");
             var runtime = new GameRuntime(Kind, window, capture, new Win32InputBackend(hWnd),
                 maskWindowDrawingBoard, maskWindowMapState);
 

@@ -1,8 +1,10 @@
+using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace Fischless.GameCapture;
 
-internal static class RemoteSessionCaptureModePolicy
+public static class RemoteSessionCaptureModePolicy
 {
     public static CaptureModes Resolve(CaptureModes requestedMode, bool isRemoteSession)
     {
@@ -15,9 +17,29 @@ internal static class RemoteSessionCaptureModePolicy
             ? CaptureModes.BitBlt
             : requestedMode;
     }
+
+    public static IGameCapture Start(CaptureModes requestedMode, bool? isRemoteSession, bool isChildSession,
+        nint hWnd, IReadOnlyDictionary<string, object> settings, Func<CaptureModes, IGameCapture> create)
+    {
+        var mode = Resolve(requestedMode, isRemoteSession == true);
+        var capture = create(mode);
+        try
+        {
+            var runtimeSettings = new Dictionary<string, object>(settings);
+            if (mode == CaptureModes.BitBlt && (isChildSession || isRemoteSession == true))
+                runtimeSettings["captureFromDesktop"] = true;
+            capture.Start(hWnd, runtimeSettings);
+            return capture;
+        }
+        catch
+        {
+            capture.Dispose();
+            throw;
+        }
+    }
 }
 
-internal static class RemoteSessionDetector
+public static class RemoteSessionDetector
 {
     private const int SmRemoteSession = 0x1000;
 

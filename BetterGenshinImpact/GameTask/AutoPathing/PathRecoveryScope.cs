@@ -71,7 +71,7 @@ internal sealed class PathRecoveryScope : IDisposable
         _movementIdleStarted = null;
     }
 
-    internal async Task<PathMoveObservation> ObserveAsync()
+    internal async Task<PathMoveObservation> ObserveAsync(bool failOnDuplicate = false)
     {
         while (true)
         {
@@ -86,7 +86,7 @@ internal sealed class PathRecoveryScope : IDisposable
             if (observation.SourceUsable && _inputFence is { } fence && !fence.Accepts(observation.Stamp))
             {
                 // 有按住的移动键时不能把失效反馈等待变成长按；原清理路径立即松键。
-                if (_held.Count != 0 || observation.Stamp.SessionId != fence.Before.SessionId)
+                if (failOnDuplicate || _held.Count != 0 || observation.Stamp.SessionId != fence.Before.SessionId)
                     throw new RecoveryObservationChanged();
                 await Io.Delay(50, _ct);
                 Check();
@@ -94,12 +94,14 @@ internal sealed class PathRecoveryScope : IDisposable
             }
             if (observation.SourceUsable && observation.Stamp == _previous && observation.Motion == MotionStatus.Normal)
             {
+                if (failOnDuplicate) throw new RecoveryObservationChanged();
                 // A duplicate cannot authorize input. Wait within the SAME operation; stale/changed data aborts below.
                 await Io.Delay(50, _ct);
                 Check();
                 continue;
             }
-            if (!observation.Valid || observation.Motion != MotionStatus.Normal || !observation.Stamp.IsAfter(_previous))
+            if (!observation.Valid || observation.Motion != MotionStatus.Normal || !observation.Stamp.IsAfter(_previous) ||
+                failOnDuplicate && !observation.Stamp.IsFresh(Io.Clock, TimeSpan.FromSeconds(2)))
                 throw new RecoveryObservationChanged();
             _previous = observation.Stamp;
             return observation;
@@ -162,7 +164,14 @@ internal sealed class PathRecoveryScope : IDisposable
         _inputFence = new(_previous, _lastInputAt.Value);
     }
 
-    internal async Task DelayAsync(int milliseconds)
+    internal async Task DelayAsync(int milliseconds) =>
+        _ = await DelayCoreAsync(milliseconds, null);
+
+    // Reuse the feedback already read while waiting. A stop request is not release confirmation.
+    internal Task<bool> DelayUntilAsync(int milliseconds, Func<PathMoveObservation, bool> stop) =>
+        DelayCoreAsync(milliseconds, stop);
+
+    private async Task<bool> DelayCoreAsync(int milliseconds, Func<PathMoveObservation, bool>? stop)
     {
         var until = Io.Clock.GetTimestamp();
         while (Io.Clock.GetElapsedTime(until).TotalMilliseconds < milliseconds)
@@ -171,8 +180,10 @@ internal sealed class PathRecoveryScope : IDisposable
             var remaining = milliseconds - Io.Clock.GetElapsedTime(until).TotalMilliseconds;
             await Io.Delay((int)Math.Ceiling(Math.Min(50, remaining)), _ct);
             Check();
-            await ObserveAsync();
+            var observed = await ObserveAsync(failOnDuplicate: stop != null);
+            if (stop?.Invoke(observed) == true) return true;
         }
+        return false;
     }
 
     public void Dispose()
