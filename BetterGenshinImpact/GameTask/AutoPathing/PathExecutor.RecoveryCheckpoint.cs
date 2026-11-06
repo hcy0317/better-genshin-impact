@@ -9,6 +9,7 @@ using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.AutoPathing.Model.Enum;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.Common.Map;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using Fischless.GameCapture;
@@ -39,6 +40,71 @@ public partial class PathExecutor
         IReadOnlySet<int>? completedActions = null) =>
         HealingRestartRejection(segment, resumeIndex, completedActions) == null;
 
+    private bool _navigationTicketUsed;
+    private CaptureFrameStamp _navigationHealingSource;
+    private NavigationResumePlan? BuildNavigationResume() => NavigationResumePlan.TryCreate(_routeIdentity,
+        CurWaypoints.Item2, CurWaypoint.Item1, _lastReachedNavigation, _waypointBudget, _actionSettlements);
+
+    private async Task RecordReachedNavigationAsync(WaypointForTrack waypoint)
+    {
+        _waypointBudget?.Check(_moveIo.Clock, ct);
+        using var frame = _moveIo.Capture();
+        var source = frame.FrameStamp;
+        bool AcceptsFrame() => source.IsKnown && frame.FrameStamp == source &&
+            source.TimestampFrequency == _moveIo.Clock.TimestampFrequency &&
+            PathWorldAvailability.IsPlayable(_moveIo, frame) && !_moveIo.Transformed(frame) &&
+            (!_navigationProjectionActive || _pendingNavigationResume is { } plan &&
+                source.SessionId == _navigationHealingSource.SessionId && source.SessionId == plan.Reached.Source.SessionId &&
+                source.IsAfter(_navigationHealingSource));
+        void Reject()
+        {
+            if (_navigationProjectionActive) throw new InvalidOperationException("导航返回缺少同一实际Direct新帧和原到点距离后验");
+            _lastReachedNavigation = null;
+        }
+        if (!AcceptsFrame()) { Reject(); return; }
+        var located = _moveIo.LocateDirect != null ? await _moveIo.LocateDirect(frame, waypoint) : await _moveIo.Locate(frame, waypoint);
+        _waypointBudget?.Check(_moveIo.Clock, ct);
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        if (!AcceptsFrame() || !located.IsDirect || !float.IsFinite(located.Point.X) || !float.IsFinite(located.Point.Y) ||
+            Navigation.GetDistance(waypoint, located.Point) >= (IsTargetPoint(waypoint) ? 2 : 4))
+        { Reject(); return; }
+        if (!_navigationProjectionActive) _lastReachedNavigation = new(CurWaypoint.Item1, located.Point, source);
+    }
+
+    private async Task ExecutePendingNavigationResumeAsync()
+    {
+        if (_pendingNavigationResume is not { } plan) return;
+        if (_navigationTicketUsed) throw new InvalidOperationException("原恢复票据已消费，禁止重复导航投影");
+        _navigationTicketUsed = true; // Called only after the existing shared healing/revive count reserves its ticket.
+        var owner = _waypointBudget ?? throw new InvalidOperationException("导航投影缺少原节点owner");
+        owner.Check(_moveIo.Clock, ct);
+        if (!plan.Matches(_routeIdentity, CurWaypoints.Item2, owner) || !_navigationHealingSource.IsKnown ||
+            _navigationHealingSource.SessionId != plan.Reached.Source.SessionId)
+            throw new InvalidOperationException("导航投影原路线身份或恢复source不匹配");
+        using var operation = UiOperation.Begin("path-navigation-return", owner.Deadline - _moveIo.Clock.GetUtcNow(), ct, clock: _moveIo.Clock);
+        _navigationProjectionActive = true;
+        _pathingMacro?.Release();
+        try
+        {
+            await HandleTeleportWaypoint(CurWaypoints.Item2[0]);
+            owner.Check(_moveIo.Clock, ct);
+            foreach (var step in plan.Steps)
+            {
+                if (!plan.Matches(_routeIdentity, CurWaypoints.Item2, owner)) throw new InvalidOperationException("原导航计划在恢复期间变化");
+                var original = CurWaypoints.Item2[step.OriginalIndex];
+                owner.Check(_moveIo.Clock, ct);
+                await MoveTo(original);
+                if (IsTargetPoint(original)) await MoveCloseTo(original);
+                await RecordReachedNavigationAsync(original);
+                owner.Check(_moveIo.Clock, ct);
+            }
+            _resumeCurrent = plan.ResumeCurrent;
+            _pendingNavigationResume = null;
+        }
+        finally { _navigationProjectionActive = false; }
+    }
+
     private int HealingResumeIndex() => RecordWaypoints == CurWaypoints && _skipOtherOperations
         ? Math.Max(CurWaypoint.Item1, RecordWaypoint.Item1) : CurWaypoint.Item1;
 
@@ -55,7 +121,10 @@ public partial class PathExecutor
                 $"route={CurWaypoint.Item2.PathingTaskFileName} node={CurWaypoint.Item1} checkpoint={resumeIndex} rejection={rejection}; latest existing frame, no replay authorized", _moveIo.Logger);
         }
         catch { }
-        return rejection == null;
+        if (rejection == null) { _returningToCurrent = true; return true; }
+        // This adapter has no bound post-revive main/HP receipt for a navigation return yet.
+        // Keep the original replay rejection instead of borrowing an older healing source.
+        return false;
     }
 
     private void TraceHealingPrefix(string request, int resumeIndex)
@@ -138,6 +207,7 @@ public partial class PathExecutor
             ct.ThrowIfCancellationRequested();
             TaskExecutionScope.ThrowIfFailed();
             parent?.Check();
+            _waypointBudget?.Check(_moveIo.Clock, ct);
         }
         CheckParent();
         var expectedMain = pendingMainRestore?.ExpectedMainIndex ??
@@ -148,13 +218,16 @@ public partial class PathExecutor
         async Task Recover()
         {
             CheckParent();
-            if (pendingMainRestore is null) await TpStatueOfTheSeven();
+            if (_sceneIo != null) await _sceneIo.RecoverAtStatue(ct);
+            else if (pendingMainRestore is null) await TpStatueOfTheSeven();
             else await pendingMainRestore.RecoverAtStatueAsync(TpStatueOfTheSeven);
             CheckParent();
         }
         var resumeIndex = HealingResumeIndex();
         // 能否重放只决定恢复后的路线处理，不能阻止当前低血角色先安全回血。
-        var canRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex, _completedWaypointActions);
+        var legacyCanRestart = CanRestartAfterHealing(CurWaypoints.Item2, resumeIndex, _completedWaypointActions);
+        var navigation = legacyCanRestart ? null : BuildNavigationResume();
+        var canRestart = legacyCanRestart || navigation != null;
         var allowParentReplan = CanRequestParentHealingReplan(CurWaypoints.Item2, resumeIndex, _segmentHasStartedTraversal);
         var request = "healing:" + Guid.NewGuid().ToString("N");
         var context = $"route={CurWaypoint.Item2.PathingTaskFileName} segment={CurWaypoints.Item1} node={CurWaypoint.Item1} " +
@@ -186,6 +259,13 @@ public partial class PathExecutor
                 CheckParent();
                 using var frame = _moveIo.Capture();
                 DiagnosticEvidenceScope.Current?.ObserveExistingFrame(frame);
+                if (_sceneIo != null)
+                {
+                    var fixtureObservation = _sceneIo.ReadHealing(frame);
+                    lastSource = frame.FrameStamp;
+                    lastObservation = fixtureObservation.ToString();
+                    return fixtureObservation;
+                }
                 _combatScenes?.PrepareAvatarObservation(frame, identity, UiSnapshot.RecoveryMaximumAge);
                 var active = _combatScenes?.GetActiveAvatarIndex(frame, identity) ?? -1;
                 var result = PathPartyHealing.HealthFrame(frame.FrameStamp,
@@ -203,7 +283,18 @@ public partial class PathExecutor
                 CheckParent();
             }, ct, _moveIo.Clock, canRestart, allowParentReplan);
         }
-        catch (HealingRecoveryCompletedException) { Trace("healed-restart-confirmed", false); throw; }
+        catch (HealingRecoveryCompletedException)
+        {
+            if (navigation != null)
+            {
+                _pendingNavigationResume = navigation;
+                _navigationHealingSource = lastSource;
+                _navigationTicketUsed = false;
+            }
+            _returningToCurrent = true;
+            Trace("healed-restart-confirmed", false);
+            throw;
+        }
         catch (Exception error) { Trace("failed:" + error.GetType().Name, true); throw; }
         finally { evidence?.ForgetExactFrame(request, request); }
     }

@@ -15,6 +15,7 @@ namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 public class CombatScriptHandler : IActionHandler
 {
     private readonly PathingMacroSession? _macro;
+    internal CombatExecutionResult? LastResult { get; private set; }
     public CombatScriptHandler() { }
     internal CombatScriptHandler(PathingMacroSession macro) => _macro = macro;
     internal static void ValidateRouteRequirements(IEnumerable<Waypoint> points, string routeName, IEnumerable<string> party)
@@ -56,6 +57,7 @@ public class CombatScriptHandler : IActionHandler
                 : await CombatScriptExecutor.ExecuteAsync(combatScript, ct, Logger, combatScenes,
                     CombatScriptExecutionMode.LegacyPartyTemplate, CombatScriptExecutionPurpose.Pathing);
             EnsureFragmentCompleted(result);
+            LastResult = result;
             Logger.LogDebug("简易策略结果 {Kind}：{Reason}", result.Kind, result.Reason);
         }
         else
