@@ -12,6 +12,128 @@ public class PreciseApproachRecoveryTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task LastPrecisePulseCanArriveOnItsAlreadyCapturedFinalObservation(bool transformed)
+    {
+        var position = new Point2f(128, 100);
+        var pulses = 0;
+        var turns = 0;
+        var held = false;
+        var replay = new PathReplay { EmitReceipts = true, Transformed = transformed, PositionAt = _ => position };
+        replay.OnRotateUntil = () => turns++;
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown) held = true;
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                pulses++;
+                position = new Point2f(pulses == 25 ? 101.5f : 128 - pulses, 100);
+            }
+        };
+        var target = replay.Point("run"); target.Type = "target";
+
+        await replay.Executor.MoveCloseTo(target);
+
+        Assert.Equal(25, pulses);
+        Assert.Equal(25, turns);
+        Assert.Equal(25, replay.Inputs.Count(input => input.Type == KeyType.KeyDown));
+        Assert.Equal(51, replay.Frames);
+        Assert.Equal(50, replay.Delays.Count(delay => delay == 60));
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.False(held);
+        Assert.All(replay.Images, frame => Assert.True(frame.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("outside")]
+    [InlineData("climb")]
+    [InlineData("swim")]
+    [InlineData("unknown")]
+    [InlineData("foreign")]
+    [InlineData("duplicate")]
+    [InlineData("stale")]
+    [InlineData("before-fence")]
+    [InlineData("unknown-receipt")]
+    [InlineData("missing-release-receipt")]
+    [InlineData("cache")]
+    [InlineData("no-response")]
+    [InlineData("water-without-normal-proof")]
+    [InlineData("cancel")]
+    [InlineData("deadline")]
+    public async Task FinalPreciseObservationCannotCreateAnotherControlOrBypassArrivalEvidence(string kind)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var position = new Point2f(128, 100);
+        var motion = kind == "water-without-normal-proof" ? MotionStatus.Swim : MotionStatus.Normal;
+        var pulses = 0;
+        var turns = 0;
+        var held = false;
+        Fischless.GameCapture.CaptureFrameStamp beforeFinalPulse = default;
+        var replay = new PathReplay(cancellation.Token) { EmitReceipts = true,
+            PositionAt = _ => position, MotionAt = _ => motion };
+        replay.OnRotateUntil = () =>
+        {
+            turns++;
+            if (pulses == 24 && kind == "unknown-receipt") replay.EmitReceipts = false;
+        };
+        replay.OnInput = (action, type) =>
+        {
+            if (action != GIActions.MoveForward) return;
+            if (type == KeyType.KeyDown)
+            {
+                held = true;
+                if (pulses == 24 && kind == "missing-release-receipt") replay.EmitReceipts = false;
+            }
+            else if (type == KeyType.KeyUp && held)
+            {
+                held = false;
+                pulses++;
+                position = new Point2f(pulses == 25 ? kind == "outside" ? 102.54f : 101.5f : 128 - pulses, 100);
+                if (pulses != 25) return;
+                motion = kind switch
+                {
+                    "climb" => MotionStatus.Climb,
+                    "swim" => MotionStatus.Swim,
+                    "unknown" => MotionStatus.Unknown,
+                    _ => MotionStatus.Normal
+                };
+                if (kind == "cache") replay.Direct = false;
+                if (kind == "cancel") cancellation.Cancel();
+                if (kind == "deadline") replay.Clock.Advance(TimeSpan.FromMinutes(1));
+            }
+        };
+        replay.StampTransform = stamp =>
+        {
+            if (pulses < 25) { beforeFinalPulse = stamp; return stamp; }
+            return kind switch
+            {
+                "foreign" => stamp with { SessionId = Guid.NewGuid() },
+                "duplicate" => beforeFinalPulse,
+                "stale" => stamp with { CapturedTimestamp = stamp.CapturedTimestamp - 3 * stamp.TimestampFrequency },
+                "before-fence" => stamp with { CapturedTimestamp = beforeFinalPulse.CapturedTimestamp + stamp.TimestampFrequency / 100 },
+                _ => stamp
+            };
+        };
+        replay.AvailabilityAt = _ => pulses == 25 && kind == "no-response" ? WorldFrameKind.Unknown : WorldFrameKind.Playable;
+        var target = replay.Point("run"); target.Type = "target";
+
+        var error = await Record.ExceptionAsync(() => replay.Executor.MoveCloseTo(target));
+
+        if (kind == "cancel") Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<RetryException>(error);
+        Assert.Equal(25, pulses);
+        Assert.Equal(25, turns);
+        Assert.Equal(25, replay.Inputs.Count(input => input.Type == KeyType.KeyDown));
+        Assert.DoesNotContain(replay.Inputs, input => input.Type == KeyType.KeyDown && input.Action != GIActions.MoveForward);
+        Assert.Empty(replay.RecoveryInputs);
+        Assert.False(held);
+        Assert.All(replay.Images, frame => Assert.True(frame.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task WaterEpisodesCannotReuseAConsumedNormalProgressAnchor(bool secondEpisodeProgress)
     {
         var position = new Point2f(108, 100);
