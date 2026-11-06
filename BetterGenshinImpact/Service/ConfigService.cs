@@ -100,6 +100,26 @@ public class ConfigService : IConfigService
     /// </summary>
     public static AllConfig? Config { get; private set; }
 
+    // Explicit model data for isolated, nonparallel tests; never starts persistence or changes resource roots.
+    internal static IDisposable UseInMemoryConfig(AllConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        var previous = Config;
+        Config = config;
+        return new InMemoryConfigScope(previous);
+    }
+
+    private sealed class InMemoryConfigScope(AllConfig? previous) : IDisposable
+    {
+        private bool _disposed;
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            Config = previous;
+        }
+    }
+
     public ConfigService()
     {
         _saveTimer = new Timer(OnSaveTimerElapsed, null, Timeout.Infinite, Timeout.Infinite);

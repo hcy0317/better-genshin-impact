@@ -40,6 +40,7 @@ using BetterGenshinImpact.GameTask.Common.Map.Maps;
 using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
 using BetterGenshinImpact.GameTask.AutoFight;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
+using BetterGenshinImpact.GameTask.AutoFight.Script;
 using Fischless.GameCapture;
 using BetterGenshinImpact.GameTask.Common.Ui;
 
@@ -59,17 +60,40 @@ public partial class PathExecutor
     private CancellationToken ct;
     private PathExecutorSuspend pathExecutorSuspend;
     private readonly PathMoveToIo _moveIo;
+    internal sealed class PathingSceneIo
+    {
+        internal required Func<PathingTask, CancellationToken, Task<bool>> Prepare { get; init; }
+        internal required Func<Waypoint, RouteMapContext, WaypointForTrack> Convert { get; init; }
+        internal required Func<WaypointForTrack, CancellationToken, Task> Teleport { get; init; }
+        internal required Func<ImageRegion, WaypointForTrack, bool> LowHp { get; init; }
+        internal required Func<CancellationToken, Task> RecoverAtStatue { get; init; }
+        internal required Func<ImageRegion, HealingFrame> ReadHealing { get; init; }
+        internal required Func<WaypointForTrack, CancellationToken, Task<CombatExecutionResult>> RunAction { get; init; }
+        internal required Func<PathingMacroSession?> MacroFactory { get; init; }
+    }
+    private readonly PathingSceneIo? _sceneIo;
     private DateTimeOffset? _moveDeadline;
     private PathingMacroSession? _pathingMacro;
     private readonly HashSet<int> _completedWaypointActions = new();
+    private readonly Dictionary<int, WaypointActionSettlement> _actionSettlements = new();
+    private ReachedNavigation? _lastReachedNavigation;
+    private WaypointAttemptBudget? _waypointBudget;
+    private NavigationResumePlan? _pendingNavigationResume;
+    private int? _resumeCurrent;
+    private bool _returningToCurrent;
+    private bool _navigationProjectionActive;
+    private string _routeIdentity = "";
+    private CombatExecutionResult? _lastActionOutcome;
+    internal IReadOnlyDictionary<int, WaypointActionSettlement> ActionSettlements => _actionSettlements;
 
     public PathExecutor(CancellationToken ct) : this(ct, null) { }
 
-    internal PathExecutor(CancellationToken ct, PathMoveToIo? io, PathingMacroSession? macro = null)
+    internal PathExecutor(CancellationToken ct, PathMoveToIo? io, PathingMacroSession? macro = null, PathingSceneIo? sceneIo = null)
     {
         _rotateTask = new(ct);
         this.ct = ct;
         _pathingMacro = macro;
+        _sceneIo = sceneIo;
         pathExecutorSuspend = new PathExecutorSuspend(this);
         _moveIo = io ?? new PathMoveToIo(native: true)
         {
@@ -181,6 +205,8 @@ public partial class PathExecutor
         TaskExecutionScope.ThrowIfFailed();
         SuccessEnd = false;
         // SuspendableDictionary;
+        if (_sceneIo == null)
+        {
         const string sdKey = "PathExecutor";
         var sd = RunnerContext.Instance.SuspendableDictionary;
         sd.Remove(sdKey);
@@ -189,7 +215,7 @@ public partial class PathExecutor
 
         if (!task.Positions.Any())
         {
-            Logger.LogWarning("没有路径点，寻路结束");
+            _moveIo.Logger.LogWarning("没有路径点，寻路结束");
             return;
         }
 
@@ -207,24 +233,33 @@ public partial class PathExecutor
         }
 
         InitializePathing(task);
-        using var macroOwner = new PathingMacroSession(new NativePathingMacroIo(() =>
-            $"route={task.FileName} segment={CurWaypoints.Item1} node={CurWaypoint.Item1}"));
-        _pathingMacro = macroOwner;
+        }
+        else if (!await _sceneIo.Prepare(task, ct)) return;
+        using var macroOwner = _sceneIo != null ? _sceneIo.MacroFactory() :
+            _pathingMacro == null ? new PathingMacroSession(new NativePathingMacroIo(() =>
+                $"route={task.FileName} segment={CurWaypoints.Item1} node={CurWaypoint.Item1}")) : null;
+        _pathingMacro ??= macroOwner;
+        _routeIdentity = task.FullPath + "|" + task.FileName;
         // 转换、按传送点分割路径
         var waypointsList = ConvertWaypointsForTrack(task.Positions, task);
 
-        await Delay(100, ct);
-        Navigation.WarmUp(task.Info.MapMatchMethod); // 提前加载地图特征点
+        await _moveIo.Delay(100, ct);
+        if (_sceneIo == null) Navigation.WarmUp(task.Info.MapMatchMethod); // 提前加载地图特征点
 
         foreach (var waypoints in waypointsList) // 按传送点分割的路径
         {
             CurWaypoints = (waypointsList.FindIndex(wps => wps == waypoints), waypoints);
             _completedWaypointActions.Clear();
+            _actionSettlements.Clear();
+            _lastReachedNavigation = null;
+            _waypointBudget = null;
+            _resumeCurrent = null;
+            _returningToCurrent = false;
             _segmentHasStartedTraversal = false;
             var capturedRetryFailure = false;
             var endedEarly = await ExecuteSegmentWithRetriesAsync(async () =>
             {
-                await ResolveAnomalies(); // 异常场景处理
+                if (_sceneIo == null) await ResolveAnomalies(); // 异常场景处理
 
                 // 如果首个点是非TP点位，强制设置在这个点位附近优先做局部匹配
                 if (waypoints[0].Type != WaypointType.Teleport.Code)
@@ -234,14 +269,21 @@ public partial class PathExecutor
 
                 foreach (var waypoint in waypoints) // 一条路径
                 {
-                    CurWaypoint = (waypoints.FindIndex(wps => wps == waypoint), waypoint);
+                    var currentIndex = waypoints.FindIndex(wps => wps == waypoint);
+                    if (_resumeCurrent is { } resume && currentIndex < resume) continue;
+                    CurWaypoint = (currentIndex, waypoint);
+                    if (!_returningToCurrent && _waypointBudget?.CurrentIndex != currentIndex)
+                        _waypointBudget = new(currentIndex, _moveIo.Clock.GetUtcNow(), TimeSpan.FromSeconds(waypoint.MoveMode == MoveModeEnum.Climb.Code ? 60 : 240));
+                    if (_waypointBudget == null) throw new InvalidOperationException("返回原current缺少owner票据");
+                    _waypointBudget.Check(_moveIo.Clock, ct);
+                    using var nodeOwner = UiOperation.Begin("path-waypoint-owner", _waypointBudget.Deadline - _moveIo.Clock.GetUtcNow(), ct, clock: _moveIo.Clock);
                     TryCloseSkipOtherOperations();
                     await RecoverWhenLowHp(waypoint); // 低血量恢复
                     _segmentHasStartedTraversal = true;
 
                     if (waypoint.Type == WaypointType.Teleport.Code)
                     {
-                        _pathingMacro.Release();
+                        _pathingMacro?.Release();
                         if (CurWaypoints.Item1 > 0)
                         {
                             var prevWaypoints = waypointsList[CurWaypoints.Item1 - 1];
@@ -259,6 +301,7 @@ public partial class PathExecutor
                             }
                         }
                         await HandleTeleportWaypoint(waypoint);
+                        await RecordReachedNavigationAsync(waypoint);
                     }
                     else
                     {
@@ -266,7 +309,7 @@ public partial class PathExecutor
                         // Path不用走得很近，Target需要接近，但都需要先移动到对应位置
                         if (waypoint.Type == WaypointType.Orientation.Code)
                         {
-                            _pathingMacro.Release();
+                            _pathingMacro?.Release();
                             // 方位点，只需要朝向
                             // 考虑到方位点大概率是作为执行action的最后一个点，所以放在此处处理，不和传送点一样单独处理
                             await FaceTo(waypoint);
@@ -284,6 +327,7 @@ public partial class PathExecutor
                             await MoveCloseTo(waypoint);
                         }
 
+                        await RecordReachedNavigationAsync(waypoint);
                         //skipOtherOperations如果重试，则跳过相关操作，
                         if (ShouldExecuteWaypointAction(waypoint))
                         {
@@ -294,8 +338,16 @@ public partial class PathExecutor
                             await AfterMoveToTarget(waypoint);
                             ct.ThrowIfCancellationRequested();
                             TaskExecutionScope.ThrowIfFailed();
+                            _waypointBudget.Check(_moveIo.Clock, ct);
                             _completedWaypointActions.Add(CurWaypoint.Item1);
+                            if (_lastActionOutcome is { } settled) _actionSettlements[CurWaypoint.Item1] = new(CurWaypoint.Item1, NavigationResumePlan.CommandDigest(waypoint), settled);
                         }
+                    }
+                    if (_returningToCurrent && _waypointBudget.CurrentIndex == currentIndex)
+                    {
+                        _waypointBudget.Check(_moveIo.Clock, ct);
+                        _returningToCurrent = false;
+                        _resumeCurrent = null;
                     }
                 }
 
@@ -307,16 +359,18 @@ public partial class PathExecutor
                     TaskFailureDiagnostics.CaptureScreenshotOnce(exception,
                         $"地图追踪分段 {CurWaypoints.Item1 + 1} 点位 {CurWaypoint.Item1 + 1} 原始失败，尚未重试：{exception.GetType().Name}");
                 }
+                if (exception is not HealingRecoveryCompletedException) { _waypointBudget = null; _resumeCurrent = null; _returningToCurrent = false; }
                 StartSkipOtherOperations(afterHealing: exception is HealingRecoveryCompletedException);
-                Logger.LogWarning("地图追踪分段 {Segment} 点位 {Waypoint} 将重试：{Reason}",
+                _moveIo.Logger.LogWarning("地图追踪分段 {Segment} 点位 {Waypoint} 将重试：{Reason}",
                     CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, exception.Message);
             }, () =>
             {
-                _pathingMacro.Release();
+                _pathingMacro?.Release();
+                if (_sceneIo != null) { _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp); return; }
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(User32.VK.VK_W);
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.RightButtonUp();
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
-            }, ct, canRestartAfterCombatRecovery: CanRestartAfterCombatRecovery);
+            }, ct, canRestartAfterCombatRecovery: CanRestartAfterCombatRecovery, resumeNavigation: ExecutePendingNavigationResumeAsync);
             if (endedEarly)
             {
                 SuccessEnd = true;
@@ -332,7 +386,7 @@ public partial class PathExecutor
     /// <summary>正常完成返回 false；仅显式结束条件返回 true；失败或取消始终向调用方传播。</summary>
     internal static async Task<bool> ExecuteSegmentWithRetriesAsync(Func<Task> execute,
         Action<Exception> onRetry, Action releaseInput, CancellationToken ct,
-        Func<bool>? canRestartAfterCombatRecovery = null)
+        Func<bool>? canRestartAfterCombatRecovery = null, Func<Task>? resumeNavigation = null)
     {
         var healingRestarts = 0;
         var relocationRestarts = 0;
@@ -370,6 +424,7 @@ public partial class PathExecutor
                 ct.ThrowIfCancellationRequested();
                 if (++healingRestarts > 2)
                     throw new InvalidOperationException("当前分段已使用两次已验证回血或复苏重启，停止而不扩大重试", exception);
+                if (resumeNavigation != null) await resumeNavigation();
                 onRetry(new HealingRecoveryCompletedException());
                 attempt--;
             }
@@ -380,6 +435,7 @@ public partial class PathExecutor
                 UiOperation.Current?.Check();
                 if (++healingRestarts > 2)
                     throw new InvalidOperationException("当前分段已使用两次已验证回血重启，停止而不扩大重试", exception);
+                if (resumeNavigation != null) await resumeNavigation();
                 onRetry(exception);
                 attempt--;
             }
@@ -663,7 +719,8 @@ public partial class PathExecutor
                 Logger.LogWarning("地图追踪任务 {TaskName} 图层选择器诊断：{Diagnostic}", task.Info.Name, diagnostic);
             }
 
-            WaypointForTrack wft = new WaypointForTrack(waypoint, new RouteMapContext(task.Info.MapName, task.Info.MapMatchMethod, effectiveSelector));
+            var context = new RouteMapContext(task.Info.MapName, task.Info.MapMatchMethod, effectiveSelector);
+            WaypointForTrack wft = _sceneIo?.Convert(waypoint, context) ?? new WaypointForTrack(waypoint, context);
             wft.Misidentification=waypoint.PointExtParams.Misidentification;
             wft.MonsterTag = waypoint.PointExtParams.MonsterTag;
             wft.EnableMonsterLootSplit = waypoint.PointExtParams.EnableMonsterLootSplit;
@@ -776,6 +833,14 @@ public partial class PathExecutor
 
     private async Task RecoverWhenLowHp(WaypointForTrack waypoint)
     {
+        if (_sceneIo != null)
+        {
+            using var observed = _moveIo.Capture();
+            if (_moveIo.CombatHud(observed) && !_moveIo.Transformed(observed) &&
+                observed.FrameStamp.IsFresh(_moveIo.Clock, UiSnapshot.RecoveryMaximumAge) && _sceneIo.LowHp(observed, waypoint))
+                await RecoverAtStatueAndRestartAsync(observed.FrameStamp);
+            return;
+        }
         var parent = UiOperation.Current;
         void CheckParent()
         {
@@ -929,9 +994,10 @@ public partial class PathExecutor
 
     private async Task HandleTeleportWaypoint(WaypointForTrack waypoint)
     {
+        if (_sceneIo != null) { await _sceneIo.Teleport(waypoint, ct); return; }
         var forceTp = waypoint.Action == ActionEnum.ForceTp.Code;
         TpTask tpTask = new TpTask(ct);
-        await TryGetExpeditionRewardsDispatch(tpTask);
+        if (!_navigationProjectionActive) await TryGetExpeditionRewardsDispatch(tpTask);
         var (tpX, tpY) = await tpTask.Tp(waypoint.GameX, waypoint.GameY, waypoint.MapContext, forceTp);
         var (tprX, tprY) = MapManager.GetMap(waypoint.MapContext)
             .ConvertGenshinMapCoordinatesToImageCoordinates(new Point2f((float)tpX, (float)tpY));
@@ -962,6 +1028,7 @@ public partial class PathExecutor
         moveToStartTime = _moveIo.Clock.GetUtcNow().UtcDateTime;
         _moveDeadline = new DateTimeOffset(moveToStartTime, TimeSpan.Zero).AddSeconds(
             waypoint.MoveMode == MoveModeEnum.Climb.Code ? 60 : 240);
+        if (_waypointBudget is { } owner && owner.Deadline < _moveDeadline) _moveDeadline = owner.Deadline;
         var airborneStart = false;
         using (var ready = await PathWorldAvailability.CapturePlayableAsync(_moveIo, _moveDeadline.Value, ct))
         {
@@ -1453,7 +1520,7 @@ public partial class PathExecutor
 
             // 赶路逻辑（使用角色技能加速赶路）
             if (!transformed) _pathingMacro?.Release();
-            var hurryOnResult = !transformed && await (_moveIo.HurryOn?.Invoke(diff, waypoint, distance, screen, num)
+            var hurryOnResult = !_navigationProjectionActive && !transformed && await (_moveIo.HurryOn?.Invoke(diff, waypoint, distance, screen, num)
                 ?? TryHurryOnAsync(diff, waypoint, distance, screen, num, hurryOnState));
             if (hurryOnResult)
             {
@@ -1509,7 +1576,7 @@ public partial class PathExecutor
             else if (waypoint.MoveMode != MoveModeEnum.Climb.Code) //否则自动短疾跑
             {
                 // 使用 E 技能
-                if (!transformed && distance > 10 && !string.IsNullOrEmpty(PartyConfig.GuardianAvatarIndex) &&
+                if (!_navigationProjectionActive && !transformed && distance > 10 && !string.IsNullOrEmpty(PartyConfig.GuardianAvatarIndex) &&
                     double.TryParse(PartyConfig.GuardianElementalSkillSecondInterval, out var s))
                 {
                     if (s < 1)
@@ -1546,7 +1613,7 @@ public partial class PathExecutor
             }
 
             // 使用小道具
-            if (PartyConfig.UseGadgetIntervalMs > 0)
+            if (!_navigationProjectionActive && PartyConfig.UseGadgetIntervalMs > 0)
             {
                 if ((_moveIo.Clock.GetUtcNow().UtcDateTime - _useGadgetLastUseTime).TotalMilliseconds > PartyConfig.UseGadgetIntervalMs)
                 {
@@ -2161,6 +2228,15 @@ public partial class PathExecutor
 
     private async Task AfterMoveToTarget(WaypointForTrack waypoint)
     {
+        if (_sceneIo != null)
+        {
+            var outcome = await _sceneIo.RunAction(waypoint, ct);
+            _lastActionOutcome = outcome;
+            CombatScriptHandler.EnsureFragmentCompleted(outcome);
+            var nextPoint = CurWaypoint.Item1 + 1 < CurWaypoints.Item2.Count ? CurWaypoints.Item2[CurWaypoint.Item1 + 1] : null;
+            await WaitAfterWaypointActionAsync(waypoint, nextPoint, _moveIo.Delay, ct);
+            return;
+        }
         if (waypoint.Action == ActionEnum.NahidaCollect.Code
             || waypoint.Action == ActionEnum.PickAround.Code
             || waypoint.Action == ActionEnum.Fight.Code
@@ -2186,6 +2262,7 @@ public partial class PathExecutor
                 waypoint.Action == ActionEnum.Fight.Code ? 0 : IsTargetPoint(waypoint) ? 1000 : 0);
             //,PartyConfig
             await DispatchArrivalActionAsync(handler, waypoint, PartyConfig, ct);
+            _lastActionOutcome = handler is CombatScriptHandler typed ? typed.LastResult : CombatScriptExecutor.FromFlowResult(CombatFlowResult.Succeeded);
             //统计结束战斗的次数
             if (waypoint.Action == ActionEnum.Fight.Code)
             {
