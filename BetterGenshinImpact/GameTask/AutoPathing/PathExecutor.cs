@@ -1707,6 +1707,53 @@ public partial class PathExecutor
         var rotationPolicy = new PreciseApproachRotationPolicy(maxConsecutiveFailures: 2);
         var climbingFrames = 0;
         var swimmingFrames = 0;
+        var waterAdvancing = false;
+        var waterRuntime = Guid.Empty;
+        CaptureFrameFence? waterResponseFence = null;
+        var waterPulseMotion = MotionStatus.Unknown;
+        var waterProgressAnchor = double.PositiveInfinity;
+        var normalMovementFeedback = 0;
+        CaptureFrameStamp waterFeedbackSource = default;
+        void RetireWaterProof()
+        {
+            waterResponseFence = null;
+            waterPulseMotion = MotionStatus.Unknown;
+            waterProgressAnchor = double.PositiveInfinity;
+            normalMovementFeedback = 0;
+            waterFeedbackSource = default;
+        }
+        void ObserveWaterResponse(PathMoveObservation feedback)
+        {
+            if (!waterAdvancing || waterResponseFence is not { } pending || !feedback.Valid || !feedback.SourceUsable ||
+                feedback.Stamp.SessionId != waterRuntime || !pending.Accepts(feedback.Stamp) ||
+                feedback.Stamp.TimestampFrequency != _moveIo.Clock.TimestampFrequency ||
+                _moveIo.Clock.GetElapsedTime(pending.InputCompletedTimestamp, feedback.Stamp.CapturedTimestamp).TotalMilliseconds < 60)
+                return;
+            if (waterPulseMotion != MotionStatus.Normal || feedback.Motion != MotionStatus.Normal)
+            {
+                if (feedback.Motion != MotionStatus.Normal) RetireWaterProof();
+                else
+                {
+                    normalMovementFeedback = 0;
+                    waterFeedbackSource = default;
+                }
+                return;
+            }
+            // Only a new complete Normal-started pulse can establish a finite anchor.
+            if (!double.IsFinite(waterProgressAnchor)) return;
+            if (waterFeedbackSource.IsKnown && !feedback.Stamp.IsAfter(waterFeedbackSource)) return;
+            waterFeedbackSource = feedback.Stamp;
+            var responseDistance = Navigation.GetDistance(waypoint, feedback.Position);
+            // Same .1 cumulative target-progress margin as the ordinary approach.
+            normalMovementFeedback = responseDistance < waterProgressAnchor - .1 ? normalMovementFeedback + 1 : 0;
+            if (normalMovementFeedback >= 2)
+            {
+                // Same-pulse responses restore ordinary movement, never a Grounded fact.
+                waterAdvancing = false;
+                RetireWaterProof();
+                swimmingFrames = 0;
+            }
+        }
         var detachAttempts = 0;
         CaptureFrameFence? detachFence = null;
         PathApproachPulse detachPulse = default;
@@ -1737,7 +1784,12 @@ public partial class PathExecutor
                 approachDiagnostics.Recovery(screen, observation, "terminal-" + recoveryTerminal, _moveIo.Logger);
                 recoveryTerminal = null;
             }
-            if (!observation.Valid || detachFence is { } required && !required.Accepts(observation.Stamp))
+            if (waterAdvancing && observation.Stamp.SessionId != waterRuntime)
+                throw new RetryException("出水推进的捕获源已改变，重试原路线分段");
+            if (!observation.Valid || detachFence is { } required && !required.Accepts(observation.Stamp) ||
+                waterResponseFence is { } waterFence && (!waterFence.Accepts(observation.Stamp) ||
+                    observation.Stamp.TimestampFrequency != _moveIo.Clock.TimestampFrequency ||
+                    _moveIo.Clock.GetElapsedTime(waterFence.InputCompletedTimestamp, observation.Stamp.CapturedTimestamp).TotalMilliseconds < 60))
             {
                 noProgress = swimmingFrames = 0;
                 climbingFrames = 0;
@@ -1751,22 +1803,40 @@ public partial class PathExecutor
                     detachPulse, detachEnvironment, detachFence, _moveIo.Logger);
             }
             var transformed = _moveIo.Transformed(screen);
+            if (waterAdvancing)
+            {
+                if (transformed || observation.Motion is not (MotionStatus.Swim or MotionStatus.Normal))
+                    throw new RetryException("出水推进尚未恢复普通目标运动，重试原路线分段");
+                ObserveWaterResponse(observation);
+            }
             if (observation.Motion == MotionStatus.Swim && waypoint.MoveMode != MoveModeEnum.Swim.Code)
             {
                 _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp);
                 previous = observation.Stamp;
-                if (++swimmingFrames >= 2)
+                if (!waterAdvancing)
                 {
-                    approachDiagnostics.Recovery(screen, observation, "unexpected-swimming", _moveIo.Logger);
-                    throw new RetryException("精确接近连续检测到游泳，不能记录地面到达，重试原路线分段");
+                    if (++swimmingFrames < 2)
+                    {
+                        await _moveIo.Delay(100, operation.Token);
+                        continue;
+                    }
+                    var authoredGroundTarget = waypoint.Type == "target" &&
+                        waypoint.MoveMode is "walk" or "run" or "dash" && !transformed && detachFence == null &&
+                        !string.IsNullOrWhiteSpace(waypoint.MapName) && double.IsFinite(waypoint.X) && double.IsFinite(waypoint.Y);
+                    if (!authoredGroundTarget)
+                    {
+                        approachDiagnostics.Recovery(screen, observation, "unexpected-swimming", _moveIo.Logger);
+                        throw new RetryException("精确接近连续检测到游泳，不能记录地面到达，重试原路线分段");
+                    }
+                    RetireWaterProof();
+                    waterAdvancing = true;
+                    waterRuntime = observation.Stamp.SessionId;
                 }
-                await _moveIo.Delay(100, operation.Token);
-                continue;
             }
-            swimmingFrames = 0;
+            else swimmingFrames = 0;
             // 已确认的变身使用自身HUD，不把普通角色Fly/Unknown解释套到其移动上。
             // 脱离攀爬后的落地、游泳和原始源帧约束仍独立生效。
-            if ((detachFence != null || !transformed && waypoint.MoveMode is "walk" or "run" or "dash") &&
+            if (!waterAdvancing && (detachFence != null || !transformed && waypoint.MoveMode is "walk" or "run" or "dash") &&
                 observation.Motion is not (MotionStatus.Normal or MotionStatus.Climb))
             {
                 // 松开攀爬后的下落/未知姿态不算落地，也不消耗小碎步次数。
@@ -1833,7 +1903,9 @@ public partial class PathExecutor
                 continue;
             }
             climbingFrames = 0;
-            if (distance < 2)
+            if (waterAdvancing && distance < 2 && normalMovementFeedback == 0)
+                throw new RetryException("出水推进未取得普通运动后验，不能将相同平面位置记为到达");
+            if (!waterAdvancing && distance < 2)
             {
                 // Only this fresh, direct arrival observation can keep a fly node in flight.
                 // Prior flight or the authored move mode alone cannot bypass ground settling.
@@ -1855,7 +1927,7 @@ public partial class PathExecutor
             else noProgress++;
             lastPulse = default; // A receipt can authorize only one progress observation.
             previous = observation.Stamp;
-            if (!recoveryUsed && noProgress >= 5 && observation.Motion == MotionStatus.Normal &&
+            if (!waterAdvancing && !recoveryUsed && noProgress >= 5 && observation.Motion == MotionStatus.Normal &&
                 waypoint.MoveMode is "walk" or "run" or "climb" or "dash" && !_moveIo.Transformed(screen))
             {
                 recoveryUsed = true;
@@ -1896,26 +1968,31 @@ public partial class PathExecutor
                 continue;
             }
 
+            var waterConfirmationOnly = waterAdvancing && normalMovementFeedback > 0 && distance < 2;
             targetOrientation = Navigation.GetTargetOrientation(waypoint, position);
-            var rotated = await _moveIo.RotateUntil(targetOrientation, 2);
-            approachDiagnostics.RecordRotation(targetOrientation, rotated);
-            operation.Check();
-            var rotationFailed = rotationPolicy.Observe(rotated);
-            if (stepsTaken == 1 || stepsTaken % 5 == 0 || !rotated)
-                _moveIo.Logger.LogDebug("PATH_APPROACH segment={Segment} waypoint={Waypoint} step={Step}/25 targetImage=({TargetX:F1},{TargetY:F1}) currentImage=({X:F1},{Y:F1}) distance={Distance:F2} targetAngle={Angle} rotated={Rotated} consecutiveFailures={Failures}",
-                    CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, stepsTaken, waypoint.X, waypoint.Y,
-                    position.X, position.Y, distance, targetOrientation, rotated, rotationPolicy.ConsecutiveFailures);
-            if (rotationFailed)
+            if (!waterConfirmationOnly)
             {
-                _moveIo.Logger.LogWarning(
-                    "精确接近连续 {Failures} 次无法完成视角转向，停止小碎步接近，避免在错误方向空转",
-                    rotationPolicy.ConsecutiveFailures);
-                throw new RetryException("精确接近连续转向失败，重试当前路线分段");
+                var rotated = await _moveIo.RotateUntil(targetOrientation, 2);
+                approachDiagnostics.RecordRotation(targetOrientation, rotated);
+                operation.Check();
+                var rotationFailed = rotationPolicy.Observe(rotated);
+                if (stepsTaken == 1 || stepsTaken % 5 == 0 || !rotated)
+                    _moveIo.Logger.LogDebug("PATH_APPROACH segment={Segment} waypoint={Waypoint} step={Step}/25 targetImage=({TargetX:F1},{TargetY:F1}) currentImage=({X:F1},{Y:F1}) distance={Distance:F2} targetAngle={Angle} rotated={Rotated} consecutiveFailures={Failures}",
+                        CurWaypoints.Item1 + 1, CurWaypoint.Item1 + 1, stepsTaken, waypoint.X, waypoint.Y,
+                        position.X, position.Y, distance, targetOrientation, rotated, rotationPolicy.ConsecutiveFailures);
+                if (rotationFailed)
+                {
+                    _moveIo.Logger.LogWarning(
+                        "精确接近连续 {Failures} 次无法完成视角转向，停止小碎步接近，避免在错误方向空转",
+                        rotationPolicy.ConsecutiveFailures);
+                    throw new RetryException("精确接近连续转向失败，重试当前路线分段");
+                }
+                if (!rotated)
+                {
+                    continue;
+                }
             }
-            if (!rotated)
-            {
-                continue;
-            }
+            // Reuse the existing post-turn capture for the second response; no extra turn or W.
             // 小碎步接近
             _moveIo.CheckInput();
             operation.Check();
@@ -1925,8 +2002,13 @@ public partial class PathExecutor
             var currentObservation = ReadMoveObservation(current, currentLocation, previous);
             operation.Check();
             if (!currentObservation.Valid || detachFence is { } currentFence && !currentFence.Accepts(currentObservation.Stamp) ||
-                currentObservation.Motion == MotionStatus.Swim && waypoint.MoveMode != MoveModeEnum.Swim.Code ||
-                waypoint.MoveMode is "walk" or "run" or "dash" &&
+                currentObservation.Motion == MotionStatus.Swim && waypoint.MoveMode != MoveModeEnum.Swim.Code && !waterAdvancing ||
+                waterAdvancing && (_moveIo.Transformed(current) || currentObservation.Stamp.SessionId != waterRuntime ||
+                    currentObservation.Motion is not (MotionStatus.Swim or MotionStatus.Normal)) ||
+                waterResponseFence is { } postWaterFence && (!postWaterFence.Accepts(currentObservation.Stamp) ||
+                    currentObservation.Stamp.TimestampFrequency != _moveIo.Clock.TimestampFrequency ||
+                    _moveIo.Clock.GetElapsedTime(postWaterFence.InputCompletedTimestamp, currentObservation.Stamp.CapturedTimestamp).TotalMilliseconds < 60) ||
+                !waterAdvancing && waypoint.MoveMode is "walk" or "run" or "dash" &&
                 !_moveIo.Transformed(current) && currentObservation.Motion != MotionStatus.Normal)
             {
                 // 转向期间也可能爬上障碍物；回到原脱离分支，不能继续W或用平面距离判落地。
@@ -1934,11 +2016,18 @@ public partial class PathExecutor
                 await _moveIo.Delay(100, operation.Token);
                 continue;
             }
+            // Control-state recognition is part of the same original operation budget.
+            operation.Check();
+            if (waterAdvancing && !currentObservation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2)))
+                continue;
             previous = currentObservation.Stamp;
+            ObserveWaterResponse(currentObservation);
             // Rotation can outlive the position used to choose its heading. Reuse
             // the already captured direct observation before granting arrival or W.
             position = currentObservation.Position;
             distance = Navigation.GetDistance(waypoint, position);
+            if (waterAdvancing && distance < 2)
+                throw new RetryException("出水推进尚未有正常运动后进展，不能授予地面目标到达");
             if (distance < 2)
             {
                 _moveIo.Logger.LogDebug("已到达路径点");
@@ -1948,6 +2037,7 @@ public partial class PathExecutor
                     currentObservation.Stamp.IsFresh(_moveIo.Clock, TimeSpan.FromSeconds(2));
                 break;
             }
+            if (waterConfirmationOnly) continue;
             if (Navigation.GetTargetOrientation(waypoint, position) != targetOrientation)
             {
                 // Re-enter the existing observation/rotation policy and step budget;
@@ -1958,6 +2048,18 @@ public partial class PathExecutor
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyUp), milliseconds => _moveIo.Delay(milliseconds, operation.Token), _moveIo.Clock, current);
             approachDiagnostics.RecordPulse(lastPulse);
+            if (waterAdvancing)
+            {
+                if (!lastPulse.HasCompleteReceipt ||
+                    !(lastPulse.Requested >= 2 || lastPulse.Receipt is { TransportRequested: >= 2 }))
+                    throw new RetryException("出水推进输入结果不完整或未知，不追加运动");
+                waterResponseFence = new CaptureFrameFence(currentObservation.Stamp, _moveIo.Clock.GetTimestamp());
+                waterPulseMotion = currentObservation.Motion;
+                if (currentObservation.Motion != MotionStatus.Normal) waterProgressAnchor = double.PositiveInfinity;
+                else if (!double.IsFinite(waterProgressAnchor)) waterProgressAnchor = distance;
+                normalMovementFeedback = 0;
+                waterFeedbackSource = default;
+            }
             // 松键后的识图也要等待游戏30–60ms响应；按键保持时间不能代替响应后的等待。
             // 仍由下一张有效源帧确认目标进展及原2px到达距离。
             await _moveIo.Delay(60, operation.Token);
