@@ -12,11 +12,11 @@ using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 namespace BetterGenshinImpact.GameTask.Common.Job;
 
 internal readonly record struct CurrentPlayerUidText(string Text, int X, int Y, int Width, int Height);
-internal sealed record CurrentPlayerUidFrame(UiSnapshot Scene, int Width, int Height, IReadOnlyList<CurrentPlayerUidText> Text);
+internal sealed record CurrentPlayerUidFrame(UiSnapshot Scene, int Width, int Height, IReadOnlyList<CurrentPlayerUidText> Text, UiAction? SubmittedInput = null);
+internal sealed record CurrentPlayerUidInput(UiAction Action, UiSnapshot Intent);
 internal interface ICurrentPlayerUidIo : IUiDriver
 {
-    CurrentPlayerUidFrame ReadUidFrame();
-    Task<bool> OpenMenuAsync(UiSnapshot observed, CancellationToken ct);
+    CurrentPlayerUidFrame ReadUidFrame(Func<CurrentPlayerUidFrame, CurrentPlayerUidInput?>? chooseInput = null, bool readMenuUid = true);
 }
 
 internal sealed partial class CurrentPlayerUidTask
@@ -40,49 +40,124 @@ internal sealed partial class CurrentPlayerUidTask
                 var io = _createIo();
                 using var ownedIo = io as IDisposable;
                 operation.Check();
-                CurrentPlayerUidFrame Read()
+                var firstCaptureStarted = _clock.GetTimestamp();
+                var first = io.ReadUidFrame(frame =>
                 {
                     operation.Check();
-                    var frame = io.ReadUidFrame();
-                    operation.Check();
-                    return frame;
-                }
-                var first = Read();
+                    return Usable(frame) && frame.Scene.Matches(UiTarget.Overworld) && Decode(frame, false) == 0 &&
+                        operation.Remaining > ReturnReserve ? new CurrentPlayerUidInput(UiAction.OpenMenu, frame.Scene) : null;
+                }, readMenuUid: false);
+                operation.Check();
                 if (!Usable(first)) return 0;
                 if (first.Scene.Matches(UiTarget.Overworld))
                 {
                     var footer = Decode(first, false);
                     if (footer > 0) return footer;
-                    if (operation.Remaining <= ReturnReserve) return 0;
-                    var applied = await io.OpenMenuAsync(first.Scene, operation.Token);
-                    operation.Check();
-                    operation.Action(UiAction.OpenMenu, applied, 1, 1);
-                    if (!applied) return 0;
-                    io.MarkInputCompleted(first.Scene);
+                    operation.Action(UiAction.OpenMenu, first.SubmittedInput == UiAction.OpenMenu, 1, 1);
+                    if (first.SubmittedInput != UiAction.OpenMenu) return 0;
+                    await io.DelayAsync(60, operation.Token);
                 }
                 else if (!first.Scene.Matches(UiTarget.Menu)) return 0;
-                var menu = await UiTransition.WaitAsync(operation, UiTarget.Menu, io);
-                operation.Check();
-                var candidate = 0;
-                CurrentPlayerUidFrame? readFrame = null;
-                if (operation.Remaining > ReturnReserve)
+                var driver = new MenuReadDriver(this, io, operation, first.Scene.Matches(UiTarget.Menu) ? first.Scene : null, firstCaptureStarted, first.Scene.SourceStamp.SessionId);
+                UiSnapshot menu;
+                try { menu = await UiTransition.WaitAsync(operation, UiTarget.Menu, driver); }
+                catch (UidObservationUnavailable)
                 {
-                    readFrame = Read();
-                    if (Usable(readFrame) && readFrame.Scene.IsAfter(menu) &&
-                        readFrame.Scene.SourceStamp.CapturedTimestamp > menu.SourceStamp.CapturedTimestamp)
-                        candidate = Decode(readFrame, true);
+                    await WaitForOwnedWorldAsync(operation, driver);
+                    return 0;
                 }
                 operation.Check();
-                var world = await UiRecovery.ToMainAsync(io, operation.Token, logger: _logger, clock: _clock,
-                    requireOverworld: true, budget: operation.Remaining);
+                var read = driver.ReadFrame;
+                var candidate = read != null && read.Scene.SourceStamp == menu.SourceStamp && Usable(read) ? Decode(read, true) : 0;
+                UiSnapshot world;
+                if (read?.SubmittedInput == UiAction.Escape)
+                {
+                    operation.Action(UiAction.Escape, true, 1, 1);
+                    await io.DelayAsync(60, operation.Token);
+                    world = await WaitForOwnedWorldAsync(operation, driver);
+                }
+                else
+                {
+                    world = await WaitForOwnedWorldAsync(operation, driver);
+                }
                 operation.Check();
-                var after = readFrame?.Scene ?? menu;
-                return candidate > 0 && world.Matches(UiTarget.Overworld) && world.HasUsableEvidence &&
-                    world.IsAfter(after) && world.SourceStamp.CapturedTimestamp > after.SourceStamp.CapturedTimestamp &&
+                return candidate > 0 && read != null && world.HasUsableEvidence && world.IsAfter(read.Scene) &&
+                    world.SourceStamp.CapturedTimestamp > read.Scene.SourceStamp.CapturedTimestamp &&
                     world.SourceStamp.IsFresh(_clock, UiSnapshot.RecoveryMaximumAge) ? candidate : 0;
             }, _logger, _clock);
         }
         catch (Exception error) when (error is not (OperationCanceledException or NormalEndException) && !ct.IsCancellationRequested) { return 0; }
+    }
+
+    private Task<UiSnapshot> WaitForOwnedWorldAsync(UiOperation operation, MenuReadDriver driver)
+    {
+        driver.ObserveWorld = true;
+        return UiTransition.WaitAsync(operation, UiTarget.Overworld, driver,
+            observed => driver.CanRequestCleanupEscape(observed) ? UiAction.Escape : null);
+    }
+
+    private sealed class UidObservationUnavailable : Exception { }
+    private sealed class MenuReadDriver(CurrentPlayerUidTask owner, ICurrentPlayerUidIo io, UiOperation operation, UiSnapshot? seed, long seedCaptureStarted, Guid ownerSession) : IUiDriver
+    {
+        private UiSnapshot? _previousMenu;
+        private long _captureStarted;
+        internal CurrentPlayerUidFrame? ReadFrame { get; private set; }
+        internal bool ObserveWorld { get; set; }
+        private bool _escapeAuthorized;
+        internal bool CanRequestCleanupEscape(UiSnapshot observed) => !_escapeAuthorized &&
+            observed.SourceBound && observed.HasUsableEvidence && observed.SourceStamp.SessionId == ownerSession &&
+            observed.Matches(UiTarget.Menu) && observed.CanEscape &&
+            observed.SourceStamp.IsFresh(owner._clock, UiSnapshot.RecoveryMaximumAge);
+        private bool TryAuthorizeEscape()
+        {
+            operation.Check();
+            if (_escapeAuthorized) return false;
+            _escapeAuthorized = true;
+            return true;
+        }
+        public UiSnapshot Capture()
+        {
+            operation.Check();
+            _captureStarted = owner._clock.GetTimestamp();
+            if (ObserveWorld) return io.Capture();
+            if (seed != null) { var result = seed; seed = null; _previousMenu = result; _captureStarted = seedCaptureStarted; return result; }
+            if (_previousMenu == null)
+            {
+                var scene = io.Capture();
+                if (scene.HasUsableEvidence && scene.Matches(UiTarget.Menu)) _previousMenu = scene;
+                return scene;
+            }
+            var previous = _previousMenu;
+            var frame = io.ReadUidFrame(current =>
+            {
+                operation.Check();
+                if (!owner.Usable(current) || !current.Scene.Matches(UiTarget.Menu) || !current.Scene.IsAfter(previous) ||
+                    current.Scene.SourceStamp.CapturedTimestamp <= previous.SourceStamp.CapturedTimestamp ||
+                    current.Scene.Signature != previous.Signature ||
+                    !previous.SourceStamp.IsFresh(owner._clock, UiSnapshot.RecoveryMaximumAge)) return null;
+                return TryAuthorizeEscape() ? new CurrentPlayerUidInput(UiAction.Escape, previous) : null;
+            });
+            operation.Check();
+            if (!owner.Usable(frame) || frame.Scene.SourceStamp.SessionId != previous.SourceStamp.SessionId || !frame.Scene.Matches(UiTarget.Menu))
+                throw new UidObservationUnavailable();
+            _previousMenu = frame.Scene;
+            ReadFrame = frame;
+            return frame.Scene;
+        }
+        public Task DelayAsync(int milliseconds, CancellationToken ct)
+        {
+            // Preserve the existing start-to-start observation cadence without adding it again after slow recognition.
+            var elapsed = owner._clock.GetElapsedTime(_captureStarted).TotalMilliseconds;
+            return io.DelayAsync((int)Math.Ceiling(Math.Max(60, milliseconds - elapsed)), ct);
+        }
+        public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (action != UiAction.Escape || !CanRequestCleanupEscape(observed) || !TryAuthorizeEscape()) return Task.FromResult(false);
+            return io.ActAsync(action, observed, ct);
+        }
+        public void MarkInputCompleted(UiSnapshot before) => io.MarkInputCompleted(before);
+        public void MarkTransitionCompleted(UiTarget target, UiSnapshot observed) => io.MarkTransitionCompleted(target, observed);
     }
 
     private bool Usable(CurrentPlayerUidFrame frame) => frame.Width > 0 && frame.Height > 0 &&
