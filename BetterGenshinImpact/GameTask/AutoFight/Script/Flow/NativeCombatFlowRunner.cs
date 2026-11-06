@@ -628,8 +628,25 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
         private Guid _selectionBattle;
         internal (Guid Goal, long Deadline)? SelectionAssistance => !_selectionObservationOnly && _selection is { CanAssist: true } goal &&
             PendingControl == null && _input != null && !_selectionTerminal &&
-            !io.Actors.Any(actor => _attempts?.HasUnresolved(actor.Name, Method.Skill) == true || _attempts?.HasUnresolved(actor.Name, Method.Burst) == true)
+            !SelectionHasUnresolvedConflict()
                 ? (goal.GoalId, goal.DeadlineTimestamp) : null;
+
+        private bool SelectionHasUnresolvedConflict()
+        {
+            if (_attempts == null) return false;
+            var recovery = _expiredRecovery;
+            bool BorrowedByCurrentRecovery(string actor, Method skill) =>
+                _heldE == null && recovery != null && ReferenceEquals(_selectionAction, recovery.Action) &&
+                _selectionBattle == recovery.Action.BattleId && recovery.Attempt.BattleId == recovery.Action.BattleId &&
+                _selectionActor == recovery.Actor.Name && actor == recovery.Actor.Name &&
+                actor == recovery.Attempt.Actor && skill == recovery.Attempt.Skill &&
+                recovery.Action.Command.Name == actor && recovery.Action.Command.Method == skill &&
+                FindActor(actor)?.Index == recovery.Actor.Index && recovery.Action.CanStart && recovery.Action.CanContinue &&
+                _attempts.CanYieldExpiredForReadiness(recovery.Attempt, recovery.Action.Now);
+            return io.Actors.Any(actor =>
+                _attempts.HasUnresolved(actor.Name, Method.Skill) && !BorrowedByCurrentRecovery(actor.Name, Method.Skill) ||
+                _attempts.HasUnresolved(actor.Name, Method.Burst) && !BorrowedByCurrentRecovery(actor.Name, Method.Burst));
+        }
         internal async ValueTask<bool> RunSelectionOperationAsync(CombatBattleHostInput request, Func<CancellationToken, ValueTask> operation, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
