@@ -25,6 +25,67 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 // B层：真实解析/调度/在途协议与选角策略，帧到达和游戏物理效果是可控外部边界。
 public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData("ready")]
+    [InlineData("wrong-role")]
+    [InlineData("other-mode")]
+    [InlineData("low-confidence")]
+    [InlineData("disabled")]
+    [InlineData("unknown-control")]
+    [InlineData("no-hud")]
+    [InlineData("stale")]
+    [InlineData("no-effect")]
+    public async Task MiningUsesRecordedActor01ReadyEvidenceWithoutInventingNumericCooldown(string scenario)
+    {
+        using var task = TaskExecutionScope.BeginOwned();
+        var clock = new FakeTimeProvider();
+        var parsed = CombatScriptParser.ParseContext("钟离 e(hold,wait)");
+        parsed.BindSourceContext("route=recorded-e0369 node=6", "MiningHandler");
+        var program = LoadProgram("钟离 e(hold,wait)");
+        var refusedRecoveryRequests = 0;
+        using var io = new PhysicalReplay(clock, false, 50, program)
+        {
+            // Actual e0369 CPU output: original model 9DC03BC2..., PNG 19B0F220...,
+            // ROI 1658,950,82,82. Valid control here is an explicit counterexample assumption.
+            RecordedEClassification = scenario == "wrong-role" ? "S Furina 01 nocd"
+                : scenario == "other-mode" ? "S Zhongli 02 nocd" : "S Zhongli 01 nocd",
+            RecordedEConfidence = scenario == "low-confidence" ? .7 : .9996728,
+            RecordedEEnabled = scenario != "disabled",
+            RecordedEHudUnavailable = scenario == "no-hud",
+            // Observe and refuse the existing recovery request; do not change HUD, actor, inputs or outcome.
+            OnSelectionRecovery = scenario == "no-hud" ? () => refusedRecoveryRequests++ : null,
+            RecordedEObservationDelay = scenario == "stale" ? 200 : 0,
+            ControlOverride = scenario == "unknown-control" ? _ => default : null,
+            DropAllSkills = scenario == "no-effect",
+            ObservedMotion = MotionStatus.Unknown
+        };
+        io.SetFrontActor("钟离");
+        using var runner = NativeCombatFlowRunner.Create(parsed.CombatCommands, io, false,
+            purpose: CombatScriptExecutionPurpose.Pathing);
+        var result = await runner.RunRoundAsync(default);
+        output.WriteLine($"result={result} nativeSkillCount={io.Inputs.Count} recordedCueReads={io.RecordedEClassificationReads}");
+        if (scenario == "ready")
+        {
+            Assert.Equal(CombatFlowResult.Succeeded, result);
+            Assert.Single(io.Inputs);
+            Assert.True(io.RecordedEClassificationReads > 0);
+            Assert.True(double.IsFinite(io.FirstShieldConfirmed));
+        }
+        else
+        {
+            Assert.NotEqual(CombatFlowResult.Succeeded, result);
+            Assert.False(double.IsFinite(io.FirstShieldConfirmed));
+            if (scenario == "no-effect") Assert.InRange(io.Inputs.Count, 1, 2);
+            else Assert.Empty(io.Inputs);
+            if (scenario == "no-hud")
+            {
+                Assert.Equal(CombatFlowResult.Failed, result);
+                Assert.True(refusedRecoveryRequests > 0);
+                Assert.Equal(0, io.RecordedEClassificationReads);
+            }
+        }
+    }
+
     [Fact]
     public async Task NativeCameraPrimitivesKeepPassiveTargetObservationAvailable()
     {
@@ -4069,7 +4130,7 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             }
             public ValueTask DelayAsync(int milliseconds, CancellationToken ct) => new(owner.DelayAsync(milliseconds, ct));
         }
-        public bool IsCombatHud(ImageRegion frame) => CombatHudVisible &&
+        public bool IsCombatHud(ImageRegion frame) => !RecordedEHudUnavailable && CombatHudVisible &&
             (CombatHudProbe?.Invoke() ?? true) && Frame(frame).Actor != null;
         public bool IsMainUi(ImageRegion frame) => IsCombatHud(frame);
         public int ReadActive(ImageRegion frame, AvatarActiveCheckContext context)
@@ -4088,14 +4149,43 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
             var events = _energyEvents.Where(item => item.Actor == actor.Name && item.At <= at).OrderBy(item => item.At).ToArray();
             return events.Length != 0 ? events[^1].Full : _burstReady && actor.Name == "那维莱特";
         }
+        public int RecordedEObservationDelay { get; init; }
+        public bool RecordedEEnabled { get; init; } = true;
+        public bool RecordedEHudUnavailable { get; init; }
+        public string? RecordedEClassification { get; init; }
+        public double RecordedEConfidence { get; init; }
+        public int RecordedEClassificationReads { get; private set; }
         public double ReadSkillCooldown(NativeCombatActor actor, ImageRegion frame)
         {
+            if (RecordedEClassification != null && Inputs.Count == 0) return double.NaN;
             _cooldownReadSources.Add(frame.FrameStamp);
             var at = Frame(frame).At;
             return Cooling(actor, Method.Skill, at) ? _cooldowns[(actor.Name, Method.Skill)].Ready - at : 0;
         }
+        public ESkillObservation ReadSkillObservation(NativeCombatActor actor, ImageRegion frame)
+        {
+            var cooldown = ReadSkillCooldown(actor, frame);
+            if (RecordedEClassification != null && Inputs.Count == 0)
+            {
+                RecordedEClassificationReads++;
+                var classification = CombatHudReader.DecodeESkillClassification(RecordedEClassification,
+                    RecordedEConfidence, actor.Name == "钟离" ? "Zhongli" : actor.Name);
+                if (RecordedEObservationDelay > 0) Advance(RecordedEObservationDelay);
+                return CombatHudReader.CombineESkillObservation(cooldown, false, classification, classificationEnabled: RecordedEEnabled);
+            }
+            return new(cooldown, double.IsFinite(cooldown) && cooldown >= 0 ? IsSkillReady(actor, frame, cooldown) : null);
+        }
         public bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown)
         {
+            if (RecordedEClassification != null && Inputs.Count == 0)
+            {
+                RecordedEClassificationReads++;
+                var parts = RecordedEClassification.Split(' ');
+                return IsActorActive(actor, frame) == true && actor.Name == "钟离" &&
+                    RecordedEConfidence > .7 && parts.Length >= 4 &&
+                    parts[1] == "Zhongli" && parts[2] == "01" &&
+                    RecordedEClassification.Contains("nocd", StringComparison.OrdinalIgnoreCase);
+            }
             if (cooldown > 0) _knownECdUntil[actor.Name] = Now + cooldown;
             return IsActorActive(actor, frame) == true && cooldown <= 0 && Frame(frame).At >= SkillUnreadyUntil;
         }

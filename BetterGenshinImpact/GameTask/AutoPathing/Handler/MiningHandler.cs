@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Linq;
 using System.Threading.Tasks;
@@ -9,6 +10,10 @@ using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.Common.Job;
 using Microsoft.Extensions.Logging;
 using static BetterGenshinImpact.GameTask.Common.TaskControl;
+
+using BetterGenshinImpact.Core.Recognition.ONNX;
+using BetterGenshinImpact.Core.Recognition.OCR;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace BetterGenshinImpact.GameTask.AutoPathing.Handler;
 
@@ -63,19 +68,43 @@ public class MiningHandler : IActionHandler
     {
         ct.ThrowIfCancellationRequested();
         var io = _nativeIo;
-        if (io == null)
+        var restoreClassification = new List<(Avatar Avatar, bool Enabled)>();
+        try
         {
-            var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
-            if (combatScenes == null)
-                throw new InvalidOperationException("队伍识别未初始化成功，挖矿未执行，不能标记路线完成");
-            io = new NativeCombatIo(combatScenes);
+            if (io == null)
+            {
+                var combatScenes = await RunnerContext.Instance.GetCombatScenes(ct);
+                if (combatScenes == null)
+                    throw new InvalidOperationException("队伍识别未初始化成功，挖矿未执行，不能标记路线完成");
+                var avatars = combatScenes.GetAvatars();
+                var selected = SelectMiningAction(name => avatars.Any(avatar => avatar.Name == name));
+                var needsSkill = selected != null && CombatScriptParser.ParseContext(selected).CombatCommands.Any(command => command.Method == Method.Skill);
+                BgiYoloPredictor? predictor = null;
+                if (needsSkill)
+                {
+                    // Normal composition owns service access; frame reads only borrow the prepared session.
+                    predictor = App.ServiceProvider.GetRequiredService<BgiOnnxFactory>().GetOrCreateYoloPredictor(BgiOnnxModel.BgiEClassify);
+                    var name = selected![..selected.IndexOf(' ')];
+                    foreach (var avatar in avatars.Where(avatar => avatar.Name == name))
+                    {
+                        restoreClassification.Add((avatar, avatar.EnableESkillClassify));
+                        avatar.EnableESkillClassify = true;
+                    }
+                }
+                io = new NativeCombatIo(combatScenes, preparedESkillPredictor: predictor,
+                    preparedSkillOcr: needsSkill ? OcrFactory.Paddle : null);
+            }
+
+            // 挖矿
+            await MiningAsync(io, ct, waypointForTrack);
+            ct.ThrowIfCancellationRequested();
+
+
         }
-
-        // 挖矿
-        await MiningAsync(io, ct, waypointForTrack);
-        ct.ThrowIfCancellationRequested();
-
-
+        finally
+        {
+            foreach (var (avatar, enabled) in restoreClassification) avatar.EnableESkillClassify = enabled;
+        }
         if (waypointForTrack is { ActionParams: not null }
             && waypointForTrack.ActionParams.Contains("disablePickupAround",
                 StringComparison.InvariantCultureIgnoreCase))

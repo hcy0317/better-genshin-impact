@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.Core.Recognition.OCR;
+using BetterGenshinImpact.Core.Recognition.ONNX;
 using BetterGenshinImpact.Core.Simulator;
 using BetterGenshinImpact.Core.Simulator.Extensions;
 using BetterGenshinImpact.Core.Config;
@@ -19,14 +20,17 @@ using Microsoft.Extensions.Logging;
 namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 /// <summary>唯一连接截图/视觉/键鼠及原有角色状态的生产实现，不拥有战斗调度。</summary>
-internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.Owner? inputOwner = null) : INativeCombatIo
+internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.Owner? inputOwner = null,
+    BgiYoloPredictor? preparedESkillPredictor = null, IOcrService? preparedSkillOcr = null) : INativeCombatIo
 {
     internal static readonly CombatInputCoordinator Coordinator = new(InputHub.EnterLegacyOperation);
     private readonly CombatInputCoordinator _coordinator = inputOwner == null ? Coordinator : new();
     private bool _visionRequested, _burstRequested;
-    private int _burstWidth, _burstHeight;
+    private int _burstWidth, _burstHeight, _eWidth, _eHeight;
+    private bool _eRequested;
     public bool IsVisionPrepared => _visionRequested && OcrFactory.IsPaddlePrepared &&
-        (!_burstRequested || Avatar.IsBurstVisionPrepared(_burstWidth, _burstHeight));
+        (!_burstRequested || Avatar.IsBurstVisionPrepared(_burstWidth, _burstHeight)) &&
+        (!_eRequested || preparedESkillPredictor?.IsClassificationPrepared(_eWidth, _eHeight) == true);
     public TimeProvider Clock => TimeProvider.System;
     public double DpiScale => TaskContext.Instance().DpiScale;
     public ILogger Logger => TaskControl.Logger;
@@ -45,8 +49,22 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
         _visionRequested = true;
         _burstRequested = needsBurst;
         if (needsBurst) RequireBurstSize(frame);
-        // 调用方持有样本至Task完成。实际首推理和预测锁等待只在受管准备工作里执行。
-        return Task.Run(() => Avatar.PrepareCombatVisionAsync(ct, needsBurst, frame), CancellationToken.None);
+        _eRequested = preparedESkillPredictor != null && scenes.GetAvatars().Any(avatar => avatar.EnableESkillClassify);
+        if (_eRequested)
+        {
+            var rect = AutoFightAssets.Get(frame).ERectForClassify;
+            _eWidth = rect.Width; _eHeight = rect.Height;
+        }
+        // Borrowed frame remains alive until preparation completes. Read paths never initialize a session.
+        return Task.Run(async () =>
+        {
+            await Avatar.PrepareCombatVisionAsync(ct, needsBurst, frame);
+            if (_eRequested)
+            {
+                using var area = frame.DeriveCrop(AutoFightAssets.Get(frame).ERectForClassify);
+                await preparedESkillPredictor!.PrepareClassificationAsync(area.CacheImage, Logger, ct);
+            }
+        }, CancellationToken.None);
     }
     private void RequireBurstSize(ImageRegion frame)
     {
@@ -82,6 +100,21 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
     }
     public double ReadSkillCooldown(NativeCombatActor actor, ImageRegion frame) => AvatarFor(actor).ReadSkillCurrentCd(frame);
     public bool IsSkillReady(NativeCombatActor actor, ImageRegion frame, double cooldown) => AvatarFor(actor).IsSkillReadyFromCurrentFrame(frame, cooldown);
+    public ESkillObservation ReadSkillObservation(NativeCombatActor actor, ImageRegion frame) =>
+        frame.ReadOnce((this, typeof(ESkillObservation), actor.Name), () =>
+        {
+            var avatar = AvatarFor(actor);
+            if (!IsCombatHud(frame) || IsActorActive(actor, frame) != true) return new ESkillObservation(double.NaN, null);
+            var prepared = _eRequested && IsMainUi(frame) && preparedESkillPredictor?.IsClassificationPrepared(_eWidth, _eHeight) == true
+                ? preparedESkillPredictor : null;
+            if (preparedSkillOcr == null)
+            {
+                var cooldown = ReadSkillCooldown(actor, frame);
+                return new ESkillObservation(cooldown, double.IsFinite(cooldown) && cooldown >= 0
+                    ? IsSkillReady(actor, frame, cooldown) : null);
+            }
+            return avatar.ReadCurrentSkillObservation(frame, preparedSkillOcr, prepared);
+        });
     public BurstObservation ReadBurst(ImageRegion frame, bool active)
     {
         RequireBurstSize(frame);
