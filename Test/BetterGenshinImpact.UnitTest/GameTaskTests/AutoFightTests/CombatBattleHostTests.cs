@@ -9,6 +9,98 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    private static CombatBattleObservation ProjectCurrentJitterBody(CaptureFrameStamp source,Guid battle,FakeTimeProvider clock,int height,bool centered=false)
+    {
+        var visual=centered?new EnemySeekVisual(928,height==6?375:376,64,height,64*height)
+            :new EnemySeekVisual(287,height==6?464:465,67,height,67*height);
+        var raw=AutoFightSeek.SelectSeekDecision([visual],1920,1080);
+        Assert.Equal(SeekCueKind.HealthBar,raw.Cue);
+        Assert.Equal(height==6?AutoFightSeekAction.KeepFighting:AutoFightSeekAction.ApproachVisibleEnemy,raw.Action);
+        var passive=new BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation(true,false,clock.GetUtcNow().UtcDateTime,raw.Visual,1920,1080,null)
+        {Source=source,BattleId=battle,CaptureEpoch=0,Quality=CombatObservationQuality.Available,SpatialCandidateCount=1,
+            Control=new(MotionStatus.Unknown,false)};
+        var result=NativeCombatBattleHostIo.ProjectObservation(passive,0,true,clock.GetUtcNow().UtcDateTime);
+        Assert.Equal(EnemyIndicatorDirection.None,result.Target!.Value.Direction); // Original passive adapter, not a test normalization.
+        return result;
+    }
+
+    [Fact]
+    public async Task CurrentBodyHeightActionFlipKeepsTheSameUnsentCameraOnANewSource()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        Assert.Equal("Searching",host.State);
+        var attempts=new List<CombatBattleHostInput>();
+        io.PrepareEvidence=input=>{if(input.Kind==CombatBattleHostInputKind.Camera)attempts.Add(input);return true;};
+        io.TargetFactory=source=>ProjectCurrentJitterBody(source,flow.Context.BattleId,clock,6);
+        for(var step=0;step<100&&attempts.Count==0;step++)await host.AdvanceAsync(flow,default);
+        var pending=Assert.Single(attempts);var before=io.Traces.Last().Observation;
+        Assert.Equal(AutoFightSeekAction.KeepFighting,before.Target!.Value.Action);
+        Assert.Equal(CombatBattleHostInputStatus.NotSent,io.Traces.Last().InputStatus);
+        Assert.Equal("awaiting-business-decision-frame",host.Reason);
+        Assert.DoesNotContain(io.Inputs,input=>input.RequestId==pending.RequestId);
+        clock.Advance(TimeSpan.FromMilliseconds(500)); // A legal fresh frame; the original request deadline remains live.
+        Assert.True(clock.GetTimestamp()<pending.DeadlineTimestamp);
+        io.TargetFactory=source=>ProjectCurrentJitterBody(source,flow.Context.BattleId,clock,4);
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var current=io.Traces.Last().Observation;
+        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy,current.Target!.Value.Action);
+        Assert.True(current.Source.IsFresh(clock,TimeSpan.FromMilliseconds(150)));
+        Assert.True(current.Source.IsAfter(pending.Source));Assert.True(current.Source.CapturedTimestamp>pending.Source.CapturedTimestamp);
+        Assert.Equal(before.Control,current.Control);Assert.Equal(before.Motion,current.Motion);Assert.Equal(before.CaptureEpoch,current.CaptureEpoch);
+        Assert.Equal(before.Scene,current.Scene);Assert.Equal(before.SearchHint,current.SearchHint);
+        Assert.Equal(before.DirectionConfirmationPending,current.DirectionConfirmationPending);
+        Assert.Equal(before.Target.Value.Direction,current.Target.Value.Direction);Assert.Equal(1,current.Target.Value.SignalCount);
+        var visual=current.Target.Value.Visual!.Value;
+        Assert.Equal(pending.X,Math.Clamp(AutoFightSeek.GetVisibleEnemyCameraOffset(visual,1920),-120,120));
+        Assert.Equal(pending.Y,AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual,1080));
+        var sent=Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.Equal(pending.RequestId,sent.RequestId);Assert.Equal(current.Source,sent.Source);
+        Assert.Equal(-120,sent.X);Assert.Equal(pending.Y,sent.Y);Assert.Equal(1,host.CameraRequests);Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Fact]
+    public async Task AnApproachReservationStillCancelsWhenTheOriginalDistanceActionLeavesAfterHysteresis()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        var attempts=new List<CombatBattleHostInput>();var cancelled=0;
+        io.PrepareEvidence=input=>{if(input.Kind==CombatBattleHostInputKind.Approach)attempts.Add(input);return true;};
+        io.CancelEvidence=()=>cancelled++;
+        io.TargetFactory=source=>ProjectCurrentJitterBody(source,flow.Context.BattleId,clock,4,true);
+        for(var step=0;step<100&&attempts.Count==0;step++)await host.AdvanceAsync(flow,default);
+        var pending=Assert.Single(attempts);Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy,io.Traces.Last().Observation.Target!.Value.Action);
+        io.UnsentAttempts=1;io.TargetFactory=source=>ProjectCurrentJitterBody(source,flow.Context.BattleId,clock,6,true);
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.Contains(io.Requests,input=>input.RequestId==pending.RequestId);
+        Assert.DoesNotContain(io.Inputs,input=>input.RequestId==pending.RequestId);
+        clock.Advance(TimeSpan.FromMilliseconds(250)); // The preceding known NotSent already used the original292ms clock interval.
+        Assert.True(clock.GetTimestamp()<pending.DeadlineTimestamp);var before=cancelled;
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.Equal(AutoFightSeekAction.KeepFighting,io.Traces.Last().Observation.Target!.Value.Action);
+        Assert.True(cancelled>before);Assert.DoesNotContain(io.Inputs,input=>input.RequestId==pending.RequestId);
+        Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Fact]
+    public async Task DisappearingCurrentBodyStillWithdrawsItsUnsentCamera()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        var attempts=new List<CombatBattleHostInput>();var cancelled=0;
+        io.PrepareEvidence=input=>{if(input.Kind==CombatBattleHostInputKind.Camera)attempts.Add(input);return true;};io.CancelEvidence=()=>cancelled++;
+        io.TargetFactory=source=>ProjectCurrentJitterBody(source,flow.Context.BattleId,clock,6);
+        for(var step=0;step<100&&attempts.Count==0;step++)await host.AdvanceAsync(flow,default);
+        var pending=Assert.Single(attempts);var before=cancelled;clock.Advance(TimeSpan.FromMilliseconds(500));
+        io.TargetFactory=source=>new(source,flow.Context.BattleId,CombatObservationQuality.Available,null,1920,1080){Control=new(MotionStatus.Unknown,false)};
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.True(cancelled>before);Assert.DoesNotContain(io.Inputs,input=>input.RequestId==pending.RequestId);
+        Assert.Equal(0,host.CameraRequests);Assert.Equal(0,host.ApproachRequests);
+    }
+
     [Fact]
     public async Task FinalLateBodyWaitCrossingFortyFiveCannotResumeFromNextFreshBody()
     {

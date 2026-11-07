@@ -154,7 +154,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         new(observation.Target, observation.Motion, observation.Control, observation.Width, observation.Height,
             observation.SearchHint?.Visual, observation.CaptureEpoch, observation.Scene, observation.DirectionConfirmationPending, observation.SearchHint?.Kind);
 
-    private static bool SameCandidate(CandidateDecision before, CandidateDecision next)
+    private static bool SameCandidate(CandidateDecision before, CandidateDecision next, CombatBattleHostInputKind inputKind)
     {
         if (before.Motion != next.Motion || before.Control != next.Control || before.Epoch != next.Epoch ||
             before.Width != next.Width || before.Height != next.Height || before.Scene != next.Scene ||
@@ -173,9 +173,14 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         if (!VisualMatches(before.Hint, next.Hint, tolerance)) return false;
         if (before.Target == null || next.Target == null) return before.Target == next.Target;
         var oldTarget = before.Target.Value; var target = next.Target.Value;
+        // Near/far classification alone does not change a body camera; current-frame XY is still checked before send.
+        var cameraBody = inputKind == CombatBattleHostInputKind.Camera &&
+            oldTarget.Cue == SeekCueKind.HealthBar && target.Cue == SeekCueKind.HealthBar &&
+            (oldTarget.Action is AutoFightSeekAction.KeepFighting or AutoFightSeekAction.ApproachVisibleEnemy) &&
+            (target.Action is AutoFightSeekAction.KeepFighting or AutoFightSeekAction.ApproachVisibleEnemy);
         // 多候选没有可证明的唯一身份；不能仅凭相似矩形把交叉目标当作原目标。
         return oldTarget.SignalCount == 1 && target.SignalCount == 1 && oldTarget.Cue == target.Cue &&
-            oldTarget.Action == target.Action && oldTarget.Direction == target.Direction &&
+            (oldTarget.Action == target.Action || cameraBody) && oldTarget.Direction == target.Direction &&
             oldTarget.FixedTopHealth.HasValue == target.FixedTopHealth.HasValue &&
             VisualMatches(oldTarget.Visual, target.Visual, tolerance);
     }
@@ -266,7 +271,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 (_inputRecheckDeadline == null || observation.Source.CapturedTimestamp >= _inputRecheckNotBefore);
             if (_inputRequestId != Guid.Empty &&
                 _inputRequestIntent.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.Approach or CombatBattleHostInputKind.TargetLock or CombatBattleHostInputKind.CameraReset &&
-                fresh && newEvidence && !SameCandidate(_inputRequestDecision, DecisionFor(observation)))
+                fresh && newEvidence && !SameCandidate(_inputRequestDecision, DecisionFor(observation), _inputRequestIntent.Kind))
             {
                 CancelPendingCandidate();
                 Reason = "host-input-candidate-changed";
