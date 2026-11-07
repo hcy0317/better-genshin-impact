@@ -6,6 +6,111 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class SeekRecognitionDiagnosticsTests
 {
+    [Theory]
+    [InlineData("single-effect")]
+    [InlineData("hud")]
+    [InlineData("fixed-hud")]
+    [InlineData("crop")]
+    public void PartialHintNeverPromotesAnEffectHudOrDerivedViewport(string sample)
+    {
+        using var frame=NewPortablePartialFrame();
+        if(sample=="single-effect")
+        {
+            Cv2.Rectangle(frame.SrcMat,new Rect(600,500,55,6),new Scalar(40,40,230),-1);
+            for(var y=0;y<6;y++)Cv2.Rectangle(frame.SrcMat,new Rect(600+(y%2==0?0:30),500+y,25,1),new Scalar(90,90,255),-1);
+        }
+        else if(sample=="fixed-hud")
+        {
+            Cv2.Rectangle(frame.SrcMat,new Rect(900,67,80,6),new Scalar(40,40,230),-1);
+            for(var y=1;y<6;y++)Cv2.Rectangle(frame.SrcMat,new Rect(902,67+y,y<=3?73:y==4?69:67,1),new Scalar(90,90,255),-1);
+        }
+        else PaintPortablePartialBand(frame.SrcMat,600,sample=="hud"?1000:500);
+        if(sample=="crop")
+        {
+            using var original=new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(new Mat(1120,1960,MatType.CV_8UC3,new Scalar(30,70,30)),0,0)
+                {FrameStamp=frame.FrameStamp};
+            PaintPortablePartialBand(original.SrcMat,620,520);
+            using var roi=original.DeriveCrop(new Rect(20,20,1920,1080));roi.FrameStamp=frame.FrameStamp;
+            Assert.True(roi.SrcMat.IsSubmatrix());
+            Assert.Null(AvatarRecognition.ReadPassiveTargetEvidence(roi,CombatSceneCapabilities.Unknown).Hint);
+        }
+        else
+        {
+            var result=AvatarRecognition.ReadPassiveTargetEvidence(frame,CombatSceneCapabilities.Unknown);
+            Assert.Null(result.Decision.Cue);Assert.Null(result.Hint);
+        }
+    }
+
+    private static void PaintPortablePartialBand(Mat source,int x,int y)
+    {
+        // A connected red band with a salmon right edge that steps left; row0 keeps the original full height.
+        Cv2.Rectangle(source,new Rect(x,y,55,6),new Scalar(40,40,230),-1);
+        (int First,int Last)[] salmon=[(2,52),(1,51),(0,49),(1,47),(2,46)];
+        for(var row=0;row<salmon.Length;row++)
+            Cv2.Rectangle(source,new Rect(x+salmon[row].First,y+row+1,salmon[row].Last-salmon[row].First+1,1),new Scalar(90,90,255),-1);
+    }
+
+    private static BetterGenshinImpact.GameTask.Model.Area.ImageRegion NewPortablePartialFrame()
+    {
+        var clock=new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        return new(new Mat(1080,1920,MatType.CV_8UC3,new Scalar(30,70,30)),0,0)
+            {FrameStamp=new Fischless.GameCapture.CaptureFrameSource(clock).Next()};
+    }
+
+    [Fact]
+    public void PartialSalmonBandKeepsNoTargetButOffersOnlyACurrentFullHeightSearchHint()
+    {
+        using var frame=NewPortablePartialFrame();PaintPortablePartialBand(frame.SrcMat,600,500);
+        using var mask=AutoFightSeek.CreateSeekColorMask(frame.SrcMat,new Scalar(255,90,90),null);
+        using var labels=new Mat();using var stats=new Mat();using var centroids=new Mat();
+        Assert.Equal(2,Cv2.ConnectedComponentsWithStats(mask,labels,stats,centroids,
+            connectivity:PixelConnectivity.Connectivity4,ltype:MatType.CV_32S));
+        var raw=new EnemySeekVisual(stats.Get<int>(1,0),stats.Get<int>(1,1),stats.Get<int>(1,2),stats.Get<int>(1,3),stats.Get<int>(1,4));
+        Assert.Equal(new EnemySeekVisual(600,500,55,6,330),raw);
+        // The original classifier's sole feature rejection below proves geometry passed, without private API access.
+        Assert.False(AutoFightSeek.MatchesHealthBarFeature(mask,frame.SrcMat,raw));
+        var diagnostics=new SeekRecognitionDiagnostics();
+        Assert.Null(AutoFightSeek.ClassifySeekVisual(mask,frame.SrcMat,raw,frame.Width,frame.Height,diagnostics,scene:CombatSceneCapabilities.Unknown));
+        Assert.Equal(0,diagnostics.HealthWidthRejected);Assert.Equal(0,diagnostics.DarkTrackChecked);
+        Assert.Equal(1,diagnostics.Rejections["health:feature/indicator:geometry"]);
+        Assert.Single(diagnostics.Rejections);
+        // Fixed pixel truth, not a copy of the production core-selection algorithm. No vertical crop.
+        var visibleCore=new EnemySeekVisual(602,500,48,6,288);
+        Assert.Equal(raw.Height,visibleCore.Height);
+        Assert.True(AutoFightSeek.MatchesHealthBarFeature(mask,frame.SrcMat,visibleCore));
+        var result=AvatarRecognition.ReadPassiveTargetEvidence(frame,CombatSceneCapabilities.Unknown);
+        Assert.Null(result.Decision.Cue);Assert.Equal(0,result.Decision.SignalCount);
+        Assert.Null(result.Decision.Visual);Assert.True(frame.FrameStamp.IsKnown);
+        Assert.NotNull(result.Hint);
+        var hint=result.Hint!.Value;Assert.Equal(frame.FrameStamp,hint.Source);
+        Assert.Equal(frame.Width,hint.Width);Assert.Equal(frame.Height,hint.Height);
+        Assert.Equal(raw.Height,hint.Visual.Height);
+        Assert.InRange(hint.Visual.X,raw.X,raw.X+raw.Width-hint.Visual.Width);
+        Assert.Equal(raw.Y,hint.Visual.Y);
+    }
+
+    [Fact]
+    public void ACompleteHealthTargetWinsOverAPartialBandWithoutCreatingAHint()
+    {
+        using var frame=NewPortablePartialFrame();PaintPortablePartialBand(frame.SrcMat,600,500);
+        Cv2.Rectangle(frame.SrcMat,new Rect(900,500,80,6),new Scalar(90,90,255),-1);
+        var result=AvatarRecognition.ReadPassiveTargetEvidence(frame,CombatSceneCapabilities.Unknown);
+        Assert.Equal(SeekCueKind.HealthBar,result.Decision.Cue);Assert.Equal(1,result.Decision.SignalCount);
+        Assert.Equal(900,result.Decision.Visual!.Value.X);Assert.Null(result.Hint);
+    }
+
+    [Fact]
+    public void TwoPartialBandsRemainAmbiguousAndNeverBecomeTargetsOrAHint()
+    {
+        using var frame=NewPortablePartialFrame();PaintPortablePartialBand(frame.SrcMat,600,500);PaintPortablePartialBand(frame.SrcMat,800,650);
+        var result=AvatarRecognition.ReadPassiveTargetEvidence(frame,CombatSceneCapabilities.Unknown);
+        Assert.Null(result.Decision.Cue);Assert.Equal(0,result.Decision.SignalCount);
+        Assert.Null(result.Decision.Visual);Assert.Null(result.Hint);
+        UnconfirmedSearchHint[] mixedBodyHints=[new(frame.FrameStamp,new(0,668,23,5,100),1920,1080,UnconfirmedSearchHintKind.ClippedHealthBar),
+            new(frame.FrameStamp,new(602,500,48,6,288),1920,1080,UnconfirmedSearchHintKind.PartialHealthBar)];
+        Assert.Null(AvatarRecognition.SelectCurrentSearchHint(frame.FrameStamp,1920,1080,false,mixedBodyHints));
+    }
+
     [Fact]
     public void UniqueCurrentClipWinsOverTheRecordedUnconfirmedDirectionNoise()
     {
