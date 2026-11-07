@@ -80,6 +80,8 @@ internal interface ICombatBattleHostIo
     ValueTask DelayAsync(int milliseconds, CancellationToken ct);
     void ReleaseInput();
     void Trace(CombatBattleHostTrace observation) { }
+    void RetainAcceptedProgress(CombatProgressEvidence progress, CombatBattleObservation observation, string episode) { }
+    void ForgetEpisodeEvidence() { }
     // 返回值仅描述诊断素材状态；业务准入不得依赖留图是否成功。
     bool PrepareInputEvidence(CombatBattleHostInput input, CancellationToken ct) => true;
     bool InputEvidenceInvalidated => false;
@@ -688,6 +690,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         _searchCandidateDeadline = null; // Only real game progress can renew an unsent search continuation.
         _lastProgressEvidence = new(observation.Source, damage ? "new-damage-cue" : "health-progress",
             observation.Target, observation.FixedTopHealth, io.Clock.GetTimestamp());
+        try { io.RetainAcceptedProgress(_lastProgressEvidence, observation, _evidenceEpisode); } catch { /* 诊断失败不改变已接纳的业务进展。 */ }
         _reengaged = false;
         _scanPulses = _approachPulses = 0;
         _searchVerticalOffset = 0;
@@ -723,8 +726,10 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             return Stop("ambiguous-search-without-game-progress");
         }
         // 固定Boss条仅是存在/进展证据；没有空间线索时走下方既有有界扫描。
+        var scanWithoutSpatialTarget = true;
         if (observation.Target is { } target && target.Cue != SeekCueKind.FixedTopHealth && target.Visual is { } visual)
         {
+            scanWithoutSpatialTarget = false;
             if (target.Cue == SeekCueKind.DamageNumber)
             {
                 if (TryResumeStrategy()) return _result;
@@ -757,10 +762,17 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             {
                 return _result;
             }
+            else if (target is { Cue: SeekCueKind.DirectionIndicator, Direction: EnemyIndicatorDirection.Forward, SignalCount: 1 } &&
+                     Math.Abs(offset) <= 20 && CanResetCamera(observation, io.BattleId, io.Clock))
+            {
+                // Centering a direction cue did not find a screen target. Consume
+                // only the existing reset/orbit budget while reacquiring one.
+                scanWithoutSpatialTarget = true;
+            }
             else _scanPulses = MaximumSearchPulses;
             }
         }
-        else if (_scanPulses < MaximumSearchPulses)
+        if (scanWithoutSpatialTarget && _scanPulses < MaximumSearchPulses)
         {
             // 相对轨道不能推断脚本遗留的真实俯仰；先沿用旧入口的中键回正。
             // 回正占用原扫描预算，且只由真实游戏进展重新开放一次机会。
@@ -1178,7 +1190,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     {
         if (_closed) return;
         _closed = true;
-        io.ReleaseInput();
-        EndSearchEpisode();
+        try { io.ReleaseInput(); EndSearchEpisode(); }
+        finally { try { io.ForgetEpisodeEvidence(); } catch { /* 不遮蔽原输入清理异常。 */ } }
     }
 }
