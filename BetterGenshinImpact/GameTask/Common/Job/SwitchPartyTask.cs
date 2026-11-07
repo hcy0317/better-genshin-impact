@@ -252,11 +252,15 @@ public class SwitchPartyTask
         return false;
     }
 
+    private bool IsPartyInputCurrent(ImageRegion image, UiSnapshot observed, UiTarget target, bool requireForeground = false)
+        => _io.SameTarget() && (!requireForeground || _io.ForegroundReady()) && observed.Matches(target) &&
+           observed.SourceBound && observed.SourceStamp == image.FrameStamp &&
+           image.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge);
+
     private void CheckPartyInput(ImageRegion image, UiSnapshot observed, UiTarget target, CancellationToken ct, bool requireForeground = false)
     {
         ct.ThrowIfCancellationRequested(); UiOperation.Current?.Check();
-        if (!_io.SameTarget() || (requireForeground && !_io.ForegroundReady()) || !observed.Matches(target) || !observed.SourceBound || observed.SourceStamp != image.FrameStamp ||
-            !image.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge))
+        if (!IsPartyInputCurrent(image, observed, target, requireForeground))
             throw new PartySetupFailedException("队伍输入的当前列表、来源或窗口正证失效");
     }
 
@@ -292,15 +296,29 @@ public class SwitchPartyTask
         CaptureFrameStamp selectionSource = default;
         long selectionCompletedAt = 0;
 
-        void RequireCurrentAfterSelection(ImageRegion image, UiSnapshot observed, CancellationToken token)
+        bool CanVerifyCurrentAfterSelection(ImageRegion image, UiSnapshot observed, CancellationToken token)
         {
-            CheckPartyInput(image, observed, UiTarget.Party, token, requireForeground: true);
+            token.ThrowIfCancellationRequested(); UiOperation.Current?.Check();
             var source = image.FrameStamp;
-            if (!selectionSource.IsKnown || !source.IsKnown || !source.IsAfter(selectionSource) ||
-                !source.IsFresh(_io.Clock, TimeSpan.FromMilliseconds(150)) ||
-                !new CaptureFrameFence(selectionSource, selectionCompletedAt).Accepts(source) ||
-                source.CapturedTimestamp - selectionCompletedAt < _io.Clock.TimestampFrequency * 60 / 1000)
-                throw new PartySetupFailedException("队伍已出战验证缺少当前选择后的新鲜来源");
+            return IsPartyInputCurrent(image, observed, UiTarget.Party, requireForeground: true) &&
+                   selectionSource.IsKnown && source.IsKnown && source.IsAfter(selectionSource) &&
+                   source.IsFresh(_io.Clock, TimeSpan.FromMilliseconds(150)) &&
+                   new CaptureFrameFence(selectionSource, selectionCompletedAt).Accepts(source) &&
+                   source.CapturedTimestamp - selectionCompletedAt >= _io.Clock.TimestampFrequency * 60 / 1000;
+        }
+
+        void ReleaseApplyFrame()
+        {
+            var image = applyFrame;
+            applyFrame = null;
+            applyObserved = default!;
+            image?.Dispose();
+        }
+
+        Task<bool> DeclineProbe()
+        {
+            ReleaseApplyFrame();
+            return Task.FromResult(false);
         }
 
         Task<bool> ClickConfirm(CancellationToken token, bool left)
@@ -313,13 +331,12 @@ public class SwitchPartyTask
             if (reused) applyFrame = null;
             var target = left ? UiTarget.PartyList : UiTarget.Party;
             var observed = reused ? applyObserved : _io.Read(image);
+            if (reused) applyObserved = default!;
             UiOperation.Current?.Observe(observed, target, "pre-input");
             token.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
             if (!observed.Matches(target)) return Task.FromResult(false);
-            if (reused) RequireCurrentAfterSelection(image, observed, token);
             AdmitPartyInput(image, observed, target, token);
-            if (reused) RequireCurrentAfterSelection(image, observed, token);
             var roi = new Rect(left ? 0 : image.Width - image.Width / 4, image.Height / 4,
                 image.Width / 4, image.Height - image.Height / 4);
             var clicked = _io.Confirm(image, roi);
@@ -340,9 +357,9 @@ public class SwitchPartyTask
             var image = applyFrame;
             var observed = _io.Read(image);
             applyObserved = observed;
-            RequireCurrentAfterSelection(image, observed, token);
+            if (!CanVerifyCurrentAfterSelection(image, observed, token)) return DeclineProbe();
             var currentName = ReadCurrentPartyName(image);
-            RequireCurrentAfterSelection(image, observed, token);
+            if (!CanVerifyCurrentAfterSelection(image, observed, token)) return DeclineProbe();
             if (string.IsNullOrEmpty(currentName) || !matches(currentName)) return Task.FromResult(false);
             // Read the bottom-right button label, excluding the footer below it. A substring is not an active-state proof.
             var activeText = _io.OcrOne(image, new RecognitionObject
@@ -351,12 +368,11 @@ public class SwitchPartyTask
                 RegionOfInterest = new Rect(image.Width - image.Width / 4, image.Height * 9 / 10,
                     image.Width / 4, image.Height * 7 / 100)
             });
-            RequireCurrentAfterSelection(image, observed, token);
+            if (!CanVerifyCurrentAfterSelection(image, observed, token)) return DeclineProbe();
             if (!string.Equals(activeText.Trim(), "已出战", StringComparison.Ordinal)) return Task.FromResult(false);
             UiOperation.Current?.Observe(observed, UiTarget.Party, "already-active-verified");
             Logger.LogInformation("当前队伍[{Name}]匹配目标且已出战，无需提交队伍出战输入", currentName);
-            image.Dispose();
-            applyFrame = null;
+            ReleaseApplyFrame();
             return Task.FromResult(true);
         }
 
@@ -367,6 +383,6 @@ public class SwitchPartyTask
                 verifyAlreadyActive: VerifyAlreadyActive);
             await UiRecovery.CompletePartyHandoffAsync(driver, deferApplyToCaller, ct, Logger);
         }
-        finally { applyFrame?.Dispose(); }
+        finally { ReleaseApplyFrame(); }
     }
 }
