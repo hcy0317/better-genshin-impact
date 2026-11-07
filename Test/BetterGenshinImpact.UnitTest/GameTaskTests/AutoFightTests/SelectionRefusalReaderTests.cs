@@ -20,6 +20,28 @@ public sealed class SelectionRefusalReaderTests
     public SelectionRefusalReaderTests() => Assert.True(ApplicationHostBootstrapGuard.IsProhibited);
 
     [Fact]
+    public void ReadyToastReadUsesTheLineApiAndNeverInvokesTheFullDetector()
+    {
+        using var frame = CreateFrame(400, 300);
+        var ocr = new LineOnlyOcr();
+        var cue = SelectionRefusalCue.Unknown;
+        var error = Record.Exception(() => cue = CombatMotionReader.ReadSelectionRefusal(frame, ocr));
+
+        Assert.True(error == null, $"fullCalls={ocr.FullCalls} lineCalls={ocr.LineCalls} error={error?.GetType().Name}");
+        Assert.Equal(SelectionRefusalCue.GameRefusedSelection, cue);
+        Assert.Equal(0, ocr.FullCalls);
+        Assert.Equal(1, ocr.LineCalls);
+    }
+
+    private sealed class LineOnlyOcr : IOcrService
+    {
+        internal int FullCalls, LineCalls;
+        public string Ocr(Mat mat) { FullCalls++; throw new InvalidOperationException("The full detector is forbidden for this explicit line reader."); }
+        public string OcrWithoutDetector(Mat mat) { LineCalls++; return RefusalToast; }
+        public OcrResult OcrResult(Mat mat) => throw new InvalidOperationException("No alternate detector entry.");
+    }
+
+    [Fact]
     public void MissingPreparedServiceIsUnknownAndLeavesTheSourceFrameOwnedByItsCaller()
     {
         using var frame = CreateFrame(400, 300);
@@ -29,7 +51,7 @@ public sealed class SelectionRefusalReaderTests
 
         Assert.Equal(SelectionRefusalCue.Unknown, cue);
         Assert.NotEqual(SelectionRefusalCue.Absent, cue);
-        AssertParentStillAlive(frame, source, 100, 30);
+        AssertParentStillAlive(frame, source, 133, 51);
     }
 
     [Fact]
@@ -38,30 +60,31 @@ public sealed class SelectionRefusalReaderTests
         using var frame = CreateFrame(400, 300);
         var source = frame.FrameStamp;
         var before = RecognitionReadinessScope.IsNonBlocking;
-        using var ocr = new ExternalOcr(_ => throw new RecognitionNotReadyException("external fake service is not ready"));
+        using var ocr = new ExternalLineOcr(_ => throw new RecognitionNotReadyException("external fake service is not ready"));
 
         var cue = CombatMotionReader.ReadSelectionRefusal(frame, ocr);
 
         Assert.Equal(SelectionRefusalCue.Unknown, cue);
         Assert.NotEqual(SelectionRefusalCue.Absent, cue);
-        Assert.Equal(1, ocr.OcrCalls);
+        Assert.Equal(1, ocr.LineCalls);
         Assert.Equal(0, ocr.AlternateCalls);
         Assert.True(ocr.SawNonBlocking);
         Assert.Equal(before, RecognitionReadinessScope.IsNonBlocking);
         Assert.False(ocr.IsDisposed);
-        AssertParentStillAlive(frame, source, 100, 30);
+        AssertParentStillAlive(frame, source, 133, 51);
     }
 
     [Theory]
-    [InlineData(400, 300, 100, 30, 200, 100)]
-    [InlineData(800, 600, 200, 60, 400, 200)]
+    [InlineData(400, 300, 133, 51, 133, 22)]
+    [InlineData(800, 600, 266, 102, 266, 45)]
+    [InlineData(1920, 1080, 640, 183, 640, 81)]
     public void ExplicitBorrowedServiceReadsOnlyTheCurrentFrameToastRegionOnce(
         int width, int height, int left, int top, int roiWidth, int roiHeight)
     {
         using var frame = CreateFrame(width, height);
         var source = frame.FrameStamp;
         var before = RecognitionReadinessScope.IsNonBlocking;
-        using var ocr = new ExternalOcr(mat =>
+        using var ocr = new ExternalLineOcr(mat =>
         {
             Assert.False(mat.IsDisposed);
             Assert.Equal(roiWidth, mat.Cols);
@@ -74,7 +97,7 @@ public sealed class SelectionRefusalReaderTests
         var cue = CombatMotionReader.ReadSelectionRefusal(frame, ocr);
 
         Assert.Equal(SelectionRefusalCue.GameRefusedSelection, cue);
-        Assert.Equal(1, ocr.OcrCalls);
+        Assert.Equal(1, ocr.LineCalls);
         Assert.Equal(0, ocr.AlternateCalls);
         Assert.True(ocr.SawNonBlocking);
         Assert.Equal(before, RecognitionReadinessScope.IsNonBlocking);
@@ -95,12 +118,12 @@ public sealed class SelectionRefusalReaderTests
         string text, bool expectedPresent)
     {
         using var frame = CreateFrame(400, 300);
-        using var ocr = new ExternalOcr(_ => text);
+        using var ocr = new ExternalLineOcr(_ => text);
 
         var expected = expectedPresent ? SelectionRefusalCue.GameRefusedSelection : SelectionRefusalCue.Absent;
         Assert.Equal(expected, CombatMotionReader.ReadSelectionRefusal(frame, ocr));
 
-        Assert.Equal(1, ocr.OcrCalls);
+        Assert.Equal(1, ocr.LineCalls);
         Assert.Equal(0, ocr.AlternateCalls);
         Assert.False(ocr.IsDisposed);
     }
@@ -110,16 +133,16 @@ public sealed class SelectionRefusalReaderTests
     {
         using var first = CreateFrame(400, 300);
         using var second = CreateFrame(400, 300);
-        second.SrcMat.Set(30, 100, new Vec3b(9, 10, 11));
+        second.SrcMat.Set(51, 133, new Vec3b(9, 10, 11));
         var firstSource = first.FrameStamp;
         var secondSource = second.FrameStamp;
-        using var ocr = new ExternalOcr(mat =>
+        using var ocr = new ExternalLineOcr(mat =>
             mat.At<Vec3b>(0, 0).Equals(new Vec3b(41, 73, 119)) ? RefusalToast : string.Empty);
 
         Assert.Equal(SelectionRefusalCue.GameRefusedSelection, CombatMotionReader.ReadSelectionRefusal(first, ocr));
         Assert.Equal(SelectionRefusalCue.Absent, CombatMotionReader.ReadSelectionRefusal(second, ocr));
 
-        Assert.Equal(2, ocr.OcrCalls);
+        Assert.Equal(2, ocr.LineCalls);
         Assert.NotEqual(firstSource, secondSource);
         Assert.Equal(firstSource, first.FrameStamp);
         Assert.Equal(secondSource, second.FrameStamp);
@@ -135,22 +158,22 @@ public sealed class SelectionRefusalReaderTests
         var source = frame.FrameStamp;
         var before = RecognitionReadinessScope.IsNonBlocking;
         var failure = new IOException("external fake read failure");
-        using var ocr = new ExternalOcr(_ => throw failure);
+        using var ocr = new ExternalLineOcr(_ => throw failure);
 
         Assert.Same(failure, Assert.Throws<IOException>(() => CombatMotionReader.ReadSelectionRefusal(frame, ocr)));
 
         Assert.True(ocr.SawNonBlocking);
         Assert.Equal(before, RecognitionReadinessScope.IsNonBlocking);
-        Assert.Equal(1, ocr.OcrCalls);
+        Assert.Equal(1, ocr.LineCalls);
         Assert.False(ocr.IsDisposed);
-        AssertParentStillAlive(frame, source, 100, 30);
+        AssertParentStillAlive(frame, source, 133, 51);
     }
 
     private static ImageRegion CreateFrame(int width, int height)
     {
         var pixels = new Mat(height, width, MatType.CV_8UC3, new Scalar(13, 29, 47));
-        pixels.Set(height / 10, width / 4, new Vec3b(41, 73, 119));
-        pixels.Set(height / 10 + height / 3 - 1, width / 4 + width / 2 - 1, new Vec3b(139, 53, 17));
+        pixels.Set((int)(height * .17), width / 3, new Vec3b(41, 73, 119));
+        pixels.Set((int)(height * .17) + (int)(height * .075) - 1, width / 3 + width / 3 - 1, new Vec3b(139, 53, 17));
         return new ImageRegion(pixels, 0, 0) { FrameStamp = new CaptureFrameSource(TimeProvider.System).Next() };
     }
 
@@ -163,31 +186,31 @@ public sealed class SelectionRefusalReaderTests
     }
 
     // This external fake records scalars only; it never retains a Mat or ImageRegion.
-    private sealed class ExternalOcr(Func<Mat, string> read) : IOcrService, IDisposable
+    private sealed class ExternalLineOcr(Func<Mat, string> read) : IOcrService, IDisposable
     {
-        public int OcrCalls { get; private set; }
+        public int LineCalls { get; private set; }
         public int AlternateCalls { get; private set; }
         public bool SawNonBlocking { get; private set; }
         public bool IsDisposed { get; private set; }
 
         public string Ocr(Mat mat)
         {
-            Assert.False(IsDisposed);
-            OcrCalls++;
-            SawNonBlocking = RecognitionReadinessScope.IsNonBlocking;
-            return read(mat);
+            AlternateCalls++;
+            throw new InvalidOperationException("The refusal reader must not invoke the full detector.");
         }
 
         public string OcrWithoutDetector(Mat mat)
         {
-            AlternateCalls++;
-            throw new InvalidOperationException("The refusal reader must use its one explicit Ocr call.");
+            Assert.False(IsDisposed);
+            LineCalls++;
+            SawNonBlocking = RecognitionReadinessScope.IsNonBlocking;
+            return read(mat);
         }
 
         public OcrResult OcrResult(Mat mat)
         {
             AlternateCalls++;
-            throw new InvalidOperationException("The refusal reader must not select another OCR API.");
+            throw new InvalidOperationException("The refusal reader must not select another detector API.");
         }
 
         public void Dispose() => IsDisposed = true;
