@@ -119,9 +119,12 @@ public partial class CombatNativeAdapterReplayTests
         using var flow = NativeCombatFlowRunner.Create(program, physical);
         var turned = false;
         var approached = false;
+        var resetEdges = new List<(bool Down, bool Turned, bool Approached, bool Attacked)>();
         var saved = new List<DiagnosticEvidence>();
         await using var scope = collect ? new DiagnosticEvidenceScope((item, _) => { saved.Add(item); return Task.CompletedTask; }) : null;
         var device = new HostDevice(clock) { NativeReceipts = true,
+            AfterCameraReset = down => resetEdges.Add((down, turned, approached,
+                physical.Primitives.Any(input => input.Method == BetterGenshinImpact.GameTask.AutoFight.Script.Method.Attack))),
             AfterCamera = () =>
             {
                 turned = true;
@@ -157,6 +160,15 @@ public partial class CombatNativeAdapterReplayTests
         Assert.InRange(host.ApproachRequests, 1, 12);
         Assert.InRange(host.CameraRequests, 1, 24);
         Assert.DoesNotContain("party", device.Inputs);
+        Assert.Collection(resetEdges,
+            edge => { Assert.True(edge.Down); Assert.False(edge.Turned); Assert.False(edge.Approached); Assert.False(edge.Attacked); },
+            edge => { Assert.False(edge.Down); Assert.False(edge.Turned); Assert.False(edge.Approached); Assert.False(edge.Attacked); });
+        Assert.Equal(1, device.Inputs.Count(input => input == "reset-down"));
+        Assert.Equal(1, device.Inputs.Count(input => input == "reset-up"));
+        Assert.True(device.Inputs.IndexOf("reset-down") < device.Inputs.IndexOf("reset-up"));
+        Assert.True(device.Inputs.IndexOf("reset-up") < device.Inputs.IndexOf("camera"));
+        Assert.True(device.Inputs.IndexOf("camera") < device.Inputs.IndexOf("forward-down"));
+        Assert.True(device.Inputs.IndexOf("forward-down") < device.Inputs.IndexOf("forward-up"));
         host.Dispose();
         if (scope != null)
         {

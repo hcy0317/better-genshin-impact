@@ -9,6 +9,71 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    [Theory]
+    [InlineData("left")]
+    [InlineData("right")]
+    [InlineData("behind")]
+    public async Task DirectionFirstSearchEstablishesTheOriginalResetBeforeItsVerticalOrbit(string direction)
+    {
+        var clock=new FakeTimeProvider();var game=new ReturningGame(clock);using var flow=CreateFlow(false,game,clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        Assert.Equal("Searching",host.State);Assert.Equal(0,host.CameraRequests);Assert.Equal(0,io.Traces.Last().ScanUsed);
+        Assert.DoesNotContain(io.Inputs,input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);
+        var before=io.Inputs.Count;var actions=game.Inputs;var priorSource=io.Traces.Last().Observation.Source;
+        io.TargetFactory=source=>ProjectVerticalSearchFrame(source,flow.Context.BattleId,clock,direction);
+        for(var step=0;step<200&&!io.Inputs.Skip(before).Any(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);step++)
+            Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var first=Assert.Single(io.Inputs.Skip(before));var current=io.Traces.Last().Observation;
+        Assert.Equal(SeekCueKind.DirectionIndicator,current.Target!.Value.Cue);Assert.Equal(1,current.Target.Value.SignalCount);
+        Assert.True(first.Source.IsFresh(clock,TimeSpan.FromMilliseconds(150)));Assert.True(first.Source.IsAfter(priorSource));
+        Assert.Equal(current.Source,first.Source);Assert.Equal(1,host.CameraRequests);Assert.Equal(1,io.Traces.Last().ScanUsed);
+        var opened=io.CompletedInputs.Last(input=>input.Input.Kind==CombatBattleHostInputKind.OpenParty);
+        Assert.True(new CaptureFrameFence(opened.Input.Source,opened.Completed).Accepts(first.Source));
+        Assert.Equal(CombatBattleHostInputKind.CameraReset,first.Kind); // Old Direction-first sends an orbit Camera(-1296) here.
+        var reset=io.CompletedInputs.Single(input=>input.Input.RequestId==first.RequestId);
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        for(var step=0;step<200&&!io.Inputs.Skip(before).Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++)
+            Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var camera=Assert.Single(io.Inputs.Skip(before).Where(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.True(camera.Source.CapturedTimestamp>=reset.Completed+(long)(.5*clock.TimestampFrequency));
+        Assert.True(camera.Source.IsAfter(first.Source));Assert.True(camera.Source.IsFresh(clock,TimeSpan.FromMilliseconds(150)));
+        Assert.Equal(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,2),camera.Y);Assert.Equal(-864,camera.Y);
+        Assert.Equal(2,host.CameraRequests);Assert.Equal(2,io.Traces.Last().ScanUsed);
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+        Assert.Equal(actions,game.Inputs);Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Fact]
+    public async Task DirectionFirstKnownNotSentResetCannotUnlockAnOrbitOrSpendItsTicket()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        Assert.Equal(0,host.CameraRequests);Assert.Equal(0,io.Traces.Last().ScanUsed);
+        var before=io.Inputs.Count;var attempts=new List<CombatBattleHostInput>();
+        io.PrepareEvidence=input=>{if(input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset)attempts.Add(input);return true;};
+        io.TargetFactory=source=>ProjectVerticalSearchFrame(source,flow.Context.BattleId,clock,"left");
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));var pending=Assert.Single(attempts);
+        io.UnsentAttempts=1;clock.Advance(TimeSpan.FromMilliseconds(120));
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.DoesNotContain(io.Inputs.Skip(before),input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);
+        Assert.Equal(0,host.CameraRequests);Assert.Equal(0,io.Traces.Last().ScanUsed);
+        Assert.Equal(CombatBattleHostInputKind.CameraReset,io.Requests.Last(input=>input.RequestId==pending.RequestId).Kind);
+        clock.Advance(TimeSpan.FromMilliseconds(120));Assert.True(clock.GetTimestamp()<pending.DeadlineTimestamp);
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var reset=Assert.Single(io.CompletedInputs.Where(input=>input.Input.RequestId==pending.RequestId));
+        Assert.Equal(CombatBattleHostInputKind.CameraReset,reset.Input.Kind);Assert.Equal(1,host.CameraRequests);
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        for(var step=0;step<200&&!io.Inputs.Skip(before).Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++)
+            Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var camera=Assert.Single(io.Inputs.Skip(before).Where(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.True(camera.Source.CapturedTimestamp>=reset.Completed+(long)(.5*clock.TimestampFrequency));
+        Assert.Equal(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,2),camera.Y);
+        Assert.Equal(2,host.CameraRequests);Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+        Assert.Equal(0,host.ApproachRequests);
+    }
+
     private static CombatBattleObservation ProjectVerticalSearchFrame(CaptureFrameStamp source,Guid battle,FakeTimeProvider clock,
         string cue="weak",MotionStatus motion=MotionStatus.Unknown)
     {
@@ -570,12 +635,16 @@ public partial class CombatBattleHostTests
         var result=CombatBattleHostResult.Continue;
         for(var step=0;step<10000&&result==CombatBattleHostResult.Continue&&host.CameraRequests<24;step++)
             result=await host.AdvanceAsync(flow,default);
-        Assert.Equal(24,io.Inputs.Count(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        // The once-per-progress reset shares the original24 tickets; external authority gets no extra move.
+        Assert.Equal(23,io.Inputs.Count(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
         for(var step=0;step<30&&result==CombatBattleHostResult.Continue;step++) result=await host.AdvanceAsync(flow,default);
         Assert.Equal(CombatBattleHostResult.Continue,result);
         Assert.NotEqual("engagement-camera-budget-exhausted",host.Reason);
         Assert.Equal(24,host.CameraRequests);
-        Assert.Equal(24,io.Inputs.Count(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.Equal(23,io.Inputs.Count(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+        Assert.Equal(24,io.Traces.Last().ScanUsed);
         Assert.DoesNotContain(io.Inputs,input=>input.Kind==CombatBattleHostInputKind.Approach);
         Assert.Contains(io.Traces,trace=>trace.Reason is "bounded-reengagement" or "external-scene-awaiting-authority-after-bounded-search");
     }
@@ -657,7 +726,18 @@ public partial class CombatBattleHostTests
         for(var step=0;step<2000&&!io.Inputs.Skip(before).Any(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);step++)
             await host.AdvanceAsync(flow,default);
         var first=io.Inputs.Skip(before).First(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);
-        if(cue=="direction") { Assert.Equal(CombatBattleHostInputKind.Camera,first.Kind); Assert.Equal(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,1),first.Y); }
+        if(cue=="direction")
+        {
+            Assert.Equal(CombatBattleHostInputKind.CameraReset,first.Kind);
+            var reset=io.CompletedInputs.Single(input=>input.Input.RequestId==first.RequestId);
+            clock.Advance(TimeSpan.FromMilliseconds(500));
+            for(var step=0;step<200&&!io.Inputs.Skip(before).Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++)
+                Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+            var camera=Assert.Single(io.Inputs.Skip(before).Where(input=>input.Kind==CombatBattleHostInputKind.Camera));
+            Assert.True(camera.Source.CapturedTimestamp>=reset.Completed+(long)(.5*clock.TimestampFrequency));
+            Assert.Equal(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,2),camera.Y);
+            Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+        }
         else Assert.Equal(CombatBattleHostInputKind.CameraReset,first.Kind);
         Assert.Equal(0,host.ApproachRequests);
     }

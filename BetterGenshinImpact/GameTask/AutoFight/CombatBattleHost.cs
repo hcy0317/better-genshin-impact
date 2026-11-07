@@ -772,6 +772,11 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 return Stop("offscreen-target-search-exhausted");
             if (target.Cue == SeekCueKind.HealthBar && target.SignalCount == 1 && verticalOffset != 0 &&
                 _scanPulses >= MaximumSearchPulses) return Stop("engagement-camera-budget-exhausted");
+            if (directionVerticalTarget.HasValue && !_searchCameraResetUsed && _scanPulses < MaximumSearchPulses)
+            {
+                await ResetSearchCameraAsync(ct);
+                return _result;
+            }
             if ((Math.Abs(offset) > 20 || verticalOffset != 0) && _scanPulses < MaximumSearchPulses)
             {
                 if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120), verticalOffset), ct))
@@ -834,12 +839,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             }
             if (!_searchCameraResetUsed && CanResetCamera(observation, io.BattleId, io.Clock))
             {
-                if (await SendAsync(new(CombatBattleHostInputKind.CameraReset), ct))
-                {
-                    _searchCameraResetUsed = true;
-                    _searchVerticalOffset = 0;
-                    _scanPulses++;
-                }
+                await ResetSearchCameraAsync(ct);
                 return _result;
             }
             if (observation.SearchHint is { Kind: UnconfirmedSearchHintKind.DirectionIndicator } hint && hint.Source.IsKnown &&
@@ -887,6 +887,16 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             else return Stop("bounded-search-exhausted");
         }
         return _result;
+    }
+
+    private async ValueTask ResetSearchCameraAsync(CancellationToken ct)
+    {
+        if (await SendAsync(new(CombatBattleHostInputKind.CameraReset), ct))
+        {
+            _searchCameraResetUsed = true;
+            _searchVerticalOffset = 0;
+            _scanPulses++;
+        }
     }
 
     private int DirectionStep(EnemySeekDecision target, EnemySeekVisual visual, CombatBattleObservation observation)

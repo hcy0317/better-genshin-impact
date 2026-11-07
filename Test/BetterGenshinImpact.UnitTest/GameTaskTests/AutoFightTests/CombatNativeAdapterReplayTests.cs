@@ -2873,11 +2873,19 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         public Action? AfterParty { get; init; }
         public Action? AfterDrop { get; init; }
         public Action? AfterCamera { get; init; }
+        public Action<bool>? AfterCameraReset { get; init; }
         public Action<int>? AdvanceClock { get; init; }
         public double PreparationDelayMs { get; init; }
         public double HoldOverheadMs { get; init; }
         public void PrepareInput() { Preparations++; clock.Advance(TimeSpan.FromMilliseconds(PreparationDelayMs)); }
         public void MoveCamera(int x, int y) { Inputs.Add("camera"); AfterCamera?.Invoke(); }
+        public void SetCameraReset(bool down)
+        {
+            Inputs.Add(down ? "reset-down" : "reset-up");
+            if (NativeReceipts) new WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0)
+                .DispatchInput(new User32.INPUT[1]);
+            AfterCameraReset?.Invoke(down);
+        }
         public void PressTargetLock() => Inputs.Add("target-lock");
         public double DownDelayMs { get; init; }
         public double UpDelayMs { get; init; }
