@@ -1,0 +1,39 @@
+{
+  "originRunId": "5c1f3b74-09c7-4c00-bb0c-35fcbab3845d",
+  "sourceSequence": 2832,
+  "sourceSession": "6f82ae14-1f3f-4d35-9f5d-5688e238820b",
+  "sourceMetadata": "evidence-1685.json",
+  "sourceImage": "evidence-1675.png",
+  "sourceImageSha256": "6A8DB2C35A195F38D12FAB3168CA21B88D0D22E382463D897F004F472737F8F9",
+  "sourceWidth": 1920,
+  "sourceHeight": 1080,
+  "roi": {
+    "x": 1428,
+    "y": 553,
+    "width": 82,
+    "height": 15
+  },
+  "derivation": "exact crop only; no resize, color modification, UI drawing, or account identifiers",
+  "fixtureSha256": "EC8979C719079D2A4F08F8F18C1A8BCACCE5D8151B7EC40DE71E9425AAE18A6C",
+  "actualRuntimeDllSha256": "E935C051009EE87D376F703A7A0D2D9C90323A8F9AE80B113E66B8A4D942A1EA",
+  "actualRuntimeMvid": "d5780539-4f9c-49b2-b24b-adc235c7d4a3",
+  "originalComponent": {
+    "x": 1432,
+    "y": 557,
+    "width": 23,
+    "height": 6,
+    "area": 129
+  },
+  "originalFeature": true,
+  "originalMinimumWidth": 24,
+  "originalTrackRead": 0,
+  "originalDiagnostic": "short-or-discontinuous-track",
+  "originalStrictFirstFailure": {
+    "x": 1460,
+    "kind": "anchor maximum difference",
+    "actual": 77,
+    "maximum": 24
+  },
+  "physicalTruth": "A visible Lv92 torch hilichurl with salmon remainder and grey-purple empty track; quest4/5, not complete",
+  "unitFixtureScope": "portable same-coordinate component counter; original whole-frame actual-runtime replay stored separately"
+}

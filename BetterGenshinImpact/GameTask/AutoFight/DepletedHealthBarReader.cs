@@ -40,6 +40,12 @@ internal static class DepletedHealthBarReader
                 var width = ReadAntialiasedTrack(source, red, minimumWidth, limit, topPad, bottomPad);
                 if (width > 0) { reason = "accepted-bounded-antialias-track"; return width; }
             }
+            for (var topPad = 0; topPad <= padding; topPad++)
+            for (var bottomPad = 0; bottomPad <= padding; bottomPad++)
+            {
+                var width = ReadPairedBorderTrack(source, red, minimumWidth, limit, topPad, bottomPad);
+                if (width > 0) { reason = "accepted-paired-border-track"; return width; }
+            }
             return 0;
         }
         reason = "accepted";
@@ -73,6 +79,61 @@ internal static class DepletedHealthBarReader
             previous = center;
         }
         return 0; // 达到搜索边界不证明存在槽的右端。
+    }
+
+    private static int ReadPairedBorderTrack(Mat source, EnemySeekVisual red, int minimumWidth,
+        int limit, int topPad, int bottomPad)
+    {
+        var top = red.Y - topPad;
+        var bottom = red.Y + red.Height - 1 + bottomPad;
+        if (top < 1 || bottom + 1 >= source.Height) return 0;
+        var start = red.X + red.Width;
+        var supported = 0;
+        var gaps = 0;
+        Vec3b previousTop = default, previousBottom = default;
+        for (var x = start; x < limit; x++)
+        {
+            var upper = source.At<Vec3b>(top, x);
+            var lower = source.At<Vec3b>(bottom, x);
+            var paired = IsBorderPixel(upper, source.At<Vec3b>(top - 1, x)) &&
+                IsBorderPixel(lower, source.At<Vec3b>(bottom + 1, x));
+            // Each border can transmit a different background; one original dark side must remain locally continuous.
+            var stableDarkSide = IsDark(upper) && (supported == 0 || MaximumDifference(upper, previousTop) <= 32) ||
+                IsDark(lower) && (supported == 0 || MaximumDifference(lower, previousBottom) <= 32);
+            if (paired && stableDarkSide)
+            {
+                supported++;
+                gaps = 0;
+                previousTop = upper;
+                previousBottom = lower;
+                continue;
+            }
+            // A missing side or an interior colour jump is a gap, not a right end.
+            if (supported >= Math.Max(8, red.Height * 3) && HasPairedRightEnd(source, top, bottom, x, limit))
+                return x - red.X >= minimumWidth && supported * 100 >= (x - start) * 85 ? x - red.X : 0;
+            if (++gaps > 2) return 0;
+        }
+        return 0; // The original search limit never establishes a track end.
+    }
+
+    private static bool IsBorderPixel(Vec3b border, Vec3b outside) =>
+        outside.Item0 + outside.Item1 + outside.Item2 - border.Item0 - border.Item1 - border.Item2 >= 22;
+
+    private static bool HasPairedRightEnd(Mat source, int top, int bottom, int x, int limit)
+    {
+        // The original two tolerated gaps must not be mistaken for the slot's right end.
+        if (x + 2 >= limit) return false;
+        for (var next = x; next <= x + 2; next++)
+        {
+            var upper = source.At<Vec3b>(top, next);
+            var upperOutside = source.At<Vec3b>(top - 1, next);
+            var lower = source.At<Vec3b>(bottom, next);
+            var lowerOutside = source.At<Vec3b>(bottom + 1, next);
+            if (IsBorderPixel(upper, upperOutside) || IsBorderPixel(lower, lowerOutside) ||
+                MaximumDifference(upper, upperOutside) > 32 || MaximumDifference(lower, lowerOutside) > 32)
+                return false;
+        }
+        return true;
     }
 
     private static bool IsDark(Vec3b bgr) => bgr.Item0 <= 128 && bgr.Item1 <= 104 && bgr.Item2 <= 104 &&
