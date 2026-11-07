@@ -51,7 +51,7 @@ public sealed class SelectionRefusalReaderTests
 
         Assert.Equal(SelectionRefusalCue.Unknown, cue);
         Assert.NotEqual(SelectionRefusalCue.Absent, cue);
-        AssertParentStillAlive(frame, source, 133, 51);
+        AssertParentStillAlive(frame, source, 120, 54);
     }
 
     [Fact]
@@ -71,13 +71,13 @@ public sealed class SelectionRefusalReaderTests
         Assert.True(ocr.SawNonBlocking);
         Assert.Equal(before, RecognitionReadinessScope.IsNonBlocking);
         Assert.False(ocr.IsDisposed);
-        AssertParentStillAlive(frame, source, 133, 51);
+        AssertParentStillAlive(frame, source, 120, 54);
     }
 
     [Theory]
-    [InlineData(400, 300, 133, 51, 133, 22)]
-    [InlineData(800, 600, 266, 102, 266, 45)]
-    [InlineData(1920, 1080, 640, 183, 640, 81)]
+    [InlineData(400, 300, 120, 54, 160, 16)]
+    [InlineData(800, 600, 240, 108, 320, 33)]
+    [InlineData(1920, 1080, 576, 194, 768, 59)]
     public void ExplicitBorrowedServiceReadsOnlyTheCurrentFrameToastRegionOnce(
         int width, int height, int left, int top, int roiWidth, int roiHeight)
     {
@@ -133,7 +133,7 @@ public sealed class SelectionRefusalReaderTests
     {
         using var first = CreateFrame(400, 300);
         using var second = CreateFrame(400, 300);
-        second.SrcMat.Set(51, 133, new Vec3b(9, 10, 11));
+        second.SrcMat.Set(54, 120, new Vec3b(9, 10, 11));
         var firstSource = first.FrameStamp;
         var secondSource = second.FrameStamp;
         using var ocr = new ExternalLineOcr(mat =>
@@ -166,14 +166,14 @@ public sealed class SelectionRefusalReaderTests
         Assert.Equal(before, RecognitionReadinessScope.IsNonBlocking);
         Assert.Equal(1, ocr.LineCalls);
         Assert.False(ocr.IsDisposed);
-        AssertParentStillAlive(frame, source, 133, 51);
+        AssertParentStillAlive(frame, source, 120, 54);
     }
 
     private static ImageRegion CreateFrame(int width, int height)
     {
         var pixels = new Mat(height, width, MatType.CV_8UC3, new Scalar(13, 29, 47));
-        pixels.Set((int)(height * .17), width / 3, new Vec3b(41, 73, 119));
-        pixels.Set((int)(height * .17) + (int)(height * .075) - 1, width / 3 + width / 3 - 1, new Vec3b(139, 53, 17));
+        pixels.Set((int)(height * .18), (int)(width * .30), new Vec3b(41, 73, 119));
+        pixels.Set((int)(height * .18) + (int)(height * .055) - 1, (int)(width * .30) + (int)(width * .40) - 1, new Vec3b(139, 53, 17));
         return new ImageRegion(pixels, 0, 0) { FrameStamp = new CaptureFrameSource(TimeProvider.System).Next() };
     }
 

@@ -2521,7 +2521,7 @@ public class TpTask
         {
             CheckAndSleep(0);
             operation.Check();
-            using (var map = CaptureToRectArea(forceNew: true))
+            using (var map = CaptureAreaFrame())
             {
                 var snapshot = NativeUiDriver.Read(map);
                 MapContentReadiness.Record(map, "area-entry", $"area={areaName}; {snapshot.Describe()}", Logger);
