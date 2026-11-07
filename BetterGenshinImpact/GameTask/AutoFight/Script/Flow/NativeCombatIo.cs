@@ -26,6 +26,7 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
     internal static readonly CombatInputCoordinator Coordinator = new(InputHub.EnterLegacyOperation);
     private readonly CombatInputCoordinator _coordinator = inputOwner == null ? Coordinator : new();
     private bool _visionRequested, _burstRequested;
+    private IOcrService? _preparedSelectionOcr = preparedSkillOcr;
     private int _burstWidth, _burstHeight, _eWidth, _eHeight;
     private bool _eRequested;
     public bool IsVisionPrepared => _visionRequested && OcrFactory.IsPaddlePrepared &&
@@ -42,7 +43,13 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
         ?? throw new InvalidOperationException("当前队伍缺少角色：" + actor.Name);
 
     public Task PrepareVisionAsync(CancellationToken ct) => Avatar.PrepareCombatVisionAsync(ct);
-    public Task PrepareCommonVisionAsync(CancellationToken ct) => OcrFactory.PreparePaddleAsync(ct);
+    public async Task PrepareCommonVisionAsync(CancellationToken ct)
+    {
+        await OcrFactory.PreparePaddleAsync(ct);
+        ct.ThrowIfCancellationRequested();
+        // Capture the existing facade only in the original warmup owner after Prepare completes.
+        _preparedSelectionOcr ??= OcrFactory.Paddle;
+    }
     public Task PrepareVisionAsync(bool needsBurst, CancellationToken ct) => Avatar.PrepareCombatVisionAsync(ct, needsBurst);
     public Task PrepareVisionAsync(bool needsBurst, ImageRegion frame, CancellationToken ct)
     {
@@ -83,6 +90,8 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
     public bool IsCombatHud(ImageRegion frame) => Bv.IsCombatHud(frame);
     public CombatControlObservation ReadControl(ImageRegion frame) =>
         CombatMotionReader.ReadControl(frame, combatHud: true, Core.Recognition.OCR.OcrFactory.Paddle);
+    public SelectionRefusalCue ReadSelectionRefusal(ImageRegion frame) =>
+        CombatMotionReader.ReadSelectionRefusal(frame, _preparedSelectionOcr);
     public CannonUiObservation ReadCannonScene(ImageRegion frame) =>
         CannonUiReader.Read(frame, Core.Recognition.OCR.OcrFactory.Paddle);
     public bool IsMainUi(ImageRegion frame) => Bv.IsInMainUi(frame);
@@ -212,6 +221,16 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
         return receipt;
     }
     public void ReleaseInput() => Owned(InputHub.ReleaseAll, release: true);
+    public CombatBattleHostInputResult ReleaseSelectionRefusalInput(CombatNativeInputRequest request, CancellationToken ct)
+    {
+        var receipt = new CombatNativeInput(Clock, Logger, () => ct.ThrowIfCancellationRequested())
+            .Submit(request, "release-selection-owner", ReleaseInput, ct);
+        // A completed release with no held native keys is a neutral no-op, not an added key press.
+        return receipt is { Status: CombatBattleHostInputStatus.NotSent, NativeRequested: 0, NativeSubmitted: 0,
+            Error: null, Reason: "no-native-input", ObservableAfterTimestamp: { } completed }
+            ? receipt with { Status = CombatBattleHostInputStatus.Sent, CompletedTimestamp = completed,
+                Reason = "owned-release-completed-without-held-keys" } : receipt;
+    }
     public Vanara.PInvoke.User32.VK? HeldEPhysicalKey() =>
         ResolveHeldEPhysicalKey(ViewModel.Pages.KeyBindingsSettingsPageViewModel.MappingKey);
 

@@ -10,7 +10,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 
 internal sealed partial class NativeCombatFlowRunner
 {
-    internal sealed record CombatControlRequest(Guid Id, Guid BattleId, long DeadlineTimestamp);
+    internal sealed record CombatControlRequest(Guid Id, Guid BattleId, long DeadlineTimestamp,
+        bool SelectionRefusal = false, CaptureFrameStamp RefusalSource = default);
     private CombatControlRequest? _activeControl;
     private NativeCombatBattleHostIo? _controlInput;
     private CombatFlowStep? _stepBeforeControl;
@@ -40,9 +41,12 @@ internal sealed partial class NativeCombatFlowRunner
         if (_terminalControlFailure != null) ExceptionDispatchInfo.Capture(_terminalControlFailure).Throw();
         if (request.BattleId != Context.BattleId || clock.GetTimestamp() >= request.DeadlineTimestamp)
             return FailControl("控制中断未在原动作期限内闭合");
+        if (request.SelectionRefusal && IsAtomic) return FailControl("拒切恢复不准中断已原子的选择");
         if (_activeControl?.Id != request.Id)
         {
-            if (!native.ReleasePhysicalInputForControl())
+            if (request.SelectionRefusal && !native.ReleaseSelectionRefusalOwner(request, ct))
+                return FailControl("拒切owner释放没有已完成回执，保持未确认");
+            if (!request.SelectionRefusal && !native.ReleasePhysicalInputForControl())
             {
                 await native.ControlDelayAsync(50, ct);
                 return new(CombatFlowResult.AwaitingObservation, false);
@@ -68,6 +72,21 @@ internal sealed partial class NativeCombatFlowRunner
             return new(CombatFlowResult.AwaitingObservation, false);
         }
         _lastControlSource = sample.Source;
+        if (request.SelectionRefusal)
+        {
+            if (sample.Control.KeyboardBreakoutRequested || sample.Control.Motion is MotionStatus.Climb or MotionStatus.Swim or MotionStatus.Fly ||
+                !native.CompleteSelectionRefusal(sample.Source, sample.Refusal))
+            {
+                await native.ControlDelayAsync(50, ct);
+                return new(CombatFlowResult.AwaitingObservation, false);
+            }
+            native.CompleteControlRecovery();
+            _activeControl = null;
+            _controlInput = null;
+            _stepBeforeControl = null;
+            // Cue absence restores observation of the original goal, never Selected or macro completion.
+            return new(CombatFlowResult.AwaitingObservation, false);
+        }
         if (sample.Control.KeyboardBreakoutRequested)
         {
             _clearControlFrames = 0;
