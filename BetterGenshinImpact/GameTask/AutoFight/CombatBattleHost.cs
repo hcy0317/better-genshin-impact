@@ -757,8 +757,13 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             var offset = target.Cue == SeekCueKind.DirectionIndicator
                 ? DirectionStep(target, visual, observation)
                 : AutoFightSeek.GetVisibleEnemyCameraOffset(visual, observation.Width);
+            int? directionVerticalTarget = target.Cue == SeekCueKind.DirectionIndicator && target.SignalCount == 1 &&
+                (target.Direction is EnemyIndicatorDirection.Left or EnemyIndicatorDirection.Right or EnemyIndicatorDirection.Behind) &&
+                offset != 0 && CanResetCamera(observation, io.BattleId, io.Clock)
+                ? AutoFightSeek.GetSeekCameraVerticalTargetOffset(observation.Height, _scanPulses / 4, _scanPulses % 4 + 1) : null;
             var verticalOffset = target.Cue == SeekCueKind.HealthBar && target.SignalCount == 1
-                ? AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual, observation.Height) : 0;
+                ? AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual, observation.Height)
+                : directionVerticalTarget is { } verticalTarget ? verticalTarget - _searchVerticalOffset : 0;
             // 屏外提示不是可攻击目标。预算耗尽后不能在Searching/Fighting之间空转，
             // 也不能靠重新进入策略续借进展宽限期；最后一次输入仍先等稳定新帧。
             if (target.Cue == SeekCueKind.DirectionIndicator &&
@@ -771,6 +776,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             {
                 if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120), verticalOffset), ct))
                     return _result;
+                // 只提交已发送的相对轨道目标，不把commanded offset当成真实俯仰。
+                if (directionVerticalTarget is { } sentVerticalTarget) _searchVerticalOffset = sentVerticalTarget;
                 _scanPulses++;
                 return _result; // 包括最后一次镜头：下一次稳定新帧才判定是否耗尽。
             }
