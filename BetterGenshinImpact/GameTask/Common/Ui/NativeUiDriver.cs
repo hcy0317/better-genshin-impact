@@ -263,21 +263,13 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
             var control = CombatMotionReader.ReadControl(image, true, reader);
             var transformed = SaurianUiReader.IsKnownTransformation(image);
             var ordinary = !transformed && (reviveDetector?.IsCombatHud(image) ?? Bv.IsCombatHud(image));
-            var messages = image.FindMulti(RecognitionObject.Ocr(image.Width * .15, image.Height * .17,
-                image.Width * .7, image.Height * .53), ocrService: reader);
-            try
-            {
-                var rejected = messages.Any(message =>
-                    message.Text.Contains("当前状态不可进行队伍配置", StringComparison.Ordinal) ||
-                    message.Text.Contains("战斗中无法", StringComparison.Ordinal));
-                snapshot = snapshot with { World = new(control.KeyboardBreakoutRequested ||
-                    control.Motion is MotionStatus.Fly or MotionStatus.Climb,
-                    Bv.CurrentAvatarIsLowHp(image, image.Height / 1080d), rejected)
-                    { OrdinaryAvatarHud = ordinary, Transformed = transformed,
-                        ControlObserved = control.IsObserved, KeyboardBreakout = control.KeyboardBreakoutRequested,
-                        Motion = control.Motion } };
-            }
-            finally { foreach (var message in messages) message.Dispose(); }
+            var rejected = GameStatusToastReader.Read(image, reader).PartyRejected;
+            snapshot = snapshot with { World = new(control.KeyboardBreakoutRequested ||
+                control.Motion is MotionStatus.Fly or MotionStatus.Climb,
+                Bv.CurrentAvatarIsLowHp(image, image.Height / 1080d), rejected)
+                { OrdinaryAvatarHud = ordinary, Transformed = transformed,
+                    ControlObserved = control.IsObserved, KeyboardBreakout = control.KeyboardBreakoutRequested,
+                    Motion = control.Motion } };
         }
         return snapshot;
     }

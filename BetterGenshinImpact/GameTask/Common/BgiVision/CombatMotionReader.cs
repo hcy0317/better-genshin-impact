@@ -51,12 +51,9 @@ internal static class CombatMotionReader
     {
         if (prepared == null || frame.SrcMat.Empty()) return AutoFight.Model.SelectionRefusalCue.Unknown;
         using var readiness = new RecognitionReadinessScope(nonBlocking: true);
-        using var roi = frame.DeriveCrop(new Rect(frame.Width / 3, (int)(frame.Height * .17), frame.Width / 3, (int)(frame.Height * .075)));
         try
         {
-            var text = prepared.OcrWithoutDetector(roi.SrcMat);
-            var normalized = string.Concat(text.Where(c => !char.IsWhiteSpace(c)));
-            return normalized.Contains("无法切换目标角色", StringComparison.Ordinal)
+            return GameStatusToastReader.Read(frame, prepared).SelectionRefused
                 ? AutoFight.Model.SelectionRefusalCue.GameRefusedSelection : AutoFight.Model.SelectionRefusalCue.Absent;
         }
         catch (RecognitionNotReadyException) { return AutoFight.Model.SelectionRefusalCue.Unknown; }

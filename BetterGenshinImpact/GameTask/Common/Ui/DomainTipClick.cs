@@ -17,7 +17,8 @@ internal static class DomainTipClick
             // A new capture is necessary: BeforeNative invokes admission only for
             // the first native call within each capture, after transport preparation.
             Submit(down, () => { admission(); downEnteredNative = true; });
-            wait(50);
+            using (UiOperation.Current?.Measure(UiOperationPhase.ExplicitWait))
+                wait(50);
         }
         catch (Exception error) { failure = error; }
         finally
@@ -32,11 +33,13 @@ internal static class DomainTipClick
             }
         }
         if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
-        wait(50);
+        using (UiOperation.Current?.Measure(UiOperationPhase.ExplicitWait))
+            wait(50);
     }
 
     private static void Submit(Action input, Action? admission)
     {
+        using var measured = UiOperation.Current?.Measure(UiOperationPhase.NativeInput);
         using var capture = new InputDispatchCapture(admission);
         input();
         if (!capture.HasCompleteReceipt)
