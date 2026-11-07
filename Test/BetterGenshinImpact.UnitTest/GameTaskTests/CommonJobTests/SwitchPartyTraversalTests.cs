@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using BetterGenshinImpact.Core.Recognition;
 using BetterGenshinImpact.GameTask.Common.Job;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
@@ -401,6 +402,68 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
         public Task DelayAsync(int ms, CancellationToken ct) { ct.ThrowIfCancellationRequested(); if (LeftHeld && ms == 60) { HeldSettles++; if (Fault == "focus-after-down") Foreground = false; } Clock.Advance(TimeSpan.FromMilliseconds(ms)); return Task.CompletedTask; }
     }
 
+    [Fact]
+    public async Task PublicStartVerifiesTheRequestedPartyIsAlreadyActiveAfterTheOriginalSelection()
+    {
+        // S44 source397 is manual ground truth; these are explicit fake perception values, not recorded OCR.
+        var replay = new Replay { AlreadyActiveCase = true, VisiblePartyName = "岩" };
+        bool? found = null;
+        var error = await Record.ExceptionAsync(async () => found = await new SwitchPartyTask(replay.Io()).Start("岩", default));
+        output.WriteLine($"already-active found={found} error={error?.GetType().Name} selectSent={replay.SelectConfirmSent} applyAttempts={replay.ApplyAttempts} nativeApplySent={replay.ApplySent} scene={replay.Scene}");
+        Assert.True(replay.Selected);
+        Assert.Equal(1, replay.InitialEmptyNameReads);
+        Assert.Equal(1, replay.SelectConfirmSent);
+        Assert.True(replay.SelectionSource.IsKnown);
+        Assert.True(replay.PartyObservationsAfterSelection >= 2);
+        Assert.Null(error);
+        Assert.True(found);
+        Assert.Equal(0, replay.ApplyAttempts);
+        Assert.Equal(0, replay.ApplySent);
+        Assert.Equal(2, replay.ActiveStateReadSources.Count);
+        Assert.Single(replay.ActiveStateReadSources.Distinct());
+        Assert.All(replay.ActiveStateReadSources, source =>
+        {
+            Assert.True(source.IsKnown);
+            Assert.True(source.IsAfter(replay.SelectionSource));
+            Assert.True(source.CapturedTimestamp >= replay.SelectionCompletedAt + replay.Time.TimestampFrequency * 60 / 1000);
+        });
+        Assert.Equal("world", replay.Scene);
+        Assert.True(replay.WorldSources.Distinct().Count() >= 2);
+        Assert.True(ApplicationHostBootstrapGuard.IsProhibited);
+        Assert.Null(System.Windows.Application.Current);
+    }
+
+    [Fact]
+    public async Task PublicStartCannotTreatAnotherAlreadyActivePartyAsTheRequestedParty()
+    {
+        var replay = new Replay { AlreadyActiveCase = true, VisiblePartyName = "风" };
+        bool? found = null;
+        var error = await Record.ExceptionAsync(async () => found = await new SwitchPartyTask(replay.Io()).Start("岩", default));
+        Assert.NotNull(error);
+        Assert.NotEqual(true, found);
+        Assert.Equal(1, replay.SelectConfirmSent);
+        Assert.Equal(0, replay.ApplySent);
+        Assert.NotEqual("world", replay.Scene);
+        Assert.Empty(replay.WorldSources);
+    }
+
+    [Theory]
+    [InlineData("empty-name")]
+    [InlineData("source-after-read")]
+    [InlineData("window-after-read")]
+    public async Task PublicStartCannotVerifyAlreadyActiveFromAnUnknownOrInvalidatedRead(string fault)
+    {
+        var replay = new Replay { AlreadyActiveCase = true, VisiblePartyName = fault == "empty-name" ? "" : "岩", ActiveReadFault = fault };
+        bool? found = null;
+        var error = await Record.ExceptionAsync(async () => found = await new SwitchPartyTask(replay.Io()).Start("岩", default));
+        Assert.NotNull(error);
+        Assert.NotEqual(true, found);
+        Assert.Equal(1, replay.SelectConfirmSent);
+        Assert.Equal(0, replay.ApplySent);
+        Assert.NotEqual("world", replay.Scene);
+        Assert.Empty(replay.WorldSources);
+    }
+
     internal sealed class Replay : IUiDriver
     {
         private PartyNameOcrPage BindNames(ImageRegion image) => new(image,Names(image),_ => string.Empty);
@@ -413,6 +476,13 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
         internal string Scene = "party";
         internal int PageActions, Page;
         internal bool Selected;
+        internal bool AlreadyActiveCase;
+        internal string VisiblePartyName = "岩", ActiveReadFault = "";
+        internal int InitialEmptyNameReads, SelectConfirmSent, ApplyAttempts, ApplySent, PartyObservationsAfterSelection;
+        internal CaptureFrameStamp SelectionSource;
+        internal long SelectionCompletedAt;
+        internal readonly List<CaptureFrameStamp> ActiveStateReadSources = new(), WorldSources = new();
+        private bool _selectionConfirmed, _samePartyWindow = true;
         private Point2d _pointer;
         private bool _leftHeld;
         private double _thumbTop = 112;
@@ -423,7 +493,7 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
             Scale = 1, Clock = Time, Logger = NullLogger.Instance,
             Driver = () => this, Capture = Image, Read = Read,
             Element = (image, name) => name == "PartyBtnDelete" ? image.Derive(620, 990, 52, 50) : image.Derive(20, 30, 50, 30),
-            OcrOne = (_, _) => "水", ReadNames = (image, _) => BindNames(image),
+            OcrOne = ReadSingle, ReadNames = (image, _) => BindNames(image),
             Click = (_, x, y) => { if (Scene == "party") Scene = "list"; else if (Page == 1) Selected = true; else { PageActions++; Page = 1; } },
             MovePointer = (_, point) => { _pointer = point; },
             BindLeftButton = () => (() => { _leftHeld = true; },
@@ -434,9 +504,37 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
             }, () => true),
             ResetTop = _ => { Page = 0; return Task.CompletedTask; }, Delay = DelayAsync,
             ReturnMain = token => UiRecovery.ToMainAsync(this, token, false, NullLogger.Instance),
-            Confirm = (_, _) => { if (Scene == "list" && Selected) { Scene = "party"; return true; } if (Scene == "party" && Selected) { Scene = "world"; return true; } return false; },
-            Prepare = () => { }, SameTarget = () => Fault != "foreign-window", ForegroundReady = () => true, ClearDrawings = () => { }, ClearCombatScenes = () => { }
+            Confirm = (image, _) =>
+            {
+                if (Scene == "list" && Selected)
+                {
+                    SelectConfirmSent++; SelectionSource = image.FrameStamp; SelectionCompletedAt = Time.GetTimestamp();
+                    _selectionConfirmed = true; Scene = "party"; return true;
+                }
+                if (Scene == "party" && Selected)
+                {
+                    ApplyAttempts++;
+                    if (AlreadyActiveCase) return false;
+                    ApplySent++; Scene = "world"; return true;
+                }
+                return false;
+            },
+            Prepare = () => { }, SameTarget = () => Fault != "foreign-window" && _samePartyWindow, ForegroundReady = () => true, ClearDrawings = () => { }, ClearCombatScenes = () => { }
         };
+        private string ReadSingle(ImageRegion image, RecognitionObject recognition)
+        {
+            if (!AlreadyActiveCase) return "水";
+            if (!_selectionConfirmed) { InitialEmptyNameReads++; return string.Empty; }
+            ActiveStateReadSources.Add(image.FrameStamp);
+            var text = recognition.RegionOfInterest.X >= image.Width / 2 ? "已出战" : VisiblePartyName;
+            if (ActiveStateReadSources.Count == 2)
+            {
+                if (ActiveReadFault == "source-after-read") image.FrameStamp = _foreignSource.Next();
+                if (ActiveReadFault == "window-after-read") _samePartyWindow = false;
+            }
+            return text;
+        }
+
         internal ImageRegion Image()
         {
             Time.Advance(TimeSpan.FromMilliseconds(2));
@@ -445,14 +543,19 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
                 Cv2.Rectangle(mat, new Rect(698, (int)Math.Round(_thumbTop), 6, ThumbHeight), new Scalar(205, 205, 205), -1);
             return new GameCaptureRegion(mat, 0, 0) { FrameStamp = Fault == "foreign-session" && Page > 0 ? _foreignSource.Next() : _source.Next() };
         }
-        internal UiSnapshot Read(ImageRegion image) => new UiSnapshot(image.FrameStamp.Sequence)
-        { Party = Scene == "party", PartyList = Scene == "list" && Fault != "not-list", MainHud = Scene == "world", Closable = Scene != "world" }
-            .WithSource(image.FrameStamp, Time, UiSnapshot.RecoveryMaximumAge);
+        internal UiSnapshot Read(ImageRegion image)
+        {
+            if (_selectionConfirmed && Scene == "party") PartyObservationsAfterSelection++;
+            if (_selectionConfirmed && Scene == "world") WorldSources.Add(image.FrameStamp);
+            return new UiSnapshot(image.FrameStamp.Sequence)
+            { Party = Scene == "party", PartyList = Scene == "list" && Fault != "not-list", MainHud = Scene == "world", Closable = Scene != "world" }
+                .WithSource(image.FrameStamp, Time, UiSnapshot.RecoveryMaximumAge);
+        }
         private List<Region> Names(ImageRegion image)
         {
             if (Fault == "stale-ocr") Time.Advance(TimeSpan.FromSeconds(3));
             var names = Page == 0 || Fault == "thumb-only" ? new[] { "采集", "水", "火", "雷" } :
-                new[] { "雷", "草", MissingTarget ? NeverAtEnd ? "风" + Page : "风" : "矿物" };
+                new[] { "雷", "草", MissingTarget ? NeverAtEnd ? "风" + Page : "风" : AlreadyActiveCase ? "岩" : "矿物" };
             var result = new List<Region>();
             for (var i = 0; i < names.Length; i++) { var region = image.Derive(70, 135 + i * 174, 50, 25); region.Text = names[i]; result.Add(region); }
             return result;
