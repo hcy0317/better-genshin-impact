@@ -808,7 +808,10 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             // 从回正后的轨道中心按已发送纵向位移采样，发送失败不推进轨迹。
             var verticalTarget = AutoFightSeek.GetSeekCameraVerticalTargetOffset(observation.Height,
                 _scanPulses / 4, _scanPulses % 4 + 1);
-            if (!await SendAsync(new(CombatBattleHostInputKind.Camera, offset.x, verticalTarget - _searchVerticalOffset), ct)) return _result;
+            // A missing target does not reverse the last accepted direction of this search episode.
+            // Keep the original orbit magnitude and vertical track; a new spatial cue still wins above.
+            var horizontalOffset = _behindTurnSide == 0 ? offset.x : _behindTurnSide * Math.Abs(offset.x);
+            if (!await SendAsync(new(CombatBattleHostInputKind.Camera, horizontalOffset, verticalTarget - _searchVerticalOffset), ct)) return _result;
             _searchVerticalOffset = verticalTarget;
             _scanPulses++;
             return _result;

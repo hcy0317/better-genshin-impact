@@ -9,6 +9,172 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    [Fact]
+    public async Task RetainedSearchDirectionStillExhaustsTwentyFourSlotsWithoutCompletionEvidence()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId)
+        {
+            TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080)
+                { Control = new(MotionStatus.Unknown, false) }
+        };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var step = 0; step < 2000 && host.State != "Searching"; step++) await host.AdvanceAsync(flow, default);
+        var firstDirection = AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(532,748,30,25,411,-125d)],1920,1080);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.Camera) == 0 ? firstDirection : null, 1920, 1080)
+            { Control = new(MotionStatus.Unknown, false) };
+        var result = CombatBattleHostResult.Continue;
+        for (var step = 0; step < 6000 && result == CombatBattleHostResult.Continue; step++) result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Equal(24, io.Traces.Max(trace => trace.ScanUsed));
+        Assert.InRange(host.CameraRequests, 1, 24);
+        Assert.Equal(0, host.ApproachRequests);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+    }
+
+    [Fact]
+    public async Task NoAcceptedDirectionPreservesTheOriginalGenericOrbitAndVerticalTrack()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId)
+        {
+            TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080)
+                { Control = new(MotionStatus.Unknown, false) }
+        };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var step = 0; step < 3000 && io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.Camera) < 4; step++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Single(io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.CameraReset));
+        var cameras = io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.Camera).Take(4).ToArray();
+        Assert.Equal(4, cameras.Length);
+        var previousVertical = 0;
+        for (var index = 0; index < cameras.Length; index++)
+        {
+            var slot = index + 1; // Original reset uses the first slot.
+            var original = AutoFightSeek.GetSeekCameraOffset(1920, 1080, slot / 4, slot % 4);
+            var vertical = AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080, slot / 4, slot % 4 + 1);
+            Assert.Equal(original.x, cameras[index].X);
+            Assert.Equal(vertical - previousVertical, cameras[index].Y);
+            previousVertical = vertical;
+        }
+    }
+
+    [Theory]
+    [InlineData("wrong-battle")]
+    [InlineData("stale")]
+    [InlineData("unknown-source")]
+    [InlineData("control-blocked")]
+    public async Task RetainedDirectionCannotAuthorizeAnUnavailableGenericCameraFrame(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId)
+        {
+            TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080)
+                { Control = new(MotionStatus.Unknown, false) }
+        };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var step = 0; step < 2000 && host.State != "Searching"; step++) await host.AdvanceAsync(flow, default);
+        var arrow = AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(532, 748, 30, 25, 411, -125d)], 1920, 1080);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available,
+            io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.Camera) == 0 ? arrow : null, 1920, 1080)
+            { Control = new(MotionStatus.Unknown, false) };
+        for (var step = 0; step < 200 && !io.Inputs.Any(input => input.Kind == CombatBattleHostInputKind.Camera); step++)
+            await host.AdvanceAsync(flow, default);
+        Assert.Single(io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.Camera));
+        io.TargetFactory = stamp => new(fault == "unknown-source" ? default : fault == "stale"
+            ? stamp with { CapturedTimestamp = stamp.CapturedTimestamp - clock.TimestampFrequency } : stamp,
+            fault == "wrong-battle" ? Guid.NewGuid() : flow.Context.BattleId,
+            CombatObservationQuality.Available, null, 1920, 1080)
+            { Control = new(MotionStatus.Unknown, fault == "control-blocked") };
+        var result = CombatBattleHostResult.Continue;
+        for (var step = 0; step < 2000 && result == CombatBattleHostResult.Continue; step++) result = await host.AdvanceAsync(flow, default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed, result);
+        Assert.Single(io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.Camera));
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+    }
+
+    [Fact]
+    public async Task FreshOppositeDirectionAndCurrentBodyOverrideTheRetainedGenericSearchDirection()
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId)
+        {
+            TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080)
+                { Control = new(MotionStatus.Unknown, false) }
+        };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var step = 0; step < 2000 && host.State != "Searching"; step++) await host.AdvanceAsync(flow, default);
+        io.TargetFactory = stamp =>
+        {
+            var count = io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.Camera);
+            EnemySeekDecision? target = count == 0 ? AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(532,748,30,25,411,-125d)],1920,1080)
+                : count == 2 ? AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(1358,748,30,25,411,125d)],1920,1080)
+                : count >= 4 ? AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(350,400,80,4,300)],1920,1080) : null;
+            return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, target, 1920, 1080)
+                { Control = new(MotionStatus.Unknown, false) };
+        };
+        for (var step = 0; step < 4000 && io.Inputs.Count(input => input.Kind == CombatBattleHostInputKind.Camera) < 5; step++)
+            await host.AdvanceAsync(flow, default);
+        var cameras = io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.Camera).Take(5).ToArray();
+        Assert.Equal(5, cameras.Length);
+        Assert.True(cameras[0].X < 0); Assert.True(cameras[1].X < 0);
+        Assert.True(cameras[2].X > 0); Assert.True(cameras[3].X > 0);
+        Assert.True(cameras[4].X < 0); // Actual current spatial target wins over old direction memory.
+    }
+
+    [Theory]
+    [InlineData(-1, false)]
+    [InlineData(1, false)]
+    [InlineData(-1, true)]
+    [InlineData(1, true)]
+    public async Task ProducerDirectionSurvivesIntermittentAbsenceUntilTheBodyEntersTheSameBoundedSearch(int side, bool behind)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        io.TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080)
+            { Control = new(MotionStatus.Unknown, false) };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var step = 0; step < 2000 && host.State != "Searching"; step++) await host.AdvanceAsync(flow, default);
+        Assert.Equal("Searching", host.State);
+        var arrow = new EnemySeekVisual(side < 0 ? 532 : 1358, 748, 30, 25, 411, side * 125d);
+        var body = new EnemySeekVisual(920, 400, 80, 4, 300);
+        var bodySeen = false;
+        io.TargetFactory = stamp =>
+        {
+            var cameras = io.Inputs.Where(input => input.Kind == CombatBattleHostInputKind.Camera).ToArray();
+            // External relative-input projection; this is not a degrees calibration.
+            var relative = cameras.Sum(input => input.X);
+            bodySeen |= relative * side >= 2000;
+            EnemySeekDecision? target = null;
+            if (bodySeen || cameras.Length % 2 == 0)
+            {
+                var visual = bodySeen ? body : behind && cameras.Length > 0
+                    ? arrow with { IndicatorBearingDegrees = 180d } : arrow;
+                var selected = AutoFightSeek.SelectSeekDecision([visual], 1920, 1080);
+                var passive = new BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation(
+                    bodySeen, false, clock.GetUtcNow().UtcDateTime, visual, 1920, 1080, selected)
+                    { Source = stamp, BattleId = flow.Context.BattleId };
+                Assert.True(AutoFightSeek.TryCreatePassiveDecision(passive, clock.GetUtcNow().UtcDateTime, out var admitted, out _, out _));
+                target = admitted;
+            }
+            return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, target, 1920, 1080)
+                { Control = new(MotionStatus.Unknown, false) };
+        };
+        var result = CombatBattleHostResult.Continue;
+        for (var step = 0; step < 6000 && result == CombatBattleHostResult.Continue && host.ApproachRequests == 0; step++)
+            result = await host.AdvanceAsync(flow, default);
+        Assert.True(bodySeen, "Repeated valid side evidence must not be undone by the no-target orbit before the original scan budget ends.");
+        Assert.True(host.ApproachRequests > 0);
+        Assert.InRange(host.CameraRequests, 1, 24);
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Camera && input.X * side < 0);
+    }
+
     [Theory]
     [InlineData("target")]
     [InlineData("control")]
