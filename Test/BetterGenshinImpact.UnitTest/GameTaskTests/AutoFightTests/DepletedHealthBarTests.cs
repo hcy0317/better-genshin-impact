@@ -6,6 +6,58 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public class DepletedHealthBarTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData("recorded")]
+    [InlineData("no-top-edge")]
+    [InlineData("no-bottom-edge")]
+    [InlineData("no-right-end")]
+    public void RecordedTranslucentTrackNeedsBothBordersAndATrueRightEnd(string kind)
+    {
+        var fixture=Path.Combine(AppContext.BaseDirectory,"Fixtures","Combat","s46-depleted-track-2832.png");
+        Assert.Equal("EC8979C719079D2A4F08F8F18C1A8BCACCE5D8151B7EC40DE71E9425AAE18A6C",
+            Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(fixture))));
+        using var patch=Cv2.ImRead(fixture);Assert.False(patch.Empty());Assert.Equal(82,patch.Width);Assert.Equal(15,patch.Height);
+        var outer=patch.At<Vec3b>(0,0);
+        using var source=new Mat(1080,1920,MatType.CV_8UC3,new Scalar(outer.Item0,outer.Item1,outer.Item2));
+        // Portable same-coordinate component counter, not an original whole-frame or current-source authority fixture.
+        using(var destination=new Mat(source,new Rect(1428,553,82,15)))patch.CopyTo(destination);
+        if(kind is "no-top-edge" or "no-bottom-edge")
+        {
+            for(var x=1455;x<1510;x++)
+            {
+                var background=patch.At<Vec3b>(kind=="no-top-edge"?0:14,x-1428);
+                // Fill the boundary and its outside with that column's original outside pixels; the red remainder is untouched.
+                for(var y=kind=="no-top-edge"?553:561;y<=(kind=="no-top-edge"?558:567);y++)source.Set(y,x,background);
+            }
+        }
+        else if(kind=="no-right-end")
+        {
+            // Continue a real interior track column past the original x1672 search limit, including its antialiased boundaries.
+            for(var x=1495;x<=1673;x++)
+                for(var y=553;y<568;y++)source.Set(y,x,patch.At<Vec3b>(y-553,1495-1428));
+        }
+        using var mask=AutoFightSeek.CreateSeekColorMask(source,new Scalar(255,90,90),null);
+        using var labels=new Mat();using var stats=new Mat();using var centers=new Mat();
+        var count=Cv2.ConnectedComponentsWithStats(mask,labels,stats,centers,connectivity:PixelConnectivity.Connectivity4,ltype:MatType.CV_32S);
+        var components=new List<EnemySeekVisual>();
+        for(var i=1;i<count;i++)
+        {
+            var found=new EnemySeekVisual(stats.At<int>(i,0),stats.At<int>(i,1),stats.At<int>(i,2),stats.At<int>(i,3),stats.At<int>(i,4));
+            if(found.X==1432&&found.Y==557)components.Add(found);
+        }
+        var red=Assert.Single(components);Assert.Equal(new EnemySeekVisual(1432,557,23,6,129),red);
+        Assert.True(AutoFightSeek.MatchesHealthBarFeature(mask,source,red));
+        Assert.True(red.Width<24); // The unchanged1080p six-pixel geometry requires the original minimum track width24.
+        var actual=AutoFightSeek.ClassifySeekVisual(mask,source,red,1920,1080);
+        if(kind=="recorded")
+        {
+            Assert.NotNull(actual);Assert.Equal(red.Width,actual.Value.Width);
+            Assert.InRange(actual.Value.HealthBarTrackWidth,60,75);
+            Assert.Equal(SeekCueKind.HealthBar,AutoFightSeek.SelectSeekDecision([actual.Value],1920,1080,false).Cue);
+        }
+        else Assert.Null(actual);
+    }
+
     [Fact]
     public void TranslucentTrackWithAntialiasedBorderRetainsTheNarrowRedEnemyCue()
     {
