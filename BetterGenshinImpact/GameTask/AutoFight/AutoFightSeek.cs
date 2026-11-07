@@ -1941,7 +1941,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             out int imageWidth, out int imageHeight, bool indicatorOnly = false,
             bool saveDiagnostics = true, SeekRecognitionDiagnostics? diagnostics = null,
             Action<EnemySeekVisual>? unconfirmedDirection = null, CombatSceneCapabilities? scene = null,
-            Action<EnemySeekVisual>? clippedHealthBar = null)
+            Action<EnemySeekVisual>? clippedHealthBar = null, Action<EnemySeekVisual>? partialHealthBar = null)
         {
             var detectionRegion = GetSeekDetectionRegion(image.Width, image.Height);
             var wholeViewport = !image.SrcMat.IsSubmatrix() && detectionRegion.X == 0 && detectionRegion.Y == 0 &&
@@ -2015,7 +2015,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     visual,
                     imageCrop.Width,
                     imageCrop.Height, diagnostics, unconfirmedDirection, scene,
-                    wholeViewport ? clippedHealthBar : null))
+                    wholeViewport ? clippedHealthBar : null, wholeViewport && !indicatorOnly ? partialHealthBar : null))
                 .Where(visual => visual.HasValue)
                 .Select(visual => visual!.Value)
                 .ToList();
@@ -2229,7 +2229,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight,
             SeekRecognitionDiagnostics? diagnostics = null, Action<EnemySeekVisual>? unconfirmedDirection = null,
-            CombatSceneCapabilities? scene = null, Action<EnemySeekVisual>? clippedHealthBar = null)
+            CombatSceneCapabilities? scene = null, Action<EnemySeekVisual>? clippedHealthBar = null,
+            Action<EnemySeekVisual>? partialHealthBar = null)
         {
             var healthFailure = HealthBarGeometryFailure(visual, imageHeight, out var minimumWidth);
             EnemySeekVisual? Finish(EnemySeekVisual? accepted, string indicatorResult)
@@ -2262,7 +2263,15 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 {
                     return Finish(visual, "not-run");
                 }
-                else healthFailure = "feature";
+                else
+                {
+                    healthFailure = "feature";
+                    if (source != null && partialHealthBar != null &&
+                        !IsFixedTopEliteHealthBar(visual, imageWidth, imageHeight, scene) &&
+                        !IsAmbiguousTopHealthBar(visual, imageWidth, imageHeight) &&
+                        TryGetPartialHealthBarCore(mask, source, visual, imageWidth, imageHeight, scene) is { } core)
+                        partialHealthBar(core);
+                }
             }
 
             var indicator = ClassifyDirectionIndicator(mask, source, visual, imageWidth, imageHeight, out var indicatorReason);
@@ -2393,35 +2402,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 return false;
             }
 
-            using var colorCandidate = new Mat(source, rect);
-            using var salmonMask = new Mat();
-            Cv2.InRange(
-                colorCandidate,
-                new Scalar(50, 50, 180),
-                new Scalar(150, 150, 255),
-                salmonMask);
-            var channels = Cv2.Split(colorCandidate);
-            try
-            {
-                using var blueGreenDifference = new Mat();
-                using var similarBlueGreen = new Mat();
-                Cv2.Absdiff(channels[0], channels[1], blueGreenDifference);
-                Cv2.Threshold(
-                    blueGreenDifference,
-                    similarBlueGreen,
-                    45,
-                    255,
-                    ThresholdTypes.BinaryInv);
-                Cv2.BitwiseAnd(salmonMask, similarBlueGreen, salmonMask);
-                Cv2.BitwiseAnd(salmonMask, candidate, salmonMask);
-            }
-            finally
-            {
-                foreach (var channel in channels)
-                {
-                    channel.Dispose();
-                }
-            }
+            using var salmonMask = CreateHealthBarSalmonMask(candidate, source, rect);
+
 
             if (Cv2.CountNonZero(salmonMask) / (double)foregroundPixels < 0.40)
                 return false;
@@ -2450,6 +2432,87 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             // A single colored edge of a shaded effect does not establish a filled HUD band.
             // Keep room for antialiased/tapered top and bottom rows.
             return supportedRows >= (salmonMask.Height + 1) / 2;
+        }
+
+        private static Mat CreateHealthBarSalmonMask(Mat candidate, Mat source, Rect rect)
+        {
+            using var colorCandidate = new Mat(source, rect);
+            var salmonMask = new Mat();
+            try
+            {
+                Cv2.InRange(colorCandidate, new Scalar(50, 50, 180), new Scalar(150, 150, 255), salmonMask);
+                var channels = Cv2.Split(colorCandidate);
+                try
+                {
+                    using var blueGreenDifference = new Mat();
+                    using var similarBlueGreen = new Mat();
+                    Cv2.Absdiff(channels[0], channels[1], blueGreenDifference);
+                    Cv2.Threshold(blueGreenDifference, similarBlueGreen, 45, 255, ThresholdTypes.BinaryInv);
+                    Cv2.BitwiseAnd(salmonMask, similarBlueGreen, salmonMask);
+                    Cv2.BitwiseAnd(salmonMask, candidate, salmonMask);
+                }
+                finally
+                {
+                    foreach (var channel in channels) channel.Dispose();
+                }
+                return salmonMask;
+            }
+            catch
+            {
+                salmonMask.Dispose();
+                throw;
+            }
+        }
+
+        private static EnemySeekVisual? TryGetPartialHealthBarCore(Mat binaryMask, Mat source, EnemySeekVisual visual,
+            int imageWidth, int imageHeight, CombatSceneCapabilities? scene)
+        {
+            var rect = new Rect(visual.X, visual.Y, visual.Width, visual.Height);
+            if (rect.X < 0 || rect.Y < 0 || rect.Right > binaryMask.Width || rect.Bottom > binaryMask.Height ||
+                rect.Right > source.Width || rect.Bottom > source.Height || !MatchesHealthBarFeature(binaryMask, visual))
+                return null;
+            using var candidate = new Mat(binaryMask, rect);
+            using var salmonMask = CreateHealthBarSalmonMask(candidate, source, rect);
+            if (Cv2.CountNonZero(salmonMask) / (double)Cv2.CountNonZero(candidate) < 0.40) return null;
+            var requiredRows = (visual.Height + 1) / 2;
+            var requiredWidth = (int)Math.Ceiling(visual.Width * 0.60);
+            var columns = new int[visual.Width];
+            for (var y = 0; y < requiredRows; y++)
+                for (var x = 0; x < visual.Width; x++)
+                    if (salmonMask.At<byte>(y, x) != 0) columns[x]++;
+            for (var top = 0; top + requiredRows <= visual.Height; top++)
+            {
+                if (top > 0)
+                    for (var x = 0; x < visual.Width; x++)
+                    {
+                        if (salmonMask.At<byte>(top - 1, x) != 0) columns[x]--;
+                        if (salmonMask.At<byte>(top + requiredRows - 1, x) != 0) columns[x]++;
+                    }
+                var start = -1;
+                for (var x = 0; x <= visual.Width; x++)
+                {
+                    if (x < visual.Width && columns[x] == requiredRows)
+                    {
+                        if (start < 0) start = x;
+                        continue;
+                    }
+                    if (start < 0) continue;
+                    var width = x - start;
+                    if (width >= requiredWidth)
+                    {
+                        var coreRect = new Rect(visual.X + start, visual.Y, width, visual.Height);
+                        using var coreMask = new Mat(binaryMask, coreRect);
+                        var core = new EnemySeekVisual(coreRect.X, coreRect.Y, width, visual.Height, Cv2.CountNonZero(coreMask));
+                        if (HealthBarGeometryFailure(core, imageHeight, out _) == null &&
+                            !IsPlayerHudHealthBar(core, imageWidth, imageHeight) &&
+                            !IsFixedTopEliteHealthBar(core, imageWidth, imageHeight, scene) &&
+                            !IsAmbiguousTopHealthBar(core, imageWidth, imageHeight) && MatchesHealthBarFeature(binaryMask, source, core))
+                            return core; // Derived full-height evidence only; it is never returned as a classified target.
+                    }
+                    start = -1;
+                }
+            }
+            return null;
         }
 
         internal static bool HasDirectionIndicatorPinkRedShare(

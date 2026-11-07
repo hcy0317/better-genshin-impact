@@ -9,6 +9,63 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    [Fact]
+    public async Task CurrentPartialHintUsesOriginalXYTicketsWithoutTargetProgressOrApproach()
+    {
+        var clock=new FakeTimeProvider();var game=new ReturningGame(clock);using var flow=CreateFlow(false,game,clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        var before=io.Inputs.Count;var actions=game.Inputs;
+        io.TargetFactory=source=>EdgeHintObservation(source,flow.Context.BattleId,clock,UnconfirmedSearchHintKind.PartialHealthBar);
+        for(var step=0;step<200&&!io.Inputs.Skip(before).Any();step++)await host.AdvanceAsync(flow,default);
+        var first=Assert.Single(io.Inputs.Skip(before));Assert.Equal(CombatBattleHostInputKind.Camera,first.Kind);
+        Assert.Equal(-120,first.X);Assert.Equal(160,first.Y);Assert.Equal(1,host.CameraRequests);
+        Assert.Null(io.Traces.Last().Observation.Target);Assert.Null(io.Traces.Last().LastProgress);
+        Assert.Equal(actions,game.Inputs);Assert.Equal(0,host.ApproachRequests);
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<5000&&result==CombatBattleHostResult.Continue;step++)result=await host.AdvanceAsync(flow,default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed,result);Assert.Equal(24,host.CameraRequests);
+        Assert.All(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera),input=>{Assert.Equal(-120,input.X);Assert.Equal(160,input.Y);});
+        Assert.DoesNotContain(io.Inputs,input=>input.Kind==CombatBattleHostInputKind.CameraReset);
+        Assert.Equal(0,host.ApproachRequests);Assert.Equal(actions,game.Inputs);
+        Assert.Null(io.Traces.Last().LastProgress);Assert.InRange(io.Traces.Last().ProgressAge,0,45);
+    }
+
+    [Fact]
+    public async Task ZeroAxisPartialHintFallsThroughToTheOriginalReset()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        var before=io.Inputs.Count;
+        io.TargetFactory=source=>
+        {
+            var observed=EdgeHintObservation(source,flow.Context.BattleId,clock,UnconfirmedSearchHintKind.PartialHealthBar);
+            return observed with {SearchHint=observed.SearchHint!.Value with {Visual=new(936,375,48,6,288)}};
+        };
+        for(var step=0;step<200&&!io.Inputs.Skip(before).Any();step++)await host.AdvanceAsync(flow,default);
+        Assert.Equal(CombatBattleHostInputKind.CameraReset,Assert.Single(io.Inputs.Skip(before)).Kind);
+        Assert.DoesNotContain(io.Traces,trace=>trace.Reason=="scan-partial-health-hint");
+        Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Theory]
+    [InlineData("foreign")]
+    [InlineData("epoch")]
+    [InlineData("late")]
+    [InlineData("dims")]
+    public async Task PartialHintCannotAcquireCurrentCameraWithoutItsOriginalSourcePermissions(string invalid)
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        io.TargetFactory=source=>EdgeHintObservation(source,flow.Context.BattleId,clock,UnconfirmedSearchHintKind.PartialHealthBar,invalid);
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<1500&&result==CombatBattleHostResult.Continue;step++)result=await host.AdvanceAsync(flow,default);
+        Assert.DoesNotContain(io.Traces,trace=>trace.Reason=="scan-partial-health-hint");
+        Assert.Equal(0,host.ApproachRequests);Assert.Null(io.Traces.Last().LastProgress);
+    }
+
     private static CombatBattleObservation ProjectCurrentJitterBody(CaptureFrameStamp source,Guid battle,FakeTimeProvider clock,int height,bool centered=false)
     {
         var visual=centered?new EnemySeekVisual(928,height==6?375:376,64,height,64*height)
@@ -258,7 +315,8 @@ public partial class CombatBattleHostTests
     private static CombatBattleObservation EdgeHintObservation(CaptureFrameStamp source,Guid battle,FakeTimeProvider clock,
         UnconfirmedSearchHintKind kind=UnconfirmedSearchHintKind.ClippedHealthBar,string fault="",EnemySeekDecision? target=null)
     {
-        var hint=new UnconfirmedSearchHint(fault=="hint-source"?default:source,new(0,668,23,5,100),fault=="dims"?960:1920,1080,kind);
+        var hintVisual=kind==UnconfirmedSearchHintKind.PartialHealthBar?new EnemySeekVisual(529,571,48,6,282):new EnemySeekVisual(0,668,23,5,100);
+        var hint=new UnconfirmedSearchHint(fault=="hint-source"?default:source,hintVisual,fault=="dims"?960:1920,1080,kind);
         var snapshot=new BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation(false,false,clock.GetUtcNow().UtcDateTime,null,1920,1080,null)
         { Source=source,BattleId=fault=="foreign"?Guid.NewGuid():battle,CaptureEpoch=10,Quality=CombatObservationQuality.Available,
           SearchHint=hint,Control=new(MotionStatus.Unknown,fault=="control") };

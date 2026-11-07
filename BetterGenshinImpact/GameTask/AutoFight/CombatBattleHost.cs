@@ -797,6 +797,23 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         {
             // 相对轨道不能推断脚本遗留的真实俯仰；先沿用旧入口的中键回正。
             // 回正占用原扫描预算，且只由真实游戏进展重新开放一次机会。
+            if (observation.Target == null && observation.SearchHint is { Kind: UnconfirmedSearchHintKind.PartialHealthBar } partial &&
+                partial.Source.IsKnown && partial.Source == observation.Source && partial.Width == observation.Width &&
+                partial.Height == observation.Height && partial.Visual.X >= 0 && partial.Visual.Y >= 0 &&
+                partial.Visual.Width > 0 && partial.Visual.Height > 0 && partial.Visual.Width <= observation.Width &&
+                partial.Visual.Height <= observation.Height && partial.Visual.X <= observation.Width - partial.Visual.Width &&
+                partial.Visual.Y <= observation.Height - partial.Visual.Height && CanResetCamera(observation, io.BattleId, io.Clock))
+            {
+                var horizontal = AutoFightSeek.GetVisibleEnemyCameraOffset(partial.Visual, observation.Width);
+                var vertical = AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(partial.Visual, observation.Height);
+                if (horizontal != 0 || vertical != 0)
+                {
+                    if (await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(horizontal, -120, 120), vertical), ct))
+                        _scanPulses++;
+                    Reason = "scan-partial-health-hint";
+                    return _result;
+                }
+            }
             if (observation.Target == null && observation.SearchHint is { Kind: UnconfirmedSearchHintKind.ClippedHealthBar } clipped &&
                 clipped.Source == observation.Source && clipped.Source.IsKnown && clipped.Width == observation.Width &&
                 clipped.Height == observation.Height && clipped.Visual.X == 0 && clipped.Visual.Width > 0 &&
