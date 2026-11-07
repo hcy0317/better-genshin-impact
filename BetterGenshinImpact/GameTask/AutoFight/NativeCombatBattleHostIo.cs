@@ -32,6 +32,10 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     private Guid _partyInputRequest;
     private CaptureFrameStamp _lastPartyProbeSource;
     private CaptureFrameStamp _lastAdmittedPartySource;
+    private const string ProgressOwner = "combat-last-progress";
+    private DiagnosticEvidenceScope? _progressScope;
+    private string? _progressEpisode;
+    private CaptureFrameStamp _progressSource;
     private CombatDecisionEvidence? _decisionEvidence;
     private Guid _evidenceRequest;
     private long? _evidenceInputCompleted;
@@ -262,8 +266,38 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
     public ValueTask<CombatBattleHostInputResult> SendAsync(CombatBattleHostInput input, CancellationToken ct) =>
         SendCoreAsync(input, ct, controlRecovery: false);
 
+    public void RetainAcceptedProgress(CombatProgressEvidence progress, CombatBattleObservation observation, string episode)
+    {
+        var scope = DiagnosticEvidenceScope.Current;
+        if (_progressScope != scope || _progressEpisode != episode) ForgetEpisodeEvidence();
+        if (scope == null) return;
+        // These pixels were already accepted for this owner; a rejected later observation cannot revoke them.
+        if (_progressScope == scope && _progressEpisode == episode && _progressSource == progress.Source) return;
+        var request = "battle:" + BattleId.ToString("N") + ":" + episode;
+        if (observation.BattleId != BattleId || !progress.Source.IsKnown || progress.Source != observation.Source ||
+            progress.Source.TimestampFrequency != Clock.TimestampFrequency ||
+            observation.CaptureEpoch != AvatarRecognition.PassiveCaptureGate.Epoch)
+        {
+            _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase=combat-last-progress reason=progress-owner-epoch-source-mismatch", BattleId);
+            return;
+        }
+        if (scope.RememberExactSource(ProgressOwner, request, progress.Source))
+        { _progressScope = scope; _progressEpisode = episode; _progressSource = progress.Source; }
+        else ForgetEpisodeEvidence();
+    }
+
+    public void ForgetEpisodeEvidence()
+    {
+        if (_progressScope != null && _progressEpisode != null)
+            _progressScope.ForgetExactFrame(ProgressOwner, "battle:" + BattleId.ToString("N") + ":" + _progressEpisode);
+        _progressScope = null; _progressEpisode = null; _progressSource = default;
+    }
+
     public void Trace(CombatBattleHostTrace trace)
     {
+        if (_progressScope != null && (_progressScope != DiagnosticEvidenceScope.Current || _progressEpisode != trace.Episode)) ForgetEpisodeEvidence();
+        if (trace.BattleId == BattleId && trace.LastProgress is { } progress && progress.Source == trace.Observation.Source)
+            RetainAcceptedProgress(progress, trace.Observation, trace.Episode);
         if (trace.CapturePhase == "terminal")
         {
             try { SaveDecisionEvidence(trace.Reason); }
@@ -288,7 +322,11 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             _device.Logger.LogWarning("FIGHT_FAILURE_DETAIL failureId={Battle}/{Episode} termination={Termination} hostGate={HostGate} passiveGate={PassiveGate} partyGate={PartyGate} perception={Perception}",
                 trace.BattleId, trace.Episode, trace.Reason, trace.ObservationGate ?? "not-observed", frame.PassiveGate ?? "not-observed",
                 trace.PartyReason ?? "not-observed", frame.Recognition?.ToCompactString() ?? "not-observed");
-        if (trace.CapturePhase is not { } phase) return;
+        if (trace.CapturePhase is not { } phase)
+        {
+            if (trace.Result != CombatBattleHostResult.Continue || trace.ClosedEpisode == _progressEpisode) ForgetEpisodeEvidence();
+            return;
+        }
         var evidence = DiagnosticEvidenceScope.Current;
         if (phase == "terminal" && _partyInputRequest != Guid.Empty)
             RetirePartyEvidence(detail, EvidenceFields(trace));
@@ -296,6 +334,9 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             _device.Logger.LogDebug("EVIDENCE_CAPTURE_MISSING battle={Battle} phase={Phase} reason=no-run-scope", BattleId, phase);
         else
         {
+            if (phase == "terminal" && trace.LastProgress is { } lastProgress)
+                evidence.CaptureExactWindow(ProgressOwner, "battle:" + BattleId.ToString("N") + ":" + trace.Episode,
+                    lastProgress.Source, "combat-last-progress", detail, _device.Logger, EvidenceFields(trace));
             if (phase == "terminal")
                 evidence.RequestExistingWindow(BattleId.ToString("N"), "battle:" + BattleId.ToString("N") + ":" + trace.Episode,
                     "combat-terminal", frame.Source, detail, _device.Logger, EvidenceFields(trace));
@@ -303,6 +344,7 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             if (phase == "terminal")
                 evidence.CapturePendingTerminal(BattleId.ToString("N"), trace.Episode, () => _vision?.Capture());
         }
+        if (phase == "terminal" || trace.Result != CombatBattleHostResult.Continue || trace.ClosedEpisode == _progressEpisode) ForgetEpisodeEvidence();
     }
 
     internal static IReadOnlyDictionary<string, string> EvidenceFields(CombatBattleHostTrace trace)

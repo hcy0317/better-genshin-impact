@@ -80,6 +80,8 @@ internal interface ICombatBattleHostIo
     ValueTask DelayAsync(int milliseconds, CancellationToken ct);
     void ReleaseInput();
     void Trace(CombatBattleHostTrace observation) { }
+    void RetainAcceptedProgress(CombatProgressEvidence progress, CombatBattleObservation observation, string episode) { }
+    void ForgetEpisodeEvidence() { }
     // 返回值仅描述诊断素材状态；业务准入不得依赖留图是否成功。
     bool PrepareInputEvidence(CombatBattleHostInput input, CancellationToken ct) => true;
     bool InputEvidenceInvalidated => false;
@@ -688,6 +690,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         _searchCandidateDeadline = null; // Only real game progress can renew an unsent search continuation.
         _lastProgressEvidence = new(observation.Source, damage ? "new-damage-cue" : "health-progress",
             observation.Target, observation.FixedTopHealth, io.Clock.GetTimestamp());
+        try { io.RetainAcceptedProgress(_lastProgressEvidence, observation, _evidenceEpisode); } catch { /* 诊断失败不改变已接纳的业务进展。 */ }
         _reengaged = false;
         _scanPulses = _approachPulses = 0;
         _searchVerticalOffset = 0;
@@ -1187,7 +1190,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     {
         if (_closed) return;
         _closed = true;
-        io.ReleaseInput();
-        EndSearchEpisode();
+        try { io.ReleaseInput(); EndSearchEpisode(); }
+        finally { try { io.ForgetEpisodeEvidence(); } catch { /* 不遮蔽原输入清理异常。 */ } }
     }
 }

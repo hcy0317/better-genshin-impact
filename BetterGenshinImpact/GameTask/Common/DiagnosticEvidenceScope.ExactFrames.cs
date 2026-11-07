@@ -11,6 +11,22 @@ internal sealed partial class DiagnosticEvidenceScope
     // At most two exact observation slots, charged to the existing memory budget.
     private readonly Dictionary<string, (string Request, ImageRegion Frame, long Bytes)> _exactFrames = new();
 
+    internal bool RememberExactSource(string owner, string request, CaptureFrameStamp expected)
+    {
+        lock (_gate)
+        {
+            if (_closed || !expected.IsKnown) return false;
+            if (_exactFrames.TryGetValue(owner, out var existing) && existing.Request == request && existing.Frame.FrameStamp == expected) return true;
+            var found = _latestHistory?.Source == expected ? _latestHistory : System.Linq.Enumerable.FirstOrDefault(_history, item => item.Source == expected);
+            if (found?.Image == null || found.Image.FrameStamp != expected)
+            { ForgetExactFrame(owner, request); MissingFrame(request, "combat-last-progress", "exact-progress-source-not-in-history", _logger); return false; }
+            RememberExactFrame(owner, request, found.Image);
+            if (_exactFrames.TryGetValue(owner, out existing) && existing.Request == request && existing.Frame.FrameStamp == expected) return true;
+            ForgetExactFrame(owner, request);
+            return false;
+        }
+    }
+
     internal void RememberExactFrame(string owner, string request, ImageRegion frame)
     {
         ImageRegion? copy = null;
