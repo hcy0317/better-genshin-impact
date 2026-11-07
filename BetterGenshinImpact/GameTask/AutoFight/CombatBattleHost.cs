@@ -996,6 +996,8 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     return Stop("host-party-performance-recheck-deadline");
                 _partyDeadline = 0;
                 if (_endConfirmed) return _result = CombatBattleHostResult.Completed;
+                if (_finalProbe && Now - _lastProgressAt >= NoProgressDeadline)
+                    return Stop("bounded-search-finish-unconfirmed");
                 // 已发探测先收束；只有新鲜的输入后目标及无编队栏样本允许恢复。
                 // 不能把关闭UI之前的旧目标用于恢复，也不能重置原搜索/进展预算。
                 if (!_partyEvidence && fresh && observation.Target != null &&
@@ -1009,7 +1011,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                     return _result;
                 }
                 if (_finalProbe && !_partyEvidence && _hasGameProgress && !_reengaged &&
-                    observation.Target == null && Now - _lastProgressAt < NoProgressDeadline &&
+                    Now - _lastProgressAt < NoProgressDeadline &&
                     _finish?.Fence is { } finishFence && !_tracePartySample.BarVisible &&
                     _tracePartySample.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)) &&
                     finishFence.Accepts(_tracePartySample.Source))
@@ -1021,6 +1023,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                         await io.DelayAsync(50, ct);
                         return _result;
                     }
+                    if (observation.Target != null) return Stop("bounded-search-finish-unconfirmed");
                     _reengaged = true;
                     _graceUntil = Math.Min(Now + CombatFlowPolicy.EpisodeTimeoutSeconds, _lastProgressAt + NoProgressDeadline);
                     SetPhase(Phase.Reengaging);
