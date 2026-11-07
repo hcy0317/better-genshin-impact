@@ -9,6 +9,203 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    [Theory]
+    [InlineData("left")]
+    [InlineData("right")]
+    [InlineData("behind")]
+    public async Task ExternalAuthorityRetainsItsOriginalPathAfterTwentyFourDirectionCameras(string direction)
+    {
+        var clock=new FakeTimeProvider(); var game=new ReturningGame(clock);
+        using var flow=CreateFlow(false,game,clock);
+        var visual=direction=="left"?new EnemySeekVisual(532,748,30,25,411,-125d)
+            :direction=="right"?new EnemySeekVisual(1372,731,30,26,433,128.91686957617605)
+            :new EnemySeekVisual(901,923,38,31,428,-180d);
+        var selected=AutoFightSeek.SelectSeekDecision([visual],1920,1080);
+        Assert.Equal(SeekCueKind.DirectionIndicator,selected.Cue);
+        Assert.Equal(direction=="left"?EnemyIndicatorDirection.Left:direction=="right"?EnemyIndicatorDirection.Right:EnemyIndicatorDirection.Behind,selected.Direction);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,selected,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { ExternalCompletionAuthority=true,TimeoutSeconds=120 });
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<10000&&result==CombatBattleHostResult.Continue&&host.CameraRequests<24;step++)
+            result=await host.AdvanceAsync(flow,default);
+        Assert.Equal(24,io.Inputs.Count(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        for(var step=0;step<30&&result==CombatBattleHostResult.Continue;step++) result=await host.AdvanceAsync(flow,default);
+        Assert.Equal(CombatBattleHostResult.Continue,result);
+        Assert.NotEqual("engagement-camera-budget-exhausted",host.Reason);
+        Assert.Equal(24,host.CameraRequests);
+        Assert.Equal(24,io.Inputs.Count(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.DoesNotContain(io.Inputs,input=>input.Kind==CombatBattleHostInputKind.Approach);
+        Assert.Contains(io.Traces,trace=>trace.Reason is "bounded-reengagement" or "external-scene-awaiting-authority-after-bounded-search");
+    }
+
+    [Theory]
+    [InlineData(200)]
+    [InlineData(865)]
+    public async Task UnalignedSpatialBodyExhaustsCameraBudgetWithoutBorrowingApproach(int y)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        Assert.Equal("Searching",host.State);
+        var visual=new EnemySeekVisual(946,y,28,4,112);
+        var selected=AutoFightSeek.SelectSeekDecision([visual],1920,1080);
+        Assert.Equal(SeekCueKind.HealthBar,selected.Cue);
+        Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy,selected.Action);
+        Assert.Equal(0,AutoFightSeek.GetVisibleEnemyCameraOffset(visual,1920));
+        var requiredY=AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual,1080);
+        Assert.NotEqual(0,requiredY);
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,selected,1920,1080)
+            { Control=new(MotionStatus.Unknown,false) };
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<10000&&result==CombatBattleHostResult.Continue;step++) result=await host.AdvanceAsync(flow,default);
+        var cameras=io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera).ToArray();
+        Assert.Equal(24,cameras.Length); Assert.Equal(24,host.CameraRequests);
+        Assert.All(cameras,input=> { Assert.Equal(0,input.X); Assert.Equal(requiredY,input.Y); });
+        Assert.DoesNotContain(io.Inputs,input=>input.Kind==CombatBattleHostInputKind.Approach);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed,result);
+        Assert.InRange(io.Traces.Last().ProgressAge,0,45);
+    }
+
+    [Theory]
+    [InlineData(false,"horizontal")]
+    [InlineData(true,"horizontal")]
+    [InlineData(false,"vertical-high")]
+    [InlineData(true,"vertical-high")]
+    [InlineData(false,"vertical-low")]
+    [InlineData(true,"vertical-low")]
+    public async Task CurrentBodyCenteringKeepsZeroAxesAndCanSendAVerticalOnlyCamera(bool searching,string position)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        if(searching) for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var visual=position=="horizontal"?new EnemySeekVisual(1403,375,65,6,390)
+            // Centered high targets must stay below the existing ambiguous top-HUD band.
+            :new EnemySeekVisual(928,position=="vertical-high"?200:865,64,6,384);
+        var selected=AutoFightSeek.SelectSeekDecision([visual],1920,1080);
+        Assert.Equal(SeekCueKind.HealthBar,selected.Cue);
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,selected,1920,1080)
+            { Control=new(MotionStatus.Unknown,false) };
+        for(var step=0;step<2000&&!io.Inputs.Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++) await host.AdvanceAsync(flow,default);
+        var camera=Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        if(position=="horizontal") { Assert.Equal(120,camera.X); Assert.Equal(0,camera.Y); }
+        else { Assert.Equal(0,camera.X); Assert.Equal(AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual,1080),camera.Y); }
+        Assert.Equal(1,host.CameraRequests); Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Theory]
+    [InlineData("direction")]
+    [InlineData("fixed")]
+    public async Task NonSpatialCuesKeepTheirOriginalCameraPath(string cue)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var selected=cue=="direction"?AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(1372,731,30,26,433,128.916d)],1920,1080)
+            :new EnemySeekDecision(AutoFightSeekAction.KeepFighting,EnemyIndicatorDirection.None,new(800,10,320,6,1800),1,SeekCueKind.FixedTopHealth);
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,selected,1920,1080)
+            { Control=new(MotionStatus.Unknown,false) };
+        var before=io.Inputs.Count;
+        for(var step=0;step<2000&&!io.Inputs.Skip(before).Any(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);step++)
+            await host.AdvanceAsync(flow,default);
+        var first=io.Inputs.Skip(before).First(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);
+        if(cue=="direction") { Assert.Equal(CombatBattleHostInputKind.Camera,first.Kind); Assert.Equal(0,first.Y); }
+        else Assert.Equal(CombatBattleHostInputKind.CameraReset,first.Kind);
+        Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Theory]
+    [InlineData("multi")]
+    [InlineData("foreign")]
+    [InlineData("control")]
+    public async Task TwoAxisCameraCannotBorrowBodyEvidenceAcrossTheOriginalAdmissionGates(string fault)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var selected=AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(403,67,64,6,384)],1920,1080);
+        if(fault=="multi") selected=selected with { SignalCount=2 };
+        var before=io.Inputs.Count;
+        io.TargetFactory=stamp=>new(stamp,fault=="foreign"?Guid.NewGuid():flow.Context.BattleId,
+            CombatObservationQuality.Available,selected,1920,1080) { Control=new(MotionStatus.Unknown,fault=="control") };
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<2000&&result==CombatBattleHostResult.Continue;step++) result=await host.AdvanceAsync(flow,default);
+        Assert.DoesNotContain(io.Inputs.Skip(before),input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.Approach);
+    }
+
+    [Fact]
+    public async Task ADisappearingBodyCancelsItsUnsentVerticalCameraWithoutFollowingTheOldY()
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var visual=new EnemySeekVisual(403,67,64,6,384);
+        var selected=AutoFightSeek.SelectSeekDecision([visual],1920,1080);
+        var attempts=new List<CombatBattleHostInput>(); var cancelled=0;
+        io.PrepareEvidence=input=> { if(input.Kind==CombatBattleHostInputKind.Camera) attempts.Add(input); return true; };
+        io.CancelEvidence=()=>cancelled++;
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,selected,1920,1080)
+            { Control=new(MotionStatus.Unknown,false) };
+        for(var step=0;step<2000&&attempts.Count==0;step++) await host.AdvanceAsync(flow,default);
+        var reserved=Assert.Single(attempts); Assert.DoesNotContain(io.Inputs,input=>input.RequestId==reserved.RequestId);
+        var oldCancels=cancelled;
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,null,1920,1080)
+            { Control=new(MotionStatus.Unknown,false) };
+        for(var step=0;step<12;step++) await host.AdvanceAsync(flow,default);
+        Assert.True(cancelled>oldCancels);
+        Assert.DoesNotContain(io.Inputs,input=>input.RequestId==reserved.RequestId);
+        Assert.DoesNotContain(io.Inputs,input=>input.Kind==CombatBattleHostInputKind.Camera&&input.Y==AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual,1080));
+    }
+
+
+    [Theory]
+    [InlineData(false,403,67,64,6)]
+    [InlineData(false,1403,865,65,6)]
+    [InlineData(true,403,67,64,6)]
+    [InlineData(true,1403,865,65,6)]
+    public async Task CurrentSpatialHealthUsesTheOriginalHorizontalAndVerticalCameraSteps(bool searching,int x,int y,int width,int height)
+    {
+        var clock=new FakeTimeProvider();
+        using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,null,1920,1080)
+            { Control=new(MotionStatus.Unknown,false) };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        if(searching)
+        {
+            for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+            Assert.Equal("Searching",host.State);
+        }
+        var visual=new EnemySeekVisual(x,y,width,height,width*height);
+        var selected=AutoFightSeek.SelectSeekDecision([visual],1920,1080);
+        Assert.Equal(SeekCueKind.HealthBar,selected.Cue);
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,selected,1920,1080)
+            { Control=new(MotionStatus.Unknown,false) };
+        var preparations=new List<CombatBattleHostInput>();
+        io.PrepareEvidence=input=> { if(input.Kind==CombatBattleHostInputKind.Camera) preparations.Add(input); return true; };
+        for(var step=0;step<2000&&!io.Inputs.Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++)
+            await host.AdvanceAsync(flow,default);
+        var sent=Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.True(preparations.Count>=2); // Original business source recheck, not diagnostic admission.
+        Assert.Equal(preparations[0].RequestId,sent.RequestId);
+        Assert.True(sent.Source.IsAfter(preparations[0].Source));
+        Assert.True(io.Traces.Any(trace=>trace.State==(searching?"Searching":"Fighting")));
+        Assert.Equal(Math.Clamp(AutoFightSeek.GetVisibleEnemyCameraOffset(visual,1920),-120,120),sent.X);
+        var expectedY=AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual,1080);
+        Assert.NotEqual(0,expectedY); Assert.Equal(expectedY,sent.Y);
+        Assert.Equal(0,host.ApproachRequests);
+    }
+
     private static CombatBattleObservation PublishDirectionWorkingState(CaptureFrameStamp source, Guid battle,
         FakeTimeProvider clock, bool pending = true, EnemySeekDecision? established = null, bool wrongEpoch = false)
     {
