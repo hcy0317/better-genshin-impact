@@ -469,16 +469,17 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 observation.Control.Motion is not (MotionStatus.Climb or MotionStatus.Fly))
             {
                 var offset = AutoFightSeek.GetVisibleEnemyCameraOffset(engagementVisual, observation.Width);
+                var verticalOffset = AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(engagementVisual, observation.Height);
                 var approach = CanApproach(observation, io.BattleId, io.Clock);
-                if (Math.Abs(offset) > 20 || approach)
+                if (Math.Abs(offset) > 20 || verticalOffset != 0 || approach)
                 {
                     if (noProgress) return Stop("engagement-without-game-progress");
                     if (!newEvidence || !IsSettledObservation(observation, now))
                     { await io.DelayAsync(50, ct); return _result; }
-                    if (Math.Abs(offset) > 20)
+                    if (Math.Abs(offset) > 20 || verticalOffset != 0)
                     {
                         if (_scanPulses >= MaximumSearchPulses) return Stop("engagement-camera-budget-exhausted");
-                        if (await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120)), ct)) _scanPulses++;
+                        if (await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120), verticalOffset), ct)) _scanPulses++;
                     }
                     else
                     {
@@ -751,15 +752,19 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
             var offset = target.Cue == SeekCueKind.DirectionIndicator
                 ? DirectionStep(target, visual, observation)
                 : AutoFightSeek.GetVisibleEnemyCameraOffset(visual, observation.Width);
+            var verticalOffset = target.Cue == SeekCueKind.HealthBar && target.SignalCount == 1
+                ? AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual, observation.Height) : 0;
             // 屏外提示不是可攻击目标。预算耗尽后不能在Searching/Fighting之间空转，
             // 也不能靠重新进入策略续借进展宽限期；最后一次输入仍先等稳定新帧。
             if (target.Cue == SeekCueKind.DirectionIndicator &&
                 target.Direction is EnemyIndicatorDirection.Left or EnemyIndicatorDirection.Right or EnemyIndicatorDirection.Behind &&
                 _scanPulses >= MaximumSearchPulses && !options.ExternalCompletionAuthority)
                 return Stop("offscreen-target-search-exhausted");
-            if (Math.Abs(offset) > 20 && _scanPulses < MaximumSearchPulses)
+            if (target.Cue == SeekCueKind.HealthBar && target.SignalCount == 1 && verticalOffset != 0 &&
+                _scanPulses >= MaximumSearchPulses) return Stop("engagement-camera-budget-exhausted");
+            if ((Math.Abs(offset) > 20 || verticalOffset != 0) && _scanPulses < MaximumSearchPulses)
             {
-                if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120)), ct))
+                if (!await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(offset, -120, 120), verticalOffset), ct))
                     return _result;
                 _scanPulses++;
                 return _result; // 包括最后一次镜头：下一次稳定新帧才判定是否耗尽。

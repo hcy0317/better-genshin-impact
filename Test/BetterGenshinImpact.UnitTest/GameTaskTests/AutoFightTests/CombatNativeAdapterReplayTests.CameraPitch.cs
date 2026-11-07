@@ -445,7 +445,8 @@ public partial class CombatNativeAdapterReplayTests
         public void MoveCamera(int x, int y)
         {
             Receipt();
-            PitchDegrees = Math.Clamp(PitchDegrees + y * .01, -89, 89);
+            // S38 saved pairs 700->703 / 706->708: raw +Y looks down; this rig's positive pitch looks up.
+            PitchDegrees = Math.Clamp(PitchDegrees - y * .01, -89, 89);
             MinimumPitchDegrees = Math.Min(MinimumPitchDegrees, PitchDegrees);
         }
         public void SetCameraReset(bool down)
