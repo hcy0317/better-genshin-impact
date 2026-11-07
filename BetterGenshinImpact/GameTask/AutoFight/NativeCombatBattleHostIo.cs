@@ -171,7 +171,8 @@ internal sealed class NativeCombatBattleHostIo : ICombatBattleHostIo
             observation.ImageWidth, observation.ImageHeight, observation.CueFingerprint)
         { Scene = observation.Scene, CaptureEpoch = observation.CaptureEpoch, Motion = observation.Motion, Control = observation.Control, Recognition = observation.Recognition,
             PassiveGate = passiveGate, DamageFallback = observation.DamageFallback,
-            SearchHint = observation.SearchHint, FixedTopHealth = observation.FixedTopHealth };
+            SearchHint = observation.SearchHint, FixedTopHealth = observation.FixedTopHealth,
+            DirectionConfirmationPending = quality == CombatObservationQuality.Available && observation.DirectionConfirmationPending };
     }
 
     public PartySetupFinishObservation ObservePartyBar()

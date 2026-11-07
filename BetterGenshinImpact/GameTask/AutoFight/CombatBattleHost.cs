@@ -18,6 +18,7 @@ internal readonly record struct CombatBattleObservation(CaptureFrameStamp Source
     public CombatControlObservation Control { get; init; }
     public SeekRecognitionDiagnostics? Recognition { get; init; }
     public UnconfirmedSearchHint? SearchHint { get; init; }
+    public bool DirectionConfirmationPending { get; init; }
     public string? PassiveGate { get; init; }
     public string? DamageFallback { get; init; }
     public long CaptureEpoch { get; init; }
@@ -147,16 +148,17 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private CaptureFrameStamp _inputRequestSource;
     private (Phase Phase, CombatBattleHostInputKind Kind, Guid? SelectionGoal, int X, int Y) _inputRequestIntent;
     private readonly record struct CandidateDecision(EnemySeekDecision? Target, MotionStatus Motion,
-        CombatControlObservation Control, int Width, int Height, EnemySeekVisual? Hint, long Epoch, CombatSceneCapabilities Scene);
+        CombatControlObservation Control, int Width, int Height, EnemySeekVisual? Hint, long Epoch, CombatSceneCapabilities Scene, bool DirectionConfirmationPending);
     private CandidateDecision _inputRequestDecision;
     private static CandidateDecision DecisionFor(CombatBattleObservation observation) =>
         new(observation.Target, observation.Motion, observation.Control, observation.Width, observation.Height,
-            observation.SearchHint?.Visual, observation.CaptureEpoch, observation.Scene);
+            observation.SearchHint?.Visual, observation.CaptureEpoch, observation.Scene, observation.DirectionConfirmationPending);
 
     private static bool SameCandidate(CandidateDecision before, CandidateDecision next)
     {
         if (before.Motion != next.Motion || before.Control != next.Control || before.Epoch != next.Epoch ||
-            before.Width != next.Width || before.Height != next.Height || before.Scene != next.Scene) return false;
+            before.Width != next.Width || before.Height != next.Height || before.Scene != next.Scene ||
+            before.DirectionConfirmationPending != next.DirectionConfirmationPending) return false;
         // 实拍392494→392504：同条血量60x8→61x7、中心Y相差3px。
         // 一像素厚度变化和取整不能饿死输入后的新帧复核；其余身份/意图门禁仍须一致。
         var tolerance = Math.Max(3, before.Width / 640);
@@ -706,6 +708,15 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private async ValueTask<CombatBattleHostResult> AdvanceSearchAsync(CombatBattleObservation observation, CancellationToken ct)
     {
         if (!options.SeekEnabled) return Stop("finish-not-confirmed");
+        if (observation.Target == null && observation.DirectionConfirmationPending)
+        {
+            // Searching returns before the ordinary fighting no-progress gate. Waiting cannot renew it.
+            if (Now - _lastProgressAt >= NoProgressDeadline && Now >= _graceUntil)
+                return Stop("direction-confirmation-without-game-progress");
+            Reason = "direction-confirmation-pending";
+            await io.DelayAsync(50, ct);
+            return _result;
+        }
         if (observation.Target == null && Now < _lastDirectionAt + .8)
         {
             Reason = "direction-awaiting-screen-target";
