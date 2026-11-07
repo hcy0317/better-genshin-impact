@@ -1940,9 +1940,12 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             ImageRegion image, Scalar bloodLower, Scalar? bloodHigher,
             out int imageWidth, out int imageHeight, bool indicatorOnly = false,
             bool saveDiagnostics = true, SeekRecognitionDiagnostics? diagnostics = null,
-            Action<EnemySeekVisual>? unconfirmedDirection = null, CombatSceneCapabilities? scene = null)
+            Action<EnemySeekVisual>? unconfirmedDirection = null, CombatSceneCapabilities? scene = null,
+            Action<EnemySeekVisual>? clippedHealthBar = null)
         {
             var detectionRegion = GetSeekDetectionRegion(image.Width, image.Height);
+            var wholeViewport = !image.SrcMat.IsSubmatrix() && detectionRegion.X == 0 && detectionRegion.Y == 0 &&
+                detectionRegion.Width == image.Width && detectionRegion.Height == image.Height;
             using var imageCrop = image.DeriveCrop(
                 detectionRegion.X,
                 detectionRegion.Y,
@@ -2011,7 +2014,8 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                     imageCrop.SrcMat,
                     visual,
                     imageCrop.Width,
-                    imageCrop.Height, diagnostics, unconfirmedDirection, scene))
+                    imageCrop.Height, diagnostics, unconfirmedDirection, scene,
+                    wholeViewport ? clippedHealthBar : null))
                 .Where(visual => visual.HasValue)
                 .Select(visual => visual!.Value)
                 .ToList();
@@ -2225,7 +2229,7 @@ namespace BetterGenshinImpact.GameTask.AutoFight
             int imageWidth,
             int imageHeight,
             SeekRecognitionDiagnostics? diagnostics = null, Action<EnemySeekVisual>? unconfirmedDirection = null,
-            CombatSceneCapabilities? scene = null)
+            CombatSceneCapabilities? scene = null, Action<EnemySeekVisual>? clippedHealthBar = null)
         {
             var healthFailure = HealthBarGeometryFailure(visual, imageHeight, out var minimumWidth);
             EnemySeekVisual? Finish(EnemySeekVisual? accepted, string indicatorResult)
@@ -2247,6 +2251,9 @@ namespace BetterGenshinImpact.GameTask.AutoFight
                 var accepted = width > 0 && !IsPlayerHudHealthBar(recovered, imageWidth, imageHeight);
                 diagnostics?.RecordDarkTrack(visual, width, accepted ? "accepted" : width > 0 ? "hud" : reason);
                 if (accepted) return Finish(recovered, "not-run");
+                // Reuse the existing thin-bar colour/shape gates above; a cut-off track is never a full target.
+                if (source.Width == imageWidth && source.Height == imageHeight && visual.X == 0)
+                    clippedHealthBar?.Invoke(visual);
             }
             if (healthFailure == null)
             {
