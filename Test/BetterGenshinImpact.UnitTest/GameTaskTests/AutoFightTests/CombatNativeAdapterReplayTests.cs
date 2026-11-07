@@ -2339,6 +2339,66 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         Assert.Equal(new[] { needsBurst }, io.VisionPreparations);
     }
 
+    [Theory]
+    [InlineData("post-error")]
+    [InlineData("zeroheld-error")]
+    [InlineData("unknown")]
+    [InlineData("partial")]
+    public async Task RefusalReleaseSideEffectWithoutACompleteCleanReceiptNeverResumesOrReleasesAgain(string fault)
+    {
+        var clock = new FakeTimeProvider();
+        var program = LoadProgram("琴 attack(0.2)");
+        using var io = new PhysicalReplay(clock, false, 50, program)
+        {
+            IgnoreSwitchUntil = 2, CompleteSelectionReceipts = true,
+            SelectionRefusalAt = at => at < 2 ? SelectionRefusalCue.GameRefusedSelection : SelectionRefusalCue.Absent,
+            SelectionRefusalReleaseFault = fault
+        };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        Exception? failure = null;
+        for (var step = 0; step < 100 && failure == null; step++)
+            failure = await Record.ExceptionAsync(async () => await runner.StepAsync(default));
+        Assert.NotNull(failure);
+        Assert.Equal(1, io.SelectionRefusalReleases);
+        var submissions = io.SelectionDispatchRequests.ToArray();
+        clock.Advance(TimeSpan.FromSeconds(3)); // cue is absent; the failed release still grants no recovery.
+        Assert.NotNull(await Record.ExceptionAsync(async () => await runner.StepAsync(default)));
+        Assert.Equal(1, io.SelectionRefusalReleases);
+        Assert.Equal(submissions, io.SelectionDispatchRequests);
+        Assert.Single(io.SelectionDispatchRequests.Select(request => request.Item2.DeadlineTimestamp).Distinct());
+        Assert.DoesNotContain(io.Primitives, c => c.Method == Method.Attack);
+        Assert.Equal(0, io.ControlPulses);
+    }
+
+    [Fact]
+    public async Task RefusedNativeSelectionReleasesOnlyItsOwnerAndObservesTheOriginalGoalBeforeAttack()
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetUtcNow();
+        var program = LoadProgram("琴 attack(0.2)");
+        using var io = new PhysicalReplay(clock, false, 50, program)
+        {
+            IgnoreSwitchUntil = 2,
+            CompleteSelectionReceipts = true,
+            SelectionRefusalAt = at => at < 2 ? SelectionRefusalCue.GameRefusedSelection : SelectionRefusalCue.Absent
+        };
+        using var runner = NativeCombatFlowRunner.Create(program, io);
+        // Attack uses the real primitive boundary; Inputs records only E/Q skills.
+        for (var step = 0; step < 500 && runner.Context.Now < 8 && !io.Primitives.Any(c => c.Method == Method.Attack); step++)
+            await runner.StepAsync(default);
+        Assert.Equal(1, io.SelectionRefusalReleases);
+        Assert.Equal(0, io.ControlPulses);
+        var attack = Assert.Single(io.Primitives.Where(c => c.Method == Method.Attack));
+        Assert.Equal("琴", attack.Name);
+        Assert.True(io.FirstAttack >= 2);
+        Assert.True(io.FirstAttack >= io.SelectionRefusalReleasedAt + .060);
+        Assert.DoesNotContain(io.SelectionDispatchRequests, request =>
+            request.Item2.Source.CapturedAt > started.AddSeconds(io.SelectionRefusalReleasedAt) &&
+            request.Item2.Source.CapturedAt < started.AddSeconds(2));
+        Assert.Single(io.SelectionDispatchRequests.Select(request => request.Item2.DeadlineTimestamp).Distinct());
+        Assert.False(io.HoldingInput);
+    }
+
     [Fact]
     public async Task InitialControlIsObservedBeforePreparingTheBurstModel()
     {
@@ -4007,6 +4067,24 @@ public partial class CombatNativeAdapterReplayTests(ITestOutputHelper output)
         private ICombatHostInputDevice? _controlDevice;
         public ICombatHostInputDevice ControlDevice => _controlDevice ??= new ReplayControlDevice(this);
         public Func<double, bool>? ControlAt { get; init; }
+        public Func<double, SelectionRefusalCue>? SelectionRefusalAt { get; init; }
+        public string? SelectionRefusalReleaseFault { get; init; }
+        public int SelectionRefusalReleases { get; private set; }
+        public double SelectionRefusalReleasedAt { get; private set; } = double.PositiveInfinity;
+        public SelectionRefusalCue ReadSelectionRefusal(ImageRegion frame) => SelectionRefusalAt?.Invoke(Frame(frame).At) ?? SelectionRefusalCue.Unknown;
+        public CombatBattleHostInputResult ReleaseSelectionRefusalInput(CombatNativeInputRequest request, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            SelectionRefusalReleases++;
+            ReleaseInput();
+            SelectionRefusalReleasedAt = Now;
+            // Raw OS boundary: one owner key-up was acknowledged before later cleanup failed.
+            if (SelectionRefusalReleaseFault == "post-error") KeyEvents.Add((User32.VK.VK_E, true, Now, true));
+            return new(SelectionRefusalReleaseFault == "unknown" ? CombatBattleHostInputStatus.Unknown : CombatBattleHostInputStatus.Sent, Clock.GetTimestamp(),
+                Error: SelectionRefusalReleaseFault is "post-error" or "zeroheld-error" ? new IOException("native release already partially acted then failed") : null)
+                { NativeRequested = SelectionRefusalReleaseFault == "partial" ? 2 : SelectionRefusalReleaseFault == "post-error" ? 1 : 0,
+                  NativeSubmitted = SelectionRefusalReleaseFault == "post-error" ? 1 : 0, ObservableAfterTimestamp = Clock.GetTimestamp() };
+        }
         public MotionStatus ObservedMotion { get; init; } = MotionStatus.Unknown;
         public Func<double, CombatControlObservation>? ControlOverride { get; init; }
         public BetterGenshinImpact.GameTask.Common.BgiVision.CombatControlObservation ReadControl(ImageRegion frame)

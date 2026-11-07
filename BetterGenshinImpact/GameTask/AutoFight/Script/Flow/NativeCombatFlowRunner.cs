@@ -526,13 +526,35 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
             io.ReleaseInput();
             _atomicObservationId = null;
         });
-        internal (CaptureFrameStamp Source, CombatControlObservation Control) ObserveControlFrame()
+        internal (CaptureFrameStamp Source, CombatControlObservation Control, SelectionRefusalCue Refusal) ObserveControlFrame()
         {
             ClearCapture();
             _capture = CaptureFreshFrame();
             return _capture != null && io.IsCombatHud(_capture)
-                ? (_capture.FrameStamp, io.ReadControl(_capture)) : default;
+                ? (_capture.FrameStamp, io.ReadControl(_capture), PendingControl?.SelectionRefusal == true
+                    ? io.ReadSelectionRefusal(_capture) : SelectionRefusalCue.Unknown) : default;
         }
+        private Guid? _selectionRefusalReleaseAttemptedGoal;
+        internal bool ReleaseSelectionRefusalOwner(CombatControlRequest request, CancellationToken ct)
+        {
+            if (_input?.BattleId != request.BattleId || _selection == null || _selection.GoalId != request.Id ||
+                _selectionAction is not { CanStart: true, CanContinue: true, InAtomicScope: false, AtomicObservationId: null } ||
+                !_selection.RefusalRecoveryPending || _selection.IsExpired || _selectionRefusalReleaseAttemptedGoal == request.Id) return false;
+            // The one permission is consumed before a release that may partially dispatch and then fail.
+            _selectionRefusalReleaseAttemptedGoal = request.Id;
+            CombatBattleHostInputResult receipt = new(CombatBattleHostInputStatus.Unknown);
+            if (!_input.TryReleaseInput(() => receipt = io.ReleaseSelectionRefusalInput(
+                new(request.Id, request.RefusalSource, request.DeadlineTimestamp), ct))) return false;
+            ct.ThrowIfCancellationRequested();
+            return receipt.Status == CombatBattleHostInputStatus.Sent && receipt.Error == null &&
+                receipt.NativeRequested is { } requested && requested >= 0 && receipt.NativeSubmitted == requested &&
+                (receipt.TransportRequested is not > 0 || receipt.TransportAcknowledged == receipt.TransportRequested) &&
+                receipt.CompletedTimestamp is { } completed &&
+                _selection.RecordRefusalRelease(request.RefusalSource, completed);
+        }
+        internal bool CompleteSelectionRefusal(CaptureFrameStamp source, SelectionRefusalCue cue) =>
+            _selectionAction is { CanStart: true, CanContinue: true, InAtomicScope: false } &&
+            _selection?.CompleteRefusalRecovery(source, cue) == true;
         internal void CompleteControlRecovery()
         {
             PendingControl = null;
@@ -785,6 +807,19 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                 result = new(false, false, source, null, null, null,
                     outcome: AvatarSelectionProtocol.Outcome.Unavailable);
             }
+            if (result.State == AvatarSelectionProtocol.Outcome.RefusalRecovery)
+            {
+                using (result)
+                {
+                    if (!canContinue || Purpose != CombatScriptExecutionPurpose.Combat || _selectionObservationOnly ||
+                        action.InAtomicScope || action.AtomicObservationId != null || _input?.BattleId != action.BattleId)
+                        TaskExecutionScope.StopUnconfirmedCombat("拒切恢复没有当前combat选择的非原子owner许可");
+                    PendingControl ??= new(_selection.GoalId, action.BattleId, _selection.DeadlineTimestamp,
+                        SelectionRefusal: true, RefusalSource: result.Source);
+                    _confirmedActor = null;
+                    return ValueTask.CompletedTask;
+                }
+            }
             try
             {
                 if (result.NeedsRecovery)
@@ -923,7 +958,11 @@ internal sealed partial class NativeCombatFlowRunner : IDisposable
                                 $"battle={action.BattleId} goal={goal.GoalId} pulse={request.Id} target={actor.Name}/{actor.Index} originalDeadline={goal.DeadlineTimestamp}; before native submission");
                             _evidence?.ObserveExistingFrame(frame);
                         }
-                    });
+                    }, selectionRefusal: frame => Purpose == CombatScriptExecutionPurpose.Combat &&
+                        !_selectionObservationOnly && !action.InAtomicScope && action.AtomicObservationId == null &&
+                        action.CanStart && action.CanContinue
+                        ? frame.ReadOnce((io, typeof(SelectionRefusalCue)), () => io.ReadSelectionRefusal(frame))
+                        : SelectionRefusalCue.Unknown);
             }
             return new(false, false, default, null, null, null, awaitingObservation: true);
         }

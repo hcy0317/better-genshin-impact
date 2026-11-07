@@ -29,6 +29,9 @@ internal interface INativeCombatIo
     ImageRegion? Capture();
     bool IsCombatHud(ImageRegion frame);
     CombatControlObservation ReadControl(ImageRegion frame) => default;
+    SelectionRefusalCue ReadSelectionRefusal(ImageRegion frame) => SelectionRefusalCue.Unknown;
+    CombatBattleHostInputResult ReleaseSelectionRefusalInput(CombatNativeInputRequest request, CancellationToken ct) =>
+        new(CombatBattleHostInputStatus.Unknown, Reason: "owned-release-receipt-unavailable");
     CannonUiObservation ReadCannonScene(ImageRegion frame) => default;
     ICombatHostInputDevice? ControlDevice => null;
     bool IsMainUi(ImageRegion frame);

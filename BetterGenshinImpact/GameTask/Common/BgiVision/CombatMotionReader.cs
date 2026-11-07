@@ -47,6 +47,21 @@ internal static class CombatMotionReader
         return new(MotionStatus.Unknown, false);
     }
 
+    internal static AutoFight.Model.SelectionRefusalCue ReadSelectionRefusal(ImageRegion frame, IOcrService? prepared)
+    {
+        if (prepared == null || frame.SrcMat.Empty()) return AutoFight.Model.SelectionRefusalCue.Unknown;
+        using var readiness = new RecognitionReadinessScope(nonBlocking: true);
+        using var roi = frame.DeriveCrop(new Rect(frame.Width / 4, frame.Height / 10, frame.Width / 2, frame.Height / 3));
+        try
+        {
+            var text = prepared.Ocr(roi.SrcMat);
+            var normalized = string.Concat(text.Where(c => !char.IsWhiteSpace(c)));
+            return normalized.Contains("无法切换目标角色", StringComparison.Ordinal)
+                ? AutoFight.Model.SelectionRefusalCue.GameRefusedSelection : AutoFight.Model.SelectionRefusalCue.Absent;
+        }
+        catch (RecognitionNotReadyException) { return AutoFight.Model.SelectionRefusalCue.Unknown; }
+    }
+
     private static bool HasKeyboardBreakoutPrompt(ImageRegion frame, IOcrService ocr)
     {
         var scale = frame.Width / 1920d;

@@ -5,9 +5,11 @@ using Fischless.GameCapture;
 namespace BetterGenshinImpact.GameTask.AutoFight.Model;
 
 /// <summary>生产/回放共用的选角协议。替身只提供帧、识别、物理输入和时钟。</summary>
+internal enum SelectionRefusalCue { Unknown, Absent, GameRefusedSelection }
+
 internal static class AvatarSelectionProtocol
 {
-    internal enum Outcome { Awaiting, Ready, Unavailable, Unfulfilled, RetiredWithoutCompletion, UnconfirmedTerminal }
+    internal enum Outcome { Awaiting, Ready, Unavailable, Unfulfilled, RetiredWithoutCompletion, UnconfirmedTerminal, RefusalRecovery }
 
     internal sealed class Result<TFrame>(bool confirmed, bool needsRecovery, CaptureFrameStamp source,
         TFrame? frame, TFrame? before, CaptureFrameFence? inputFence, bool awaitingObservation = false,
@@ -50,6 +52,7 @@ internal static class AvatarSelectionProtocol
         private readonly Func<TFrame, bool>? _canObserve;
         private readonly Action? _release;
         private readonly Action<TFrame, CombatNativeInputRequest>? _beforeSubmit;
+        private readonly Func<TFrame, SelectionRefusalCue>? _selectionRefusal;
         internal Guid GoalId { get; } = Guid.NewGuid();
         private Guid _requestId = Guid.NewGuid();
         private readonly long _deadline;
@@ -60,6 +63,19 @@ internal static class AvatarSelectionProtocol
         private TFrame? _before;
         private int _consecutive, _requests, _mismatchIndex, _consecutiveMismatch;
         private bool _uncertainSubmission, _closed;
+        private bool _refusalRequested, _refusalRecoveryUsed;
+        private CaptureFrameFence? _refusalReleaseFence;
+        private Guid? _refusalReadRequest;
+        internal bool RecordRefusalRelease(CaptureFrameStamp source, long completed)
+        {
+            if (!_refusalRequested || _closed || IsExpired || _fence?.Accepts(source) != true ||
+                completed < source.CapturedTimestamp || completed > _clock.GetTimestamp()) return false;
+            _refusalReleaseFence = new(source, completed);
+            return true;
+        }
+        internal bool RefusalRecoveryPending => _refusalRequested;
+        internal CaptureFrameFence? SelectionInputFence => _fence;
+        internal int ExpectedIndex => _expectedIndex;
         internal bool HasSubmittedInput => _lastInput != null;
         internal CaptureFrameStamp ObservedSource { get; private set; }
         internal int? ObservedIndex { get; private set; }
@@ -89,6 +105,18 @@ internal static class AvatarSelectionProtocol
             _fence = new(source, completed);
             _consecutive = _mismatchIndex = _consecutiveMismatch = 0;
         }
+        internal bool CompleteRefusalRecovery(CaptureFrameStamp source, SelectionRefusalCue cue)
+        {
+            if (!_refusalRequested || cue != SelectionRefusalCue.Absent || _closed || IsExpired ||
+                source.TimestampFrequency != _clock.TimestampFrequency || !source.IsFresh(_clock, _maximumAge) ||
+                _fence?.Accepts(source) != true || _refusalReleaseFence is not { } released || !released.Accepts(source) ||
+                source.CapturedTimestamp < released.InputCompletedTimestamp + (long)Math.Ceiling(.060 * _clock.TimestampFrequency) ||
+                _last.IsKnown && !source.IsAfter(_last)) return false;
+            _refusalRequested = false;
+            _last = source;
+            _consecutive = _consecutiveMismatch = _mismatchIndex = 0;
+            return true;
+        }
         internal bool IsClosed => _closed;
         internal bool IsExpired => _clock.GetElapsedTime(_started) >= _duration;
 
@@ -97,7 +125,8 @@ internal static class AvatarSelectionProtocol
             Func<TFrame, int> active, Func<TFrame, TFrame> clone,
             Func<int, CombatNativeInputRequest, CombatBattleHostInputResult> select,
             TimeProvider clock, TimeSpan? maximumAge = null, Func<TFrame, bool>? canObserve = null, Action? release = null,
-            Action<TFrame, CombatNativeInputRequest>? beforeSubmit = null)
+            Action<TFrame, CombatNativeInputRequest>? beforeSubmit = null,
+            Func<TFrame, SelectionRefusalCue>? selectionRefusal = null)
         {
             _expectedIndex = expectedIndex;
             _maximumRequests = maximumRequests;
@@ -112,6 +141,7 @@ internal static class AvatarSelectionProtocol
             _canObserve = canObserve;
             _release = release;
             _beforeSubmit = beforeSubmit;
+            _selectionRefusal = selectionRefusal;
             _maximumAge = maximumAge ?? TimeSpan.FromMilliseconds(150);
             _started = clock.GetTimestamp();
             _deadline = checked(_started + (long)Math.Ceiling(duration.TotalSeconds * clock.TimestampFrequency));
@@ -160,6 +190,29 @@ internal static class AvatarSelectionProtocol
                     _mismatchIndex = observed;
                 }
                 else { _mismatchIndex = _consecutiveMismatch = 0; }
+                if (_selectionRefusal != null && HasSubmittedInput && !_uncertainSubmission && _fence is { } refusalFence &&
+                    stamp.TimestampFrequency == _clock.TimestampFrequency && refusalFence.Accepts(stamp) &&
+                    stamp.CapturedTimestamp >= refusalFence.InputCompletedTimestamp + (long)Math.Ceiling(.060 * _clock.TimestampFrequency) &&
+                    (_refusalRequested || _consecutiveMismatch >= 2 && _refusalReadRequest != _requestId))
+                {
+                    _refusalReadRequest = _requestId;
+                    var cue = _refusalRequested ? SelectionRefusalCue.Unknown : _selectionRefusal(frame);
+                    ct.ThrowIfCancellationRequested();
+                    if (_source(frame) != stamp || !stamp.IsFresh(_clock, _maximumAge) || IsExpired) return Unknown("refusal-read-expired");
+                    if (_refusalRequested || cue == SelectionRefusalCue.GameRefusedSelection)
+                    {
+                        if (!_refusalRequested && (_refusalRecoveryUsed || !allowInput || RetirementRequested))
+                        { Reason = "selection-refusal-recovery-unavailable"; return Finish(false, false, null, Outcome.UnconfirmedTerminal); }
+                        _refusalRequested = true;
+                        _refusalRecoveryUsed = true;
+                        _consecutive = 0;
+                        Reason = "game-refused-selection";
+                        var refused = new Result<TFrame>(false, false, stamp, frame, null, _fence,
+                            awaitingObservation: true, outcome: Outcome.RefusalRecovery);
+                        frame = null;
+                        return refused;
+                    }
+                }
                 _consecutive = AvatarSwitchConfirmationPolicy.Observe(_consecutive, observed, _expectedIndex);
                 if (AvatarSwitchConfirmationPolicy.IsConfirmed(_consecutive))
                 {
