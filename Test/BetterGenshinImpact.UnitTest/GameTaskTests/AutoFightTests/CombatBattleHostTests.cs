@@ -9,6 +9,160 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    [Fact]
+    public async Task FinalLateBodyWaitCrossingFortyFiveCannotResumeFromNextFreshBody()
+    {
+        var clock=new FakeTimeProvider();var game=new ReturningGame(clock);using var flow=CreateFlow(false,game,clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId){SourcePeriodMilliseconds=50};
+        using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        var body=AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(783,370,61,5,305)],1920,1080);
+        Assert.Equal(SeekCueKind.HealthBar,body.Cue);
+        CombatBattleObservation Body(CaptureFrameStamp source)=>new(source,flow.Context.BattleId,CombatObservationQuality.Available,body,1920,1080)
+            {Control=new(MotionStatus.Unknown,false)};
+        var progressStarted=clock.GetTimestamp();io.TargetFactory=Body;
+        await host.AdvanceAsync(flow,default);io.TargetFactory=null;
+        var originalProgress=io.Traces.Last().LastProgress;Assert.NotNull(originalProgress);
+        var nearDeadline=false;
+        for(var step=0;step<2000&&!(host.CameraRequests==24&&host.State=="AwaitParty");step++)
+        {
+            if(!nearDeadline&&host.CameraRequests==24&&host.State=="Searching")
+            {
+                clock.Advance(TimeSpan.FromSeconds(43-clock.GetElapsedTime(progressStarted).TotalSeconds));
+                nearDeadline=true;
+            }
+            Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        }
+        Assert.True(nearDeadline);Assert.Equal("AwaitParty",host.State);
+        Assert.Equal(24,io.Inputs.Count(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset));
+        clock.Advance(TimeSpan.FromSeconds(44.98-.2166-clock.GetElapsedTime(progressStarted).TotalSeconds));
+        CaptureFrameStamp late=default;PartySetupFinishObservation negative=default;
+        io.AfterTargetCapture=()=>clock.Advance(TimeSpan.FromMilliseconds(216.6));
+        io.TargetFactory=source=>{late=source;return Body(source);};
+        io.PartyFactory=source=>negative=new(source.Sequence,source.CapturedAt,1920,1080,false,(ulong)source.Sequence){Source=source};
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        io.AfterTargetCapture=null;io.TargetFactory=_=>Body(late);
+        Assert.Equal("CloseParty",host.State);
+        Assert.InRange(clock.GetElapsedTime(progressStarted).TotalSeconds,44.979999,44.980001);
+        Assert.InRange(clock.GetElapsedTime(late.CapturedTimestamp).TotalMilliseconds,216.599,216.601);
+        Assert.True(negative.Source.IsFresh(clock,TimeSpan.FromMilliseconds(150)));Assert.False(negative.BarVisible);
+        var opened=io.CompletedInputs.Last(input=>input.Input.Kind==CombatBattleHostInputKind.OpenParty);
+        Assert.True(new CaptureFrameFence(opened.Input.Source,opened.Completed).Accepts(negative.Source));
+        Assert.Equal(originalProgress,io.Traces.Last().LastProgress);
+        Assert.DoesNotContain(io.Traces,trace=>trace.State=="Reengaging");
+        var inputs=io.Inputs.Count;var attacks=game.Inputs;var waits=io.DelayCalls;var startedWait=clock.GetTimestamp();
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.Equal("CloseParty",host.State);Assert.Equal(waits+1,io.DelayCalls);
+        Assert.Equal(50,clock.GetElapsedTime(startedWait).TotalMilliseconds);
+        Assert.InRange(clock.GetElapsedTime(progressStarted).TotalSeconds,45.029999,45.030001);
+        Assert.Equal(inputs,io.Inputs.Count);Assert.Equal(attacks,game.Inputs);
+        io.TargetFactory=Body;
+        var result=await host.AdvanceAsync(flow,default);
+        Assert.Equal(originalProgress,io.Traces.Last().LastProgress);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed,result);
+        Assert.NotEqual("target-returned-after-party-probe",host.Reason);
+        Assert.Equal(inputs,io.Inputs.Count);Assert.Equal(attacks,game.Inputs);
+        Assert.Equal(24,host.CameraRequests);Assert.Equal(0,host.ApproachRequests);
+    }
+
+    private static async Task<(EnemySeekDecision Body,CaptureFrameStamp Late,PartySetupFinishObservation Negative)> ReachFinalCloseWithNaturallyLateBody(
+        FakeTimeProvider clock,NativeCombatFlowRunner flow,ReplayIo io,CombatBattleHost host,bool hasProgress=true,bool wrongPartyFence=false)
+    {
+        var body=AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(783,370,61,5,305)],1920,1080);
+        Assert.Equal(SeekCueKind.HealthBar,body.Cue);
+        CombatBattleObservation Body(CaptureFrameStamp source)=>new(source,flow.Context.BattleId,CombatObservationQuality.Available,body,1920,1080)
+            {Control=new(MotionStatus.Unknown,false)};
+        if(hasProgress){io.TargetFactory=Body;await host.AdvanceAsync(flow,default);}
+        io.TargetFactory=null;
+        for(var step=0;step<2000&&!(host.CameraRequests==24&&host.State=="AwaitParty");step++)
+            Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.Equal(24,host.CameraRequests);Assert.Equal("AwaitParty",host.State);
+        Assert.Equal(24,io.Inputs.Count(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset));
+        CaptureFrameStamp latestBody=default;PartySetupFinishObservation negative=default;
+        io.AfterTargetCapture=()=>{if(host.State=="AwaitParty")clock.Advance(TimeSpan.FromMilliseconds(216.6));};
+        io.TargetFactory=source=>
+        {
+            if(host.State=="AwaitParty")latestBody=source;
+            return Body(latestBody);
+        };
+        io.PartyFactory=source=>negative=new(source.Sequence,source.CapturedAt,1920,1080,false,(ulong)source.Sequence)
+            {Source=wrongPartyFence?source with {SessionId=Guid.NewGuid()}:source};
+        for(var step=0;step<100&&host.State!="CloseParty";step++)
+            Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        io.AfterTargetCapture=null;
+        Assert.Equal("CloseParty",host.State);Assert.True(latestBody.IsKnown);
+        Assert.InRange(clock.GetElapsedTime(latestBody.CapturedTimestamp).TotalMilliseconds,216.599,216.601);
+        Assert.False(latestBody.IsFresh(clock,TimeSpan.FromMilliseconds(150)));
+        Assert.False(negative.BarVisible);Assert.True(negative.Source.IsFresh(clock,TimeSpan.FromMilliseconds(150)));
+        var opened=io.CompletedInputs.Last(input=>input.Input.Kind==CombatBattleHostInputKind.OpenParty);
+        var fence=new CaptureFrameFence(opened.Input.Source,opened.Completed);
+        Assert.Equal(!wrongPartyFence,fence.Accepts(negative.Source));
+        Assert.DoesNotContain(io.Traces,trace=>trace.State=="Reengaging");
+        Assert.DoesNotContain(io.Inputs,input=>input.Kind==CombatBattleHostInputKind.CloseParty);
+        return(body,latestBody,negative);
+    }
+
+    [Fact]
+    public async Task FinalClosePartyWaitsOnceForLateBodyThenResumesFromTheNextFreshCurrent()
+    {
+        var clock=new FakeTimeProvider();var game=new ReturningGame(clock);using var flow=CreateFlow(false,game,clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId){SourcePeriodMilliseconds=50};
+        using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        var scene=await ReachFinalCloseWithNaturallyLateBody(clock,flow,io,host);
+        var inputs=io.Inputs.Count;var attacks=game.Inputs;var waits=io.DelayCalls;var before=clock.GetTimestamp();
+        var progressAge=io.Traces.Last().ProgressAge;
+        var progress=io.Traces.Last().LastProgress;Assert.NotNull(progress);
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.Equal("CloseParty",host.State);Assert.Equal(waits+1,io.DelayCalls);
+        Assert.Equal(50,clock.GetElapsedTime(before).TotalMilliseconds);
+        // This wait may be trace-throttled; check progress on the next phase-changing fresh observation.
+        Assert.Equal(inputs,io.Inputs.Count);Assert.Equal(attacks,game.Inputs);
+        Assert.Equal(scene.Late,io.Traces.Last().Observation.Source);Assert.NotNull(io.Traces.Last().Observation.Target);
+        Assert.Equal(24,host.CameraRequests);Assert.Equal(0,host.ApproachRequests);
+        io.TargetFactory=source=>new(source,flow.Context.BattleId,CombatObservationQuality.Available,scene.Body,1920,1080)
+            {Control=new(MotionStatus.Unknown,false)};
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.Equal("Fighting",host.State);Assert.Equal("target-returned-after-party-probe",host.Reason);
+        Assert.InRange(io.Traces.Last().ProgressAge-progressAge,.049999,.050001);
+        Assert.Equal(progress,io.Traces.Last().LastProgress);
+        Assert.Equal(inputs,io.Inputs.Count);Assert.Equal(attacks,game.Inputs);
+        Assert.Equal(24,host.CameraRequests);Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Fact]
+    public async Task LateBodyWaitCannotRenewTheIndependentNegativePartySample()
+    {
+        var clock=new FakeTimeProvider();var game=new ReturningGame(clock);using var flow=CreateFlow(false,game,clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId){SourcePeriodMilliseconds=50};
+        using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        await ReachFinalCloseWithNaturallyLateBody(clock,flow,io,host);
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var inputs=io.Inputs.Count;var attacks=game.Inputs;var waits=io.DelayCalls;
+        clock.Advance(TimeSpan.FromMilliseconds(101));
+        Assert.Equal(CombatBattleHostResult.Unconfirmed,await host.AdvanceAsync(flow,default));
+        Assert.Equal(inputs,io.Inputs.Count);Assert.Equal(attacks,game.Inputs);Assert.Equal(waits,io.DelayCalls);
+        Assert.Equal(24,host.CameraRequests);Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Theory]
+    [InlineData("no-progress")]
+    [InlineData("stale-party")]
+    [InlineData("party-fence")]
+    [InlineData("deadline")]
+    public async Task LateBodyCannotBypassTheOriginalFinalWaitEligibility(string invalid)
+    {
+        var clock=new FakeTimeProvider();var game=new ReturningGame(clock);using var flow=CreateFlow(false,game,clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId){SourcePeriodMilliseconds=50};
+        using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        await ReachFinalCloseWithNaturallyLateBody(clock,flow,io,host,invalid!="no-progress",invalid=="party-fence");
+        if(invalid=="stale-party")clock.Advance(TimeSpan.FromMilliseconds(151));
+        if(invalid=="deadline")clock.Advance(TimeSpan.FromSeconds(Math.Max(0,45-io.Traces.Last().ProgressAge)));
+        var inputs=io.Inputs.Count;var attacks=game.Inputs;var waits=io.DelayCalls;
+        Assert.Equal(CombatBattleHostResult.Unconfirmed,await host.AdvanceAsync(flow,default));
+        Assert.Equal(inputs,io.Inputs.Count);Assert.Equal(attacks,game.Inputs);Assert.Equal(waits,io.DelayCalls);
+        Assert.Equal(24,host.CameraRequests);Assert.Equal(0,host.ApproachRequests);
+        Assert.DoesNotContain(io.Traces,trace=>trace.Reason=="target-returned-after-party-probe");
+    }
+
     private static CombatBattleObservation EdgeHintObservation(CaptureFrameStamp source,Guid battle,FakeTimeProvider clock,
         UnconfirmedSearchHintKind kind=UnconfirmedSearchHintKind.ClippedHealthBar,string fault="",EnemySeekDecision? target=null)
     {
@@ -1907,6 +2061,7 @@ public partial class CombatBattleHostTests
         public Guid BattleId => battleId;
         public List<CombatBattleHostInput> Inputs { get; } = [];
         public List<CombatBattleHostInput> Requests { get; } = [];
+        public List<(CombatBattleHostInput Input,long Completed)> CompletedInputs { get; } = [];
         public List<CombatBattleHostTrace> Traces { get; } = [];
         public void Trace(CombatBattleHostTrace observation) => Traces.Add(observation);
         public int UnsentAttempts { get; set; }
@@ -1960,7 +2115,9 @@ public partial class CombatBattleHostTests
             if (input.Kind == CombatBattleHostInputKind.OpenParty) PartyOpen = true;
             if (input.Kind == CombatBattleHostInputKind.CloseParty) PartyOpen = false;
             clock.Advance(TimeSpan.FromMilliseconds(10));
-            return ValueTask.FromResult(new CombatBattleHostInputResult(CombatBattleHostInputStatus.Sent, clock.GetTimestamp()));
+            var completed=clock.GetTimestamp();
+            CompletedInputs.Add((input,completed));
+            return ValueTask.FromResult(new CombatBattleHostInputResult(CombatBattleHostInputStatus.Sent, completed));
         }
         public ValueTask DelayAsync(int milliseconds, CancellationToken ct)
         {
