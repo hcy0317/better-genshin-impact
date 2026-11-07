@@ -683,14 +683,27 @@ public static class AvatarRecognition
         return frame.ReadOnce((typeof(AvatarRecognition), "target", scene), () =>
         {
             var diagnostics = new SeekRecognitionDiagnostics();
-            var hints = new Dictionary<(int X, int Y, int Width, int Height), EnemySeekVisual>();
+            var hints = new Dictionary<(int X, int Y, int Width, int Height, UnconfirmedSearchHintKind Kind), EnemySeekVisual>();
             var decision = AutoFightSeek.RecognizeSeekDecision(frame,
                 new Scalar(255, 90, 90), null, out var width, out var height, saveDiagnostics: false, diagnostics: diagnostics,
-                unconfirmedDirection: visual => hints[(visual.X, visual.Y, visual.Width, visual.Height)] = visual, scene: scene);
-            UnconfirmedSearchHint? hint = hints.Count == 1 && frame.FrameStamp.IsKnown
-                ? new(frame.FrameStamp, hints.Values.Single(), width, height) : null;
+                unconfirmedDirection: visual => hints[(visual.X, visual.Y, visual.Width, visual.Height, UnconfirmedSearchHintKind.DirectionIndicator)] = visual, scene: scene,
+                clippedHealthBar: visual => hints[(visual.X, visual.Y, visual.Width, visual.Height, UnconfirmedSearchHintKind.ClippedHealthBar)] = visual);
+            var candidates = hints.Select(pair => new UnconfirmedSearchHint(frame.FrameStamp, pair.Value, width, height, pair.Key.Kind)).ToArray();
+            var hint = SelectCurrentSearchHint(frame.FrameStamp, width, height, decision.SignalCount != 0, candidates);
             return (decision, diagnostics, hint);
         });
+    }
+
+    internal static UnconfirmedSearchHint? SelectCurrentSearchHint(CaptureFrameStamp source, int width, int height,
+        bool hasTarget, IReadOnlyCollection<UnconfirmedSearchHint> candidates)
+    {
+        if (hasTarget || !source.IsKnown || candidates.Any(hint => hint.Source != source || hint.Width != width || hint.Height != height))
+            return null;
+        // The caller deduplicates geometry per kind. One clipped bar is stronger than unconfirmed arrow orientation.
+        var clipped = candidates.Where(hint => hint.Kind == UnconfirmedSearchHintKind.ClippedHealthBar).ToArray();
+        var preferred = clipped.Length > 0 ? clipped
+            : candidates.Where(hint => hint.Kind == UnconfirmedSearchHintKind.DirectionIndicator).ToArray();
+        return preferred.Length == 1 ? preferred[0] : null;
     }
 
     internal static bool PublishPassiveObservation(

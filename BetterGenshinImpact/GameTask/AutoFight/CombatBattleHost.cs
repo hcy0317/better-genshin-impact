@@ -148,17 +148,17 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
     private CaptureFrameStamp _inputRequestSource;
     private (Phase Phase, CombatBattleHostInputKind Kind, Guid? SelectionGoal, int X, int Y) _inputRequestIntent;
     private readonly record struct CandidateDecision(EnemySeekDecision? Target, MotionStatus Motion,
-        CombatControlObservation Control, int Width, int Height, EnemySeekVisual? Hint, long Epoch, CombatSceneCapabilities Scene, bool DirectionConfirmationPending);
+        CombatControlObservation Control, int Width, int Height, EnemySeekVisual? Hint, long Epoch, CombatSceneCapabilities Scene, bool DirectionConfirmationPending, UnconfirmedSearchHintKind? HintKind);
     private CandidateDecision _inputRequestDecision;
     private static CandidateDecision DecisionFor(CombatBattleObservation observation) =>
         new(observation.Target, observation.Motion, observation.Control, observation.Width, observation.Height,
-            observation.SearchHint?.Visual, observation.CaptureEpoch, observation.Scene, observation.DirectionConfirmationPending);
+            observation.SearchHint?.Visual, observation.CaptureEpoch, observation.Scene, observation.DirectionConfirmationPending, observation.SearchHint?.Kind);
 
     private static bool SameCandidate(CandidateDecision before, CandidateDecision next)
     {
         if (before.Motion != next.Motion || before.Control != next.Control || before.Epoch != next.Epoch ||
             before.Width != next.Width || before.Height != next.Height || before.Scene != next.Scene ||
-            before.DirectionConfirmationPending != next.DirectionConfirmationPending) return false;
+            before.DirectionConfirmationPending != next.DirectionConfirmationPending || before.HintKind != next.HintKind) return false;
         // 实拍392494→392504：同条血量60x8→61x7、中心Y相差3px。
         // 一像素厚度变化和取整不能饿死输入后的新帧复核；其余身份/意图门禁仍须一致。
         var tolerance = Math.Max(3, before.Width / 640);
@@ -792,6 +792,17 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
         {
             // 相对轨道不能推断脚本遗留的真实俯仰；先沿用旧入口的中键回正。
             // 回正占用原扫描预算，且只由真实游戏进展重新开放一次机会。
+            if (observation.Target == null && observation.SearchHint is { Kind: UnconfirmedSearchHintKind.ClippedHealthBar } clipped &&
+                clipped.Source == observation.Source && clipped.Source.IsKnown && clipped.Width == observation.Width &&
+                clipped.Height == observation.Height && clipped.Visual.X == 0 && clipped.Visual.Width > 0 &&
+                clipped.Visual.Height > 0 && CanResetCamera(observation, io.BattleId, io.Clock))
+            {
+                var horizontal = AutoFightSeek.GetVisibleEnemyCameraOffset(clipped.Visual, observation.Width);
+                if (await SendAsync(new(CombatBattleHostInputKind.Camera, Math.Clamp(horizontal, -120, 120), 0), ct))
+                    _scanPulses++;
+                Reason = "scan-clipped-health-hint";
+                return _result;
+            }
             if (!_searchCameraResetUsed && CanResetCamera(observation, io.BattleId, io.Clock))
             {
                 if (await SendAsync(new(CombatBattleHostInputKind.CameraReset), ct))
@@ -802,7 +813,7 @@ internal sealed class CombatBattleHost(ICombatBattleHostIo io, CombatBattleHostO
                 }
                 return _result;
             }
-            if (observation.SearchHint is { } hint && hint.Source.IsKnown &&
+            if (observation.SearchHint is { Kind: UnconfirmedSearchHintKind.DirectionIndicator } hint && hint.Source.IsKnown &&
                 hint.Source == observation.Source && hint.Width == observation.Width && hint.Height == observation.Height)
             {
                 // 未确认箭头朝向只能提供屏幕位置线索，不能成为目标或进展证据。

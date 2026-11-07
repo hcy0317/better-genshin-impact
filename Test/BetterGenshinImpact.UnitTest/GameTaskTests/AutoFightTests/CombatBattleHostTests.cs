@@ -9,6 +9,116 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    private static CombatBattleObservation EdgeHintObservation(CaptureFrameStamp source,Guid battle,FakeTimeProvider clock,
+        UnconfirmedSearchHintKind kind=UnconfirmedSearchHintKind.ClippedHealthBar,string fault="",EnemySeekDecision? target=null)
+    {
+        var hint=new UnconfirmedSearchHint(fault=="hint-source"?default:source,new(0,668,23,5,100),fault=="dims"?960:1920,1080,kind);
+        var snapshot=new BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation(false,false,clock.GetUtcNow().UtcDateTime,null,1920,1080,null)
+        { Source=source,BattleId=fault=="foreign"?Guid.NewGuid():battle,CaptureEpoch=10,Quality=CombatObservationQuality.Available,
+          SearchHint=hint,Control=new(MotionStatus.Unknown,fault=="control") };
+        var projected=NativeCombatBattleHostIo.ProjectObservation(snapshot,fault=="epoch"?11:10,true,clock.GetUtcNow().UtcDateTime);
+        return projected with { Target=target,Source=fault=="unknown"?default:fault=="late"?source with {CapturedTimestamp=source.CapturedTimestamp-clock.TimestampFrequency}:source };
+    }
+
+    [Fact]
+    public async Task CurrentClippedHealthHintUsesOneHorizontalCameraBeforeTheFirstReset()
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var before=io.Inputs.Count;
+        io.TargetFactory=stamp=>EdgeHintObservation(stamp,flow.Context.BattleId,clock);
+        for(var step=0;step<200&&!io.Inputs.Skip(before).Any();step++) await host.AdvanceAsync(flow,default);
+        var sent=Assert.Single(io.Inputs.Skip(before));
+        Assert.Equal(CombatBattleHostInputKind.Camera,sent.Kind); Assert.Equal(-120,sent.X); Assert.Equal(0,sent.Y);
+        Assert.Equal(1,host.CameraRequests); Assert.Equal(0,host.ApproachRequests);
+        io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,null,1920,1080) {Control=new(MotionStatus.Unknown,false)};
+        for(var step=0;step<200&&!io.Inputs.Any(input=>input.Kind==CombatBattleHostInputKind.CameraReset);step++) await host.AdvanceAsync(flow,default);
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+    }
+
+    [Theory]
+    [InlineData("body")]
+    [InlineData("direction")]
+    public async Task CurrentConfirmedTargetWinsOverEdgeHint(string kind)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId); using var host=new CombatBattleHost(io,new() {FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var target=AutoFightSeek.SelectSeekDecision([kind=="body"?new EnemySeekVisual(1400,400,80,6,480):new EnemySeekVisual(1372,731,30,26,433,128.916d)],1920,1080);
+        io.TargetFactory=stamp=>EdgeHintObservation(stamp,flow.Context.BattleId,clock,target:target);
+        for(var step=0;step<200&&!io.Inputs.Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++) await host.AdvanceAsync(flow,default);
+        Assert.Equal(120,Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera)).X);
+    }
+
+    [Fact]
+    public async Task DirectionHintKeepsItsOriginalResetAndVerticalOrbit()
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId); using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var before=io.Inputs.Count;
+        io.TargetFactory=stamp=>EdgeHintObservation(stamp,flow.Context.BattleId,clock,UnconfirmedSearchHintKind.DirectionIndicator);
+        for(var step=0;step<200&&!io.Inputs.Skip(before).Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++) await host.AdvanceAsync(flow,default);
+        Assert.Equal(CombatBattleHostInputKind.CameraReset,io.Inputs[before].Kind);
+        Assert.Contains(io.Inputs.Skip(before),input=>input.Kind==CombatBattleHostInputKind.Camera&&input.Y!=0);
+    }
+
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("foreign")]
+    [InlineData("epoch")]
+    [InlineData("late")]
+    [InlineData("control")]
+    [InlineData("hint-source")]
+    [InlineData("dims")]
+    public async Task InvalidEdgeHintCannotAcquireTheClippedCameraPath(string fault)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId); using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        io.TargetFactory=stamp=>EdgeHintObservation(stamp,flow.Context.BattleId,clock,fault:fault);
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<1500&&result==CombatBattleHostResult.Continue;step++) result=await host.AdvanceAsync(flow,default);
+        Assert.DoesNotContain(io.Traces,trace=>trace.Reason=="scan-clipped-health-hint");
+        Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EdgeHintDisappearanceOrKindChangeCancelsItsUnsentRequest(bool changeKind)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId); using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var prepared=new List<CombatBattleHostInput>();var cancellations=0;
+        io.PrepareEvidence=input=>{if(input.Kind==CombatBattleHostInputKind.Camera)prepared.Add(input);return true;};
+        io.CancelEvidence=()=>cancellations++;
+        io.TargetFactory=stamp=>EdgeHintObservation(stamp,flow.Context.BattleId,clock);
+        for(var step=0;step<200&&prepared.Count==0;step++) await host.AdvanceAsync(flow,default);
+        var pending=Assert.Single(prepared);var before=cancellations;
+        io.TargetFactory=stamp=>changeKind?EdgeHintObservation(stamp,flow.Context.BattleId,clock,UnconfirmedSearchHintKind.DirectionIndicator)
+            :new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,null,1920,1080){Control=new(MotionStatus.Unknown,false)};
+        await host.AdvanceAsync(flow,default);
+        Assert.True(cancellations>before);Assert.DoesNotContain(io.Inputs,input=>input.RequestId==pending.RequestId);
+    }
+
+    [Fact]
+    public async Task PersistentClippedHintConsumesOnlyTheOriginalSearchBudgetAndNeverCompletes()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        io.TargetFactory=stamp=>EdgeHintObservation(stamp,flow.Context.BattleId,clock);
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<5000&&result==CombatBattleHostResult.Continue;step++)result=await host.AdvanceAsync(flow,default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed,result);Assert.Equal(24,host.CameraRequests);
+        Assert.All(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera),input=>{Assert.Equal(-120,input.X);Assert.Equal(0,input.Y);});
+        Assert.Equal(0,host.ApproachRequests);Assert.InRange(io.Traces.Last().ProgressAge,0,45);
+    }
+
     [Theory]
     [InlineData("left")]
     [InlineData("right")]
