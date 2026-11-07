@@ -9,6 +9,133 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    private static CombatBattleObservation ProjectVerticalSearchFrame(CaptureFrameStamp source,Guid battle,FakeTimeProvider clock,
+        string cue="weak",MotionStatus motion=MotionStatus.Unknown)
+    {
+        EnemySeekDecision? selected=cue=="weak"?null:AutoFightSeek.SelectSeekDecision([
+            cue=="left"?new EnemySeekVisual(532,748,30,25,411,-125d):
+            cue=="right"?new EnemySeekVisual(1372,731,30,26,433,128.91686957617605):
+            cue=="behind"?new EnemySeekVisual(901,923,38,31,428,-180d):new EnemySeekVisual(287,464,67,6,402)],1920,1080);
+        var body=cue=="body";
+        if(cue!="weak")
+        {
+            Assert.True(selected.HasValue);Assert.NotNull(selected.Value.Visual);Assert.Equal(1,selected.Value.SignalCount);
+            Assert.Equal(body?SeekCueKind.HealthBar:SeekCueKind.DirectionIndicator,selected.Value.Cue);
+            if(!body)Assert.NotNull(selected.Value.Visual.Value.IndicatorBearingDegrees);
+        }
+        var passive=new BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation(body,false,clock.GetUtcNow().UtcDateTime,
+            selected?.Visual,1920,1080,body?null:selected)
+        {Source=source,BattleId=battle,CaptureEpoch=0,Quality=CombatObservationQuality.Available,Motion=motion,Control=new(motion,false),
+            SearchHint=cue=="weak"?new(source,new(465,312,19,25,316),1920,1080):null};
+        var observation=NativeCombatBattleHostIo.ProjectObservation(passive,0,true,clock.GetUtcNow().UtcDateTime);
+        if(cue is "left" or "right" or "behind")
+        {
+            Assert.True(observation.Target.HasValue);
+            Assert.Equal(SeekCueKind.DirectionIndicator,observation.Target.Value.Cue);
+            Assert.Equal(selected!.Value.Direction,observation.Target.Value.Direction);
+        }
+        return observation;
+    }
+
+    private static async Task<(CombatBattleHostInput Input,long Completed)> EstablishOriginalWeakVerticalTrack(
+        FakeTimeProvider clock,NativeCombatFlowRunner flow,ReplayIo io,CombatBattleHost host)
+    {
+        for(var step=0;step<2000&&host.State!="Searching";step++)await host.AdvanceAsync(flow,default);
+        Assert.Equal("Searching",host.State);
+        io.TargetFactory=source=>ProjectVerticalSearchFrame(source,flow.Context.BattleId,clock);
+        for(var step=0;step<200&&!io.Inputs.Any(input=>input.Kind==CombatBattleHostInputKind.CameraReset);step++)await host.AdvanceAsync(flow,default);
+        var reset=Assert.Single(io.CompletedInputs.Where(input=>input.Input.Kind==CombatBattleHostInputKind.CameraReset));
+        Assert.Equal(1,host.CameraRequests);
+        clock.Advance(TimeSpan.FromMilliseconds(500));
+        for(var step=0;step<200&&!io.Inputs.Any(input=>input.Kind==CombatBattleHostInputKind.Camera);step++)await host.AdvanceAsync(flow,default);
+        var weak=Assert.Single(io.CompletedInputs.Where(input=>input.Input.Kind==CombatBattleHostInputKind.Camera));
+        Assert.True(weak.Input.Source.CapturedTimestamp>=reset.Completed+(long)(.5*clock.TimestampFrequency));
+        Assert.Equal(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,2),weak.Input.Y);Assert.Equal(-864,weak.Input.Y);
+        Assert.Equal(2,host.CameraRequests);Assert.Equal(2,io.Traces.Last().ScanUsed);
+        Assert.Null(io.Traces.Last().Observation.Target);
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+        clock.Advance(TimeSpan.FromMilliseconds(350));
+        return weak;
+    }
+
+    [Theory]
+    [InlineData("left")]
+    [InlineData("right")]
+    [InlineData("behind")]
+    public async Task ConfirmedDirectionContinuesTheExistingVerticalTrackAfterAWeakHint(string direction)
+    {
+        var clock=new FakeTimeProvider();var game=new ReturningGame(clock);using var flow=CreateFlow(false,game,clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        var weak=await EstablishOriginalWeakVerticalTrack(clock,flow,io,host);var actions=game.Inputs;
+        var target=AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,2/4,2%4+1);Assert.Equal(-432,target);
+        Assert.Equal(2,host.CameraRequests);Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+        io.TargetFactory=source=>ProjectVerticalSearchFrame(source,flow.Context.BattleId,clock,direction);
+        var attempts=new List<CombatBattleHostInput>();io.PrepareEvidence=input=>{if(input.Kind==CombatBattleHostInputKind.Camera)attempts.Add(input);return true;};
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var pending=Assert.Single(attempts);Assert.Equal(2,host.CameraRequests);
+        clock.Advance(TimeSpan.FromMilliseconds(120));
+        Assert.True(clock.GetTimestamp()<pending.DeadlineTimestamp);
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var sent=io.Inputs.Last(input=>input.Kind==CombatBattleHostInputKind.Camera);var current=io.Traces.Last().Observation;
+        Assert.Equal(pending.RequestId,sent.RequestId);Assert.Equal(current.Source,sent.Source);
+        Assert.True(sent.Source.IsAfter(weak.Input.Source));Assert.True(sent.Source.CapturedTimestamp>=weak.Completed+(long)(.35*clock.TimestampFrequency));
+        Assert.True(current.Source.IsFresh(clock,TimeSpan.FromMilliseconds(150)));
+        Assert.Equal(SeekCueKind.DirectionIndicator,current.Target!.Value.Cue);Assert.Equal(1,current.Target.Value.SignalCount);
+        Assert.Equal(3,host.CameraRequests);Assert.Equal(3,io.Traces.Last().ScanUsed);
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));
+        Assert.Equal(actions,game.Inputs);Assert.Equal(0,host.ApproachRequests);
+        Assert.Equal(target-weak.Input.Y,sent.Y); // Current old consumer sends0 instead of the original next-track delta+432.
+    }
+
+    [Fact]
+    public async Task KnownNotSentDirectionCameraDoesNotCommitTheVerticalTrackOrSpendATicket()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        var weak=await EstablishOriginalWeakVerticalTrack(clock,flow,io,host);
+        io.TargetFactory=source=>ProjectVerticalSearchFrame(source,flow.Context.BattleId,clock,"left");
+        var attempts=new List<CombatBattleHostInput>();io.PrepareEvidence=input=>{if(input.Kind==CombatBattleHostInputKind.Camera)attempts.Add(input);return true;};
+        await host.AdvanceAsync(flow,default);var pending=Assert.Single(attempts);
+        io.UnsentAttempts=1;clock.Advance(TimeSpan.FromMilliseconds(120));
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        Assert.Contains(io.Requests,input=>input.RequestId==pending.RequestId);Assert.DoesNotContain(io.Inputs,input=>input.RequestId==pending.RequestId);
+        Assert.Equal(2,host.CameraRequests);Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.Camera));
+        clock.Advance(TimeSpan.FromMilliseconds(120));Assert.True(clock.GetTimestamp()<pending.DeadlineTimestamp);
+        Assert.Equal(CombatBattleHostResult.Continue,await host.AdvanceAsync(flow,default));
+        var sent=io.Inputs.Last(input=>input.Kind==CombatBattleHostInputKind.Camera);
+        Assert.Equal(pending.RequestId,sent.RequestId);Assert.Equal(3,host.CameraRequests);
+        Assert.Equal(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,3)-weak.Input.Y,sent.Y);
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Fact]
+    public async Task CurrentBodyKeepsItsOwnXYCorrectionInsteadOfTheSearchOrbit()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        var weak=await EstablishOriginalWeakVerticalTrack(clock,flow,io,host);
+        io.TargetFactory=source=>ProjectVerticalSearchFrame(source,flow.Context.BattleId,clock,"body");var before=io.Inputs.Count;
+        for(var step=0;step<200&&io.Inputs.Count==before;step++)await host.AdvanceAsync(flow,default);
+        var sent=Assert.Single(io.Inputs.Skip(before));var current=io.Traces.Last().Observation;
+        Assert.Equal(SeekCueKind.HealthBar,current.Target!.Value.Cue);var visual=current.Target.Value.Visual!.Value;
+        Assert.Equal(Math.Clamp(AutoFightSeek.GetVisibleEnemyCameraOffset(visual,1920),-120,120),sent.X);
+        Assert.Equal(AutoFightSeek.GetVisibleEnemyCameraVerticalOffset(visual,1080),sent.Y);
+        Assert.NotEqual(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,3)-weak.Input.Y,sent.Y);
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Fact]
+    public async Task KnownSwimmingDirectionKeepsOriginalYawWithoutNewVerticalPermission()
+    {
+        var clock=new FakeTimeProvider();using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId);using var host=new CombatBattleHost(io,new(){FinishCheckIntervalSeconds=.1});
+        await EstablishOriginalWeakVerticalTrack(clock,flow,io,host);
+        io.TargetFactory=source=>ProjectVerticalSearchFrame(source,flow.Context.BattleId,clock,"left",MotionStatus.Swim);var before=io.Inputs.Count;
+        for(var step=0;step<200&&io.Inputs.Count==before;step++)await host.AdvanceAsync(flow,default);
+        var sent=Assert.Single(io.Inputs.Skip(before));Assert.Equal(CombatBattleHostInputKind.Camera,sent.Kind);Assert.Equal(-120,sent.X);Assert.Equal(0,sent.Y);
+        Assert.Single(io.Inputs.Where(input=>input.Kind==CombatBattleHostInputKind.CameraReset));Assert.Equal(0,host.ApproachRequests);
+    }
+
     [Fact]
     public async Task CurrentPartialHintUsesOriginalXYTicketsWithoutTargetProgressOrApproach()
     {
@@ -521,6 +648,7 @@ public partial class CombatBattleHostTests
             CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
         using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
         for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        Assert.Equal("Searching",host.State);Assert.Equal(0,host.CameraRequests);Assert.Equal(0,io.Traces.Last().ScanUsed);
         var selected=cue=="direction"?AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(1372,731,30,26,433,128.916d)],1920,1080)
             :new EnemySeekDecision(AutoFightSeekAction.KeepFighting,EnemyIndicatorDirection.None,new(800,10,320,6,1800),1,SeekCueKind.FixedTopHealth);
         io.TargetFactory=stamp=>new(stamp,flow.Context.BattleId,CombatObservationQuality.Available,selected,1920,1080)
@@ -529,7 +657,7 @@ public partial class CombatBattleHostTests
         for(var step=0;step<2000&&!io.Inputs.Skip(before).Any(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);step++)
             await host.AdvanceAsync(flow,default);
         var first=io.Inputs.Skip(before).First(input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset);
-        if(cue=="direction") { Assert.Equal(CombatBattleHostInputKind.Camera,first.Kind); Assert.Equal(0,first.Y); }
+        if(cue=="direction") { Assert.Equal(CombatBattleHostInputKind.Camera,first.Kind); Assert.Equal(AutoFightSeek.GetSeekCameraVerticalTargetOffset(1080,0,1),first.Y); }
         else Assert.Equal(CombatBattleHostInputKind.CameraReset,first.Kind);
         Assert.Equal(0,host.ApproachRequests);
     }
