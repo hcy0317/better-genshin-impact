@@ -9,6 +9,174 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class CombatBattleHostTests
 {
+    private static CombatBattleObservation PublishDirectionWorkingState(CaptureFrameStamp source, Guid battle,
+        FakeTimeProvider clock, bool pending = true, EnemySeekDecision? established = null, bool wrongEpoch = false)
+    {
+        var gate = BetterGenshinImpact.GameTask.AutoFight.Model.AvatarRecognition.PassiveCaptureGate;
+        BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation? published = null;
+        Assert.True(BetterGenshinImpact.GameTask.AutoFight.Model.AvatarRecognition.PublishPassiveObservation(
+            established?.Cue == SeekCueKind.HealthBar,false,established?.Visual,1920,1080,
+            clock.GetUtcNow().UtcDateTime,gate.Epoch,indicatorDecision:established?.Cue==SeekCueKind.DirectionIndicator?established:null,
+            source:source,battleId:battle,quality:CombatObservationQuality.Available,control:new(MotionStatus.Unknown,false),
+            absenceReason:pending?"indicator-awaiting-stability":"all-visual-candidates-filtered",
+            evidence:value=>published=value,directionConfirmationPending:pending));
+        Assert.NotNull(published);
+        return NativeCombatBattleHostIo.ProjectObservation(published.Value,gate.Epoch+(wrongEpoch?1:0),gate.CanCapture,clock.GetUtcNow().UtcDateTime);
+    }
+
+    [Fact]
+    public async Task PermanentPendingStillStopsAtTheOriginalFortyFiveSecondNoProgressDeadline()
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var before=io.Inputs.Count;
+        io.TargetFactory=stamp=>PublishDirectionWorkingState(stamp,flow.Context.BattleId,clock);
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<2000&&result==CombatBattleHostResult.Continue;step++) result=await host.AdvanceAsync(flow,default);
+        Assert.Equal(CombatBattleHostResult.Unconfirmed,result);
+        Assert.InRange(io.Traces.Last().ProgressAge,45,45.051);
+        Assert.Empty(io.Inputs.Skip(before));
+        Assert.Equal(0,host.CameraRequests); Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Fact]
+    public async Task DisappearingPendingReturnsToTheOriginalUnspentSearch()
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var pending=true;
+        io.TargetFactory=stamp=>PublishDirectionWorkingState(stamp,flow.Context.BattleId,clock,pending);
+        for(var step=0;step<8;step++) await host.AdvanceAsync(flow,default);
+        Assert.Equal(0,host.CameraRequests);
+        pending=false;
+        for(var step=0;step<200&&host.CameraRequests==0;step++) await host.AdvanceAsync(flow,default);
+        Assert.InRange(host.CameraRequests,1,24);
+        Assert.Equal(0,host.ApproachRequests);
+    }
+
+    [Theory]
+    [InlineData("body")]
+    [InlineData("direction")]
+    public async Task CurrentEstablishedTargetWinsOverPendingMetadata(string kind)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var selected=AutoFightSeek.SelectSeekDecision([kind=="body"?new EnemySeekVisual(1400,400,80,4,300)
+            :new EnemySeekVisual(1372,731,32,29,413,128.916d)],1920,1080);
+        io.TargetFactory=stamp=>PublishDirectionWorkingState(stamp,flow.Context.BattleId,clock,true,selected);
+        for(var step=0;step<200&&host.CameraRequests==0;step++) await host.AdvanceAsync(flow,default);
+        Assert.True(host.CameraRequests>0);
+    }
+
+    [Fact]
+    public async Task NewlyPublishedPendingCancelsAnUnsentGenericCameraReservation()
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        var prepared=0; var cancelled=0;
+        CombatBattleHostInput? reserved=null;
+        io.PrepareEvidence=input=>
+        {
+            if(input.Kind==CombatBattleHostInputKind.Camera) { prepared++; reserved=input; }
+            return true;
+        };
+        io.CancelEvidence=()=>cancelled++;
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&prepared==0;step++) await host.AdvanceAsync(flow,default);
+        Assert.Equal(1,prepared); Assert.True(reserved.HasValue);
+        Assert.Equal("Searching",host.State);
+        Assert.Equal("awaiting-business-decision-frame",host.Reason);
+        var held=reserved.Value;
+        Assert.Equal(CombatBattleHostInputKind.Camera,held.Kind);
+        Assert.NotEqual(Guid.Empty,held.RequestId); Assert.True(held.Source.IsKnown);
+        Assert.DoesNotContain(io.Inputs,sent=>sent.RequestId==held.RequestId);
+        var before=io.Inputs.Count; var cancelsBefore=cancelled;
+        io.TargetFactory=stamp=>PublishDirectionWorkingState(stamp,flow.Context.BattleId,clock);
+        for(var step=0;step<10;step++) await host.AdvanceAsync(flow,default);
+        Assert.True(cancelled>cancelsBefore);
+        Assert.Equal(1,prepared); Assert.Empty(io.Inputs.Skip(before));
+    }
+
+    [Theory]
+    [InlineData("stale")]
+    [InlineData("foreign")]
+    [InlineData("epoch")]
+    [InlineData("control")]
+    [InlineData("unknown-source")]
+    public async Task PendingDoesNotAuthorizeInputsAcrossTheOriginalSourceAndControlGates(string fault)
+    {
+        var clock=new FakeTimeProvider(); using var flow=CreateFlow(false,new ReturningGame(clock),clock);
+        var io=new ReplayIo(clock,flow.Context.BattleId) { TargetFactory=stamp=>new(stamp,flow.Context.BattleId,
+            CombatObservationQuality.Available,null,1920,1080) { Control=new(MotionStatus.Unknown,false) } };
+        using var host=new CombatBattleHost(io,new() { FinishCheckIntervalSeconds=.1 });
+        for(var step=0;step<2000&&host.State!="Searching";step++) await host.AdvanceAsync(flow,default);
+        var before=io.Inputs.Count;
+        io.TargetFactory=stamp=>
+        {
+            var projected=PublishDirectionWorkingState(stamp,flow.Context.BattleId,clock,wrongEpoch:fault=="epoch");
+            return projected with {
+                Source=fault=="stale"?stamp with { CapturedTimestamp=stamp.CapturedTimestamp-clock.TimestampFrequency }
+                    :fault=="unknown-source"?default:stamp,
+                BattleId=fault=="foreign"?Guid.NewGuid():flow.Context.BattleId,
+                Control=new(MotionStatus.Unknown,fault=="control") };
+        };
+        var result=CombatBattleHostResult.Continue;
+        for(var step=0;step<2000&&result==CombatBattleHostResult.Continue;step++) result=await host.AdvanceAsync(flow,default);
+        Assert.DoesNotContain(io.Inputs.Skip(before),input=>input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset or CombatBattleHostInputKind.Approach);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublishedDirectionAwaitingStabilityCannotBeSpentAsAnEmptySearchFrame(bool hint)
+    {
+        var clock = new FakeTimeProvider();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId)
+        {
+            TargetFactory = stamp => new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, null, 1920, 1080)
+                { Control = new(MotionStatus.Unknown, false) }
+        };
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        for (var step = 0; step < 2000 && host.State != "Searching"; step++) await host.AdvanceAsync(flow, default);
+        Assert.Equal("Searching", host.State);
+        clock.Advance(TimeSpan.FromSeconds(1)); // Original settle has elapsed; no deadline is extended.
+        var before = io.Inputs.Count;
+        // Saved S37/1141 CV packet (image SHA928A537A…): replay typed data, not model inference.
+        var rawPacket = AutoFightSeek.SelectSeekDecision([new EnemySeekVisual(1372,731,30,26,433,128.91686957617605)],1920,1080);
+        Assert.Equal(SeekCueKind.DirectionIndicator,rawPacket.Cue);
+        Assert.Equal(EnemyIndicatorDirection.Right,rawPacket.Direction);
+        io.TargetFactory = stamp =>
+        {
+            // The original ReplayIo owns the fresh test source, unchanged between the old and new interfaces.
+            // S37 source1141 packet: original CV accepted Right; publication still awaits the original stability gate.
+            // This replays the published working state, not a simulation of the 120ms algorithm.
+            var epoch = BetterGenshinImpact.GameTask.AutoFight.Model.AvatarRecognition.PassiveCaptureGate;
+            BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation? published = null;
+            Assert.True(BetterGenshinImpact.GameTask.AutoFight.Model.AvatarRecognition.PublishPassiveObservation(
+                false, false, null, 1920, 1080, clock.GetUtcNow().UtcDateTime, epoch.Epoch,
+                source: stamp, battleId: flow.Context.BattleId, quality: CombatObservationQuality.Available,
+                control: new(MotionStatus.Unknown, false), absenceReason: "indicator-awaiting-stability",
+                searchHint: hint ? new(stamp,new EnemySeekVisual(1372,731,32,29,413),1920,1080) : null,
+                evidence: value => published = value, directionConfirmationPending: true));
+            Assert.NotNull(published);
+            Assert.Equal("indicator-awaiting-stability", published!.Value.TargetAbsenceReason);
+            return NativeCombatBattleHostIo.ProjectObservation(published.Value,epoch.Epoch,epoch.CanCapture,clock.GetUtcNow().UtcDateTime);
+        };
+        for (var step = 0; step < 5; step++) await host.AdvanceAsync(flow, default);
+        Assert.DoesNotContain(io.Inputs.Skip(before), input => input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset or CombatBattleHostInputKind.Approach);
+    }
+
     [Fact]
     public async Task RetainedSearchDirectionStillExhaustsTwentyFourSlotsWithoutCompletionEvidence()
     {

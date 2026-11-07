@@ -640,6 +640,7 @@ public static class AvatarRecognition
                                     targetRead.Diagnostics.Accepted == 0 ? "all-visual-candidates-filtered" : "target-selection-empty",
                                 damageFallback: DescribeDamageFallback(visConfig.DamageNumberRecognitionMode, false),
                                 searchHint: confirmedIndicator == null ? targetRead.Hint : null,
+                                 directionConfirmationPending: indicatorCandidate != null && confirmedIndicator == null,
                                 fixedTopHealth: target.FixedTopHealth, evidence: recordEvidence, sourceFrame: capture));
                         }
                     }
@@ -706,7 +707,7 @@ public static class AvatarRecognition
         CombatControlObservation control = default, SeekRecognitionDiagnostics? recognition = null,
         string? absenceReason = null, string? damageFallback = null, UnconfirmedSearchHint? searchHint = null,
         EnemySeekVisual? fixedTopHealth = null, Action<PassiveTargetObservation>? evidence = null, int spatialCandidateCount = 1,
-        ImageRegion? sourceFrame = null)
+        ImageRegion? sourceFrame = null, bool directionConfirmationPending = false)
     {
         var observation = new PassiveTargetObservation(hasNormalHealthBar, hasDamageCue, capturedAtUtc,
             visual, imageWidth, imageHeight, indicatorDecision)
@@ -714,6 +715,7 @@ public static class AvatarRecognition
             CueFingerprint = cueFingerprint, Motion = motion, Control = control,
             Recognition = recognition, TargetAbsenceReason = absenceReason, DamageFallback = damageFallback,
             SearchHint = searchHint, FixedTopHealth = fixedTopHealth, SpatialCandidateCount = spatialCandidateCount,
+            DirectionConfirmationPending = directionConfirmationPending,
             Scene = _currentAutoFightParam.Value?.SceneCapabilities ?? CombatSceneCapabilities.Unknown };
         lock (_seekLock)
         {
@@ -809,6 +811,7 @@ internal readonly record struct PassiveTargetObservation(
     public CombatControlObservation Control { get; init; }
     public SeekRecognitionDiagnostics? Recognition { get; init; }
     public string? TargetAbsenceReason { get; init; }
+    public bool DirectionConfirmationPending { get; init; }
     public UnconfirmedSearchHint? SearchHint { get; init; }
     public string? DamageFallback { get; init; }
 }
