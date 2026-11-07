@@ -35,7 +35,7 @@ internal static class UiRecovery
     internal static Task<UiSnapshot> ConfirmPartyAsync(IUiDriver driver,
         Func<CancellationToken, Task<bool>> select, Func<CancellationToken, Task<bool>> apply,
         CancellationToken ct, bool deferApplyToCaller = false, ILogger? logger = null,
-        TimeProvider? clock = null) =>
+        TimeProvider? clock = null, Func<CancellationToken, Task<bool>>? verifyAlreadyActive = null) =>
         UiOperation.RunAsync("party-confirm", TimeSpan.FromSeconds(20), ct, async operation =>
         {
             var list = await UiTransition.WaitAsync(operation, UiTarget.PartyList, driver);
@@ -46,6 +46,13 @@ internal static class UiRecovery
             var party = await UiTransition.WaitAsync(operation, UiTarget.Party, driver);
             // 秘境调用方拥有“开始挑战”，不能在通用切队过程中提前触发加载。
             if (deferApplyToCaller) return party;
+            if (verifyAlreadyActive != null)
+            {
+                operation.Check();
+                var alreadyActive = await verifyAlreadyActive(operation.Token);
+                operation.Check();
+                if (alreadyActive) return party; // Verified NoOp: no Apply action or input-completion fence is issued.
+            }
             var applied = await operation.InvokeActionAsync(UiAction.ApplyParty, () => apply(operation.Token), 1, 1);
             if (applied) driver.MarkInputCompleted(party);
             operation.Check();

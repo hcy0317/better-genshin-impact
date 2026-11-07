@@ -6,6 +6,7 @@ using BetterGenshinImpact.GameTask.Common.Element.Assets;
 using BetterGenshinImpact.GameTask.Common.Exceptions;
 using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
+using Fischless.GameCapture;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
@@ -130,32 +131,7 @@ public class SwitchPartyTask
                 await UiTransition.WaitAsync("party-ready", UiTarget.Party, driver, token, TimeSpan.FromSeconds(10), logger: Logger);
                 await Delay(500, token);
             });
-        using var partyViewBtn = _io.Element(ra, "PartyBtnChooseView");
-        if (!partyViewBtn.IsExist()) throw new PartySetupFailedException("编队页面已变化，不能读取队伍名称");
-
-        // OCR 当前队伍名称（无法单字，中间禁止空格）
-        var currTeamName = _io.OcrOne(ra, new RecognitionObject
-        {
-            RecognitionType = RecognitionTypes.Ocr,
-            RegionOfInterest = new Rect(partyViewBtn.Right, partyViewBtn.Top, (int)(350 * _assetScale),
-                partyViewBtn.Height)
-        });
-
-        
-        var tempName = currTeamName
-            .Replace("\"", "")        // 移除所有双引号（核心新增，解决日志里的""问题）
-            .Replace("\r\n", "")      // 清理Windows换行符
-            .Replace("\r", "");   // 先清理所有双引号，避免引号干扰后续处理
-                              
-        // 核心逻辑：找到第一个换行符(\n)的位置，截断并删除换行+后面所有字符
-        int firstNewLineIndex = tempName.IndexOf('\n');
-        if (firstNewLineIndex != -1) // 存在换行符，截取到换行符前
-        {
-            tempName = tempName.Substring(0, firstNewLineIndex);
-        }
-                          
-        // 最后统一去首尾所有空白（空格、制表符、回车符\r等），得到纯净队伍名
-        currTeamName = tempName.Trim();
+        var currTeamName = ReadCurrentPartyName(ra);
 
         Logger.LogInformation("切换队伍，当前队伍名称: {Text}，使用正则表达式规则进行模糊匹配", currTeamName);
         if (matches(currTeamName))
@@ -222,7 +198,7 @@ public class SwitchPartyTask
                         AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
                         _io.Click(page, title.Right + 100 * _assetScale, title.Bottom);
                         await Delay(400, ct);
-                        await ConfirmParty(driver, ct, deferApplyToCaller);
+                        await ConfirmParty(driver, ct, deferApplyToCaller, matches);
                         _io.ClearCombatScenes();
                     }
                     foreach (var title in titles)
@@ -289,28 +265,108 @@ public class SwitchPartyTask
         CheckPartyInput(image, observed, target, ct); _io.Prepare(); CheckPartyInput(image, observed, target, ct, requireForeground: true);
     }
 
-    private async Task ConfirmParty(IUiDriver driver, CancellationToken ct, bool deferApplyToCaller)
+    private string ReadCurrentPartyName(ImageRegion image)
     {
+        using var choose = _io.Element(image, "PartyBtnChooseView");
+        if (!choose.IsExist()) throw new PartySetupFailedException("编队页面已变化，不能读取队伍名称");
+        var text = _io.OcrOne(image, new RecognitionObject
+        {
+            RecognitionType = RecognitionTypes.Ocr,
+            RegionOfInterest = new Rect(choose.Right, choose.Top, (int)(350 * _assetScale), choose.Height)
+        });
+        return NormalizePartyName(text);
+    }
+
+    private static string NormalizePartyName(string text)
+    {
+        var name = text.Replace("\"", "").Replace("\r\n", "").Replace("\r", "");
+        var newline = name.IndexOf('\n');
+        return (newline >= 0 ? name.Substring(0, newline) : name).Trim();
+    }
+
+    private async Task ConfirmParty(IUiDriver driver, CancellationToken ct, bool deferApplyToCaller,
+        Func<string, bool> matches)
+    {
+        ImageRegion? applyFrame = null;
+        UiSnapshot applyObserved = default!;
+        CaptureFrameStamp selectionSource = default;
+        long selectionCompletedAt = 0;
+
+        void RequireCurrentAfterSelection(ImageRegion image, UiSnapshot observed, CancellationToken token)
+        {
+            CheckPartyInput(image, observed, UiTarget.Party, token, requireForeground: true);
+            var source = image.FrameStamp;
+            if (!selectionSource.IsKnown || !source.IsKnown || !source.IsAfter(selectionSource) ||
+                !source.IsFresh(_io.Clock, TimeSpan.FromMilliseconds(150)) ||
+                !new CaptureFrameFence(selectionSource, selectionCompletedAt).Accepts(source) ||
+                source.CapturedTimestamp - selectionCompletedAt < _io.Clock.TimestampFrequency * 60 / 1000)
+                throw new PartySetupFailedException("队伍已出战验证缺少当前选择后的新鲜来源");
+        }
+
         Task<bool> ClickConfirm(CancellationToken token, bool left)
         {
             token.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
             _io.Prepare();
-            using var image = _io.Capture();
+            var reused = !left && applyFrame != null;
+            using var image = reused ? applyFrame! : _io.Capture();
+            if (reused) applyFrame = null;
             var target = left ? UiTarget.PartyList : UiTarget.Party;
-            var observed = _io.Read(image);
+            var observed = reused ? applyObserved : _io.Read(image);
             UiOperation.Current?.Observe(observed, target, "pre-input");
             token.ThrowIfCancellationRequested();
             UiOperation.Current?.Check();
             if (!observed.Matches(target)) return Task.FromResult(false);
+            if (reused) RequireCurrentAfterSelection(image, observed, token);
             AdmitPartyInput(image, observed, target, token);
+            if (reused) RequireCurrentAfterSelection(image, observed, token);
             var roi = new Rect(left ? 0 : image.Width - image.Width / 4, image.Height / 4,
                 image.Width / 4, image.Height - image.Height / 4);
-            return Task.FromResult(_io.Confirm(image, roi));
+            var clicked = _io.Confirm(image, roi);
+            if (left && clicked)
+            {
+                selectionSource = image.FrameStamp;
+                selectionCompletedAt = _io.Clock.GetTimestamp();
+            }
+            return Task.FromResult(clicked);
         }
 
-        await UiRecovery.ConfirmPartyAsync(driver, token => ClickConfirm(token, true),
-            token => ClickConfirm(token, false), ct, deferApplyToCaller, Logger);
-        await UiRecovery.CompletePartyHandoffAsync(driver, deferApplyToCaller, ct, Logger);
+        Task<bool> VerifyAlreadyActive(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
+            _io.Prepare();
+            applyFrame = _io.Capture();
+            var image = applyFrame;
+            var observed = _io.Read(image);
+            applyObserved = observed;
+            RequireCurrentAfterSelection(image, observed, token);
+            var currentName = ReadCurrentPartyName(image);
+            RequireCurrentAfterSelection(image, observed, token);
+            if (string.IsNullOrEmpty(currentName) || !matches(currentName)) return Task.FromResult(false);
+            // Read the bottom-right button label, excluding the footer below it. A substring is not an active-state proof.
+            var activeText = _io.OcrOne(image, new RecognitionObject
+            {
+                RecognitionType = RecognitionTypes.Ocr,
+                RegionOfInterest = new Rect(image.Width - image.Width / 4, image.Height * 9 / 10,
+                    image.Width / 4, image.Height * 7 / 100)
+            });
+            RequireCurrentAfterSelection(image, observed, token);
+            if (!string.Equals(activeText.Trim(), "已出战", StringComparison.Ordinal)) return Task.FromResult(false);
+            UiOperation.Current?.Observe(observed, UiTarget.Party, "already-active-verified");
+            Logger.LogInformation("当前队伍[{Name}]匹配目标且已出战，无需提交队伍出战输入", currentName);
+            image.Dispose();
+            applyFrame = null;
+            return Task.FromResult(true);
+        }
+
+        try
+        {
+            await UiRecovery.ConfirmPartyAsync(driver, token => ClickConfirm(token, true),
+                token => ClickConfirm(token, false), ct, deferApplyToCaller, Logger,
+                verifyAlreadyActive: VerifyAlreadyActive);
+            await UiRecovery.CompletePartyHandoffAsync(driver, deferApplyToCaller, ct, Logger);
+        }
+        finally { applyFrame?.Dispose(); }
     }
 }
