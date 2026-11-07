@@ -14,6 +14,294 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 [Collection("CombatFlowPerformance")]
 public class CombatTargetLossEvidenceTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProductionPublicationBoundaryKeepsItsPixelsAcrossAConcurrentExistingCapture(bool captureBeforePreparation)
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock);
+        var saved = new List<(DiagnosticEvidence Evidence, byte Pixel)>();
+        await using var scope = new DiagnosticEvidenceScope((item, image) =>
+        { saved.Add((item, image.At<Vec3b>(0, 0).Item0)); return Task.CompletedTask; });
+        using var flow = ProgressFlow(clock);
+        var native = new NativeCombatBattleHostIo(flow, new ProgressDevice(clock));
+        var owner = flow.Context.BattleId.ToString("N");
+        using var a = ProgressFrame(source, 11);
+        scope.CaptureRequestedFrames(owner, a);
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        using var b = ProgressFrame(source, 22);
+        scope.CaptureRequestedFrames(owner, b);
+        ImageRegion? concurrent = null;
+        var callbackCompleted = false;
+        var sameScope = false;
+        try
+        {
+            if (captureBeforePreparation)
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(50));
+                concurrent = ProgressFrame(source, 33);
+                scope.CaptureRequestedFrames(owner, concurrent);
+            }
+            var published = AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                b.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch,
+                source: b.FrameStamp, battleId: flow.Context.BattleId, sourceFrame: b, evidence: observed =>
+                {
+                    sameScope = ReferenceEquals(scope, DiagnosticEvidenceScope.Current);
+                    CombatDecisionEvidence.Publish(scope, b, observed);
+                    if (!captureBeforePreparation)
+                    {
+                        clock.Advance(TimeSpan.FromMilliseconds(50));
+                        concurrent = ProgressFrame(source, 33);
+                        scope.CaptureRequestedFrames(owner, concurrent);
+                    }
+                    callbackCompleted = true;
+                });
+            Assert.True(published);
+            Assert.True(callbackCompleted);
+            Assert.True(sameScope);
+            var observed = native.ObserveTarget();
+            Assert.Equal(b.FrameStamp, observed.Source);
+            const string episode = "production-publication";
+            var progress = new CombatProgressEvidence(observed.Source, "new-damage-cue", observed.Target, null, clock.GetTimestamp());
+            native.Trace(new(flow.Context.BattleId, episode, "Running", "accepted-progress", CombatBattleHostResult.Continue,
+                observed, 0, 0, 0, 0, false) { LastProgress = progress });
+            clock.Advance(TimeSpan.FromSeconds(25));
+            using var terminal = ProgressFrame(source, 44);
+            scope.CaptureRequestedFrames(owner, terminal);
+            native.Trace(new(flow.Context.BattleId, episode, "Unconfirmed", "no-progress", CombatBattleHostResult.Unconfirmed,
+                ProgressObservation(terminal, flow.Context.BattleId), 0, 0, 25, 0, false, "terminal") { LastProgress = progress });
+            await scope.DisposeAsync();
+            Assert.Contains(saved, item => item.Evidence.Phase == "combat-terminal" && item.Evidence.Source == terminal.FrameStamp && item.Pixel == 44);
+            Assert.Contains(saved, item => item.Evidence.Phase == "combat-last-progress" && item.Evidence.Window == null && item.Evidence.Source == b.FrameStamp && item.Pixel == 22);
+            Assert.DoesNotContain(saved, item => item.Evidence.Phase == "combat-last-progress" && item.Evidence.Window == null && item.Evidence.Source != b.FrameStamp);
+        }
+        finally { concurrent?.Dispose(); AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Fact]
+    public async Task ProductionPublicationMetadataIsNotVisibleBeforeItsEvidencePreparationCompletes()
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock);
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var flow = ProgressFlow(clock);
+        var native = new NativeCombatBattleHostIo(flow, new ProgressDevice(clock));
+        using var frame = ProgressFrame(source, 22);
+        var sawNewSourceDuringPreparation = false;
+        var preparationCompleted = false;
+        try
+        {
+            AvatarRecognition.ClearPassiveObservation();
+            var published = AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                frame.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch,
+                source: frame.FrameStamp, battleId: flow.Context.BattleId, sourceFrame: frame, evidence: observed =>
+                {
+                    sawNewSourceDuringPreparation = native.ObserveTarget().Source == frame.FrameStamp;
+                    CombatDecisionEvidence.Publish(scope, frame, observed);
+                    preparationCompleted = true;
+                });
+            Assert.True(published);
+            Assert.True(preparationCompleted);
+            Assert.False(sawNewSourceDuringPreparation);
+            Assert.Equal(frame.FrameStamp, native.ObserveTarget().Source);
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Fact]
+    public async Task PublicationRechecksEpochAndReleasesOnlyItsRejectedPreparation()
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var a = ProgressFrame(source, 11); scope.CaptureRequestedFrames(battle.ToString("N"), a);
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        using var b = ProgressFrame(source, 22); scope.CaptureRequestedFrames(battle.ToString("N"), b);
+        AvatarRecognition.SkipSeekScope? exclusive = null;
+        var prepared = false;
+        try
+        {
+            AvatarRecognition.ClearPassiveObservation();
+            var published = AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                b.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: b.FrameStamp, battleId: battle, sourceFrame: b,
+                evidence: observed => { CombatDecisionEvidence.Publish(scope, b, observed); prepared = true; exclusive = AvatarRecognition.BeginExclusiveOperation(); });
+            Assert.True(prepared);
+            Assert.False(published);
+            Assert.NotEqual(b.FrameStamp, AvatarRecognition.LatestPassiveObservation.Source);
+            exclusive?.Dispose(); exclusive = null;
+            clock.Advance(TimeSpan.FromMilliseconds(100));
+            using var c = ProgressFrame(source, 33); scope.CaptureRequestedFrames(battle.ToString("N"), c);
+            Assert.False(scope.RememberExactSource("rejected-probe", "b", b.FrameStamp));
+            Assert.True(scope.RememberExactSource("rejected-probe", "a", a.FrameStamp));
+            scope.ForgetExactFrame("rejected-probe", "a");
+        }
+        finally { exclusive?.Dispose(); AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PublicationPreparationFailureNeverBlocksMetadata(bool provideSourcePixels)
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var frame = ProgressFrame(source, 22);
+        try
+        {
+            Assert.True(AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                frame.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: frame.FrameStamp, battleId: battle,
+                sourceFrame: provideSourcePixels ? frame : null, evidence: _ => throw new IOException("diagnostic callback")));
+            Assert.Equal(frame.FrameStamp, AvatarRecognition.LatestPassiveObservation.Source);
+            Assert.Equal(provideSourcePixels, scope.RememberExactSource("prepared-probe", "frame", frame.FrameStamp));
+            scope.ForgetExactFrame("prepared-probe", "frame");
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Theory]
+    [InlineData("source")]
+    [InlineData("frequency")]
+    [InlineData("size")]
+    public async Task PublicationBoundaryNeverRetainsPixelsForMismatchedMetadata(string mismatch)
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var a = ProgressFrame(source, 11); scope.CaptureRequestedFrames(battle.ToString("N"), a);
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        using var b = ProgressFrame(source, 22); scope.CaptureRequestedFrames(battle.ToString("N"), b);
+        var publishedSource = mismatch switch
+        {
+            "source" => new CaptureFrameSource(clock).Next(),
+            "frequency" => b.FrameStamp with { TimestampFrequency = b.FrameStamp.TimestampFrequency + 1 },
+            _ => b.FrameStamp
+        };
+        try
+        {
+            Assert.True(AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), mismatch == "size" ? 64 : 32, 32,
+                b.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: publishedSource, battleId: battle,
+                sourceFrame: b, evidence: observed => CombatDecisionEvidence.Publish(scope, b, observed)));
+            clock.Advance(TimeSpan.FromMilliseconds(100));
+            using var c = ProgressFrame(source, 33); scope.CaptureRequestedFrames(battle.ToString("N"), c);
+            Assert.False(scope.RememberExactSource("mismatch-probe", "b", b.FrameStamp));
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Fact]
+    public async Task PublicationBoundariesKeepTheOriginalDerivedHistoryCapacity()
+    {
+        const int frameBytes = 32 * 32 * 3;
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask, maximumMemoryBytes: 9L * frameBytes);
+        var sources = new List<CaptureFrameStamp>();
+        try
+        {
+            for (var i = 0; i < 12; i++)
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(100));
+                using var frame = ProgressFrame(source, (byte)i);
+                sources.Add(frame.FrameStamp);
+                scope.CaptureRequestedFrames(battle.ToString("N"), frame);
+                Assert.True(AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                    frame.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: frame.FrameStamp, battleId: battle, sourceFrame: frame,
+                    evidence: observed => CombatDecisionEvidence.Publish(scope, frame, observed)));
+            }
+            var available = 0;
+            foreach (var stamp in sources)
+            {
+                if (scope.RememberExactSource("capacity-probe", "one", stamp)) available++;
+                scope.ForgetExactFrame("capacity-probe", "one");
+            }
+            Assert.InRange(available, 1, 3); // Original memory/3/frameBytes yields three history entries.
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Fact]
+    public async Task SamePublicationSourceDoesNotCloneAgainOrConsumeAnExactSlot()
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var frame = ProgressFrame(source, 22);
+        scope.CaptureRequestedFrames(battle.ToString("N"), frame);
+        try
+        {
+            bool Publish() => AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                frame.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: frame.FrameStamp, battleId: battle, sourceFrame: frame,
+                evidence: observed => CombatDecisionEvidence.Publish(scope, frame, observed));
+            Assert.True(Publish());
+            var clones = scope.HistoryCloneCount;
+            for (var i = 0; i < 10; i++) Assert.True(Publish());
+            Assert.Equal(clones, scope.HistoryCloneCount);
+            scope.RememberExactFrame("one", "a", frame);
+            scope.RememberExactFrame("two", "b", frame);
+            Assert.True(scope.CaptureExactWindow("one", "a", frame.FrameStamp, "a", "first exact slot"));
+            Assert.True(scope.CaptureExactWindow("two", "b", frame.FrameStamp, "b", "second exact slot"));
+            scope.RememberExactFrame("three", "c", frame);
+            Assert.False(scope.CaptureExactWindow("three", "c", frame.FrameStamp, "c", "no third slot"));
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Fact]
+    public async Task PublicationBudgetRejectionStillPublishesMetadataAndCannotForgeExactPixels()
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask, maximumBytes: 1);
+        using var frame = ProgressFrame(source, 22);
+        scope.CaptureRequestedFrames(battle.ToString("N"), frame);
+        try
+        {
+            Assert.True(AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                frame.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: frame.FrameStamp, battleId: battle, sourceFrame: frame,
+                evidence: observed => CombatDecisionEvidence.Publish(scope, frame, observed)));
+            Assert.Equal(frame.FrameStamp, AvatarRecognition.LatestPassiveObservation.Source);
+            Assert.False(scope.PreparePublicationFrame("budget", frame));
+            Assert.False(scope.RememberExactSource("budget-probe", "b", frame.FrameStamp));
+            Assert.False(scope.CaptureExactWindow("budget-probe", "b", frame.FrameStamp, "forbidden", "budget unchanged"));
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); }
+    }
+
+    [Fact]
+    public async Task PublicationHistoryDisposalReleasesItsOwnershipWithoutDisposingTheCaller()
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var frame = ProgressFrame(source, 22);
+        try
+        {
+            scope.CaptureRequestedFrames(battle.ToString("N"), frame);
+            Assert.True(AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                frame.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: frame.FrameStamp, battleId: battle, sourceFrame: frame,
+                evidence: observed => CombatDecisionEvidence.Publish(scope, frame, observed)));
+            await scope.DisposeAsync();
+            Assert.False(scope.PreparePublicationFrame("closed", frame));
+            Assert.False(scope.RememberExactSource("closed-probe", "b", frame.FrameStamp));
+            Assert.False(frame.SrcMat.Empty());
+            Assert.Equal(22, frame.SrcMat.At<Vec3b>(0, 0).Item0);
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); await scope.DisposeAsync(); }
+    }
+
+    [Fact]
+    public async Task MetadataOnlyAndFeedbackCallersNeverStartPublicationPixelRetention()
+    {
+        var clock = new FakeTimeProvider(); var source = new CaptureFrameSource(clock); var battle = Guid.NewGuid();
+        await using var scope = new DiagnosticEvidenceScope((_, _) => Task.CompletedTask);
+        using var a = ProgressFrame(source, 11); scope.CaptureRequestedFrames(battle.ToString("N"), a);
+        clock.Advance(TimeSpan.FromMilliseconds(100));
+        using var b = ProgressFrame(source, 22); scope.CaptureRequestedFrames(battle.ToString("N"), b);
+        try
+        {
+            Assert.True(AvatarRecognition.PublishPassiveObservation(false, true, new(4, 4, 8, 22, 176), 32, 32,
+                b.FrameStamp.CapturedAt.UtcDateTime, AvatarRecognition.PassiveCaptureGate.Epoch, source: b.FrameStamp, battleId: battle,
+                evidence: observed => CombatDecisionEvidence.Publish(scope, b, observed)));
+            clock.Advance(TimeSpan.FromMilliseconds(100));
+            using var c = ProgressFrame(source, 33); scope.CaptureRequestedFrames(battle.ToString("N"), c);
+            Assert.False(scope.RememberExactSource("metadata-only-probe", "b", b.FrameStamp));
+        }
+        finally { AvatarRecognition.ClearPassiveObservation(); }
+    }
+
     [Fact]
     public async Task AcceptedLastProgressKeepsExactPixelsAfterTenSecondHistoryExpires()
     {

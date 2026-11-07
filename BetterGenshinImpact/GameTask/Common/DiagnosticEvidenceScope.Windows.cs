@@ -18,6 +18,9 @@ internal sealed partial class DiagnosticEvidenceScope
         // 环缓存、末态候选和writer共享不可变像素；仅最后一个所有者释放并扣减预算。
         internal int References = 1;
         internal bool Saved;
+        internal int PublicationPreparations;
+        internal bool PublicationConfirmed;
+        internal bool PublicationOnly;
     }
     private sealed class PendingWindow(string request, string phase, string detail, CaptureFrameStamp anchor, ILogger logger,
         IReadOnlyDictionary<string, string>? fields, Guid? incidentId = null, string occurrence = "first")
@@ -129,11 +132,83 @@ internal sealed partial class DiagnosticEvidenceScope
             _historySampleSeconds = WindowBeforeSeconds / (historySlots - 1);
             if (!_lastHistorySample.IsKnown || SecondsBetween(source, _lastHistorySample) >= _historySampleSeconds)
             {
-                _history.Enqueue(CopyHistory(frame));
-                _lastHistorySample = source;
+                if (MakeHistoryRoom(historySlots))
+                {
+                    _history.Enqueue(CopyHistory(frame));
+                    _lastHistorySample = source;
+                }
             }
             UpdateLatestHistory(frame);
         }
+    }
+
+    // Publication preparation retains pixels only; it neither requests a window nor writes an image.
+    internal bool PreparePublicationFrame(string request, ImageRegion frame)
+    {
+        lock (_gate)
+        {
+            var source = frame.FrameStamp;
+            if (_closed || !source.IsKnown || frame.SrcMat.Empty())
+            { MissingFrame(request, "publication-boundary", _closed ? "scope-closed" : "source-unknown-or-empty", _logger); return false; }
+            if (_lastWindowSource.IsKnown && (source.SessionId != _lastWindowSource.SessionId ||
+                source.TimestampFrequency != _lastWindowSource.TimestampFrequency ||
+                SecondsBetween(_lastWindowSource, source) > WindowBeforeSeconds))
+            { MissingFrame(request, "publication-boundary", "publication-source-outside-window", _logger); return false; }
+            if (!_lastWindowSource.IsKnown) _lastWindowSource = source;
+            var existing = _history.FirstOrDefault(item => item.Source == source && item.Image != null);
+            var bytes = checked(frame.SrcMat.Total() * frame.SrcMat.ElemSize());
+            var latest = _latestHistory?.Source == source && _latestHistory.Image != null ? _latestHistory : null;
+            var additionalBytes = existing != null || latest != null ? 0 : bytes;
+            if (!FitsByteLimit(additionalBytes) || !FitsMemory(additionalBytes))
+            { MissingFrame(request, "publication-boundary", "publication-memory-or-byte-budget", _logger); return false; }
+            if (existing != null) { existing.PublicationPreparations++; return true; }
+            var capacity = Math.Clamp(_maximumMemoryBytes / 3 / Math.Max(1, bytes), 2, 11);
+            if (!MakeHistoryRoom(capacity))
+            { MissingFrame(request, "publication-boundary", "publication-history-capacity", _logger); return false; }
+            var retained = latest ?? CopyHistory(frame);
+            if (retained.Image == null)
+            { MissingFrame(request, "publication-boundary", retained.Missing ?? "publication-copy-failed", _logger); ReleaseHistory(retained); return false; }
+            if (latest != null) retained.References++;
+            retained.PublicationPreparations = 1;
+            retained.PublicationConfirmed = false;
+            retained.PublicationOnly = true;
+            var ordered = _history.Append(retained).OrderBy(item => item.Source.CapturedTimestamp).ThenBy(item => item.Source.Sequence).ToArray();
+            _history.Clear();
+            foreach (var item in ordered) _history.Enqueue(item);
+            return true;
+        }
+    }
+
+    internal void CompletePublicationFrame(CaptureFrameStamp source, bool published)
+    {
+        lock (_gate)
+        {
+            var frame = _history.FirstOrDefault(item => item.Source == source && item.PublicationPreparations > 0);
+            if (frame == null) return;
+            frame.PublicationPreparations--;
+            frame.PublicationConfirmed |= published;
+            if (frame.PublicationPreparations == 0 && frame.PublicationOnly && !frame.PublicationConfirmed)
+                RemoveHistoryFrame(frame);
+        }
+    }
+
+    private bool MakeHistoryRoom(long capacity)
+    {
+        while (_history.Count >= capacity)
+        {
+            var oldest = _history.FirstOrDefault(item => item.PublicationPreparations == 0);
+            if (oldest == null) return false;
+            RemoveHistoryFrame(oldest);
+        }
+        return true;
+    }
+
+    private void RemoveHistoryFrame(HistoryFrame frame)
+    {
+        var retained = _history.Where(item => !ReferenceEquals(item, frame)).ToArray();
+        _history.Clear();
+        foreach (var item in retained) _history.Enqueue(item);
+        ReleaseHistory(frame);
     }
 
     private void UpdateLatestHistory(ImageRegion frame)
