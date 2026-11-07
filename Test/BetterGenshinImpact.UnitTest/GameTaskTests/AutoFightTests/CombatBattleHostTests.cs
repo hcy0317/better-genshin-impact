@@ -1130,6 +1130,110 @@ public partial class CombatBattleHostTests
         Assert.Equal(0, io.DelayCalls);
     }
 
+    [Theory]
+    [InlineData("handoff")]
+    [InlineData("no-body")]
+    [InlineData("wrong-source")]
+    [InlineData("control-not-ready")]
+    [InlineData("multiple")]
+    public async Task CenteredProducerDirectionRetainsUnspentSearchForAScreenTarget(string scenario)
+    {
+        var clock = new FakeTimeProvider();
+        var started = clock.GetTimestamp();
+        using var flow = CreateFlow(false, new ReturningGame(clock), clock);
+        var io = new ReplayIo(clock, flow.Context.BattleId);
+        using var host = new CombatBattleHost(io, new() { FinishCheckIntervalSeconds = .1 });
+        var visual = new EnemySeekVisual(945, 110, 30, 32, 480, 0);
+        var selected = AutoFightSeek.SelectSeekDecision([visual], 1920, 1080);
+        Assert.Equal(SeekCueKind.DirectionIndicator, selected.Cue);
+        Assert.Equal(EnemyIndicatorDirection.Forward, selected.Direction);
+        Assert.Equal(1, selected.SignalCount);
+        Assert.Equal(visual, selected.Visual);
+        var faultActive = false;
+        CombatBattleObservation Forward(CaptureFrameStamp stamp)
+        {
+            var candidate = faultActive && scenario == "multiple"
+                ? AutoFightSeek.SelectSeekDecision([visual, visual with { X = visual.X + 40 }], 1920, 1080) : selected;
+            var passive = new BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation(false, false, clock.GetUtcNow().UtcDateTime,
+                visual, 1920, 1080, candidate) { Source = stamp, BattleId = flow.Context.BattleId };
+            Assert.True(AutoFightSeek.TryCreatePassiveDecision(passive, clock.GetUtcNow().UtcDateTime,
+                out var admitted, out _, out _));
+            Assert.Equal(EnemyIndicatorDirection.Forward, admitted.Direction);
+            return new(stamp, faultActive && scenario == "wrong-source" ? Guid.NewGuid() : flow.Context.BattleId,
+                CombatObservationQuality.Available, admitted, 1920, 1080)
+            { Control = new(MotionStatus.Unknown, faultActive && scenario == "control-not-ready") };
+        }
+        for (var i = 0; i < 2000 && host.State != "Searching"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Searching", host.State);
+        io.TargetFactory = Forward;
+        for (var i = 0; i < 200 && host.State == "Searching"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Fighting", host.State);
+        Assert.Equal("bounded-reengagement", host.Reason);
+        io.TargetFactory = null;
+        for (var i = 0; i < 3000 && host.State != "Searching"; i++)
+            Assert.Equal(CombatBattleHostResult.Continue, await host.AdvanceAsync(flow, default));
+        Assert.Equal("Searching", host.State);
+        var toNoProgress = TimeSpan.FromSeconds(45.1) - clock.GetElapsedTime(started);
+        if (toNoProgress > TimeSpan.Zero) clock.Advance(toNoProgress);
+        Assert.Empty(io.Inputs.Where(input => input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset));
+        faultActive = true;
+        io.TargetFactory = Forward;
+        if (scenario is "wrong-source" or "control-not-ready" or "multiple")
+        {
+            var rejected = CombatBattleHostResult.Continue;
+            for (var i = 0; i < 1000 && rejected == CombatBattleHostResult.Continue; i++)
+                rejected = await host.AdvanceAsync(flow, default);
+            Assert.Equal(CombatBattleHostResult.Unconfirmed, rejected);
+            Assert.DoesNotContain(io.Inputs, input => input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset or CombatBattleHostInputKind.Approach);
+            return;
+        }
+        for (var i = 0; i < 10 && !io.Inputs.Any(input => input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset); i++)
+        {
+            var result = await host.AdvanceAsync(flow, default);
+            if (result != CombatBattleHostResult.Continue) break;
+        }
+        Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+        Assert.True(io.Inputs.Any(input => input.Kind is CombatBattleHostInputKind.Camera or CombatBattleHostInputKind.CameraReset),
+            $"state={host.State} reason={host.Reason} sentCamera={host.CameraRequests} scanUsed={io.Traces.Last().ScanUsed} approach={host.ApproachRequests}");
+        Assert.Equal(1L, host.CameraRequests);
+        Assert.Equal(1, io.Traces.Last().ScanUsed);
+        if (scenario == "no-body")
+        {
+            var exhausted = CombatBattleHostResult.Continue;
+            for (var i = 0; i < 10000 && exhausted == CombatBattleHostResult.Continue; i++)
+                exhausted = await host.AdvanceAsync(flow, default);
+            Assert.Equal(CombatBattleHostResult.Unconfirmed, exhausted);
+            Assert.InRange(host.CameraRequests, 1, 24);
+            Assert.Equal(24, io.Traces.Max(trace => trace.ScanUsed));
+            Assert.DoesNotContain(io.Inputs, input => input.Kind == CombatBattleHostInputKind.Approach);
+            return;
+        }
+        var resetCompleted = clock.GetTimestamp();
+        io.TargetFactory = stamp =>
+        {
+            var health = new EnemySeekVisual(946, 400, 28, 4, 112);
+            var passive = new BetterGenshinImpact.GameTask.AutoFight.Model.PassiveTargetObservation(true, false,
+                clock.GetUtcNow().UtcDateTime, health, 1920, 1080) { Source = stamp, BattleId = flow.Context.BattleId };
+            Assert.True(AutoFightSeek.TryCreatePassiveDecision(passive, clock.GetUtcNow().UtcDateTime, out var body, out _, out _));
+            Assert.Equal(SeekCueKind.HealthBar, body.Cue);
+            Assert.Equal(AutoFightSeekAction.ApproachVisibleEnemy, body.Action);
+            return new(stamp, flow.Context.BattleId, CombatObservationQuality.Available, body, 1920, 1080)
+            { Control = new(MotionStatus.Unknown, false) };
+        };
+        for (var i = 0; i < 1000 && host.ApproachRequests == 0; i++)
+        {
+            var result = await host.AdvanceAsync(flow, default);
+            Assert.True(result == CombatBattleHostResult.Continue, $"reason={host.Reason} trace={io.Traces.Last()}");
+            if (clock.GetElapsedTime(resetCompleted) < TimeSpan.FromMilliseconds(500)) Assert.Equal(0L, host.ApproachRequests);
+        }
+        Assert.Equal(1L, host.ApproachRequests);
+        Assert.Equal(1L, host.CameraRequests);
+        Assert.Equal(1, io.Traces.Last().ApproachUsed);
+        Assert.InRange(clock.GetElapsedTime(resetCompleted).TotalMilliseconds, 500, 2000);
+    }
+
     private static NativeCombatFlowRunner CreateFlow(bool json, ICombatFlowGame game, FakeTimeProvider clock)
     {
         if (json)
