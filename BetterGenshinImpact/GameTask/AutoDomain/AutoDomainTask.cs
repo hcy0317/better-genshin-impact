@@ -1301,6 +1301,15 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
         await allTasks;
     }
 
+    internal static bool HasConfirmedMapResinForPreflight(ResinStatus status)
+    {
+        if (AutoDomainResinPreflightPolicy.HasClaimableResin(status.OriginalResinCount, status.CondensedResinCount))
+            return true;
+        if (status.OriginalResinCount < 0 || status.CondensedResinCount < 0)
+            throw new InvalidOperationException("地图树脂数量仍未确认，不能判定库存不足");
+        return false;
+    }
+
     private async Task<bool> HasClaimableResinBeforeDomain()
     {
         try
@@ -1314,11 +1323,9 @@ public partial class AutoDomainTask : ISoloTask<Dictionary<string, int>>
                     var status = ResinStatus.RecogniseFromRegion(
                         capture,
                         TaskContext.Instance().SystemInfo,
-                        OcrFactory.Paddle);
+                        OcrFactory.Paddle, allowPartial: true);
                     status.Print(Logger);
-                    return AutoDomainResinPreflightPolicy.HasClaimableResin(
-                        status.OriginalResinCount,
-                        status.CondensedResinCount);
+                    return HasConfirmedMapResinForPreflight(status);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
