@@ -18,6 +18,10 @@ internal interface INativeCombatIo
     ILogger Logger { get; }
     CombatInputCoordinator InputCoordinator { get; }
     IReadOnlyList<NativeCombatActor> Actors { get; }
+    // Capability only, never a freshness claim. Old adapters do not incur an extra capture.
+    bool SupportsActorIdentity => false;
+    // A context roster is not a fresh identity read. Providers may prove only this target.
+    ReviveRecoveryFrame? ReadActorIdentity(NativeCombatActor actor, ImageRegion frame) => null;
     double DpiScale => 1;
     double LastFinishCheckAge { get; }
     Task PrepareVisionAsync(CancellationToken ct);

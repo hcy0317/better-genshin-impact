@@ -1,6 +1,8 @@
+using BetterGenshinImpact.GameTask;
 using BetterGenshinImpact.GameTask.AutoPathing;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
+using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Script.Flow;
 using BetterGenshinImpact.GameTask.Common.Map.Maps.Base;
 using OpenCvSharp;
@@ -11,7 +13,7 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoPathingTests;
 public sealed class NavigationResumeDataCollection { }
 
 [Collection(nameof(NavigationResumeDataCollection))]
-public class NavigationResumeTests
+public partial class NavigationResumeTests
 {
     private sealed class ModelDataFixture : IDisposable
     {
@@ -336,4 +338,483 @@ public class NavigationResumeTests
         Assert.Equal(legacy ? "" : "钟离 d(0.2),e", route.Positions[1].ActionParams);
         Assert.Equal(legacy ? "" : "combat_script", route.Positions[1].Action);
     }
+}
+
+public partial class NavigationResumeTests
+{
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("context-changed")]
+    [InlineData("target-slot-changed")]
+    [InlineData("resolved-ir-changed")]
+    [InlineData("missing-target-proof")]
+    [InlineData("wrong-target")]
+    [InlineData("foreign-target-proof")]
+    [InlineData("stale-target-proof")]
+    [InlineData("duplicate-target-proof")]
+    [InlineData("digest-changed")]
+    [InlineData("owner-expired")]
+    [InlineData("parent-expired")]
+    [InlineData("third-ticket")]
+    [InlineData("unsafe-q")]
+    [InlineData("unsafe-ui")]
+    [InlineData("long-wait")]
+    [InlineData("multi-actor")]
+    public async Task PublicPathingReplaysTheWholeRecordedPrefixAfterConfirmedHealing(string scenario)
+    {
+        using var modelData = new ModelDataFixture();
+        var replay = new PathReplay { EmitReceipts = true };
+        PathExecutor? subject = null;
+        var nativeInputsAtRecovery = -1;
+        var hpRestoreSeconds = BetterGenshinImpact.Service.ConfigService.Config!.TpConfig.HpRestoreDuration;
+        var position = new Point2f(524.73f, 525.45f);
+        var target = position;
+        var healed = false;
+        var recoveryCount = 0;
+        var teleports = new List<(Fischless.GameCapture.CaptureFrameStamp Before, Fischless.GameCapture.CaptureFrameStamp After, long Completed)>();
+        var actions = new List<(bool Returned, int Id, string Action, string Parameters, string Ir)>();
+        var initialVisits = new List<int>();
+        var suffixVisits = 0;
+        var airborne = false;
+        long? jumpReleased = null;
+        long? landingRequested = null;
+        var landings = new List<(Fischless.GameCapture.CaptureFrameStamp InputSource, long Completed, Fischless.GameCapture.CaptureFrameStamp After)>();
+        Fischless.GameCapture.CaptureFrameStamp landingSource = default;
+        var stopCalls = 0;
+        DateTimeOffset? originalDeadline = null, returnedDeadline = null;
+        replay.PositionAt = _ => position;
+        replay.BeforeLocate = point => target = new((float)point.X, (float)point.Y);
+        replay.OnInput = (action, kind) =>
+        {
+            if (action == BetterGenshinImpact.Core.Simulator.Extensions.GIActions.Jump && kind == BetterGenshinImpact.Core.Simulator.Extensions.KeyType.KeyUp)
+                jumpReleased = replay.Clock.GetTimestamp();
+            if (action == BetterGenshinImpact.Core.Simulator.Extensions.GIActions.NormalAttack)
+            {
+                landingSource = replay.LastSource;
+                replay.Clock.Advance(TimeSpan.FromMilliseconds(1));
+                landingRequested = replay.Clock.GetTimestamp();
+            }
+        };
+        replay.MotionAt = _ =>
+        {
+            if (landingRequested is { } stopped && replay.Clock.GetElapsedTime(stopped) >= TimeSpan.FromMilliseconds(60))
+            {
+                airborne = false;
+                jumpReleased = null;
+                landingRequested = null;
+                landings.Add((landingSource, stopped, replay.LastSource));
+            }
+            else if (jumpReleased is { } opened && replay.Clock.GetElapsedTime(opened) >= TimeSpan.FromMilliseconds(60)) airborne = true;
+            return airborne ? BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Fly : BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Normal;
+        };
+        replay.AfterDelay = milliseconds =>
+        {
+            if (!replay.Io.IsDown(BetterGenshinImpact.Core.Simulator.Extensions.GIActions.MoveForward)) return;
+            var delta = target - position;
+            var distance = Math.Sqrt(delta.X * delta.X + delta.Y * delta.Y);
+            if (distance > 0) position += delta * (float)Math.Min(1, milliseconds * .03 / distance);
+        };
+        using var native = new FullPrefixNativeIo(replay);
+        var raw = new FullPrefixMacroIo(replay, native.InputCoordinator);
+        using var macro = new PathingMacroSession(raw);
+        var macroOutcomes = new List<(int Id, CombatExecutionResult Result)>();
+        var miningSelections = new List<(bool Returned, string Roster, string Strategy, string Ir)>();
+        var stops = new BetterGenshinImpact.GameTask.AutoPathing.Handler.StopFlyingHandler();
+        async Task<CombatExecutionResult> ExecuteNative(IReadOnlyList<CombatCommand> commands, CancellationToken token)
+        {
+            using var runner = NativeCombatFlowRunner.Create(commands, native, loop: false,
+                purpose: CombatScriptExecutionPurpose.Pathing);
+            using var recoveryOwner = CombatRecoveryOwner.Enter(token, runner.RetireForRecovery);
+            var nativeStarted = replay.Clock.GetTimestamp();
+            var actual = await runner.RunRoundAsync(token);
+            if (actual == CombatFlowResult.Failed)
+                native.NativeFailure = $"result={actual}; ir={FullPrefixIr(commands)}; source={replay.LastSource}; heldE={native.HeldE}; inputs={native.Inputs.Count};" +
+                    $" now={replay.Clock.GetUtcNow():O};elapsed={replay.Clock.GetElapsedTime(nativeStarted).TotalSeconds:R};tokenCancelled={token.IsCancellationRequested};" +
+                    $" parentRemaining={BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current?.Remaining};macroTail={macro.HasTail};" +
+                    Environment.NewLine + string.Join(Environment.NewLine, native.Diagnostics.TakeLast(80));
+            return CombatScriptExecutor.FromFlowResult(actual);
+        }
+        var boundMining = new BetterGenshinImpact.GameTask.AutoPathing.Handler.MiningHandler(native);
+        async Task<(CombatExecutionResult Outcome, NavigationResumePlan.MiningBinding? Binding)> RunBoundMining(
+            WaypointForTrack point, NavigationResumePlan.MiningBinding? expected, CancellationToken token)
+        {
+            Assert.True(point.Id.HasValue);
+            var executed = await boundMining.RunWithBindingAsync(token, point, expected);
+            var binding = Assert.IsType<NavigationResumePlan.MiningBinding>(executed.Binding);
+            Assert.Equal(CombatExecutionKind.Completed, executed.Outcome.Kind);
+            miningSelections.Add((healed, binding.ContextDescriptor, binding.Strategy, binding.IrDigest));
+            actions.Add((healed, point.Id.Value, point.Action, point.ActionParams ?? "", binding.IrDigest));
+            macroOutcomes.Add((point.Id.Value, executed.Outcome));
+            return executed;
+        }
+        var scene = new PathExecutor.PathingSceneIo
+        {
+            Prepare = (_, _) => Task.FromResult(true),
+            Convert = (point, map) => new WaypointForTrack(point, map, value => value),
+            Teleport = (point, token) =>
+            {
+                token.ThrowIfCancellationRequested();
+                var before = replay.LastSource;
+                replay.Clock.Advance(TimeSpan.FromMilliseconds(1));
+                var completed = replay.Clock.GetTimestamp();
+                position = new((float)point.X, (float)point.Y);
+                airborne = false; jumpReleased = null; landingRequested = null;
+                replay.Clock.Advance(TimeSpan.FromMilliseconds(60));
+                using var after = replay.Io.Capture();
+                teleports.Add((before, after.FrameStamp, completed));
+                return Task.CompletedTask;
+            },
+            LowHp = (_, point) =>
+            {
+                Assert.True(point.Id.HasValue);
+                var pointId = point.Id.Value;
+                if (!healed && (initialVisits.Count == 0 || initialVisits[^1] != pointId)) initialVisits.Add(pointId);
+                if (healed && pointId == 27) suffixVisits++;
+                if (pointId != 26) return false;
+                var deadline = replay.Clock.GetUtcNow() + BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!.Remaining;
+                if (healed) { returnedDeadline = deadline; return scenario == "third-ticket" && recoveryCount < 3; }
+                originalDeadline = deadline;
+                var changed = scenario switch
+                {
+                    "unsafe-q" => "钟离 q",
+                    "unsafe-ui" => "keypress(F)",
+                    "long-wait" => "wait(30)",
+                    "multi-actor" => "钟离 e,娜维娅 e",
+                    _ => null
+                };
+                if (changed != null) subject!.CurWaypoints.Item2[1].ActionParams = changed;
+                return true;
+            },
+            RecoverAtStatue = token =>
+            {
+                token.ThrowIfCancellationRequested();
+                recoveryCount++;
+                healed = true;
+                nativeInputsAtRecovery = native.Inputs.Count;
+                if (scenario == "context-changed")
+                    native.Actors = [new("钟离", 1), new("娜维娅", 2), new("凯亚", 3), new("香菱", 4)];
+                if (scenario == "target-slot-changed")
+                    native.Actors = [new("娜维娅", 1), new("钟离", 2), new("班尼特", 3), new("香菱", 4)];
+                if (scenario == "resolved-ir-changed")
+                    native.Actors = [new("娜维娅", 1), new("班尼特", 2), new("凯亚", 3), new("香菱", 4)];
+                if (scenario == "missing-target-proof") native.TargetIdentityName = null;
+                if (scenario == "wrong-target") native.TargetIdentityName = "娜维娅";
+                if (scenario == "foreign-target-proof") native.IdentityFault = "foreign";
+                if (scenario == "stale-target-proof") native.IdentityFault = "stale";
+                if (scenario == "duplicate-target-proof") native.IdentityFault = "duplicate";
+                if (scenario == "digest-changed") subject!.CurWaypoints.Item2[1].X += 1;
+                position = new(9000, 9000);
+                // TpTask.TpToStatueOfTheSeven always spends this configured HP wait after transport.
+                // Model that external I/O elapsed; skill readiness remains the real fake sensor's cooldown.
+                replay.Clock.Advance(TimeSpan.FromSeconds(scenario == "owner-expired" ? 241 : scenario == "parent-expired" ? 1201 : hpRestoreSeconds));
+                return Task.CompletedTask;
+            },
+            ReadHealing = frame => new(frame.FrameStamp, healed, false),
+            BeforeAction = async (point, token) =>
+            {
+                Assert.Equal("stop_flying", point.Action);
+                Assert.Equal("fly", point.MoveMode);
+                Assert.Equal(BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Fly, replay.Io.Motion(replay.Images[^1]));
+                await stops.RunAsync(token, point, replay.Io);
+                stopCalls++;
+                Assert.Equal(BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Normal, replay.Io.Motion(replay.Images[^1]));
+            },
+            RunAction = async (point, token) =>
+            {
+                Assert.True(point.Id.HasValue);
+                var pointId = point.Id.Value;
+                if (point.Action is "stop_flying" or "log_output")
+                {
+                    actions.Add((healed, pointId, point.Action, point.ActionParams ?? "", ""));
+                    // Their original work is the before handler / diagnostic log. This is
+                    // an explicit absence of an after-fragment, never a fabricated Completed.
+                    return new(CombatExecutionKind.Skipped, "NO_AFTER_FRAGMENT_FOR_ORIGINAL_ACTION");
+                }
+                if (point.Action == "mining") return (await RunBoundMining(point, null, token)).Outcome;
+                Assert.Equal("combat_script", point.Action);
+                var script = point.CombatScript!;
+                Assert.NotNull(script);
+                actions.Add((healed, pointId, point.Action, point.ActionParams ?? "", FullPrefixIr(script.CombatCommands)));
+                var resultFromOriginal = await macro.ExecuteAsync(
+                    LegacyPathingMacroPlan.Create(script, native.Actors.Select(actor => actor.Name)), ExecuteNative, token);
+                macroOutcomes.Add((pointId, resultFromOriginal));
+                return resultFromOriginal;
+            },
+            RunMining = RunBoundMining,
+            ReadMiningBinding = boundMining.ReadCurrentBindingAsync,
+            MacroFactory = () => macro
+        };
+        var route = FullRecordedHealingPrefix();
+        var original = route.Positions.Select(point => (point.Id, point.X, point.Y, point.Type, point.MoveMode, point.Action, point.ActionParams)).ToArray();
+        subject = new PathExecutor(default, replay.Io, sceneIo: scene)
+            { PartyConfig = new() { MainAvatarIndex = "1" } };
+        using var parent = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin("full-recorded-prefix-parent",
+            TimeSpan.FromMinutes(20), clock: replay.Clock);
+        var error = await Record.ExceptionAsync(() => subject.Pathing(route));
+
+        // These preconditions deliberately run before the desired recovery assertion.
+        // Guard/bootstrap, parser, input or native-runner failures are not business RED.
+        Assert.DoesNotContain("Application host", error?.ToString() ?? "");
+        Assert.DoesNotContain("NullReferenceException", error?.ToString() ?? "");
+        Assert.True(healed, $"Original prefix never reached its low-HP checkpoint: {error}{Environment.NewLine}nativeFailure={native.NativeFailure}");
+        Assert.Equal(Enumerable.Range(1, 26), initialVisits);
+        Assert.True(recoveryCount == (scenario == "third-ticket" ? 3 : 1),
+            $"actualHeals={recoveryCount}; error={error}; plan={subject.NavigationResumeRejection};nativeFailure={native.NativeFailure}");
+        Assert.Equal(new[] { 2, 3, 6, 7, 14, 21, 24, 25 }, actions.Where(action => !action.Returned).Select(action => action.Id));
+        Assert.NotEmpty(native.Inputs);
+        Assert.Contains(350, raw.Delays);
+        Assert.Empty(raw.Inputs);
+        Assert.All(macroOutcomes, item => Assert.True(item.Result.CanContinue,
+            $"id={item.Id}; result={item.Result}; error={error};nativeFailure={native.NativeFailure}"));
+        Assert.Contains(macroOutcomes, item => item.Id == 25 && item.Result.Kind == CombatExecutionKind.Completed);
+        Assert.NotEmpty(landings);
+        Assert.All(landings, landing =>
+        {
+            Assert.True(landing.After.IsAfter(landing.InputSource));
+            Assert.True(landing.After.CapturedTimestamp - landing.Completed >= landing.After.TimestampFrequency * .06);
+        });
+        Assert.False(native.HeldE);
+        Assert.Empty(raw.Held);
+        if (scenario == "third-ticket")
+        {
+            Assert.NotNull(error);
+            Assert.False(subject.SuccessEnd);
+            Assert.Equal(3, teleports.Count); // Initial entry plus only the two original shared recovery tickets.
+            Assert.Equal(3, stopCalls);
+            Assert.Equal(nativeInputsAtRecovery, native.Inputs.Count);
+            Assert.Equal(0, suffixVisits);
+            return;
+        }
+        if (scenario != "completed")
+        {
+            Assert.NotNull(error);
+            Assert.False(subject.SuccessEnd);
+            Assert.Equal(1, teleports.Count);
+            Assert.Equal(nativeInputsAtRecovery, native.Inputs.Count);
+            Assert.Equal(1, stopCalls);
+            Assert.Equal(0, suffixVisits);
+            return;
+        }
+        Assert.True(error == null, $"{error}{Environment.NewLine}plan={subject.NavigationResumeRejection}{Environment.NewLine}nativeFailure={native.NativeFailure}"); // Same null requirement, with actual admission diagnostics.
+        Assert.True(subject.SuccessEnd);
+        Assert.Equal(2, teleports.Count);
+        Assert.All(teleports, teleport =>
+        {
+            Assert.True(teleport.After.IsKnown);
+            Assert.True(teleport.After.CapturedTimestamp > teleport.Completed);
+            if (teleport.Before.IsKnown) Assert.True(teleport.After.IsAfter(teleport.Before));
+        });
+        Assert.Equal(2, stopCalls);
+        Assert.Equal(1, suffixVisits);
+        Assert.Equal(originalDeadline, returnedDeadline);
+        Assert.Equal(actions.Where(action => !action.Returned).Select(action => (action.Id, action.Action, action.Parameters, action.Ir)),
+            actions.Where(action => action.Returned).Select(action => (action.Id, action.Action, action.Parameters, action.Ir)));
+        Assert.Equal(2, miningSelections.Count);
+        Assert.False(miningSelections[0].Returned);
+        Assert.True(miningSelections[1].Returned);
+        Assert.Equal(miningSelections[0].Roster, miningSelections[1].Roster);
+        Assert.Equal(miningSelections[0].Strategy, miningSelections[1].Strategy);
+        Assert.Equal(miningSelections[0].Ir, miningSelections[1].Ir);
+        Assert.Equal(original, route.Positions.Select(point => (point.Id, point.X, point.Y, point.Type, point.MoveMode, point.Action, point.ActionParams)));
+    }
+
+    private static string FullPrefixIr(IEnumerable<CombatCommand> commands) => string.Join(";",
+        commands.Select(command => command.Name + ":" + command.Method.Alias[0] + ":" + string.Join(",", command.Args ?? [])));
+
+    private static PathingTask FullRecordedHealingPrefix() => new()
+    {
+        FileName = "10-无名遗迹x10-recorded-prefix.json", FullPath = "recorded/10-无名遗迹x10-recorded-prefix.json",
+        Info = new() { MapName = "TheChasm" },
+        Positions =
+        [
+            new() { Id=1, X=524.73, Y=525.45, Type="teleport", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=2, X=515.49, Y=529.14, Type="path", MoveMode="run", Action="combat_script", ActionParams="钟离 d(0.2),e" },
+            new() { Id=3, X=509.83, Y=531.22, Type="path", MoveMode="run", Action="combat_script", ActionParams="wait(0.35)" },
+            new() { Id=4, X=508.83, Y=535.22, Type="path", MoveMode="fly", Action="", ActionParams="" },
+            new() { Id=5, X=508.71, Y=555.03, Type="path", MoveMode="fly", Action="", ActionParams="" },
+            new() { Id=6, X=508.71, Y=555.03, Type="path", MoveMode="fly", Action="stop_flying", ActionParams="" },
+            new() { Id=7, X=511.08, Y=560.67, Type="target", MoveMode="walk", Action="combat_script", ActionParams="钟离 s(0.2),e(hold)" },
+            new() { Id=8, X=518.31, Y=561.78, Type="target", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=9, X=510.52, Y=569.53, Type="target", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=10, X=510.28, Y=564.79, Type="target", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=11, X=505.39, Y=562.01, Type="target", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=12, X=506.67, Y=560.53, Type="target", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=13, X=509.91, Y=562.11, Type="target", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=14, X=509.32, Y=552.66, Type="target", MoveMode="walk", Action="combat_script", ActionParams="钟离 d(0.2),e(hold)" },
+            new() { Id=15, X=510.48, Y=549.51, Type="target", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=16, X=524.08, Y=516.23, Type="path", MoveMode="walk", Action="", ActionParams="" },
+            new() { Id=17, X=532.91, Y=499.42, Type="path", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=18, X=523.63, Y=450.94, Type="path", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=19, X=538.63, Y=409.68, Type="path", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=20, X=539.83, Y=381.65, Type="path", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=21, X=546.32, Y=377.46, Type="path", MoveMode="run", Action="log_output", ActionParams="========= ============可选战斗，默认关闭========= ========= ========= ============可选战斗，默认关闭========= ========= ========= ============可选战斗，默认关闭========= ========= ========= ============可选战斗，默认关闭========= ========= ========= ============可选战斗，默认关闭========= =========" },
+            new() { Id=22, X=553.26, Y=367.1, Type="path", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=23, X=561.26, Y=363.1, Type="path", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=24, X=567.46, Y=359.38, Type="path", MoveMode="run", Action="combat_script", ActionParams="钟离 d(0.2),e" },
+            new() { Id=25, X=579.94, Y=348, Type="path", MoveMode="run", Action="mining", ActionParams="" },
+            new() { Id=26, X=580, Y=347.95, Type="path", MoveMode="run", Action="", ActionParams="" },
+            new() { Id=27, X=584.9, Y=347.56, Type="target", MoveMode="run", Action="", ActionParams="" },
+        ]
+    };
+
+    private sealed class FullPrefixMacroIo(PathReplay replay, CombatInputCoordinator coordinator) : IPathingMacroIo
+    {
+        public TimeProvider Clock => replay.Clock;
+        public CombatInputCoordinator Coordinator => coordinator;
+        internal readonly List<(PathingMacroInput Input, long Started, long Completed)> Inputs = new();
+        internal readonly List<int> Delays = new();
+        internal readonly HashSet<Vanara.PInvoke.User32.VK> Held = new();
+        public PathingMacroObservation Observe(string phase = "boundary")
+        {
+            replay.Clock.Advance(TimeSpan.FromMilliseconds(20));
+            using var frame = replay.Io.Capture();
+            return new(PathingMacroScene.World, frame.FrameStamp);
+        }
+        public Vanara.PInvoke.User32.VK Map(Vanara.PInvoke.User32.VK key) => key;
+        public BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputResult Send(PathingMacroInput input, Action admit)
+        {
+            admit();
+            var started = Clock.GetTimestamp();
+            if (input.Kind == PathingMacroInputKind.KeyDown) Held.Add(input.Key);
+            if (input.Kind == PathingMacroInputKind.KeyUp) Held.Remove(input.Key);
+            replay.Clock.Advance(TimeSpan.FromMilliseconds(1));
+            var completed = Clock.GetTimestamp();
+            Inputs.Add((input, started, completed));
+            return FullPrefixReceipt(started, completed);
+        }
+        public Task Delay(int milliseconds, CancellationToken token)
+        {
+            Delays.Add(milliseconds);
+            return replay.Io.Delay(milliseconds, token);
+        }
+    }
+
+    private static BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputResult FullPrefixReceipt(long started, long completed) =>
+        new(BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputStatus.Sent, completed)
+        { StartedTimestamp = started, ObservableAfterTimestamp = completed, NativeRequested = 1, NativeSubmitted = 1, NativeUncertain = false };
+
+    private sealed class FullPrefixNativeIo(PathReplay replay) : INativeCombatIo, IDisposable
+    {
+        public TimeProvider Clock => replay.Clock;
+        private Microsoft.Extensions.Logging.ILogger? _logger;
+        public Microsoft.Extensions.Logging.ILogger Logger => _logger ??= new FullPrefixDiagnosticLogger(Diagnostics);
+        internal readonly List<string> Diagnostics = new();
+        internal string? NativeFailure;
+        public CombatInputCoordinator InputCoordinator { get; } = new();
+        public IReadOnlyList<NativeCombatActor> Actors { get; set; } =
+            [new("钟离", 1), new("娜维娅", 2), new("班尼特", 3), new("香菱", 4)];
+        public double LastFinishCheckAge => 0;
+        internal string RosterSignature => string.Join(";", Actors.Select(actor => actor.Index + ":" + actor.Name));
+        internal readonly List<(string Input, long Started, long Completed)> Inputs = new();
+        internal readonly List<(Fischless.GameCapture.CaptureFrameStamp Source, string Roster)> CapturedRosters = new();
+        internal bool HeldE;
+        internal string? TargetIdentityName = "钟离";
+        internal string? IdentityFault;
+        private Fischless.GameCapture.CaptureFrameStamp? _firstIdentity;
+        public bool SupportsActorIdentity => true;
+        public ReviveRecoveryFrame? ReadActorIdentity(NativeCombatActor actor, BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame)
+        {
+            if (TargetIdentityName == null) return null;
+            var source = frame.FrameStamp;
+            _firstIdentity ??= source;
+            if (IdentityFault == "foreign") source = source with { SessionId = Guid.NewGuid() };
+            if (IdentityFault == "stale") source = source with { CapturedTimestamp = source.CapturedTimestamp - source.TimestampFrequency * 2 };
+            if (IdentityFault == "duplicate") source = _firstIdentity.Value;
+            return new ReviveRecoveryFrame(source.Sequence, true, BetterGenshinImpact.GameTask.Common.BgiVision.ReviveUiState.None, 1,
+                new Dictionary<int, string> { [actor.Index] = TargetIdentityName }).WithSource(source, Clock);
+        }
+        private DateTimeOffset _readyAt;
+        private DateTimeOffset? _knownReadyAt;
+        public Task PrepareVisionAsync(CancellationToken token) { token.ThrowIfCancellationRequested(); return Task.CompletedTask; }
+        public IDisposable BeginExclusive(bool allowPassiveObservation) => new FullPrefixNoopScope();
+        public BetterGenshinImpact.GameTask.Model.Area.ImageRegion Capture()
+        {
+            replay.Clock.Advance(TimeSpan.FromMilliseconds(20));
+            var frame = replay.Io.Capture();
+            CapturedRosters.Add((frame.FrameStamp, RosterSignature));
+            return frame;
+        }
+        public bool IsCombatHud(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame) => true;
+        public bool IsMainUi(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame) => true;
+        public BetterGenshinImpact.GameTask.Common.BgiVision.CombatControlObservation ReadControl(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame)
+        {
+            Diagnostics.Add($"control=Normal source={frame.FrameStamp}");
+            return new(BetterGenshinImpact.GameTask.Common.BgiVision.MotionStatus.Normal, false);
+        }
+        public int ReadActive(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame, BetterGenshinImpact.GameTask.AutoFight.Model.AvatarActiveCheckContext context)
+        {
+            Diagnostics.Add($"active=1 source={frame.FrameStamp}");
+            return 1;
+        }
+        public bool? IsActorActive(NativeCombatActor actor, BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame) => actor.Index == 1;
+        public double ReadSkillCooldown(NativeCombatActor actor, BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame)
+        {
+            var remaining = Math.Max(0, (_readyAt - Clock.GetUtcNow()).TotalSeconds);
+            Diagnostics.Add($"observed-cooldown actor={actor.Name} remaining={remaining:R} source={frame.FrameStamp}");
+            return remaining;
+        }
+        public bool IsSkillReady(NativeCombatActor actor, BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame, double cooldown) => cooldown == 0;
+        public BetterGenshinImpact.GameTask.AutoFight.Model.BurstObservation ReadBurst(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame, bool active) => default;
+        public bool? ReadLowHp(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame) => false;
+        public HashSet<int> ReadSideBurstReady(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame) => [];
+        public bool TryGetKnownSkillCooldown(string actor, out double cooldown)
+        {
+            cooldown = _knownReadyAt is { } ready ? Math.Max(0, (ready - Clock.GetUtcNow()).TotalSeconds) : 0;
+            Diagnostics.Add($"known-cooldown actor={actor} remaining={cooldown:R} known={_knownReadyAt.HasValue} source={replay.LastSource}");
+            return _knownReadyAt.HasValue;
+        }
+        public void ConfirmSkill(NativeCombatActor actor, double cooldown, DateTime inputAtUtc) =>
+            _knownReadyAt = Clock.GetUtcNow() + TimeSpan.FromSeconds(cooldown);
+        public Task WaitSkillCooldown(NativeCombatActor actor, CancellationToken token) =>
+            DelayAsync(TryGetKnownSkillCooldown(actor.Name, out var remaining) ? (int)Math.Ceiling(remaining * 1000) : 0, token);
+        public BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputResult SelectActor(int index, BetterGenshinImpact.GameTask.AutoFight.CombatNativeInputRequest request, CancellationToken token) =>
+            throw new InvalidOperationException("This recorded prefix only selects the already observed Zhongli slot.");
+        public void WaitForSelection(int milliseconds, CancellationToken token) { token.ThrowIfCancellationRequested(); replay.Clock.Advance(TimeSpan.FromMilliseconds(milliseconds)); }
+        public bool OnSelectionMismatch(NativeCombatActor actor, int attempt, int attempts, int observed, CancellationToken token) => false;
+        public void ResolveSelectionRecovery(NativeCombatActor actor, AvatarSelectionProtocol.Result<BetterGenshinImpact.GameTask.Model.Area.ImageRegion> selection, CancellationToken token) =>
+            throw new InvalidOperationException("The recorded main HUD cannot enter non-combat recovery.");
+        public void CheckDefeated(BetterGenshinImpact.GameTask.Model.Area.ImageRegion frame, CancellationToken token) => token.ThrowIfCancellationRequested();
+        public BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputResult SubmitInput(NativeCombatActor actor, CombatCommand command,
+            BetterGenshinImpact.GameTask.AutoFight.CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); beforeFirstNative();
+            var result = Receive(command.Method.ToString());
+            if (command.Method == Method.Skill) _readyAt = Clock.GetUtcNow() + TimeSpan.FromSeconds(12);
+            return result;
+        }
+        public Vanara.PInvoke.User32.VK? HeldEPhysicalKey() => Vanara.PInvoke.User32.VK.VK_E;
+        public BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputResult SubmitHeldE(Vanara.PInvoke.User32.VK key, bool down,
+            BetterGenshinImpact.GameTask.AutoFight.CombatNativeInputRequest request, Action beforeFirstNative, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); beforeFirstNative();
+            Assert.Equal(Vanara.PInvoke.User32.VK.VK_E, key);
+            HeldE = down;
+            var result = Receive(down ? "E-down" : "E-up");
+            if (!down) _readyAt = Clock.GetUtcNow() + TimeSpan.FromSeconds(12);
+            return result;
+        }
+        private BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputResult Receive(string input)
+        {
+            var started = Clock.GetTimestamp();
+            replay.Clock.Advance(TimeSpan.FromMilliseconds(1));
+            var completed = Clock.GetTimestamp();
+            Inputs.Add((input, started, completed));
+            return FullPrefixReceipt(started, completed);
+        }
+        public void ReleaseHeldE(Vanara.PInvoke.User32.VK key) => HeldE = false;
+        public void ReleaseInput() => HeldE = false;
+        public Task DelayAsync(int milliseconds, CancellationToken token) => replay.Io.Delay(Math.Max(1, milliseconds), token);
+        public void Dispose() => ReleaseInput();
+    }
+
+    private sealed class FullPrefixDiagnosticLogger(List<string> entries) : Microsoft.Extensions.Logging.ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => new FullPrefixNoopScope();
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel level) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel level, Microsoft.Extensions.Logging.EventId eventId,
+            TState state, Exception? error, Func<TState, Exception?, string> formatter) =>
+            entries.Add($"{level}: {formatter(state, error)}{(error == null ? "" : Environment.NewLine + error)}");
+    }
+
+    private sealed class FullPrefixNoopScope : IDisposable { public void Dispose() { } }
 }

@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BetterGenshinImpact.GameTask.AutoPathing.Model;
+using BetterGenshinImpact.GameTask.AutoPathing.Handler;
 using BetterGenshinImpact.GameTask.AutoPathing.Model.Enum;
 using BetterGenshinImpact.GameTask.AutoFight.Script;
 using BetterGenshinImpact.GameTask.Common;
@@ -42,8 +43,23 @@ public partial class PathExecutor
 
     private bool _navigationTicketUsed;
     private CaptureFrameStamp _navigationHealingSource;
-    private NavigationResumePlan? BuildNavigationResume() => NavigationResumePlan.TryCreate(_routeIdentity,
-        CurWaypoints.Item2, CurWaypoint.Item1, _lastReachedNavigation, _waypointBudget, _actionSettlements);
+    internal string? NavigationResumeRejection { get; private set; }
+    private NavigationResumePlan? BuildNavigationResume()
+    {
+        var projection = NavigationResumePlan.TryCreate(_routeIdentity, CurWaypoints.Item2, CurWaypoint.Item1,
+            _lastReachedNavigation, _waypointBudget, _actionSettlements);
+        if (projection != null) return projection;
+        var plan = NavigationResumePlan.TryCreateFullSemantic(_routeIdentity, CurWaypoints.Item2, CurWaypoint.Item1,
+            _lastReachedNavigation, _waypointBudget, _actionSettlements, _semanticSegmentDigest, out var reason);
+        var now = _moveIo.Clock.GetUtcNow();
+        NavigationResumeRejection = $"reason={reason};current={CurWaypoint.Item1};owner={_waypointBudget?.Owner};" +
+            $"ownerIndex={_waypointBudget?.CurrentIndex};deadline={_waypointBudget?.Deadline:O};now={now:O};" +
+            $"expired={_waypointBudget?.Deadline <= now};reached={_lastReachedNavigation};" +
+            $"originalDigest={_semanticSegmentDigest};currentDigest={NavigationResumePlan.SemanticDigest(CurWaypoints.Item2)}" +
+            Environment.NewLine + "original=" + _semanticStateAtEntry + Environment.NewLine +
+            "current=" + NavigationResumePlan.DescribeSemanticState(CurWaypoints.Item2);
+        return plan;
+    }
 
     private async Task RecordReachedNavigationAsync(WaypointForTrack waypoint)
     {
@@ -82,6 +98,11 @@ public partial class PathExecutor
         if (!plan.Matches(_routeIdentity, CurWaypoints.Item2, owner) || !_navigationHealingSource.IsKnown ||
             _navigationHealingSource.SessionId != plan.Reached.Source.SessionId)
             throw new InvalidOperationException("导航投影原路线身份或恢复source不匹配");
+        if (plan.FullSemantic)
+        {
+            await ExecuteFullSemanticResumeAsync(plan, owner);
+            return;
+        }
         using var operation = UiOperation.Begin("path-navigation-return", owner.Deadline - _moveIo.Clock.GetUtcNow(), ct, clock: _moveIo.Clock);
         _navigationProjectionActive = true;
         _pathingMacro?.Release();
@@ -103,6 +124,56 @@ public partial class PathExecutor
             _pendingNavigationResume = null;
         }
         finally { _navigationProjectionActive = false; }
+    }
+
+    private async Task ExecuteFullSemanticResumeAsync(NavigationResumePlan plan, WaypointAttemptBudget owner)
+    {
+        using var operation = UiOperation.Begin("path-navigation-return", owner.Deadline - _moveIo.Clock.GetUtcNow(), ct, clock: _moveIo.Clock);
+        var callerToken = ct;
+        var checkpoint = CurWaypoint;
+        ct = operation.Token;
+        _navigationProjectionActive = true;
+        void Check()
+        {
+            operation.Check();
+            owner.Check(_moveIo.Clock, ct);
+            if (!plan.Matches(_routeIdentity, CurWaypoints.Item2, owner))
+                throw new InvalidOperationException("原完整前缀身份或owner已变化，禁止继续回放");
+        }
+        try
+        {
+            _pathingMacro?.Release();
+            Check();
+            foreach (var expected in plan.MiningBindings.Values)
+            {
+                var current = _sceneIo != null
+                    ? _sceneIo.ReadMiningBinding == null ? null : await _sceneIo.ReadMiningBinding(ct)
+                    : await new MiningHandler().ReadCurrentBindingAsync(ct);
+                Check();
+                if (current == null || !expected.SameStrategy(current) ||
+                    current.Source.SessionId != _navigationHealingSource.SessionId || !current.Source.IsAfter(expected.Source))
+                    throw new InvalidOperationException("返回前原挖矿context/目标身份/IR未确认，禁止回放");
+            }
+            var entry = CurWaypoints.Item2[0];
+            CurWaypoint = (0, entry);
+            await ExecuteOriginalWaypointAsync(entry, plan);
+            Check();
+            foreach (var step in plan.Steps)
+            {
+                Check();
+                var original = CurWaypoints.Item2[step.OriginalIndex];
+                CurWaypoint = (step.OriginalIndex, original);
+                await ExecuteOriginalWaypointAsync(original, plan);
+                Check();
+            }
+            _resumeCurrent = plan.ResumeCurrent;
+            _pendingNavigationResume = null;
+        }
+        finally
+        {
+            try { _pathingMacro?.Release(); }
+            finally { _navigationProjectionActive = false; CurWaypoint = checkpoint; ct = callerToken; }
+        }
     }
 
     private int HealingResumeIndex() => RecordWaypoints == CurWaypoints && _skipOtherOperations

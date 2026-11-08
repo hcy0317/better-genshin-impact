@@ -64,11 +64,38 @@ public class MiningHandler : IActionHandler
         return null;
     }
 
+    internal async Task<NavigationResumePlan.MiningBinding?> ReadCurrentBindingAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var io = _nativeIo;
+        if (io == null)
+        {
+            var scenes = await RunnerContext.Instance.GetCombatScenes(ct);
+            ct.ThrowIfCancellationRequested();
+            if (scenes == null) return null;
+            // Identity only: borrow the scene's already prepared target classifier, no skill service initialization.
+            io = new NativeCombatIo(scenes);
+        }
+        var selected = SelectMiningAction(name => io.Actors.Any(actor => actor.Name == name));
+        if (selected == null) return null;
+        var parsed = CombatScriptParser.ParseContext(selected);
+        var binding = ReadBinding(io, parsed.CombatCommands, selected);
+        ct.ThrowIfCancellationRequested();
+        return binding;
+    }
+
     public async Task RunAsync(CancellationToken ct, WaypointForTrack? waypointForTrack = null, object? config = null)
+    {
+        await RunWithBindingAsync(ct, waypointForTrack);
+    }
+
+    internal async Task<(CombatExecutionResult Outcome, NavigationResumePlan.MiningBinding? Binding)> RunWithBindingAsync(
+        CancellationToken ct, WaypointForTrack? waypointForTrack, NavigationResumePlan.MiningBinding? expected = null)
     {
         ct.ThrowIfCancellationRequested();
         var io = _nativeIo;
         var restoreClassification = new List<(Avatar Avatar, bool Enabled)>();
+        (CombatExecutionResult Outcome, NavigationResumePlan.MiningBinding? Binding) result;
         try
         {
             if (io == null)
@@ -96,7 +123,7 @@ public class MiningHandler : IActionHandler
             }
 
             // 挖矿
-            await MiningAsync(io, ct, waypointForTrack);
+            result = await MiningAsync(io, ct, waypointForTrack, expected);
             ct.ThrowIfCancellationRequested();
 
 
@@ -114,14 +141,22 @@ public class MiningHandler : IActionHandler
             // 拾取
             await (_scanPickTask ??= new ScanPickTask()).Start(ct);
         }
+        return result;
     }
 
-    private static async Task MiningAsync(INativeCombatIo io, CancellationToken ct, WaypointForTrack? waypoint)
+    private static async Task<(CombatExecutionResult Outcome, NavigationResumePlan.MiningBinding? Binding)> MiningAsync(
+        INativeCombatIo io, CancellationToken ct, WaypointForTrack? waypoint, NavigationResumePlan.MiningBinding? expected)
     {
         ct.ThrowIfCancellationRequested();
         var selected = SelectMiningAction(name => io.Actors.Any(actor => actor.Name == name));
         if (selected == null) throw new InvalidOperationException("当前队伍没有可执行的挖矿动作，不能标记路线完成");
         var miningAction = CombatScriptParser.ParseContext(selected);
+        var binding = ReadBinding(io, miningAction.CombatCommands, selected);
+        ct.ThrowIfCancellationRequested();
+        BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current?.Check();
+        if (expected != null && (binding == null || !expected.SameStrategy(binding) ||
+            binding.Source.SessionId != expected.Source.SessionId || !binding.Source.IsAfter(expected.Source)))
+            throw new InvalidOperationException("原挖矿策略/角色身份/source绑定未确认，禁止回放输入");
         miningAction.BindSourceContext($"route={waypoint?.PathingTaskFileName ?? "unknown:no-waypoint"} node={waypoint?.Id.ToString() ?? "unknown"}",
             nameof(MiningHandler));
         using var runner = NativeCombatFlowRunner.Create(miningAction.CombatCommands, io, loop: false,
@@ -147,5 +182,35 @@ public class MiningHandler : IActionHandler
                 name, outcome.Kind, outcome.Reason);
             throw new InvalidOperationException($"挖矿角色 {name} 未确认执行，停止当前挖矿动作；本路线未完成：{outcome.Kind}/{outcome.Reason}");
         }
+        if (binding != null && binding.ContextDescriptor != ContextDescriptor(io.Actors))
+        {
+            if (expected != null) throw new InvalidOperationException("挖矿执行期间原队伍context变化，回放未完成");
+            binding = null;
+        }
+        return (outcome, binding);
+    }
+
+    private static string ContextDescriptor(IReadOnlyList<NativeCombatActor> actors) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            string.Join(";", actors.OrderBy(actor => actor.Index).Select(actor => actor.Index + ":" + actor.Name)))));
+
+    private static NavigationResumePlan.MiningBinding? ReadBinding(INativeCombatIo io,
+        IReadOnlyList<CombatCommand> commands, string strategy)
+    {
+        if (!io.SupportsActorIdentity || !NavigationResumePlan.IsBoundMiningStrategy(commands)) return null;
+        var actors = io.Actors;
+        var actor = actors.FirstOrDefault(candidate => candidate.Name == commands[0].Name);
+        if (actor == null || actor.Index is < 1 or > 4 || actors.Select(candidate => candidate.Index).Distinct().Count() != actors.Count) return null;
+        var descriptor = ContextDescriptor(actors);
+        using var frame = io.Capture();
+        if (frame == null) return null;
+        var source = frame.FrameStamp;
+        if (!source.IsFresh(io.Clock, BetterGenshinImpact.GameTask.Common.Ui.UiSnapshot.RecoveryMaximumAge) ||
+            source.TimestampFrequency != io.Clock.TimestampFrequency) return null;
+        var proof = io.ReadActorIdentity(actor, frame);
+        if (proof == null || !proof.SourceBound || proof.SourceStamp != source || frame.FrameStamp != source || !proof.HasUsableEvidence ||
+            !proof.MainReady || proof.Revive != BetterGenshinImpact.GameTask.Common.BgiVision.ReviveUiState.None ||
+            !proof.HasTarget(new ReviveTarget(actor.Name, actor.Index)) || descriptor != ContextDescriptor(io.Actors)) return null;
+        return new(descriptor, strategy, NavigationResumePlan.CommandsDigest(commands), actor.Name, actor.Index, source);
     }
 }
