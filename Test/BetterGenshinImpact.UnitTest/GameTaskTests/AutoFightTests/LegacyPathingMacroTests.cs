@@ -12,6 +12,102 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests.AutoFightTests;
 
 public partial class LegacyPathingMacroTests
 {
+    [Fact]
+    public async Task AuthoredThirdInteractionCanAcquireCannonBeforeTheOriginalFire()
+    {
+        const string program = "w(.5),wait(1),keypress(f),wait(.2),keypress(f),wait(.1),keypress(f),wait(.1),keypress(RETURN),wait(.1),keypress(ESCAPE)";
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(program, false), ["钟离"]);
+        var segment = Assert.Single(plan.Segments);
+        Assert.True(segment.IsRaw);
+        Assert.True(segment.CannonProgram);
+        var beforeReturn = segment.Commands.TakeWhile(command => command.Method != Method.KeyPress ||
+            !string.Equals(command.Args![0], "RETURN", StringComparison.OrdinalIgnoreCase)).ToArray();
+        Assert.Equal(3, beforeReturn.Count(command => command.Method == Method.KeyPress &&
+            string.Equals(command.Args![0], "f", StringComparison.OrdinalIgnoreCase)));
+        var io = new MacroReplay { Scene = PathingMacroScene.World };
+        using var cancellation = new CancellationTokenSource();
+        var started = io.Time.GetTimestamp();
+        var originalDeadline = started + (long)(Math.Min(plan.BudgetSeconds, segment.RawBudgetSeconds) * io.Time.TimestampFrequency);
+        var worldResponses = new HashSet<int>();
+        CaptureFrameStamp entry = default, cannon = default, beforeFire = default;
+        io.OnObservation = (phase, frame) =>
+        {
+            Assert.True(frame.Source.IsKnown);
+            Assert.Equal(io.Time.TimestampFrequency, frame.Source.TimestampFrequency);
+            Assert.True(frame.Source.IsFresh(io.Time, TimeSpan.FromMilliseconds(150)));
+            if (!entry.IsKnown) entry = frame.Source;
+            else Assert.True(frame.Source.IsAfter(entry));
+            var releasedF = io.InputReceipts.Count(item => item.Input.Kind == PathingMacroInputKind.KeyUp && item.Input.Key == User32.VK.VK_F);
+            if (io.InputReceipts.Count > 0)
+            {
+                var receipt = io.InputReceipts[^1].Receipt;
+                Assert.Equal(CombatBattleHostInputStatus.Sent, receipt.Status);
+                Assert.Equal(1, receipt.NativeRequested);
+                Assert.Equal(1, receipt.NativeSubmitted);
+                var completed = Assert.IsType<long>(receipt.CompletedTimestamp);
+                Assert.True(new CaptureFrameFence(entry, completed).Accepts(frame.Source));
+                Assert.True(io.Time.GetElapsedTime(completed, frame.Source.CapturedTimestamp) >= TimeSpan.FromMilliseconds(60));
+            }
+            // This is an external sensor simulation. Production never infers Cannon from a press count.
+            var exited = io.InputReceipts.Any(item => item.Input.Kind == PathingMacroInputKind.KeyUp && item.Input.Key == User32.VK.VK_ESCAPE);
+            var scene = exited || releasedF < 3 ? PathingMacroScene.World : PathingMacroScene.Cannon;
+            io.Scene = scene;
+            var observed = frame with { Scene = scene, CanFire = scene == PathingMacroScene.Cannon };
+            if (releasedF is 1 or 2 && worldResponses.Add(releasedF))
+            {
+                Assert.Equal(PathingMacroScene.World, observed.Scene);
+                Assert.False(observed.CanFire);
+                Assert.False(cancellation.IsCancellationRequested);
+                Assert.True(io.Time.GetTimestamp() < originalDeadline);
+                using var otherOwner = io.Coordinator.TryAcquire(Guid.NewGuid(), () => { });
+                Assert.Null(otherOwner);
+            }
+            if (scene == PathingMacroScene.Cannon && !cannon.IsKnown) cannon = frame.Source;
+            if (phase == "before-fire")
+            {
+                Assert.Equal(PathingMacroScene.Cannon, observed.Scene);
+                Assert.True(observed.CanFire);
+                beforeFire = frame.Source;
+            }
+            return observed;
+        };
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(plan, (_, _) => throw new Exception("unexpected native segment"), cancellation.Token);
+        Assert.True(result.CanContinue);
+        Assert.Contains(1, worldResponses);
+        Assert.Contains(2, worldResponses);
+        Assert.True(cannon.IsKnown);
+        Assert.True(beforeFire.IsKnown);
+        Assert.True(beforeFire == cannon || beforeFire.IsAfter(cannon));
+        Assert.Equal(3, io.Inputs.Count(input => input == "KeyDown:VK_F"));
+        var fire = Assert.Single(io.InputReceipts.Where(item => item.Input.Kind == PathingMacroInputKind.KeyDown && item.Input.Key == User32.VK.VK_RETURN));
+        Assert.True(Assert.IsType<long>(fire.Receipt.CompletedTimestamp) >= beforeFire.CapturedTimestamp);
+        Assert.Single(io.Inputs.Where(input => input == "KeyDown:VK_ESCAPE"));
+        Assert.Equal(PathingMacroScene.World, io.Scene);
+        Assert.True(io.Time.GetTimestamp() < originalDeadline);
+    }
+
+    [Fact]
+    public async Task TwoAuthoredInteractionsStillInWorldCannotInventAThirdOrFire()
+    {
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(
+            "w(.5),wait(1),keypress(f),wait(.2),keypress(f),wait(.1),keypress(RETURN),keypress(ESCAPE)", false), ["钟离"]);
+        var io = new MacroReplay { Scene = PathingMacroScene.World };
+        using var session = new PathingMacroSession(io);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => session.ExecuteAsync(plan,
+            (_, _) => throw new Exception("unexpected native segment"), default));
+        Assert.Equal(2, io.Inputs.Count(input => input == "KeyDown:VK_F"));
+        Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
+        Assert.DoesNotContain("KeyDown:VK_ESCAPE", io.Inputs);
+        Assert.All(io.InputReceipts, item =>
+        {
+            Assert.Equal(CombatBattleHostInputStatus.Sent, item.Receipt.Status);
+            Assert.Equal(1, item.Receipt.NativeRequested);
+            Assert.Equal(1, item.Receipt.NativeSubmitted);
+        });
+    }
+
+
     [Theory]
     [InlineData(100, 500)]
     [InlineData(600, 100)]
@@ -120,6 +216,41 @@ public partial class LegacyPathingMacroTests
         Assert.Equal(4, io.Observations); // entry, before-handshake, first-F, one completion observation
         Assert.DoesNotContain("KeyDown:VK_RETURN", io.Inputs);
     }
+    [Fact]
+    public async Task EarlyCannonSuppressesOnlyThisAuthoredRunAndKeepsTheNextRunAfterExit()
+    {
+        const string program = "keypress(f),wait(.2),keypress(f),wait(.1),keypress(f),wait(.1),keypress(RETURN),keypress(ESCAPE),wait(3)," +
+            "keypress(f),wait(.2),keypress(f),wait(.1),keypress(RETURN),keypress(ESCAPE)";
+        var plan = LegacyPathingMacroPlan.Create(CombatScriptParser.ParseContext(program, false), ["钟离"]);
+        Assert.True(Assert.Single(plan.Segments).CannonProgram);
+        var io = new MacroReplay { Scene = PathingMacroScene.World, CrossCannonScenes = true };
+        var fireSources = new List<CaptureFrameStamp>();
+        io.OnObservation = (phase, frame) =>
+        {
+            if (phase == "before-fire")
+            {
+                Assert.Equal(PathingMacroScene.Cannon, frame.Scene);
+                Assert.True(frame.CanFire);
+                Assert.True(frame.Source.IsFresh(io.Time, TimeSpan.FromMilliseconds(150)));
+                var receipt = io.InputReceipts[^1].Receipt;
+                Assert.Equal(CombatBattleHostInputStatus.Sent, receipt.Status);
+                var completed = Assert.IsType<long>(receipt.CompletedTimestamp);
+                Assert.True(io.Time.GetElapsedTime(completed, frame.Source.CapturedTimestamp) >= TimeSpan.FromMilliseconds(60));
+                fireSources.Add(frame.Source);
+            }
+            return frame;
+        };
+        using var session = new PathingMacroSession(io);
+        var result = await session.ExecuteAsync(plan, (_, _) => throw new Exception("unexpected native segment"), default);
+        Assert.True(result.CanContinue);
+        Assert.Equal(new[] { "KeyDown:VK_F", "KeyDown:VK_RETURN", "KeyDown:VK_ESCAPE",
+            "KeyDown:VK_F", "KeyDown:VK_RETURN", "KeyDown:VK_ESCAPE" },
+            io.Inputs.Where(input => input is "KeyDown:VK_F" or "KeyDown:VK_RETURN" or "KeyDown:VK_ESCAPE").ToArray());
+        Assert.Equal(2, fireSources.Count);
+        Assert.True(fireSources[1].IsAfter(fireSources[0]));
+        Assert.Equal(PathingMacroScene.World, io.Scene);
+    }
+
     [Fact]
     public async Task FirstInteractionAlreadyInCannonDoesNotSendAnotherInteraction()
     {
@@ -555,15 +686,94 @@ public partial class LegacyPathingMacroTests
                         ? frame with { Scene = PathingMacroScene.Unknown } : frame;
                 };
             }
+            var parsed = CombatScriptParser.ParseContext(text, false);
+            var plan = LegacyPathingMacroPlan.Create(parsed, ["琴"]);
+            var raw = Assert.Single(plan.Segments);
+            Assert.True(raw.IsRaw);
+            Assert.True(raw.CannonProgram);
+            Assert.Equal(parsed.CombatCommands.ToArray(), raw.Commands.ToArray());
+            static User32.VK? AuthoredKey(CombatCommand command)
+            {
+                if (command.Method == Method.W) return User32.VK.VK_W;
+                if (command.Method == Method.A) return User32.VK.VK_A;
+                if (command.Method == Method.S) return User32.VK.VK_S;
+                if (command.Method == Method.D) return User32.VK.VK_D;
+                return command.Method == Method.KeyPress
+                    ? BetterGenshinImpact.Helpers.User32Helper.ToVk(command.Args![0]) : null;
+            }
+            Assert.All(raw.Commands, command => Assert.True(command.Method == Method.Wait || AuthoredKey(command).HasValue));
+            var authoredF = raw.Commands.Select((command, index) => (command, index))
+                .Where(value => AuthoredKey(value.command) == User32.VK.VK_F).Select(value => value.index).ToArray();
+            Assert.Equal(text.Split("keypress(f)").Length - 1, authoredF.Length);
+            var suppressedOriginalIndices = new HashSet<int>();
+            var threeFProgram = item.GetProperty("name").GetString() == "001【激活程序】稻妻大炮1.json";
+            if (threeFProgram)
+            {
+                Assert.Equal(23, authoredF.Length); // Original fixture/plan is unchanged, including its third F.
+                Assert.Equal(new[] { 2, 4, 6 }, raw.Commands.Select((command, index) => (command, index))
+                    .TakeWhile(value => AuthoredKey(value.command) != User32.VK.VK_RETURN)
+                    .Where(value => AuthoredKey(value.command) == User32.VK.VK_F).Select(value => value.index).ToArray());
+                Assert.Equal(Method.Wait, raw.Commands[5].Method);
+                Assert.Equal("0.1", raw.Commands[5].Args![0]);
+            }
             using var session = new PathingMacroSession(io);
-            var result = await session.ExecuteAsync(LegacyPathingMacroPlan.Create(
-                CombatScriptParser.ParseContext(text, false), ["琴"]), (_, _) => throw new Exception("unexpected humanoid runner"), default);
+            var result = await session.ExecuteAsync(plan, (_, _) => throw new Exception("unexpected humanoid runner"), default);
             Assert.True(result.CanContinue);
             Assert.Equal(PathingMacroScene.World, io.Scene);
             Assert.False(session.HasTail);
             Assert.Equal(text.Split("keypress(RETURN)").Length - 1, io.Inputs.Count(x => x == "KeyDown:VK_RETURN"));
             Assert.Equal(text.Split("keypress(ESCAPE)").Length - 1, io.Inputs.Count(x => x == "KeyDown:VK_ESCAPE"));
-            Assert.Equal(text.Split("keypress(f)").Length - 1, io.Inputs.Count(x => x == "KeyDown:VK_F"));
+            var entry = io.ObservationReceipts.First().Observation.Source;
+            if (threeFProgram)
+            {
+                const int thirdOriginalF = 6;
+                var prefixEvents = raw.Commands.Take(thirdOriginalF).Count(command => AuthoredKey(command).HasValue) * 2;
+                var satisfied = Assert.Single(io.ObservationReceipts.Where(value => value.Phase == "cannon-handshake-continue" &&
+                    value.InputCount == prefixEvents && value.Observation.Scene == PathingMacroScene.Cannon));
+                var observed = satisfied.Observation;
+                Assert.Equal(thirdOriginalF - 1, satisfied.CommandIndex);
+                Assert.True(satisfied.ObservedAt < satisfied.Deadline);
+                Assert.True(observed.CanFire);
+                Assert.Equal(entry.SessionId, observed.Source.SessionId);
+                Assert.True(observed.Source.IsAfter(entry));
+                Assert.Equal(io.Time.TimestampFrequency, observed.Source.TimestampFrequency);
+                Assert.InRange(io.Time.GetElapsedTime(observed.Source.CapturedTimestamp, satisfied.ObservedAt).TotalMilliseconds, 0, 150);
+                var completed = Assert.IsType<long>(io.InputReceipts[prefixEvents - 1].Receipt.CompletedTimestamp);
+                Assert.Equal(completed, satisfied.InputFence);
+                Assert.Equal(new PathingMacroInput(PathingMacroInputKind.KeyUp, User32.VK.VK_F), io.InputReceipts[prefixEvents - 1].Input);
+                Assert.True(new CaptureFrameFence(entry, completed).Accepts(observed.Source));
+                Assert.True(io.Time.GetElapsedTime(completed, observed.Source.CapturedTimestamp) >= TimeSpan.FromMilliseconds(60));
+                suppressedOriginalIndices.Add(thirdOriginalF); // Only this run's already-satisfied third interaction is omitted.
+            }
+            else Assert.DoesNotContain(io.ObservationReceipts, value => value.Phase == "cannon-handshake-continue");
+            var expectedKeys = raw.Commands.Select((command, index) => (Key: AuthoredKey(command), Index: index))
+                .Where(value => value.Key.HasValue && !suppressedOriginalIndices.Contains(value.Index))
+                .Select(value => value.Key!.Value).ToArray();
+            Assert.Equal(authoredF.Length - suppressedOriginalIndices.Count, io.Inputs.Count(x => x == "KeyDown:VK_F"));
+            Assert.Equal(expectedKeys, io.InputReceipts.Where(value => value.Input.Kind == PathingMacroInputKind.KeyDown).Select(value => value.Input.Key).ToArray());
+            Assert.Equal(expectedKeys, io.InputReceipts.Where(value => value.Input.Kind == PathingMacroInputKind.KeyUp).Select(value => value.Input.Key).ToArray());
+            Assert.All(io.InputReceipts, value =>
+            {
+                Assert.Equal(CombatBattleHostInputStatus.Sent, value.Receipt.Status);
+                Assert.Null(value.Receipt.Error);
+                Assert.Equal(1, value.Receipt.NativeRequested);
+                Assert.Equal(1, value.Receipt.NativeSubmitted);
+                Assert.NotNull(value.Receipt.CompletedTimestamp);
+            });
+            var fireChecks = io.ObservationReceipts.Where(value => value.Phase == "before-fire").ToArray();
+            Assert.Equal(text.Split("keypress(RETURN)").Length - 1, fireChecks.Length);
+            foreach (var fire in fireChecks)
+            {
+                Assert.Equal(PathingMacroScene.Cannon, fire.Observation.Scene);
+                Assert.True(fire.Observation.CanFire);
+                Assert.Equal(entry.SessionId, fire.Observation.Source.SessionId);
+                Assert.InRange(io.Time.GetElapsedTime(fire.Observation.Source.CapturedTimestamp, fire.ObservedAt).TotalMilliseconds, 0, 150);
+                var completed = Assert.IsType<long>(io.InputReceipts[fire.InputCount - 1].Receipt.CompletedTimestamp);
+                Assert.True(new CaptureFrameFence(entry, completed).Accepts(fire.Observation.Source));
+                Assert.True(io.Time.GetElapsedTime(completed, fire.Observation.Source.CapturedTimestamp) >= TimeSpan.FromMilliseconds(60));
+                Assert.Equal(new PathingMacroInput(PathingMacroInputKind.KeyDown, User32.VK.VK_RETURN), io.InputReceipts[fire.InputCount].Input);
+            }
+            Assert.InRange((io.Time.GetUtcNow() - io.Start).TotalSeconds, 0, Math.Min(plan.BudgetSeconds, raw.RawBudgetSeconds));
         }
     }
 
@@ -684,6 +894,16 @@ public partial class LegacyPathingMacroTests
         public CombatInputCoordinator Coordinator { get; } = new();
         internal DateTimeOffset Start;
         internal List<string> Inputs { get; } = [];
+        internal List<(PathingMacroInput Input, CombatBattleHostInputResult Receipt)> InputReceipts { get; } = [];
+        internal List<(string Phase, PathingMacroObservation Observation, int InputCount, long ObservedAt, int CommandIndex, long Deadline, long InputFence)> ObservationReceipts { get; } = [];
+        private int _evidenceCommandIndex = -1;
+        private long _evidenceDeadline, _evidenceInputFence;
+        public void EvidenceBoundary(int commandIndex, long deadline, long inputFence)
+        {
+            _evidenceCommandIndex = commandIndex;
+            _evidenceDeadline = deadline;
+            _evidenceInputFence = inputFence;
+        }
         internal int Observations;
         internal Func<string, PathingMacroObservation, PathingMacroObservation>? OnObservation;
         internal Func<User32.VK, User32.VK> Mapping = key => key;
@@ -713,7 +933,10 @@ public partial class LegacyPathingMacroTests
             }
             var unknown = UnknownAt > 0 && Observations >= UnknownAt && Observations - UnknownAt < UnknownCount;
             var observation = new PathingMacroObservation(unknown ? PathingMacroScene.Unknown : Scene, _source.Next(), Scene == PathingMacroScene.Cannon && FirePrompt);
-            return OnObservation?.Invoke(phase, observation) ?? observation;
+            var observed = OnObservation?.Invoke(phase, observation) ?? observation;
+            ObservationReceipts.Add((phase, observed, Inputs.Count, Time.GetTimestamp(),
+                _evidenceCommandIndex, _evidenceDeadline, _evidenceInputFence));
+            return observed;
         }
         public User32.VK Map(User32.VK key) => Mapping(key);
         public CombatBattleHostInputResult Send(PathingMacroInput input, Action admit)
@@ -735,9 +958,12 @@ public partial class LegacyPathingMacroTests
                     _animationUntil = Time.GetUtcNow().AddMilliseconds(CannonAnimationMilliseconds);
                 }
             }
-            if (Inputs.Count == FaultAt) return new(Fault, Reason: "simulated-native-failure", Error: FaultError);
-            return new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp())
-            { NativeRequested = 1, NativeSubmitted = 1, ObservableAfterTimestamp = Clock.GetTimestamp() };
+            CombatBattleHostInputResult receipt = Inputs.Count == FaultAt
+                ? new(Fault, Reason: "simulated-native-failure", Error: FaultError)
+                : new(CombatBattleHostInputStatus.Sent, Clock.GetTimestamp())
+                    { NativeRequested = 1, NativeSubmitted = 1, ObservableAfterTimestamp = Clock.GetTimestamp() };
+            InputReceipts.Add((input, receipt));
+            return receipt;
         }
         public Task Delay(int milliseconds, CancellationToken ct)
         {

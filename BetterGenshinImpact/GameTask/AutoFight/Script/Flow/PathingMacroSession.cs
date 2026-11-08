@@ -146,6 +146,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
         _entry = observation.Source;
         _fence = io.Clock.GetTimestamp();
         var observedWaitMilliseconds = 0;
+        var cannonAcquisitionCompleted = false;
         for (var commandIndex = 0; commandIndex < segment.Commands.Count; commandIndex++)
         {
             var command = segment.Commands[commandIndex];
@@ -153,8 +154,8 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
             observedWaitMilliseconds = 0;
             _commandIndex = commandIndex;
             Check(_deadline, ct);
-            // 两个原定F是一次交互握手；第一F可能只隐藏HUD，不能在两者之间等待炮台UI。
-            // 仅保留已识别炮台程序中的原短等待，不新增重试或扩大Unknown入口准入。
+            // 只消费作者连续F/短wait的交互序列，不在仍有原F时提前等待Cannon。
+            // 未知入口的原双F许可不扩展；之后的原F须重新取得有效World或Cannon反馈。
             if (segment.CannonProgram && observation.Scene == PathingMacroScene.World &&
                 IsCannonHandshake(segment.Commands, commandIndex))
             {
@@ -178,21 +179,53 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 // 首F已经取得炮台能力时，第二F会成为多余的交互。Unknown只保留原定第二F，
                 // 不在两F之间等待Cannon，也不增加输入或延长宏期限。
                 if (feedback.Scene != PathingMacroScene.Cannon) await PressAsync(User32.VK.VK_F, ct);
+                var consumedIndex = commandIndex + 2;
+                var acquired = feedback.Scene == PathingMacroScene.Cannon;
+                while (IsCannonHandshake(segment.Commands, consumedIndex))
+                {
+                    _commandIndex = consumedIndex + 1;
+                    var continuationStarted = io.Clock.GetTimestamp();
+                    observation = await ObserveBoundaryAsync("cannon-handshake-continue", ct);
+                    var continuationWait = (int)Math.Min(int.MaxValue,
+                        Math.Floor(io.Clock.GetElapsedTime(continuationStarted).TotalMilliseconds));
+                    // Feedback consumes only this original adjacent wait; it is not carried past the next F.
+                    await WaitAsync(Math.Max(0, Milliseconds(segment.Commands[consumedIndex + 1].Args![0]) - continuationWait), ct);
+                    if (!observation.Source.IsFresh(io.Clock, TimeSpan.FromMilliseconds(150)))
+                        observation = await ObserveBoundaryAsync("cannon-handshake-continue", ct);
+                    if (observation.Scene is not (PathingMacroScene.World or PathingMacroScene.Cannon))
+                        throw new InvalidOperationException("炮台后续交互反馈场景失效，不继续发送原交互");
+                    acquired |= observation.Scene == PathingMacroScene.Cannon;
+                    if (io.Map(User32.VK.VK_F) != User32.VK.VK_F)
+                        throw new InvalidOperationException("炮台交互期间按键映射改变");
+                    consumedIndex += 2;
+                    _commandIndex = consumedIndex;
+                    SetEvidenceBoundary();
+                    if (!acquired) await PressAsync(User32.VK.VK_F, ct);
+                }
                 var handshakeFeedbackStarted = io.Clock.GetTimestamp();
                 observation = await ObserveBoundaryAsync("cannon-handshake-complete", ct, PathingMacroScene.Cannon);
                 // This branch bypasses the common transition accounting below. Credit only
                 // confirmation after the final F, never the script's interval between both Fs.
                 observedWaitMilliseconds = (int)Math.Min(int.MaxValue,
                     Math.Floor(io.Clock.GetElapsedTime(handshakeFeedbackStarted).TotalMilliseconds));
-                commandIndex += 2;
+                commandIndex = consumedIndex;
+                cannonAcquisitionCompleted = true;
                 continue;
             }
             var key = command.Method == Method.KeyPress ? User32Helper.ToVk(command.Args![0]) : default;
-            var turnsCannon = observation.Scene == PathingMacroScene.Cannon &&
-                (command.Method == Method.W || command.Method == Method.A || command.Method == Method.S || command.Method == Method.D ||
-                 key is User32.VK.VK_W or User32.VK.VK_A or User32.VK.VK_S or User32.VK.VK_D);
+            var directionCommand = command.Method == Method.W || command.Method == Method.A || command.Method == Method.S || command.Method == Method.D ||
+                key is User32.VK.VK_W or User32.VK.VK_A or User32.VK.VK_S or User32.VK.VK_D;
+            if (cannonAcquisitionCompleted && directionCommand)
+            {
+                observation = await ObserveBoundaryAsync("before-cannon-direction", ct, PathingMacroScene.Cannon);
+                cannonAcquisitionCompleted = false;
+            }
+            var turnsCannon = observation.Scene == PathingMacroScene.Cannon && directionCommand;
             if (segment.CannonProgram && key == User32.VK.VK_RETURN)
+            {
                 observation = await ObserveBoundaryAsync("before-fire", ct);
+                cannonAcquisitionCompleted = false;
+            }
             if (observation.Scene == PathingMacroScene.Cannon)
             {
                 if (!LegacyPathingMacroPlan.IsCannonCommand(command) ||
@@ -247,6 +280,7 @@ internal sealed class PathingMacroSession(IPathingMacroIo io) : IDisposable
                 (segment.CannonProgram || observation.Scene is PathingMacroScene.Cannon or PathingMacroScene.World))
                 observation = await ObserveBoundaryAsync("scene-transition", ct,
                     segment.CannonProgram && key == User32.VK.VK_ESCAPE ? PathingMacroScene.World : null);
+            if (segment.CannonProgram && key == User32.VK.VK_ESCAPE) cannonAcquisitionCompleted = false;
             // 炮台脚本的紧随wait规定的是输入后的最短等待，不是在已验证动画之后
             // 再等同样一遍。只抵扣实际观察耗时，只交给下一条wait，不续期或重放输入。
             if (segment.CannonProgram && (turnsCannon || key is User32.VK.VK_F or User32.VK.VK_ESCAPE))
