@@ -70,6 +70,7 @@ public partial class PathExecutor
         internal required Func<ImageRegion, HealingFrame> ReadHealing { get; init; }
         internal required Func<WaypointForTrack, CancellationToken, Task<CombatExecutionResult>> RunAction { get; init; }
         internal Func<WaypointForTrack, CancellationToken, Task>? BeforeAction { get; init; }
+        internal Func<UiOperation?>? ReadCurrentUiOperation { get; init; }
         internal Func<WaypointForTrack, NavigationResumePlan.MiningBinding?, CancellationToken,
             Task<(CombatExecutionResult Outcome, NavigationResumePlan.MiningBinding? Binding)>>? RunMining { get; init; }
         internal Func<CancellationToken, Task<NavigationResumePlan.MiningBinding?>>? ReadMiningBinding { get; init; }
@@ -308,7 +309,8 @@ public partial class PathExecutor
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(User32.VK.VK_W);
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.Mouse.RightButtonUp();
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateAction(GIActions.NormalAttack, KeyType.KeyUp);
-            }, ct, canRestartAfterCombatRecovery: CanRestartAfterCombatRecovery, resumeNavigation: ExecutePendingNavigationResumeAsync);
+            }, ct, resumeNavigation: ExecutePendingNavigationResumeAsync,
+                assessVerifiedCombatRecovery: CanRestartAfterCombatRecovery);
             if (endedEarly)
             {
                 SuccessEnd = true;
@@ -324,7 +326,8 @@ public partial class PathExecutor
     /// <summary>正常完成返回 false；仅显式结束条件返回 true；失败或取消始终向调用方传播。</summary>
     internal static async Task<bool> ExecuteSegmentWithRetriesAsync(Func<Task> execute,
         Action<Exception> onRetry, Action releaseInput, CancellationToken ct,
-        Func<bool>? canRestartAfterCombatRecovery = null, Func<Task>? resumeNavigation = null)
+        Func<bool>? canRestartAfterCombatRecovery = null, Func<Task>? resumeNavigation = null,
+        Func<CombatRecoveryCompletedException, bool>? assessVerifiedCombatRecovery = null)
     {
         var healingRestarts = 0;
         var relocationRestarts = 0;
@@ -356,7 +359,10 @@ public partial class PathExecutor
                 UiOperation.Current?.Check();
                 // 选角触发的复苏和低血回血共用原有两次恢复预算；仍须验证同一
                 // 传送入口及完整前缀，不能把复苏成功直接当作可重放路线的授权。
-                if (canRestartAfterCombatRecovery?.Invoke() != true)
+                var canRestart = assessVerifiedCombatRecovery != null
+                    ? assessVerifiedCombatRecovery(exception)
+                    : canRestartAfterCombatRecovery?.Invoke() == true;
+                if (!canRestart)
                     throw new InvalidOperationException("已确认复苏，但缺少可安全回放的原传送入口或前缀；路线未完成，不重放路径宏", exception);
                 UiOperation.Current?.Check();
                 ct.ThrowIfCancellationRequested();
@@ -2252,6 +2258,7 @@ public partial class PathExecutor
         if (semanticPlan == null)
         {
             TryCloseSkipOtherOperations();
+            _reviveResumeAnchor = CaptureReviveResumeAnchor();
             await RecoverWhenLowHp(waypoint);
             _segmentHasStartedTraversal = true;
         }

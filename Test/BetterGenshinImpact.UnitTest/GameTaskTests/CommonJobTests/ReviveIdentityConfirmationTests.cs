@@ -11,6 +11,153 @@ public class ReviveIdentityConfirmationTests
     private static readonly ReviveTarget Target = new("钟离", 1);
     private static readonly IReadOnlyDictionary<int, string> Party = new Dictionary<int, string> { [1] = "钟离", [2] = "娜维娅" };
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(null)]
+    public Task NativeAvatarVerifierPublishesTheSecondExistingFrameHealthAndOriginalUiOrigin(bool? secondLowHp) =>
+        RunNativeAvatarVerifierCounterAsync(secondLowHp, null);
+
+    [Theory]
+    [InlineData("wrong-target")]
+    [InlineData("stale")]
+    [InlineData("cancelled")]
+    [InlineData("foreign-root")]
+    public Task NativeAvatarVerifierCannotUpgradeInvalidEvidenceToARouteReceipt(string fault) =>
+        RunNativeAvatarVerifierCounterAsync(false, fault);
+
+    private static async Task RunNativeAvatarVerifierCounterAsync(bool? secondLowHp, string? fault)
+    {
+        BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.ProhibitForCurrentProcess();
+        using var taskOwner = TaskExecutionScope.BeginOwned();
+        using var cancellation = new CancellationTokenSource();
+        var clock = new FakeTimeProvider();
+        var producer = new CaptureFrameSource(clock);
+        using var routeOwner = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin(
+            "native-revive-original-route", TimeSpan.FromSeconds(240), cancellation.Token,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, clock);
+        var originalDeadline = clock.GetUtcNow() + routeOwner.Remaining;
+        var origin = Avatar.CaptureReviveUiOrigin();
+        Assert.Equal(routeOwner.RootId, origin.RootId);
+        Assert.Equal(routeOwner.Id, origin.OperationId);
+        if (fault == "foreign-root") origin = origin with { RootId = Guid.NewGuid().ToString("N") };
+        using var selection = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin(
+            "native-revive-selection-child", TimeSpan.FromSeconds(60), routeOwner.Token,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, clock);
+        Assert.NotEqual(origin.OperationId, selection.Id);
+        var captures = new List<BetterGenshinImpact.GameTask.Model.Area.ImageRegion>();
+        var targetRegions = new List<BetterGenshinImpact.GameTask.Model.Area.ImageRegion>();
+        var healthRegions = new List<BetterGenshinImpact.GameTask.Model.Area.ImageRegion>();
+        var targetFrames = new List<ReviveRecoveryFrame>();
+        var health = new List<bool?>();
+        var recoveries = 0;
+        var inputs = 0;
+        long recoveryCompleted = 0;
+        var io = new Avatar.ReviveVerificationIo
+        {
+            Capture = () =>
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(1));
+                var pixels = new OpenCvSharp.Mat(1080, 1920, OpenCvSharp.MatType.CV_8UC3, OpenCvSharp.Scalar.Black);
+                var lowHp = captures.Count == 0 ? true : secondLowHp;
+                if (lowHp.HasValue)
+                {
+                    using var bar = new OpenCvSharp.Mat(pixels, new OpenCvSharp.Rect(805, 1008, 7, 5));
+                    bar.SetTo(lowHp.Value ? new OpenCvSharp.Scalar(0, 0, 255) : new OpenCvSharp.Scalar(0, 200, 0));
+                }
+                var timestamp = clock.GetTimestamp();
+                if (fault == "stale") timestamp -= (long)((BetterGenshinImpact.GameTask.Common.Ui.UiSnapshot.RecoveryMaximumAge +
+                    TimeSpan.FromMilliseconds(1)).TotalSeconds * clock.TimestampFrequency);
+                var frame = new BetterGenshinImpact.GameTask.Model.Area.ImageRegion(pixels, 0, 0)
+                    { FrameStamp = producer.Next(timestamp) };
+                captures.Add(frame);
+                return frame;
+            },
+            ReadTarget = frame =>
+            {
+                targetRegions.Add(frame);
+                var party = System.Collections.Immutable.ImmutableDictionary<int, string>.Empty
+                    .Add(1, fault == "wrong-target" ? "娜维娅" : Target.Name);
+                var observed = new ReviveRecoveryFrame(0, true, ReviveUiState.None, 1, party)
+                    .WithSource(frame.FrameStamp, clock);
+                targetFrames.Add(observed);
+                return observed;
+            },
+            ReadLowHp = frame =>
+            {
+                healthRegions.Add(frame);
+                Assert.Same(targetRegions[^1], frame);
+                Assert.Equal(targetFrames[^1].SourceStamp, frame.FrameStamp);
+                var observed = Bv.ObserveCurrentAvatarLowHp(frame, 1d); // Actual pure nullable pixel reader, no OCR/model.
+                health.Add(observed);
+                if (fault == "cancelled") cancellation.Cancel();
+                return observed;
+            },
+            Select = _ => inputs++,
+            BeginExclusive = () => new NativeVerificationLease(),
+            Clock = clock,
+            Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+            Delay = (milliseconds, token) =>
+            {
+                token.ThrowIfCancellationRequested();
+                clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+                return Task.CompletedTask;
+            }
+        };
+        Task Recover()
+        {
+            recoveries++;
+            clock.Advance(TimeSpan.FromSeconds(5));
+            recoveryCompleted = clock.GetTimestamp();
+            return Task.CompletedTask;
+        }
+        var error = await Record.ExceptionAsync(() =>
+            Avatar.RecoverVerifiedTargetAsync(Recover, Target, io, origin, selection.Token));
+        Assert.Equal(1, recoveries);
+        Assert.Equal(0, inputs);
+        Assert.Equal(captures.Count, targetRegions.Count);
+        Assert.Equal(captures.Count, healthRegions.Count);
+        for (var index = 0; index < captures.Count; index++)
+        {
+            Assert.Same(captures[index], targetRegions[index]);
+            Assert.Same(captures[index], healthRegions[index]);
+        }
+        if (fault is "wrong-target" or "stale" or "cancelled")
+        {
+            Assert.NotNull(error);
+            Assert.IsNotType<CombatRecoveryCompletedException>(error);
+            if (fault == "cancelled") Assert.IsAssignableFrom<OperationCanceledException>(error);
+            else if (fault == "stale") Assert.True(error is InvalidOperationException or TimeoutException);
+            else Assert.IsType<InvalidOperationException>(error);
+            return;
+        }
+        Assert.Equal(2, captures.Count); // Existing Wait's two frames only; neither receipt construction nor catch may recapture.
+        Assert.True(health[0]);
+        Assert.Equal(secondLowHp, health[1]);
+        Assert.True(targetFrames[1].IsAfter(targetFrames[0]));
+        Assert.True(targetFrames[1].SourceStamp.CapturedTimestamp > recoveryCompleted);
+        Assert.Equal(originalDeadline, clock.GetUtcNow() + routeOwner.Remaining);
+        var signal = Assert.IsType<CombatRecoveryCompletedException>(error);
+        if (fault == "foreign-root")
+        {
+            Assert.Null(signal.Proof); // Invalid origin cannot grant a route receipt; positive cases must first pass.
+            return;
+        }
+        var proof = Assert.IsType<ReviveRecoveryProof>(signal.Proof); // Native producer RED: original verify body still returns Task/true.
+        Assert.Same(targetFrames[1], proof.Frame);
+        Assert.Equal(targetFrames[1].SourceStamp, proof.Frame.SourceStamp);
+        Assert.Equal(health[1], proof.LowHp);
+        Assert.Equal(Target, proof.Target);
+        Assert.Equal(origin.RootId, proof.UiRootId);
+        Assert.Equal(origin.OperationId, proof.UiOperationId);
+        Assert.NotEqual(selection.Id, proof.UiOperationId);
+        Assert.Equal(recoveryCompleted, proof.RecoveryCompletedTimestamp);
+    }
+
+    private sealed class NativeVerificationLease : IDisposable
+    {
+        public void Dispose() { }
+    }
+
     [Fact]
     public async Task AnotherLivingActorCannotProveTheKnownDefeatedActorRecovered()
     {

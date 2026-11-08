@@ -9,6 +9,59 @@ namespace BetterGenshinImpact.UnitTest.GameTaskTests;
 public class CombatRecoveryTests
 {
     [Fact]
+    public async Task VerifiedRecoverySignalMustRetainTheOriginalBoundObservationForRouteAssessment()
+    {
+        BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.ProhibitForCurrentProcess();
+        using var taskOwner = TaskExecutionScope.BeginOwned();
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var producer = new Fischless.GameCapture.CaptureFrameSource(clock);
+        using var routeOwner = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin(
+            "revive-proof-route-parent", TimeSpan.FromSeconds(240),
+            logger: NullLogger.Instance, clock: clock);
+        var originalDeadline = clock.GetUtcNow() + routeOwner.Remaining;
+        var recovered = 0;
+        var observations = 0;
+        long recoveryCompleted = 0;
+        ReviveRecoveryProof? published = null;
+        Task Recover()
+        {
+            recovered++;
+            clock.Advance(TimeSpan.FromSeconds(5));
+            recoveryCompleted = clock.GetTimestamp();
+            return Task.CompletedTask;
+        }
+        Task<ReviveRecoveryProof> Verify()
+        {
+            observations++;
+            clock.Advance(TimeSpan.FromMilliseconds(61));
+            var target = new ReviveTarget("钟离", 1);
+            var frame = new ReviveRecoveryFrame(0, true,
+                BetterGenshinImpact.GameTask.Common.BgiVision.ReviveUiState.None, 1,
+                System.Collections.Immutable.ImmutableDictionary<int, string>.Empty.Add(1, target.Name))
+                .WithSource(producer.Next(), clock);
+            var proof = new ReviveRecoveryProof(frame, target, false, routeOwner.RootId, routeOwner.Id, recoveryCompleted);
+            published = proof;
+            return Task.FromResult(proof);
+        }
+        // Task<T> passes through the production Func<Task> boundary, exactly where the current result is erased.
+        var signal = await Assert.ThrowsAsync<CombatRecoveryCompletedException>(() =>
+            CombatRecoveryCompletedException.RecoverVerifiedAsync(Recover, Verify, routeOwner.Token));
+        Assert.Equal(1, recovered);
+        Assert.Equal(1, observations);
+        Assert.NotNull(published);
+        Assert.True(published.Frame.SourceBound);
+        Assert.True(published.Frame.HasUsableEvidence);
+        Assert.NotNull(published.Target);
+        Assert.True(published.Frame.Confirms(published.Target));
+        Assert.False(published.LowHp);
+        Assert.True(published.Frame.SourceStamp.CapturedTimestamp > recoveryCompleted);
+        Assert.Equal(routeOwner.RootId, published.UiRootId);
+        Assert.Equal(originalDeadline, clock.GetUtcNow() + routeOwner.Remaining);
+        TaskExecutionScope.ThrowIfFailed();
+        Assert.Same(published, signal.Proof); // Business RED: the existing completed path drops the verified value.
+    }
+
+    [Fact]
     public async Task JavascriptCanRetryTheCommissionAfterConfirmedRecoveryButNeverCreditTheFailedAttempt()
     {
         var recovered = await Assert.ThrowsAsync<CombatRecoveryCompletedException>(() =>
