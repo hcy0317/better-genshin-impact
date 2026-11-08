@@ -43,6 +43,22 @@ namespace BetterGenshinImpact.GameTask.AutoFight.Model;
 public partial class Avatar
 {
     private sealed record KnownReviveTarget(ReviveTarget Identity, CombatScenes Scene);
+    internal readonly record struct ReviveUiOrigin(string? RootId, string? OperationId);
+    internal sealed class ReviveVerificationIo
+    {
+        internal required Func<ImageRegion?> Capture { get; init; }
+        internal required Func<ImageRegion, ReviveRecoveryFrame> ReadTarget { get; init; }
+        internal required Func<ImageRegion, bool?> ReadLowHp { get; init; }
+        internal required Action<int> Select { get; init; }
+        internal required Func<IDisposable> BeginExclusive { get; init; }
+        internal required TimeProvider Clock { get; init; }
+        internal required ILogger Logger { get; init; }
+        internal Func<int, CancellationToken, Task>? Delay { get; init; }
+        internal Action<Exception, string>? CaptureFailure { get; init; }
+    }
+    private readonly record struct ReviveObservation(ReviveRecoveryFrame Frame, bool? LowHp);
+    internal static ReviveUiOrigin CaptureReviveUiOrigin() => new(UiOperation.Current?.RootId, UiOperation.Current?.Id);
+
     /// <summary>
     /// 配置文件中的角色信息
     /// </summary>
@@ -192,7 +208,8 @@ public partial class Avatar
         ThrowWhenDefeated(region, ct, null);
     }
 
-    private static void ThrowWhenDefeated(ImageRegion region, CancellationToken ct, KnownReviveTarget? target)
+    private static void ThrowWhenDefeated(ImageRegion region, CancellationToken ct, KnownReviveTarget? target,
+        ReviveUiOrigin? origin = null)
     {
         if (Bv.IsInRevivePrompt(region))
         {
@@ -212,7 +229,7 @@ public partial class Avatar
             using var driver = new NativeUiDriver();
             UiRecovery.RecoverDefeatedAsync(driver, token =>
             {
-                TpForRecover(token, cause, target);
+                TpForRecover(token, cause, target, origin);
                 return Task.CompletedTask;
             }, ct, Logger).GetAwaiter().GetResult();
         }
@@ -320,10 +337,22 @@ public partial class Avatar
     /// <exception cref="RetryException"></exception>
     public static void TpForRecover(CancellationToken ct, Exception ex) => TpForRecover(ct, ex, null);
 
-    private static void TpForRecover(CancellationToken ct, Exception ex, KnownReviveTarget? target)
+    private static void TpForRecover(CancellationToken ct, Exception ex, KnownReviveTarget? target,
+        ReviveUiOrigin? origin = null) =>
+        RecoverVerifiedTargetAsync(() => RecoverAtStatueOfTheSeven(ct), target?.Identity,
+            CreateReviveVerificationIo(target), origin, ct).GetAwaiter().GetResult();
+
+    internal static Task RecoverVerifiedTargetAsync(Func<Task> recover, ReviveTarget? target,
+        ReviveVerificationIo io, ReviveUiOrigin? origin, CancellationToken ct)
     {
-        CombatRecoveryCompletedException.RecoverVerifiedAsync(
-            () => RecoverAtStatueOfTheSeven(ct), () => VerifyRecoveredTarget(target, ct), ct).GetAwaiter().GetResult();
+        long recoveryCompleted = 0;
+        async Task Recover()
+        {
+            await recover();
+            recoveryCompleted = io.Clock.GetTimestamp();
+        }
+        return CombatRecoveryCompletedException.RecoverVerifiedAsync(Recover,
+            () => VerifyRecoveredTargetAsync(target, io, origin, recoveryCompleted, ct), ct);
     }
 
     private static ImageRegion? CaptureFreshUiFrame()
@@ -334,57 +363,93 @@ public partial class Avatar
         return new CaptureContent(frame, 0, 0).CaptureRectArea;
     }
 
-    private static ReviveRecoveryFrame CaptureRecoveryFrame(KnownReviveTarget? target, CancellationToken ct)
+    private static ReviveVerificationIo CreateReviveVerificationIo(KnownReviveTarget? target) => new()
+    {
+        Capture = CaptureFreshUiFrame,
+        ReadTarget = frame =>
+        {
+            if (target == null)
+                return new ReviveRecoveryFrame(frame.FrameStamp.Sequence, Bv.IsInMainUi(frame), Bv.ReadReviveState(frame), -1, new Dictionary<int, string>())
+                    .WithSource(frame.FrameStamp, TimeProvider.System);
+            try
+            {
+                var observed = target.Scene.ReadRecoveryFrame(frame, target.Identity);
+                try
+                {
+                    BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope.Current?.TryCapture(frame, "statue-confirm:" + UiOperation.Current?.Id,
+                        $"state-{observed.Revive}-{observed.ActiveIndex}",
+                        $"target={target.Identity.Name} slot={target.Identity.Index} active={observed.ActiveIndex} hud={observed.MainReady} revive={observed.Revive}; 原始恢复判定帧", Logger);
+                }
+                catch { }
+                return observed;
+            }
+            catch (Exception error) when (error is not OperationCanceledException and not CombatNotFinishedException and not CombatActionInterruptedException)
+            {
+                Logger.LogDebug(error, "神像恢复角色身份读取失败，保留未知");
+                return new(0, false, ReviveUiState.None, -1, new Dictionary<int, string>());
+            }
+        },
+        ReadLowHp = Bv.ObserveCurrentAvatarLowHp,
+        Select = SimulateSwitchKey,
+        BeginExclusive = () => AvatarRecognition.BeginExclusiveOperation(),
+        Clock = TimeProvider.System,
+        Logger = Logger,
+        CaptureFailure = (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context)
+    };
+
+    private static ReviveObservation CaptureRecoveryObservation(ReviveVerificationIo io, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         UiOperation.Current?.Check();
-        using var frame = CaptureFreshUiFrame();
-        if (frame == null) return new(0, false, ReviveUiState.None, -1, new Dictionary<int, string>());
-        if (target == null)
-            return new ReviveRecoveryFrame(frame.FrameStamp.Sequence, Bv.IsInMainUi(frame), Bv.ReadReviveState(frame), -1, new Dictionary<int, string>())
-                .WithSource(frame.FrameStamp, TimeProvider.System);
-        try
-        {
-            var observed = target.Scene.ReadRecoveryFrame(frame, target.Identity);
-            try
-            {
-                BetterGenshinImpact.GameTask.Common.DiagnosticEvidenceScope.Current?.TryCapture(frame, "statue-confirm:" + UiOperation.Current?.Id,
-                    $"state-{observed.Revive}-{observed.ActiveIndex}",
-                    $"target={target.Identity.Name} slot={target.Identity.Index} active={observed.ActiveIndex} hud={observed.MainReady} revive={observed.Revive}; 原始恢复判定帧",
-                    Logger);
-            }
-            catch { }
-            return observed;
-        }
+        using var frame = io.Capture();
+        if (frame == null) return new(new(0, false, ReviveUiState.None, -1, new Dictionary<int, string>()), null);
+        var source = frame.FrameStamp;
+        var observed = io.ReadTarget(frame);
+        bool? lowHp = null;
+        try { lowHp = io.ReadLowHp(frame); }
         catch (Exception error) when (error is not OperationCanceledException and not CombatNotFinishedException and not CombatActionInterruptedException)
-        {
-            Logger.LogDebug(error, "神像恢复角色身份读取失败，保留未知");
-            return new(0, false, ReviveUiState.None, -1, new Dictionary<int, string>());
-        }
+        { io.Logger.LogDebug(error, "神像恢复同帧血量读取失败，保留未知"); }
+        ct.ThrowIfCancellationRequested();
+        UiOperation.Current?.Check();
+        if (frame.FrameStamp != source || observed.SourceStamp != source)
+            return new(new(0, false, ReviveUiState.None, -1, new Dictionary<int, string>()), null);
+        return new(observed, lowHp);
     }
 
-    private static Task VerifyRecoveredTarget(KnownReviveTarget? target, CancellationToken ct) =>
+    private static Task<ReviveRecoveryProof?> VerifyRecoveredTargetAsync(ReviveTarget? target, ReviveVerificationIo io,
+        ReviveUiOrigin? origin, long recoveryCompleted, CancellationToken ct) =>
         UiOperation.RunAsync("statue-revive-confirm", TimeSpan.FromSeconds(8), ct, async operation =>
         {
-            using var exclusive = AvatarRecognition.BeginExclusiveOperation();
+            using var exclusive = io.BeginExclusive();
             ReviveRecoveryFrame? last = null;
-            await RecoveredAvatarConfirmation.WaitAsync(target?.Identity, () =>
+            bool? lastLowHp = null;
+            var confirmed = await RecoveredAvatarConfirmation.WaitAsync(target, () =>
             {
-                last = CaptureRecoveryFrame(target, operation.Token);
+                var observation = CaptureRecoveryObservation(io, operation.Token);
+                last = observation.Frame;
+                lastLowHp = observation.LowHp;
                 operation.Observe("原败北角色恢复并可出战",
-                    $"actor={target?.Identity.Name ?? "未知"},slot={target?.Identity.Index},mapped={target != null && last.HasTarget(target.Identity)},active={last.ActiveIndex},hud={last.MainReady},revive={last.Revive}", last.FrameId);
+                    $"actor={target?.Name ?? "未知"},slot={target?.Index},mapped={target != null && last.HasTarget(target)},active={last.ActiveIndex},hud={last.MainReady},revive={last.Revive},lowHp={lastLowHp}", last.FrameId);
                 return last;
             }, index =>
             {
                 operation.Check();
-                if (target != null && last is { MainReady: true, Revive: ReviveUiState.None } && last.HasTarget(target.Identity))
-                    SimulateSwitchKey(index);
-            }, ms => operation.DelayAsync(ms, ct), operation.Remaining, operation.Token);
+                if (target != null && last is { MainReady: true, Revive: ReviveUiState.None } && last.HasTarget(target))
+                    io.Select(index);
+            }, ms => io.Delay == null ? operation.DelayAsync(ms, ct) : io.Delay(ms, ct), operation.Remaining, operation.Token, io.Clock);
             operation.Check();
-            if (target != null) Logger.LogInformation("神像恢复已确认原角色 {Actor} 可出战", target.Identity.Name);
-            else Logger.LogInformation("复苏目标身份未知，本次只核实恢复后的主界面，不签发指定角色或全队复活证明");
-            return true;
-        }, Logger, captureFailure: (error, context) => TaskFailureDiagnostics.CaptureScreenshotOnce(error, context));
+            if (target != null) io.Logger.LogInformation("神像恢复已确认原角色 {Actor} 可出战", target.Name);
+            else io.Logger.LogInformation("复苏目标身份未知，本次只核实恢复后的主界面，不签发指定角色或全队复活证明");
+            // No observation is made here: health and identity belong to the same already-consumed region.
+            if (last == null || !ReferenceEquals(confirmed, last))
+                throw new InvalidOperationException("恢复确认帧与同帧血量观察未绑定，不能签发路线回执");
+            if (origin is not { } caller || string.IsNullOrWhiteSpace(caller.RootId) ||
+                string.IsNullOrWhiteSpace(caller.OperationId) || caller.RootId != operation.RootId)
+                return (ReviveRecoveryProof?)null;
+            return new ReviveRecoveryProof(confirmed, target, lastLowHp, caller.RootId,
+                caller.OperationId, recoveryCompleted);
+        }, io.Logger, io.Clock, captureFailure: (error, context) => io.CaptureFailure?.Invoke(error, context));
+
 
     public static async Task RecoverAtStatueOfTheSeven(CancellationToken ct)
     {

@@ -42,6 +42,7 @@ public partial class Avatar
     internal static void ResolveSelectionRecovery(AvatarRecoveryRequest request, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        var origin = CaptureReviveUiOrigin(); // Original caller identity, before the selection child scope.
         // 先实际释放输入，再进入不受战斗150ms约束的恢复阶段。
         BetterGenshinImpact.Core.Input.InputHub.ReleaseAll();
         using var suspension = CombatActionScope.Suspend();
@@ -71,6 +72,6 @@ public partial class Avatar
             }
         }
         operation.Check();
-        ThrowWhenDefeated(after, operation.Token, target);
+        ThrowWhenDefeated(after, operation.Token, target, origin);
     }
 }

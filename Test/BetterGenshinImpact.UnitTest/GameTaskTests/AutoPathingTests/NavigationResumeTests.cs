@@ -360,8 +360,28 @@ public partial class NavigationResumeTests
     [InlineData("unsafe-ui")]
     [InlineData("long-wait")]
     [InlineData("multi-actor")]
-    public async Task PublicPathingReplaysTheWholeRecordedPrefixAfterConfirmedHealing(string scenario)
+    public Task PublicPathingReplaysTheWholeRecordedPrefixAfterConfirmedHealing(string scenario) =>
+        ReplayWholeRecordedPrefixAsync(scenario, revive: false);
+
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("missing-proof")]
+    [InlineData("stale-proof")]
+    [InlineData("foreign-root")]
+    [InlineData("wrong-target")]
+    [InlineData("unknown-hp")]
+    [InlineData("owner-expired")]
+    [InlineData("third-ticket")]
+    public Task PublicPathingAssessesConfirmedReviveThroughTheOriginalSemanticBoundary(string scenario) =>
+        ReplayWholeRecordedPrefixAsync(scenario, revive: true);
+
+    [Fact]
+    public Task MissingCurrentUiOriginCannotBorrowAFreshReviveProofForSemanticReplay() =>
+        ReplayWholeRecordedPrefixAsync("missing-ui-origin", revive: true);
+
+    private async Task ReplayWholeRecordedPrefixAsync(string scenario, bool revive)
     {
+        BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.ProhibitForCurrentProcess();
         using var modelData = new ModelDataFixture();
         var replay = new PathReplay { EmitReceipts = true };
         PathExecutor? subject = null;
@@ -371,6 +391,11 @@ public partial class NavigationResumeTests
         var target = position;
         var healed = false;
         var recoveryCount = 0;
+        var reviveSignals = new List<CombatRecoveryCompletedException>();
+        ReviveRecoveryProof? publishedReviveProof = null;
+        bool? publishedReviveFreshnessAtVerification = null;
+        var currentOriginReads = 0;
+        DateTimeOffset? verifiedReviveDeadline = null;
         var teleports = new List<(Fischless.GameCapture.CaptureFrameStamp Before, Fischless.GameCapture.CaptureFrameStamp After, long Completed)>();
         var actions = new List<(bool Returned, int Id, string Action, string Parameters, string Ir)>();
         var initialVisits = new List<int>();
@@ -447,8 +472,46 @@ public partial class NavigationResumeTests
             macroOutcomes.Add((point.Id.Value, executed.Outcome));
             return executed;
         }
+        Task RecoverAtStatue(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            recoveryCount++;
+            healed = true;
+            nativeInputsAtRecovery = native.Inputs.Count;
+            if (scenario == "context-changed") native.Actors = [new("钟离", 1), new("娜维娅", 2), new("凯亚", 3), new("香菱", 4)];
+            if (scenario == "target-slot-changed") native.Actors = [new("娜维娅", 1), new("钟离", 2), new("班尼特", 3), new("香菱", 4)];
+            if (scenario == "resolved-ir-changed") native.Actors = [new("娜维娅", 1), new("班尼特", 2), new("凯亚", 3), new("香菱", 4)];
+            if (scenario == "missing-target-proof") native.TargetIdentityName = null;
+            if (!revive && scenario == "wrong-target") native.TargetIdentityName = "娜维娅";
+            if (scenario == "foreign-target-proof") native.IdentityFault = "foreign";
+            if (scenario == "stale-target-proof") native.IdentityFault = "stale";
+            if (scenario == "duplicate-target-proof") native.IdentityFault = "duplicate";
+            if (scenario == "digest-changed") subject!.CurWaypoints.Item2[1].X += 1;
+            position = new(9000, 9000);
+            // Preserve the real configured external statue wait; this does not set skill readiness.
+            replay.Clock.Advance(TimeSpan.FromSeconds(scenario == "owner-expired" ? 241 : scenario == "parent-expired" ? 1201 : hpRestoreSeconds));
+            return Task.CompletedTask;
+        }
         var scene = new PathExecutor.PathingSceneIo
         {
+            ReadCurrentUiOperation = revive && scenario == "missing-ui-origin" ? () =>
+            {
+                currentOriginReads++;
+                var actual = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current;
+                Assert.NotNull(actual);
+                actual.Check();
+                Assert.False(actual.Token.IsCancellationRequested);
+                TaskExecutionScope.ThrowIfFailed();
+                Assert.NotNull(publishedReviveProof);
+                Assert.True(publishedReviveProof.Frame.SourceBound);
+                Assert.True(publishedReviveProof.Frame.HasUsableEvidence);
+                Assert.True(publishedReviveProof.Frame.Confirms(publishedReviveProof.Target));
+                Assert.False(publishedReviveProof.LowHp);
+                Assert.Equal(publishedReviveProof.UiRootId, actual.RootId);
+                Assert.Equal(originalDeadline, verifiedReviveDeadline);
+                Assert.True(replay.Clock.GetUtcNow() < originalDeadline!.Value);
+                return null; // Only this guard read is absent; ambient/scope/token/owner remain unchanged.
+            } : null,
             Prepare = (_, _) => Task.FromResult(true),
             Convert = (point, map) => new WaypointForTrack(point, map, value => value),
             Teleport = (point, token) =>
@@ -472,6 +535,53 @@ public partial class NavigationResumeTests
                 if (healed && pointId == 27) suffixVisits++;
                 if (pointId != 26) return false;
                 var deadline = replay.Clock.GetUtcNow() + BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!.Remaining;
+                if (revive && (!healed || scenario == "third-ticket" && recoveryCount < 3))
+                {
+                    if (healed) returnedDeadline = deadline; else originalDeadline = deadline;
+                    var token = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!.Token;
+                    long recoveryCompleted = 0;
+                    async Task RecoverForSignal()
+                    {
+                        await RecoverAtStatue(token);
+                        recoveryCompleted = replay.Clock.GetTimestamp();
+                    }
+                    Task<ReviveRecoveryProof?> VerifyForSignal()
+                    {
+                        replay.Clock.Advance(TimeSpan.FromMilliseconds(61));
+                        using var observed = replay.Io.Capture();
+                        var bound = new ReviveRecoveryFrame(0, true,
+                            BetterGenshinImpact.GameTask.Common.BgiVision.ReviveUiState.None, 1,
+                            System.Collections.Immutable.ImmutableDictionary<int, string>.Empty.Add(1, "钟离"))
+                            .WithSource(observed.FrameStamp, replay.Clock);
+                        var current = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!;
+                        publishedReviveProof = scenario == "missing-proof" ? null : new(bound,
+                            scenario == "wrong-target" ? new ReviveTarget("娜维娅", 2) : new ReviveTarget("钟离", 1),
+                            scenario == "unknown-hp" ? null : false,
+                            scenario == "foreign-root" ? Guid.NewGuid().ToString("N") : current.RootId,
+                            current.Id, recoveryCompleted);
+                        if (scenario == "stale-proof") replay.Clock.Advance(
+                            BetterGenshinImpact.GameTask.Common.Ui.UiSnapshot.RecoveryMaximumAge + TimeSpan.FromMilliseconds(1));
+                        publishedReviveFreshnessAtVerification = publishedReviveProof?.Frame.HasUsableEvidence;
+                        if (publishedReviveProof != null)
+                        {
+                            if (scenario == "stale-proof") Assert.False(publishedReviveFreshnessAtVerification);
+                            else Assert.True(publishedReviveFreshnessAtVerification);
+                        }
+                        verifiedReviveDeadline = replay.Clock.GetUtcNow() + current.Remaining;
+                        return Task.FromResult(publishedReviveProof);
+                    }
+                    try
+                    {
+                        CombatRecoveryCompletedException.RecoverVerifiedAsync(RecoverForSignal, VerifyForSignal, token)
+                            .GetAwaiter().GetResult();
+                    }
+                    catch (CombatRecoveryCompletedException signal)
+                    {
+                        reviveSignals.Add(signal);
+                        throw;
+                    }
+                    throw new InvalidOperationException("Verified recovery must propagate its completion signal.");
+                }
                 if (healed) { returnedDeadline = deadline; return scenario == "third-ticket" && recoveryCount < 3; }
                 originalDeadline = deadline;
                 var changed = scenario switch
@@ -485,30 +595,7 @@ public partial class NavigationResumeTests
                 if (changed != null) subject!.CurWaypoints.Item2[1].ActionParams = changed;
                 return true;
             },
-            RecoverAtStatue = token =>
-            {
-                token.ThrowIfCancellationRequested();
-                recoveryCount++;
-                healed = true;
-                nativeInputsAtRecovery = native.Inputs.Count;
-                if (scenario == "context-changed")
-                    native.Actors = [new("钟离", 1), new("娜维娅", 2), new("凯亚", 3), new("香菱", 4)];
-                if (scenario == "target-slot-changed")
-                    native.Actors = [new("娜维娅", 1), new("钟离", 2), new("班尼特", 3), new("香菱", 4)];
-                if (scenario == "resolved-ir-changed")
-                    native.Actors = [new("娜维娅", 1), new("班尼特", 2), new("凯亚", 3), new("香菱", 4)];
-                if (scenario == "missing-target-proof") native.TargetIdentityName = null;
-                if (scenario == "wrong-target") native.TargetIdentityName = "娜维娅";
-                if (scenario == "foreign-target-proof") native.IdentityFault = "foreign";
-                if (scenario == "stale-target-proof") native.IdentityFault = "stale";
-                if (scenario == "duplicate-target-proof") native.IdentityFault = "duplicate";
-                if (scenario == "digest-changed") subject!.CurWaypoints.Item2[1].X += 1;
-                position = new(9000, 9000);
-                // TpTask.TpToStatueOfTheSeven always spends this configured HP wait after transport.
-                // Model that external I/O elapsed; skill readiness remains the real fake sensor's cooldown.
-                replay.Clock.Advance(TimeSpan.FromSeconds(scenario == "owner-expired" ? 241 : scenario == "parent-expired" ? 1201 : hpRestoreSeconds));
-                return Task.CompletedTask;
-            },
+            RecoverAtStatue = RecoverAtStatue,
             ReadHealing = frame => new(frame.FrameStamp, healed, false),
             BeforeAction = async (point, token) =>
             {
@@ -549,7 +636,7 @@ public partial class NavigationResumeTests
         subject = new PathExecutor(default, replay.Io, sceneIo: scene)
             { PartyConfig = new() { MainAvatarIndex = "1" } };
         using var parent = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin("full-recorded-prefix-parent",
-            TimeSpan.FromMinutes(20), clock: replay.Clock);
+            TimeSpan.FromMinutes(20), logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, clock: replay.Clock);
         var error = await Record.ExceptionAsync(() => subject.Pathing(route));
 
         // These preconditions deliberately run before the desired recovery assertion.
@@ -575,6 +662,38 @@ public partial class NavigationResumeTests
         });
         Assert.False(native.HeldE);
         Assert.Empty(raw.Held);
+        if (revive && scenario != "owner-expired")
+        {
+            Assert.NotEmpty(reviveSignals);
+            Assert.Equal(originalDeadline, verifiedReviveDeadline);
+            if (scenario == "missing-proof") Assert.Null(reviveSignals[^1].Proof);
+            else
+            {
+                Assert.NotNull(publishedReviveProof);
+                Assert.True(publishedReviveProof.Frame.SourceBound);
+                // Replay may legitimately outlive the old observation's age window; assert its admission-time value.
+                if (scenario == "stale-proof") Assert.False(publishedReviveFreshnessAtVerification);
+                else Assert.True(publishedReviveFreshnessAtVerification);
+                if (scenario == "foreign-root") Assert.NotEqual(parent.RootId, publishedReviveProof.UiRootId);
+                if (scenario == "wrong-target") Assert.False(publishedReviveProof.Frame.Confirms(publishedReviveProof.Target));
+                if (scenario == "unknown-hp") Assert.Null(publishedReviveProof.LowHp);
+                // Until this producer precondition passes, refusal controls are drafts, not signed negatives.
+                Assert.Same(publishedReviveProof, reviveSignals[^1].Proof);
+            }
+        }
+        if (revive && scenario == "missing-ui-origin")
+        {
+            Assert.Equal(1, currentOriginReads);
+            Assert.NotNull(error); // P2 business RED: the old null-current guard authorizes full replay.
+            Assert.Contains("revive-origin-ui-owner-mismatch", subject.NavigationResumeRejection ?? "");
+            Assert.False(subject.SuccessEnd);
+            Assert.Equal(1, recoveryCount);
+            Assert.Equal(1, teleports.Count);
+            Assert.Equal(nativeInputsAtRecovery, native.Inputs.Count);
+            Assert.Equal(1, stopCalls);
+            Assert.Equal(0, suffixVisits);
+            return;
+        }
         if (scenario == "third-ticket")
         {
             Assert.NotNull(error);

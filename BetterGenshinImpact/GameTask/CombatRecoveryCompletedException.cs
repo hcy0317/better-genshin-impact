@@ -35,6 +35,10 @@ internal sealed record ReviveRecoveryFrame(long FrameId, bool MainReady, ReviveU
         (target == null || HasTarget(target) && ActiveIndex == target.Index);
 }
 
+// Observation data only. Carrying this tuple does not authorize route replay.
+internal sealed record ReviveRecoveryProof(ReviveRecoveryFrame Frame, ReviveTarget? Target,
+    bool? LowHp, string? UiRootId, string? UiOperationId, long RecoveryCompletedTimestamp);
+
 // 战斗仍按原截止推进；只有既有复苏入口确认后才退役战斗并接管父取消。
 internal sealed class CombatRecoveryOwner : IDisposable
 {
@@ -79,7 +83,23 @@ internal sealed class CombatRecoveryOwner : IDisposable
 // the caller must retry the original route/commission within its existing budget.
 internal sealed class CombatRecoveryCompletedException : RetryException
 {
-    private CombatRecoveryCompletedException() : base("[BGI_RECOVERY_COMPLETED] 神像恢复流程已完成并确认返回主界面，请重试原路线或委托") { }
+    internal ReviveRecoveryProof? Proof { get; }
+
+    private CombatRecoveryCompletedException(ReviveRecoveryProof? proof = null)
+        : base("[BGI_RECOVERY_COMPLETED] 神像恢复流程已完成并确认返回主界面，请重试原路线或委托") => Proof = proof;
+
+    // Transport only: the route adapter must still assess every proof/owner/semantic gate.
+    internal static async Task RecoverVerifiedAsync(Func<Task> recover, Func<Task<ReviveRecoveryProof?>> verify, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
+        await recover();
+        ct.ThrowIfCancellationRequested();
+        var proof = await verify();
+        ct.ThrowIfCancellationRequested();
+        TaskExecutionScope.ThrowIfFailed();
+        throw new CombatRecoveryCompletedException(proof);
+    }
 
     internal static async Task RecoverVerifiedAsync(Func<Task> recover, Func<Task> verify, CancellationToken ct)
     {

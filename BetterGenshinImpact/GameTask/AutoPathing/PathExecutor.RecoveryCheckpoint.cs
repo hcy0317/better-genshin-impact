@@ -1,6 +1,7 @@
 using BetterGenshinImpact.GameTask.AutoFight.Model;
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -44,22 +45,47 @@ public partial class PathExecutor
     private bool _navigationTicketUsed;
     private CaptureFrameStamp _navigationHealingSource;
     internal string? NavigationResumeRejection { get; private set; }
-    private NavigationResumePlan? BuildNavigationResume()
+    // Only current-attempt data is retained. The segment reference is guarded by its frozen digest.
+    private sealed record ReviveResumeAnchor(string Route, int SegmentIndex,
+        IReadOnlyList<WaypointForTrack> Segment, int CurrentIndex, int ResumeIndex, WaypointAttemptBudget Owner,
+        ReachedNavigation? Reached, ImmutableDictionary<int, WaypointActionSettlement> Settlements,
+        string OriginalDigest, string CapturedDigest, string UiRootId, string UiOperationId,
+        int ExpectedMainIndex, long CapturedTimestamp);
+    private ReviveResumeAnchor? _reviveResumeAnchor;
+
+    private ReviveResumeAnchor? CaptureReviveResumeAnchor()
     {
-        var projection = NavigationResumePlan.TryCreate(_routeIdentity, CurWaypoints.Item2, CurWaypoint.Item1,
-            _lastReachedNavigation, _waypointBudget, _actionSettlements);
+        if (_waypointBudget is not { } owner || UiOperation.Current is not { } operation) return null;
+        return new(_routeIdentity, CurWaypoints.Item1, CurWaypoints.Item2, CurWaypoint.Item1,
+            HealingResumeIndex(), owner, _lastReachedNavigation, _actionSettlements.ToImmutableDictionary(),
+            _semanticSegmentDigest, NavigationResumePlan.SemanticDigest(CurWaypoints.Item2),
+            operation.RootId, operation.Id,
+            int.TryParse(PartyConfig.MainAvatarIndex, out var main) ? main : -1, _moveIo.Clock.GetTimestamp());
+    }
+
+    private NavigationResumePlan? BuildNavigationResume(ReviveResumeAnchor? anchor = null)
+    {
+        var route = anchor?.Route ?? _routeIdentity;
+        var segment = anchor?.Segment ?? CurWaypoints.Item2;
+        var current = anchor?.CurrentIndex ?? CurWaypoint.Item1;
+        var reached = anchor == null ? _lastReachedNavigation : anchor.Reached;
+        var owner = anchor?.Owner ?? _waypointBudget;
+        IReadOnlyDictionary<int, WaypointActionSettlement> settlements = anchor == null ? _actionSettlements : anchor.Settlements;
+        var originalDigest = anchor?.OriginalDigest ?? _semanticSegmentDigest;
+        var projection = NavigationResumePlan.TryCreate(route, segment, current, reached, owner, settlements);
         if (projection != null) return projection;
-        var plan = NavigationResumePlan.TryCreateFullSemantic(_routeIdentity, CurWaypoints.Item2, CurWaypoint.Item1,
-            _lastReachedNavigation, _waypointBudget, _actionSettlements, _semanticSegmentDigest, out var reason);
+        var plan = NavigationResumePlan.TryCreateFullSemantic(route, segment, current,
+            reached, owner, settlements, originalDigest, out var reason);
         var now = _moveIo.Clock.GetUtcNow();
-        NavigationResumeRejection = $"reason={reason};current={CurWaypoint.Item1};owner={_waypointBudget?.Owner};" +
-            $"ownerIndex={_waypointBudget?.CurrentIndex};deadline={_waypointBudget?.Deadline:O};now={now:O};" +
-            $"expired={_waypointBudget?.Deadline <= now};reached={_lastReachedNavigation};" +
-            $"originalDigest={_semanticSegmentDigest};currentDigest={NavigationResumePlan.SemanticDigest(CurWaypoints.Item2)}" +
+        NavigationResumeRejection = $"reason={reason};current={current};owner={owner?.Owner};" +
+            $"ownerIndex={owner?.CurrentIndex};deadline={owner?.Deadline:O};now={now:O};" +
+            $"expired={owner?.Deadline <= now};reached={reached};" +
+            $"originalDigest={originalDigest};currentDigest={NavigationResumePlan.SemanticDigest(segment)}" +
             Environment.NewLine + "original=" + _semanticStateAtEntry + Environment.NewLine +
-            "current=" + NavigationResumePlan.DescribeSemanticState(CurWaypoints.Item2);
+            "current=" + NavigationResumePlan.DescribeSemanticState(segment);
         return plan;
     }
+
 
     private async Task RecordReachedNavigationAsync(WaypointForTrack waypoint)
     {
@@ -179,12 +205,40 @@ public partial class PathExecutor
     private int HealingResumeIndex() => RecordWaypoints == CurWaypoints && _skipOtherOperations
         ? Math.Max(CurWaypoint.Item1, RecordWaypoint.Item1) : CurWaypoint.Item1;
 
-    private bool CanRestartAfterCombatRecovery()
+    private bool CanRestartAfterCombatRecovery(CombatRecoveryCompletedException signal)
     {
         var resumeIndex = HealingResumeIndex();
         var request = "revive-resume:" + Guid.NewGuid().ToString("N");
         TraceHealingPrefix(request, resumeIndex);
-        var rejection = HealingRestartRejection(CurWaypoints.Item2, resumeIndex, _completedWaypointActions);
+        var legacyRejection = HealingRestartRejection(CurWaypoints.Item2, resumeIndex, _completedWaypointActions);
+        string? rejection = legacyRejection;
+        var accepted = false;
+        if (signal.Proof is not { } proof)
+        {
+            // Old no-proof callers retain only their original narrow replay permission.
+            accepted = legacyRejection == null;
+            if (!accepted) rejection = legacyRejection + ";missing-bound-revive-proof";
+        }
+        else if (!AcceptsReviveProof(proof,
+            _sceneIo?.ReadCurrentUiOperation is { } readCurrent ? readCurrent() : UiOperation.Current, out rejection)) { }
+        else if (legacyRejection == null) accepted = true;
+        else
+        {
+            var plan = BuildNavigationResume(_reviveResumeAnchor);
+            if (plan == null) rejection = NavigationResumeRejection ?? "revive-semantic-plan-unavailable";
+            else if (plan.FullSemantic && plan.MiningBindings.Values.Any(binding =>
+                binding.Name != proof.Target!.Name || binding.Slot != proof.Target.Index))
+                rejection = "revive-target-does-not-match-original-mining-binding";
+            else
+            {
+                _pendingNavigationResume = plan;
+                _navigationHealingSource = proof.Frame.SourceStamp;
+                _navigationTicketUsed = false; // Consumer still runs only after the unchanged shared ticket reservation.
+                accepted = true;
+            }
+        }
+        if (accepted) { _returningToCurrent = true; rejection = null; }
+        else NavigationResumeRejection = rejection;
         try
         {
             _moveIo.Logger.LogDebug("PATH_REVIVE_RESUME request={Request} node={Node} checkpoint={Checkpoint} rejection={Rejection}", request, CurWaypoint.Item1, resumeIndex, rejection ?? "none");
@@ -192,10 +246,43 @@ public partial class PathExecutor
                 $"route={CurWaypoint.Item2.PathingTaskFileName} node={CurWaypoint.Item1} checkpoint={resumeIndex} rejection={rejection}; latest existing frame, no replay authorized", _moveIo.Logger);
         }
         catch { }
-        if (rejection == null) { _returningToCurrent = true; return true; }
-        // This adapter has no bound post-revive main/HP receipt for a navigation return yet.
-        // Keep the original replay rejection instead of borrowing an older healing source.
-        return false;
+        return accepted;
+    }
+
+    private bool AcceptsReviveProof(ReviveRecoveryProof proof, UiOperation? current, out string? rejection)
+    {
+        rejection = "revive-original-attempt-unavailable";
+        if (_reviveResumeAnchor is not { } anchor) return false;
+        anchor.Owner.Check(_moveIo.Clock, ct);
+        if (anchor.Route != _routeIdentity || anchor.SegmentIndex != CurWaypoints.Item1 ||
+            !ReferenceEquals(anchor.Segment, CurWaypoints.Item2) || anchor.CurrentIndex != CurWaypoint.Item1 ||
+            !ReferenceEquals(anchor.Owner, _waypointBudget) || anchor.Owner.CurrentIndex != anchor.CurrentIndex ||
+            anchor.ResumeIndex != anchor.CurrentIndex)
+        { rejection = "revive-original-checkpoint-owner-mismatch"; return false; }
+        if (anchor.OriginalDigest != anchor.CapturedDigest ||
+            NavigationResumePlan.SemanticDigest(CurWaypoints.Item2) != anchor.CapturedDigest ||
+            anchor.Reached != _lastReachedNavigation || anchor.Settlements.Count != _actionSettlements.Count ||
+            anchor.Settlements.Any(pair => !_actionSettlements.TryGetValue(pair.Key, out var value) || value != pair.Value))
+        { rejection = "revive-original-semantics-or-settlements-changed"; return false; }
+        if (string.IsNullOrWhiteSpace(proof.UiRootId) || string.IsNullOrWhiteSpace(proof.UiOperationId) ||
+            proof.UiRootId != anchor.UiRootId || proof.UiOperationId != anchor.UiOperationId ||
+            (current == null || current.RootId != anchor.UiRootId))
+        { rejection = "revive-origin-ui-owner-mismatch"; return false; }
+        var source = proof.Frame.SourceStamp;
+        var now = _moveIo.Clock.GetTimestamp();
+        if (!proof.Frame.SourceBound || !proof.Frame.HasUsableEvidence ||
+            source.TimestampFrequency != _moveIo.Clock.TimestampFrequency ||
+            !source.IsFresh(_moveIo.Clock, UiSnapshot.RecoveryMaximumAge) ||
+            proof.RecoveryCompletedTimestamp < anchor.CapturedTimestamp || proof.RecoveryCompletedTimestamp > now ||
+            source.CapturedTimestamp <= proof.RecoveryCompletedTimestamp ||
+            anchor.Reached is not { } reached || !source.IsAfter(reached.Source))
+        { rejection = "revive-source-not-fresh-after-original-recovery"; return false; }
+        if (proof.Target is not { } target || anchor.ExpectedMainIndex is < 1 or > 4 ||
+            target.Index != anchor.ExpectedMainIndex || !proof.Frame.Confirms(target) || proof.LowHp is not false)
+        { rejection = "revive-target-main-or-health-unconfirmed"; return false; }
+        anchor.Owner.Check(_moveIo.Clock, ct);
+        rejection = null;
+        return true;
     }
 
     private void TraceHealingPrefix(string request, int resumeIndex)
