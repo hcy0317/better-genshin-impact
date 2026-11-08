@@ -21,16 +21,18 @@ internal sealed partial class CurrentPlayerUidTask
     }
 
     internal static CurrentPlayerUidTask CreatePrepared(NativeUiDriverIo prepared, Func<IOcrService> resolveOcr, ILogger logger,
-        Func<NativeUiDriverIo, IOcrService, ICurrentPlayerUidIo>? createSession = null)
+        Func<NativeUiDriverIo, IOcrService, ICurrentPlayerUidIo>? createSession = null,
+        Func<BetterGenshinImpact.GameTask.Model.Area.ImageRegion, bool, IOcrService, UiSnapshot>? readScene = null)
     {
         var ocr = resolveOcr();
         var texts = prepared.Texts();
+        readScene ??= (image, inspectWorld, service) => NativeUiDriver.ReadNativeScene(image, inspectWorld, ocr: service);
         var captured = new NativeUiDriverIo
         {
             Capture = prepared.Capture,
             Focus = prepared.Focus,
-            ReadScene = image => NativeUiDriver.ReadNativeScene(image, inspectWorld: true, ocr: ocr),
-            ReadOrdinaryWorld = image => NativeUiDriver.ReadNativeScene(image, inspectWorld: true, ocr: ocr),
+            ReadScene = image => readScene(image, true, ocr),
+            ReadOrdinaryWorld = image => readScene(image, true, ocr),
             Ocr = () => ocr,
             Texts = () => texts,
             Click = prepared.Click,
@@ -41,15 +43,36 @@ internal sealed partial class CurrentPlayerUidTask
             NetworkAvailable = prepared.NetworkAvailable
         };
         return new CurrentPlayerUidTask(() => createSession != null
-            ? createSession(captured, ocr) : new NativeIo(captured, ocr), logger, captured.Clock);
+            ? createSession(captured, ocr) : new NativeIo(captured, ocr, readScene), logger, captured.Clock);
     }
 
     private sealed class NativeIo : ICurrentPlayerUidIo, IDisposable
     {
         private readonly NativeUiDriver _driver;
         private readonly IOcrService _ocr;
-        internal NativeIo(NativeUiDriverIo prepared, IOcrService ocr)
-        { _ocr = ocr; _driver = new NativeUiDriver(prepared); }
+        private bool _initialUidReadCompleted;
+        internal NativeIo(NativeUiDriverIo prepared, IOcrService ocr,
+            Func<BetterGenshinImpact.GameTask.Model.Area.ImageRegion, bool, IOcrService, UiSnapshot> readScene)
+        {
+            _ocr = ocr;
+            _driver = new NativeUiDriver(new NativeUiDriverIo
+            {
+                Capture = prepared.Capture,
+                Focus = prepared.Focus,
+                // Only the first UID read can request OpenMenu and needs control proof.
+                ReadScene = image => readScene(image, !_initialUidReadCompleted, ocr),
+                // Login recovery retains its ordinary/control-world confirmation.
+                ReadOrdinaryWorld = prepared.ReadOrdinaryWorld,
+                Ocr = prepared.Ocr,
+                Texts = prepared.Texts,
+                Click = prepared.Click,
+                OtherAction = prepared.OtherAction,
+                Delay = prepared.Delay,
+                Clock = prepared.Clock,
+                BeginExclusive = prepared.BeginExclusive,
+                NetworkAvailable = prepared.NetworkAvailable
+            });
+        }
         public UiSnapshot Capture() => _driver.Capture();
         public Task DelayAsync(int milliseconds, CancellationToken ct) => _driver.DelayAsync(milliseconds, ct);
         public Task<bool> ActAsync(UiAction action, UiSnapshot observed, CancellationToken ct) => _driver.ActAsync(action, observed, ct);
@@ -65,7 +88,12 @@ internal sealed partial class CurrentPlayerUidTask
             using var deadline = new CancellationTokenSource(remaining);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(operation.Token, deadline.Token);
             using var recognition = new RecognitionExecutionScope(linked.Token);
-            try { return ReadOwned(chooseInput, readMenuUid); }
+            try
+            {
+                var frame = ReadOwned(chooseInput, readMenuUid);
+                _initialUidReadCompleted = true;
+                return frame;
+            }
             catch (OperationCanceledException) when (deadline.IsCancellationRequested && !operation.Token.IsCancellationRequested)
             { return new(new UiSnapshot(0), 0, 0, Array.Empty<CurrentPlayerUidText>()); }
         }

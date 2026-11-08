@@ -4,9 +4,13 @@ using BetterGenshinImpact.GameTask.Model.Area;
 using Microsoft.Extensions.Time.Testing;
 using Fischless.GameCapture;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging;
 using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.Core.Recognition.OCR;
 using System.Reflection;
+using BetterGenshinImpact.Core.Recognition;
+using BetterGenshinImpact.Helpers;
+using OpenCvSharp;
 
 namespace BetterGenshinImpact.UnitTest.GameTaskTests.CommonJobTests;
 
@@ -285,6 +289,286 @@ public class CurrentPlayerUidTaskTests
         Assert.Single(io.PostInputCaptureGapsMs);
         Assert.True(io.PostInputCaptureGapsMs[0] >= 60);
         Assert.Equal(1, io.EscapeInputs);
+    }
+
+    [Fact]
+    [Trait("UidNativeStage", "Baseline")]
+    public void PreparedNativeMenuOcrRegionsPassTheProductionOwnCardDecoder() =>
+        PreparedNativeUidScene.AssertActualMenuDecoderPremise();
+
+    [Fact]
+    [Trait("UidNativeStage", "Baseline")]
+    public async Task PreparedNativeSessionPublishesOwnedMenuUidAfterTwoFreshWorldFrames()
+    {
+        PreparedNativeUidScene.AssertActualMenuDecoderPremise();
+        using var scene = new PreparedNativeUidScene();
+        var result = await scene.CreateTask().Start(CancellationToken.None);
+        scene.AssertOwnedMenuRoundTripPremises();
+        Assert.True(result == 123456789, scene.FailureSummary(result));
+        Assert.True(scene.Elapsed < CurrentPlayerUidTask.TotalBudget, scene.FailureSummary(result));
+        Assert.True(scene.WorldFramesAfterEscape >= 2);
+    }
+
+    [Fact]
+    [Trait("UidNativeStage", "Baseline")]
+    public async Task PreparedNativeSessionKeepsWorldHudDomainTipOverlayAsARejection()
+    {
+        PreparedNativeUidScene.AssertActualMenuDecoderPremise();
+        using var scene = new PreparedNativeUidScene { WorldDomainTip = true };
+        var result = await scene.CreateTask().Start(CancellationToken.None);
+        Assert.Equal(1, scene.MenuUidReads);
+        Assert.Equal(1, scene.EscapeInputs);
+        Assert.True(scene.WorldDomainTipReads > 0);
+        Assert.True(scene.WorldFramesAfterEscape >= 2);
+        Assert.Equal(0, scene.UnexpectedInputs);
+        Assert.Equal(0, result);
+    }
+
+    [Fact]
+    [Trait("UidNativeStage", "Baseline")]
+    public async Task PreparedNativeSessionKeepsInitialOpenMenuControlProofFull()
+    {
+        using var scene = new PreparedNativeUidScene { InitialWorldWithoutControl = true };
+        var result = await scene.CreateTask().Start(CancellationToken.None);
+        Assert.Single(scene.Projections);
+        Assert.True(scene.Projections[0].InspectWorld);
+        Assert.True(scene.InitialSourceWasSystemFresh);
+        Assert.Equal(0, scene.EscapeInputs);
+        Assert.Equal(0, scene.UnexpectedInputs);
+        Assert.Equal(0, result);
+    }
+
+    [Fact]
+    [Trait("UidNativeStage", "PerformanceCounter")]
+    public async Task PreparedNativeSessionPublishesWithinFiveSecondsWithoutRepeatingRichWorldProjection()
+    {
+        PreparedNativeUidScene.AssertActualMenuDecoderPremise();
+        using var scene = new PreparedNativeUidScene { RichWorldCost = TimeSpan.FromMilliseconds(1500) };
+        var result = await scene.CreateTask().Start(CancellationToken.None);
+        scene.AssertOwnedMenuRoundTripPremises();
+        Assert.True(scene.WorldFramesAfterEscape >= 2);
+        Assert.All(scene.Projections.Where(p => !p.Menu), projection =>
+        {
+            Assert.True(projection.PlainWorldReady);
+            Assert.True(projection.SourceFreshWhenProjected);
+        });
+        // These inputs are valid under the original source/response contracts.  The
+        // failing business assertion must be publication, not a missing adapter/App.
+        Assert.True(result == 123456789, scene.FailureSummary(result));
+        Assert.True(scene.Elapsed < CurrentPlayerUidTask.TotalBudget, scene.FailureSummary(result));
+    }
+
+    private sealed class PreparedNativeUidScene : IDisposable
+    {
+        internal sealed record Projection(CaptureFrameStamp Source, bool Menu, bool InspectWorld,
+            bool PlainWorldReady, bool SourceFreshWhenProjected);
+        private readonly Guid _session = Guid.NewGuid();
+        private long _sequence;
+        private bool _menu = true;
+        private long? _escapeReturned;
+        private readonly PreparedUidOcr _ocr;
+        private readonly DateTimeOffset _started;
+        private readonly PreparedUidLogger _logger = new();
+        internal PreparedUidClock Clock { get; } = new();
+        internal List<Projection> Projections { get; } = new();
+        internal List<double> PostEscapeCaptureGaps { get; } = new();
+        internal TimeSpan RichWorldCost { get; init; }
+        internal bool WorldDomainTip { get; init; }
+        internal bool InitialWorldWithoutControl { get; init; }
+        internal bool InitialSourceWasSystemFresh { get; private set; }
+        internal int EscapeInputs { get; private set; }
+        internal int UnexpectedInputs { get; private set; }
+        internal int WorldFramesAfterEscape { get; private set; }
+        internal int MenuUidReads { get; private set; }
+        internal int MenuDomainTipReads { get; private set; }
+        internal int WorldDomainTipReads { get; private set; }
+        internal int ServiceResolutions { get; private set; }
+        internal TimeSpan Elapsed => Clock.GetUtcNow() - _started;
+        internal PreparedNativeUidScene()
+        {
+            ApplicationHostBootstrapGuard.ProhibitForCurrentProcess();
+            Assert.True(ApplicationHostBootstrapGuard.IsProhibited);
+            _started = Clock.GetUtcNow();
+            _ocr = new PreparedUidOcr(this);
+        }
+        internal CurrentPlayerUidTask CreateTask()
+        {
+            var prepared = new NativeUiDriverIo
+            {
+                Capture = Capture,
+                Focus = () => { },
+                ReadScene = _ => throw new InvalidOperationException("The explicit prepared native reader must be used"),
+                ReadOrdinaryWorld = _ => throw new InvalidOperationException("The explicit prepared ordinary-world reader must be used"),
+                Ocr = () => throw new InvalidOperationException("Uncaptured OCR service lookup"),
+                Texts = () => new("synthetic domain tip", "synthetic close"),
+                Clock = Clock,
+                NetworkAvailable = () => true,
+                BeginExclusive = () => new PreparedUidLease(),
+                Click = (_, _, _) => { UnexpectedInputs++; throw new InvalidOperationException("No click is authorized in this fixture"); },
+                OtherAction = (action, image, admit) =>
+                {
+                    if (action != UiAction.Escape)
+                    { UnexpectedInputs++; throw new InvalidOperationException("Only the injected owned Escape is authorized"); }
+                    Assert.True(_menu);
+                    Assert.True(image.FrameStamp.IsFresh(Clock, UiSnapshot.RecoveryMaximumAge));
+                    admit();
+                    EscapeInputs++;
+                    _menu = false;
+                    _escapeReturned = Clock.GetTimestamp();
+                    return true;
+                },
+                Delay = (milliseconds, ct) =>
+                {
+                    ct.ThrowIfCancellationRequested();
+                    Clock.Advance(TimeSpan.FromMilliseconds(milliseconds));
+                    ct.ThrowIfCancellationRequested();
+                    return Task.CompletedTask;
+                }
+            };
+            // No createSession override: the production NativeIo, NativeUiDriver,
+            // UID geometry decoder, owned Escape and return transition all execute.
+            return CurrentPlayerUidTask.CreatePrepared(prepared,
+                () => { ServiceResolutions++; return _ocr; }, _logger,
+                readScene: ReadNativeScene);
+        }
+        internal static void AssertActualMenuDecoderPremise()
+        {
+            using var probe = new PreparedNativeUidScene();
+            using var image = probe.Capture();
+            var scene = new UiSnapshot(image.FrameStamp.Sequence) { MenuBack = true }
+                .WithSource(image.FrameStamp, probe.Clock, UiSnapshot.RecoveryMaximumAge);
+            var regions = image.FindMulti(RecognitionObject.Ocr(95, 0, 675, 780), ocrService: probe._ocr);
+            var text = regions.Select(region => new CurrentPlayerUidText(region.Text,
+                region.X, region.Y, region.Width, region.Height)).ToArray();
+            var frame = new CurrentPlayerUidFrame(scene, image.Width, image.Height, text);
+            var decoded = CurrentPlayerUidTask.Decode(frame, true);
+            var rectangles = string.Join(";", text.Select(value =>
+                $"{value.X},{value.Y},{value.Width},{value.Height}"));
+            Assert.True(decoded == 123456789,
+                $"actualDecodePositive={decoded > 0}; regionCount={text.Length}; rects={rectangles}");
+        }
+        internal string FailureSummary(int result) =>
+            $"resultPositive={result > 0}; elapsedMs={Elapsed.TotalMilliseconds:F1}; nowTimestamp={Clock.GetTimestamp()}; " +
+            $"frequency={Clock.TimestampFrequency}; escapeReturned={_escapeReturned}; menuOcr={MenuUidReads}; " +
+            $"escape={EscapeInputs}; worldCaptures={WorldFramesAfterEscape}; unexpectedInputs={UnexpectedInputs}; " +
+            $"postInputCaptureGapsMs=[{string.Join(",", PostEscapeCaptureGaps.Select(gap => gap.ToString("F1")))}]; " +
+            $"projections=[{string.Join(";", Projections.Select(projection =>
+                $"source={projection.Source.Sequence},capturedTimestamp={projection.Source.CapturedTimestamp}," +
+                $"menu={projection.Menu},rich={projection.InspectWorld}," +
+                $"worldReady={projection.PlainWorldReady},fresh={projection.SourceFreshWhenProjected}"))}]; " +
+            $"events=[{string.Join(" | ", _logger.Events)}]";
+        private sealed class PreparedUidLogger : ILogger
+        {
+            internal List<string> Events { get; } = new();
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => new PreparedUidLease();
+            public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+            public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                Events.Add(formatter(state, exception));
+                if (exception != null) Events.Add(exception.GetType().Name + ": " + exception.Message);
+            }
+        }
+        private ImageRegion Capture()
+        {
+            if (!InitialWorldWithoutControl) Clock.Advance(TimeSpan.FromMilliseconds(1));
+            var menu = !InitialWorldWithoutControl && _menu;
+            if (_escapeReturned is { } returned)
+            {
+                PostEscapeCaptureGaps.Add(Clock.GetElapsedTime(returned).TotalMilliseconds);
+                WorldFramesAfterEscape++;
+            }
+            var source = new CaptureFrameStamp(_session, ++_sequence, Clock.GetTimestamp(), Clock.TimestampFrequency, Clock.GetUtcNow());
+            return new ImageRegion(new Mat(1080, 1920, MatType.CV_8UC3, Scalar.All(menu ? 17 : 29)), 0, 0)
+                { FrameStamp = source };
+        }
+        private UiSnapshot ReadNativeScene(ImageRegion image, bool inspectWorld, IOcrService service)
+        {
+            Assert.Same(_ocr, service);
+            var menu = image.SrcMat.At<Vec3b>(0, 0).Item0 == 17;
+            if (Projections.Count == 0)
+                InitialSourceWasSystemFresh = image.FrameStamp.IsFresh(TimeProvider.System, UiSnapshot.RecoveryMaximumAge);
+            if (menu) Clock.Advance(TimeSpan.FromMilliseconds(500));
+            var snapshot = new UiSnapshot(image.FrameStamp.Sequence) { MenuBack = menu, MainHud = !menu }
+                .WithSource(image.FrameStamp, Clock, UiSnapshot.RecoveryMaximumAge);
+            if (!menu && inspectWorld)
+            {
+                snapshot = snapshot with { World = new UiWorldObservation(false, false, false)
+                    { OrdinaryAvatarHud = true, Transformed = false, ControlObserved = !InitialWorldWithoutControl,
+                        KeyboardBreakout = false } };
+                if (_escapeReturned != null) Clock.Advance(RichWorldCost);
+            }
+            Projections.Add(new(image.FrameStamp, menu, inspectWorld, snapshot.MainReady,
+                image.FrameStamp.IsFresh(Clock, UiSnapshot.RecoveryMaximumAge)));
+            return snapshot;
+        }
+        internal void AssertOwnedMenuRoundTripPremises()
+        {
+            Assert.Equal(1, ServiceResolutions);
+            Assert.Equal(1, MenuUidReads);
+            Assert.Equal(1, EscapeInputs);
+            Assert.Equal(0, UnexpectedInputs);
+            Assert.True(Projections[0].Menu);
+            Assert.True(Projections[0].InspectWorld);
+            Assert.True(MenuDomainTipReads > 0);
+            Assert.True(WorldDomainTipReads > 0);
+            Assert.NotEmpty(PostEscapeCaptureGaps);
+            Assert.True(PostEscapeCaptureGaps[0] >= 60);
+            var sources = Projections.Select(p => p.Source).ToArray();
+            Assert.All(sources, source => Assert.Equal(_session, source.SessionId));
+            for (var i = 1; i < sources.Length; i++) Assert.True(sources[i].IsAfter(sources[i - 1]));
+        }
+        public void Dispose() { }
+        private sealed class PreparedUidLease : IDisposable { public void Dispose() { } }
+        private sealed class PreparedUidOcr(PreparedNativeUidScene scene) : IOcrService
+        {
+            public string Ocr(Mat mat) => OcrResult(mat).Text;
+            public string OcrWithoutDetector(Mat mat) => OcrResult(mat).Text;
+            public OcrResult OcrResult(Mat mat)
+            {
+                RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
+                var menu = mat.At<Vec3b>(0, 0).Item0 == 17;
+                if (mat.Width == 675 && mat.Height == 780 && menu)
+                {
+                    scene.MenuUidReads++;
+                    scene.Clock.Advance(TimeSpan.FromMilliseconds(300));
+                    RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
+                    return new(new[]
+                    {
+                        Region("冒险等阶", 220, 170, 100, 24), Region("世界等级", 220, 250, 100, 24),
+                        Region("生日", 220, 290, 50, 24), Region("队伍配置", 205, 440, 100, 24),
+                        Region("UID 123456789", 20, 195, 182, 30)
+                    });
+                }
+                var title = mat.Width == 1050 && mat.Height == 85;
+                var close = mat.Width == 820 && mat.Height == 47;
+                if (title || close)
+                {
+                    if (menu) scene.MenuDomainTipReads++; else scene.WorldDomainTipReads++;
+                    scene.Clock.Advance(TimeSpan.FromMilliseconds(100));
+                    RecognitionExecutionScope.Token.ThrowIfCancellationRequested();
+                    if (!menu && scene.WorldDomainTip)
+                        return new(new[] { Region(title ? "synthetic domain tip" : "synthetic close", 10, 10, 200, 20) });
+                }
+                return new(Array.Empty<OcrResultRegion>());
+            }
+            private static OcrResultRegion Region(string text, int x, int y, int width, int height) =>
+                new(new RotatedRect(new Point2f(x + width / 2f, y + height / 2f), new Size2f(width, height), 0), text, 1f);
+        }
+    }
+
+    private sealed class PreparedUidClock : TimeProvider
+    {
+        private readonly FakeTimeProvider _manual = new(DateTimeOffset.UtcNow);
+        private readonly long _origin;
+        private readonly long _anchor;
+        internal PreparedUidClock() { _origin = _manual.GetTimestamp(); _anchor = TimeProvider.System.GetTimestamp(); }
+        public override long TimestampFrequency => TimeProvider.System.TimestampFrequency;
+        public override DateTimeOffset GetUtcNow() => _manual.GetUtcNow();
+        public override long GetTimestamp() => _anchor + _manual.GetElapsedTime(_origin, _manual.GetTimestamp()).Ticks * TimestampFrequency / TimeSpan.TicksPerSecond;
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            _manual.CreateTimer(callback, state, dueTime, period);
+        internal void Advance(TimeSpan amount) => _manual.Advance(amount);
     }
 
     private sealed class FakeIo : ICurrentPlayerUidIo
