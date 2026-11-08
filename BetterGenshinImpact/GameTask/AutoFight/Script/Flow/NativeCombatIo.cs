@@ -223,8 +223,20 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
     public void ReleaseInput() => Owned(InputHub.ReleaseAll, release: true);
     public CombatBattleHostInputResult ReleaseSelectionRefusalInput(CombatNativeInputRequest request, CancellationToken ct)
     {
-        var receipt = new CombatNativeInput(Clock, Logger, () => ct.ThrowIfCancellationRequested())
-            .Submit(request, "release-selection-owner", ReleaseInput, ct);
+        // An ownerless adapter must not borrow a surrounding owner's cleanup capability.
+        if (inputOwner == null && InputSessionOwnership.HasCurrentCleanup)
+        {
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            return new(CombatBattleHostInputStatus.NotSent, Reason: "release-owner-unavailable",
+                Error: new CombatInputNotAdmittedException());
+        }
+        CombatBattleHostInputResult SubmitRelease() =>
+            new CombatNativeInput(Clock, Logger, () => ct.ThrowIfCancellationRequested())
+                .Submit(request, "release-selection-owner", InputHub.ReleaseAll, ct);
+        var receipt = new CombatBattleHostInputResult(CombatBattleHostInputStatus.Unknown);
+        if (inputOwner == null) receipt = SubmitRelease();
+        else inputOwner.ReleaseInput(() => receipt = SubmitRelease());
         // A completed release with no held native keys is a neutral no-op, not an added key press.
         return receipt is { Status: CombatBattleHostInputStatus.NotSent, NativeRequested: 0, NativeSubmitted: 0,
             Error: null, Reason: "no-native-input", ObservableAfterTimestamp: { } completed }
