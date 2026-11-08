@@ -168,75 +168,106 @@ public class SwitchPartyTask
         PartyListPageObservation? previousPage = null;
         long previousInputCompleted = 0;
         Guid? listSession = null;
-        for (var i = 0; i < 16; i++)
+        var stopPaging = false;
+        for (var i = 0; i < 16 && !stopPaging; i++)
         {
             await Delay(50, ct);
-            try
+            // At most one reread belongs to this page; it never issues another drag or changes its baseline.
+            for (var pageRead = 0; pageRead < 2; pageRead++)
             {
-                using var page = _io.Capture();
-                var observed = _io.Read(page);
-                if (!observed.Matches(UiTarget.PartyList) || !observed.SourceBound || observed.SourceStamp != page.FrameStamp ||
-                    !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
-                    throw new PartySetupFailedException("队伍列表当前来源或窗口失效，不能继续分页");
-                listSession ??= page.FrameStamp.SessionId;
-                if (listSession != page.FrameStamp.SessionId)
-                    throw new PartySetupFailedException("队伍列表捕获会话改变，不能继续分页");
-                var recognitionObject = new RecognitionObject
-                { RecognitionType = RecognitionTypes.Ocr, RegionOfInterest = regionOfInterest, DrawOnWindow = true, Name = "队伍识别区域" };
-                var namePage = _io.ReadNames(page, recognitionObject);
-                var names = namePage.Names;
+                if (pageRead > 0)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var operation = UiOperation.Current;
+                    operation?.Check();
+                    var waitMilliseconds = (int)Math.Min(50, operation?.Remaining.TotalMilliseconds ?? 50);
+                    await Delay(waitMilliseconds, ct);
+                    ct.ThrowIfCancellationRequested();
+                    operation?.Check();
+                }
                 try
                 {
-                    if (!observed.HasUsableEvidence || namePage.Source != page.FrameStamp || !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
-                        throw new PartySetupFailedException("队伍OCR完成后来源或窗口已失效，不能判定末页或继续输入");
-                    var titles = names.Where(t => t.X > 35 * _assetScale && t.X < 100 * _assetScale).ToArray();
-                    var state = PartyListPageObservation.Read(page.SrcMat, page.FrameStamp, _assetScale, titles.Select(t => new PartyListRow(t.Text, new Rect(t.X, t.Y, t.Width, t.Height))));
-                    if (previousPage != null && !state.AdvancesFrom(previousPage, previousInputCompleted, _io.Clock))
-                        throw new PartySetupFailedException("队伍列表翻页未取得新页正证，停止继续输入");
-                    async Task SelectTitle(Region title)
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    using var page = _io.Capture();
+                    var observed = _io.Read(page);
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!observed.Matches(UiTarget.PartyList) || !observed.SourceBound || observed.SourceStamp != page.FrameStamp ||
+                        !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
+                        throw new PartySetupFailedException("队伍列表当前来源或窗口失效，不能继续分页");
+                    listSession ??= page.FrameStamp.SessionId;
+                    if (listSession != page.FrameStamp.SessionId)
+                        throw new PartySetupFailedException("队伍列表捕获会话改变，不能继续分页");
+                    var recognitionObject = new RecognitionObject
+                    { RecognitionType = RecognitionTypes.Ocr, RegionOfInterest = regionOfInterest, DrawOnWindow = true, Name = "队伍识别区域" };
+                    var namePage = _io.ReadNames(page, recognitionObject);
+                    var names = namePage.Names;
+                    try
                     {
+                        ct.ThrowIfCancellationRequested();
+                        UiOperation.Current?.Check();
+                        if (!observed.HasUsableEvidence || namePage.Source != page.FrameStamp || !page.FrameStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) || !_io.SameTarget())
+                            throw new PartySetupFailedException("队伍OCR完成后来源或窗口已失效，不能判定末页或继续输入");
+                        var titles = names.Where(t => t.X > 35 * _assetScale && t.X < 100 * _assetScale).ToArray();
+                        var state = PartyListPageObservation.Read(page.SrcMat, page.FrameStamp, _assetScale, titles.Select(t => new PartyListRow(t.Text, new Rect(t.X, t.Y, t.Width, t.Height))));
+                        if (previousPage != null && !state.AdvancesFrom(previousPage, previousInputCompleted, _io.Clock))
+                        {
+                            // Only presentation feedback may be reobserved; source and input timing stay strict.
+                            if (pageRead == 0 && state.Source.IsAfter(previousPage.Source) &&
+                                state.Source.TimestampFrequency == _io.Clock.TimestampFrequency &&
+                                state.Source.CapturedTimestamp > previousPage.Source.CapturedTimestamp &&
+                                _io.Clock.GetElapsedTime(previousInputCompleted, state.Source.CapturedTimestamp) >= TimeSpan.FromMilliseconds(60) &&
+                                state.Source.IsFresh(_io.Clock, TimeSpan.FromSeconds(2)))
+                                continue;
+                            throw new PartySetupFailedException("队伍列表翻页未取得新页正证，停止继续输入");
+                        }
+                        async Task SelectTitle(Region title)
+                        {
+                            AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
+                            _io.Click(page, title.Right + 100 * _assetScale, title.Bottom);
+                            await Delay(400, ct);
+                            await ConfirmParty(driver, ct, deferApplyToCaller, matches);
+                            _io.ClearCombatScenes();
+                        }
+                        foreach (var title in titles)
+                        {
+                            if (!matches(title.Text)) continue;
+                            await SelectTitle(title); return true;
+                        }
+                        foreach (var title in titles)
+                        {
+                            var left = Math.Max(regionOfInterest.Left, (int)(35 * _assetScale));
+                            if (title.Width <= 0 || title.Height <= 0 || title.Right <= left || title.Right > regionOfInterest.Right ||
+                                title.Y < regionOfInterest.Top || title.Bottom > regionOfInterest.Bottom) continue;
+                            var band = new Rect(left, title.Y, title.Right - left, title.Height);
+                            CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true);
+                            if (namePage.Source != page.FrameStamp) throw new PartySetupFailedException("队伍名字行来源不属于当前页");
+                            var completeName = namePage.ReadLine(band);
+                            CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true);
+                            if (namePage.Source != page.FrameStamp) throw new PartySetupFailedException("队伍名字行读取期间来源改变");
+                            if (!matches(completeName)) continue;
+                            await SelectTitle(title); return true;
+                        }
+                        if (state.End == PartyListEnd.End)
+                        { Logger.LogInformation("已确认队伍列表滚动到底，当前页未找到目标"); stopPaging = true; break; }
+                        if (state.End != PartyListEnd.More || titles.Length == 0)
+                            throw new PartySetupFailedException("队伍列表剩余页状态未知，不能盲目翻页或宣称搜索结束");
+                        if (i == 15) { stopPaging = true; break; }
                         AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
-                        _io.Click(page, title.Right + 100 * _assetScale, title.Bottom);
-                        await Delay(400, ct);
-                        await ConfirmParty(driver, ct, deferApplyToCaller, matches);
-                        _io.ClearCombatScenes();
+                        if (!state.TryPlanPage(regionOfInterest, out var pagePlan))
+                            throw new PartySetupFailedException("当前队伍行与滚动条不足以规划有重叠的新页，停止输入");
+                        await _io.DragPageAsync(page, pagePlan, ct, () => CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true));
+                        previousInputCompleted = _io.Clock.GetTimestamp();
+                        previousPage = state;
+                        // Two 60ms drag settles share the existing 400ms per-page wait.
+                        await Delay(280, ct);
+                        break;
                     }
-                    foreach (var title in titles)
-                    {
-                        if (!matches(title.Text)) continue;
-                        await SelectTitle(title); return true;
-                    }
-                    foreach (var title in titles)
-                    {
-                        var left = Math.Max(regionOfInterest.Left, (int)(35 * _assetScale));
-                        if (title.Width <= 0 || title.Height <= 0 || title.Right <= left || title.Right > regionOfInterest.Right ||
-                            title.Y < regionOfInterest.Top || title.Bottom > regionOfInterest.Bottom) continue;
-                        var band = new Rect(left, title.Y, title.Right - left, title.Height);
-                        CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true);
-                        if (namePage.Source != page.FrameStamp) throw new PartySetupFailedException("队伍名字行来源不属于当前页");
-                        var completeName = namePage.ReadLine(band);
-                        CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true);
-                        if (namePage.Source != page.FrameStamp) throw new PartySetupFailedException("队伍名字行读取期间来源改变");
-                        if (!matches(completeName)) continue;
-                        await SelectTitle(title); return true;
-                    }
-                    if (state.End == PartyListEnd.End)
-                    { Logger.LogInformation("已确认队伍列表滚动到底，当前页未找到目标"); break; }
-                    if (state.End != PartyListEnd.More || titles.Length == 0)
-                        throw new PartySetupFailedException("队伍列表剩余页状态未知，不能盲目翻页或宣称搜索结束");
-                    if (i == 15) break;
-                    AdmitPartyInput(page, observed, UiTarget.PartyList, ct);
-                    if (!state.TryPlanPage(regionOfInterest, out var pagePlan))
-                        throw new PartySetupFailedException("当前队伍行与滚动条不足以规划有重叠的新页，停止输入");
-                    await _io.DragPageAsync(page, pagePlan, ct, () => CheckPartyInput(page, observed, UiTarget.PartyList, ct, requireForeground: true));
-                    previousInputCompleted = _io.Clock.GetTimestamp();
-                    previousPage = state;
-                    // Two 60ms drag settles share the existing 400ms per-page wait.
-                    await Delay(280, ct);
+                    finally { foreach (var region in names) region.Dispose(); }
                 }
-                finally { foreach (var region in names) region.Dispose(); }
+                finally { _io.ClearDrawings(); }
             }
-            finally { _io.ClearDrawings(); }
         }
         if (stayInPartyViewOnFailure && !isInPartyViewUi)
         {

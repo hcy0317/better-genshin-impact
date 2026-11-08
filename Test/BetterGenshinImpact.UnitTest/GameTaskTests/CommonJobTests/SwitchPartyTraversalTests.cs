@@ -34,6 +34,101 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task PublicStartReobservesOneCompletedDragUntilItsFreshContentAndThumbAdvance()
+    {
+        using var replay = new Replay { DelayedPageFeedback = true };
+        var started = replay.Time.GetTimestamp();
+        bool? found = null;
+        var error = await Record.ExceptionAsync(async () => found = await new SwitchPartyTask(replay.Io()).Start("矿物", default));
+
+        AssertPageFeedbackPremises(replay, nextAdvances: true);
+        output.WriteLine($"post-drag before={replay.BeforePageFeedback!.Page.Source} first={replay.FirstPageFeedback!.Page.Source} next={replay.NextPageFeedback!.Page.Source} inputCompleted={replay.PageInputCompletedAt} firstAdvances={replay.FirstPageFeedback.Advances} nextAdvances={replay.NextPageFeedback.Advances} pageActions={replay.PageActions} error={error?.GetType().Name} nativeInputs=0");
+        Assert.Null(error); // The unchanged source stops at its first rejected post-drag observation.
+        Assert.True(found);
+        Assert.Contains(replay.NextPageFeedback!.Page.Source, replay.ActualPageFeedbackReadSources);
+        Assert.True(replay.ActualAdvancedPageFeedbackRead);
+        Assert.Equal(1, replay.PageActions);
+        Assert.Equal(1, replay.SelectConfirmSent);
+        Assert.Equal(1, replay.ApplySent);
+        Assert.True(replay.Selected);
+        Assert.Equal("world", replay.Scene);
+        Assert.False(replay.PageButtonHeld);
+        Assert.True(replay.Time.GetElapsedTime(started) < TimeSpan.FromSeconds(60));
+        Assert.True(ApplicationHostBootstrapGuard.IsProhibited);
+        Assert.Null(System.Windows.Application.Current);
+    }
+
+    [Fact]
+    public async Task PublicStartNeverAddsAnotherDragWhenFreshPageFeedbackDoesNotAdvance()
+    {
+        using var replay = new Replay { DelayedPageFeedback = true, NeverAdvancePageFeedback = true };
+        var started = replay.Time.GetTimestamp();
+        var error = await Record.ExceptionAsync(() => new SwitchPartyTask(replay.Io()).Start("矿物", default));
+
+        AssertPageFeedbackPremises(replay, nextAdvances: false);
+        Assert.NotNull(error);
+        Assert.Equal(1, replay.PageActions);
+        Assert.False(replay.Selected);
+        Assert.Equal(0, replay.SelectConfirmSent);
+        Assert.Equal(0, replay.ApplySent);
+        Assert.False(replay.PageButtonHeld);
+        Assert.True(replay.Time.GetElapsedTime(started) <= TimeSpan.FromSeconds(60));
+        Assert.True(ApplicationHostBootstrapGuard.IsProhibited);
+        Assert.Null(System.Windows.Application.Current);
+    }
+
+    private static void AssertPageFeedbackPremises(Replay replay, bool nextAdvances)
+    {
+        Assert.NotNull(replay.BeforePageFeedback);
+        Assert.NotNull(replay.FirstPageFeedback);
+        Assert.NotNull(replay.NextPageFeedback);
+        var before = replay.BeforePageFeedback!;
+        var first = replay.FirstPageFeedback!;
+        var next = replay.NextPageFeedback!;
+        Assert.True(before.Page.Rows.Count >= 2);
+        Assert.Equal(PartyListEnd.More, before.Page.End);
+        Assert.True(before.Page.TryPlanPage(new Rect(0, 80, 672, 910), out var plan));
+        Assert.Equal(before.Page.Source, plan.Source);
+        Assert.True(plan.ContentAdvance > 0);
+        Assert.True(replay.PageInputCompletedAt > before.Page.Source.CapturedTimestamp);
+        Assert.True(first.Page.Source.IsAfter(before.Page.Source));
+        Assert.True(next.Page.Source.IsAfter(first.Page.Source));
+        Assert.Equal(first.Page.Source.SessionId, next.Page.Source.SessionId);
+        Assert.Equal(replay.Time.TimestampFrequency, first.Page.Source.TimestampFrequency);
+        Assert.Equal(replay.Time.TimestampFrequency, next.Page.Source.TimestampFrequency);
+        Assert.True(replay.Time.GetElapsedTime(replay.PageInputCompletedAt, first.Page.Source.CapturedTimestamp) >= TimeSpan.FromMilliseconds(60));
+        Assert.True(replay.Time.GetElapsedTime(replay.PageInputCompletedAt, next.Page.Source.CapturedTimestamp) >= TimeSpan.FromMilliseconds(60));
+        foreach (var sample in new[] { before, first, next })
+        {
+            Assert.Equal(sample.Page.Source, sample.NamesSource);
+            Assert.True(sample.View.HasUsableEvidence);
+            Assert.True(sample.View.SourceBound);
+            Assert.Equal(sample.Page.Source, sample.View.SourceStamp);
+            Assert.True(sample.View.Matches(UiTarget.PartyList));
+            Assert.True(sample.SameWindow);
+            Assert.Equal(PartyListEnd.More, sample.Page.End);
+            var age = replay.Time.GetElapsedTime(sample.Page.Source.CapturedTimestamp, sample.ObservedAt);
+            Assert.True(age >= TimeSpan.Zero && age <= TimeSpan.FromSeconds(2));
+        }
+        Assert.Equal(before.Page.NamesSignature, first.Page.NamesSignature);
+        Assert.Equal(before.Page.Thumb, first.Page.Thumb);
+        Assert.False(first.Advances);
+        Assert.Equal(nextAdvances, next.Advances);
+        Assert.Contains(first.Page.Source, replay.ActualPageFeedbackReadSources);
+        if (nextAdvances)
+        {
+            Assert.NotEqual(before.Page.NamesSignature, next.Page.NamesSignature);
+            Assert.True(next.Page.Thumb.Top > before.Page.Thumb.Top + 1);
+            Assert.True(before.Page.Rows.Select(row => row.Text).Intersect(next.Page.Rows.Select(row => row.Text)).Count() >= 2);
+        }
+        else
+        {
+            Assert.Equal(before.Page.NamesSignature, next.Page.NamesSignature);
+            Assert.Equal(before.Page.Thumb, next.Page.Thumb);
+        }
+    }
+
+    [Fact]
     public async Task PublicStartRejectsMovingThumbWhenOcrNamesAndPositionsStillDescribeTheOldPage()
     {
         var replay = new Replay { Fault = "thumb-only", MissingTarget = true, NeverAtEnd = true };
@@ -505,9 +600,34 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
         Assert.Null(System.Windows.Application.Current);
     }
 
-    internal sealed class Replay : IUiDriver
+    internal sealed class Replay : IUiDriver, IDisposable
     {
-        private PartyNameOcrPage BindNames(ImageRegion image) => new(image,Names(image),_ => string.Empty);
+        internal sealed record PageFeedbackSnapshot(PartyListPageObservation Page, CaptureFrameStamp NamesSource,
+            UiSnapshot View, long ObservedAt, bool SameWindow, bool Advances);
+        internal bool DelayedPageFeedback, NeverAdvancePageFeedback;
+        internal long PageInputCompletedAt;
+        internal PageFeedbackSnapshot? BeforePageFeedback, FirstPageFeedback, NextPageFeedback;
+        internal readonly List<CaptureFrameStamp> ActualPageFeedbackReadSources = new();
+        internal bool ActualAdvancedPageFeedbackRead;
+        internal bool PageButtonHeld => _leftHeld;
+        private readonly Dictionary<CaptureFrameStamp, PartyListRow[]> _feedbackRows = new();
+        private ImageRegion? _queuedPageFeedback;
+        private PartyNameOcrPage BindNames(ImageRegion image)
+        {
+            var names = Names(image);
+            var page = new PartyNameOcrPage(image, names, _ => string.Empty);
+            if (DelayedPageFeedback && Scene == "list")
+            {
+                var sample = DescribeFeedback(image, names, page.Source);
+                if (PageActions == 0) BeforePageFeedback = sample;
+                else
+                {
+                    ActualPageFeedbackReadSources.Add(image.FrameStamp);
+                    if (NextPageFeedback?.Page.Source == image.FrameStamp) ActualAdvancedPageFeedbackRead = sample.Advances;
+                }
+            }
+            return page;
+        }
         private string ReadNameLine(ImageRegion image, Rect band) => string.Empty;
         internal readonly FakeTimeProvider Time = new();
         private readonly CaptureFrameSource _source;
@@ -551,6 +671,7 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
             {
                 if (!_leftHeld) return; _leftHeld = false; PageActions++;
                 if (Fault != "stuck") { Page++; _thumbTop = _pointer.Y - ThumbHeight / 2d; }
+                if (DelayedPageFeedback) PageInputCompletedAt = Time.GetTimestamp();
             }, () => true),
             ResetTop = _ => { Page = 0; return Task.CompletedTask; }, Delay = DelayAsync,
             ReturnMain = token => UiRecovery.ToMainAsync(this, token, false, NullLogger.Instance),
@@ -592,6 +713,8 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
 
         private ImageRegion CaptureForTask()
         {
+            if (DelayedPageFeedback && Scene == "list" && !Selected && PageActions > 0)
+                return CapturePageFeedback();
             var image = Image();
             if (WhiteProbeCase && _selectionConfirmed && Scene == "party")
             {
@@ -603,6 +726,70 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
                 else NormalApplyCaptureSources.Add(image.FrameStamp);
             }
             return image;
+        }
+
+        private PageFeedbackSnapshot DescribeFeedback(ImageRegion image, IReadOnlyList<Region> names, CaptureFrameStamp namesSource)
+        {
+            var page = PartyListPageObservation.Read(image.SrcMat, image.FrameStamp, 1,
+                names.Select(row => new PartyListRow(row.Text, new Rect(row.X, row.Y, row.Width, row.Height))));
+            var view = Read(image);
+            var advances = BeforePageFeedback != null && PageActions > 0 &&
+                page.AdvancesFrom(BeforePageFeedback.Page, PageInputCompletedAt, Time);
+            return new(page, namesSource, view, Time.GetTimestamp(), _samePartyWindow && Fault != "foreign-window", advances);
+        }
+
+        private PageFeedbackSnapshot DescribeAvailableFeedback(ImageRegion image)
+        {
+            var names = Names(image);
+            try
+            {
+                var page = new PartyNameOcrPage(image, names, _ => string.Empty);
+                return DescribeFeedback(image, names, page.Source);
+            }
+            finally { foreach (var name in names) name.Dispose(); }
+        }
+
+        private ImageRegion CreateFeedbackFrame(bool advanced)
+        {
+            Time.Advance(TimeSpan.FromMilliseconds(2));
+            var pixels = new Mat(1080, 1920, MatType.CV_8UC3, new Scalar(35, 45, 55));
+            var thumbTop = advanced ? _thumbTop : BeforePageFeedback!.Page.Thumb.Top;
+            Cv2.Rectangle(pixels, new Rect(698, (int)Math.Round(thumbTop), 6, ThumbHeight), new Scalar(205, 205, 205), -1);
+            var frame = new GameCaptureRegion(pixels, 0, 0) { FrameStamp = _source.Next() };
+            var texts = advanced ? new[] { "火", "雷", "矿物", "风" } : new[] { "采集", "水", "火", "雷" };
+            _feedbackRows.Add(frame.FrameStamp, texts.Select((text, i) => new PartyListRow(text, new Rect(70, 135 + i * 174, 50, 25))).ToArray());
+            return frame;
+        }
+
+        private ImageRegion CapturePageFeedback()
+        {
+            if (FirstPageFeedback == null)
+            {
+                var first = CreateFeedbackFrame(advanced: false);
+                try
+                {
+                    FirstPageFeedback = DescribeAvailableFeedback(first);
+                    // The external renderer advances while the already captured first image remains unchanged.
+                    Time.Advance(TimeSpan.FromMilliseconds(60));
+                    _queuedPageFeedback = CreateFeedbackFrame(advanced: !NeverAdvancePageFeedback);
+                    NextPageFeedback = DescribeAvailableFeedback(_queuedPageFeedback);
+                    return first;
+                }
+                catch { first.Dispose(); throw; }
+            }
+            if (_queuedPageFeedback != null)
+            {
+                var frame = _queuedPageFeedback;
+                _queuedPageFeedback = null;
+                return frame;
+            }
+            return CreateFeedbackFrame(advanced: !NeverAdvancePageFeedback);
+        }
+
+        public void Dispose()
+        {
+            _queuedPageFeedback?.Dispose();
+            _queuedPageFeedback = null;
         }
 
         private string ReadSingle(ImageRegion image, RecognitionObject recognition)
@@ -653,6 +840,15 @@ public class SwitchPartyTraversalTests(ITestOutputHelper output)
         }
         private List<Region> Names(ImageRegion image)
         {
+            if (DelayedPageFeedback && _feedbackRows.TryGetValue(image.FrameStamp, out var observedRows))
+            {
+                return observedRows.Select(row =>
+                {
+                    var region = image.Derive(row.Bounds.X, row.Bounds.Y, row.Bounds.Width, row.Bounds.Height);
+                    region.Text = row.Text;
+                    return region;
+                }).ToList();
+            }
             if (Fault == "stale-ocr") Time.Advance(TimeSpan.FromSeconds(3));
             var names = Page == 0 || Fault == "thumb-only" ? new[] { "采集", "水", "火", "雷" } :
                 new[] { "雷", "草", MissingTarget ? NeverAtEnd ? "风" + Page : "风" : AlreadyActiveCase || WhiteProbeCase ? "岩" : "矿物" };
