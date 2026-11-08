@@ -2,6 +2,12 @@ using BetterGenshinImpact.Core.Input;
 using Vanara.PInvoke;
 using BetterGenshinImpact.GameTask.Runtime.WebPage;
 using System.ComponentModel;
+using BetterGenshinImpact.GameTask;
+using BetterGenshinImpact.GameTask.AutoFight;
+using Fischless.GameCapture;
+using Fischless.WindowsInput;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 
 namespace BetterGenshinImpact.UnitTest.CoreTests.InputTests;
 
@@ -194,6 +200,147 @@ public class InputSessionOwnershipTests
         Assert.Equal(0, device.Channel.Presses);
     }
 
+    [Fact]
+    public void OwnedCleanupKeepsItsUpReceiptWhenOnlyTheKnownSourceHasAged()
+    {
+        var clock = new FakeTimeProvider();
+        var device = new RecordingBackend();
+        device.Channel.RecordNativeUps = true;
+        var inputs = new InputSessionOwnership(device);
+        var owner = inputs.Acquire();
+        try
+        {
+            owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_E));
+            Assert.True(device.Channel.IsKeyDown(User32.VK.VK_E));
+            owner.CloseAdmission();
+            Assert.Throws<InputSessionOwnership.RevokedException>(
+                () => owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q)));
+            var cleanupEntered = false;
+            owner.ReleaseInput(() => cleanupEntered = true);
+            Assert.True(cleanupEntered);
+            var source = new CaptureFrameSource(clock).Next();
+            var request = new CombatNativeInputRequest(Guid.NewGuid(), source, clock.GetTimestamp() + clock.TimestampFrequency * 3);
+            clock.Advance(TimeSpan.FromMilliseconds(200));
+            Assert.True(source.IsKnown);
+            Assert.Equal(clock.TimestampFrequency, source.TimestampFrequency);
+            Assert.True(source.CapturedTimestamp <= clock.GetTimestamp());
+            Assert.False(source.IsFresh(clock, TimeSpan.FromMilliseconds(150)));
+            Assert.True(request.DeadlineTimestamp > clock.GetTimestamp());
+            TaskExecutionScope.ThrowIfFailed();
+            Assert.Equal(0, device.Channel.NativeUps);
+            Assert.False(device.Channel.IsKeyDown(User32.VK.VK_Q));
+            var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.Unknown);
+            // The existing opaque cleanup API is the permission; the kind string is not an admission flag.
+            owner.ReleaseInput(() => result = new CombatNativeInput(clock, NullLogger.Instance, () => { })
+                .Submit(request, "release-selection-owner", inputs.Backend.ReleaseAll, CancellationToken.None));
+            Assert.Equal(CombatBattleHostInputStatus.Sent, result.Status);
+            Assert.Null(result.Error);
+            Assert.Equal(1, result.NativeRequested);
+            Assert.Equal(1, result.NativeSubmitted);
+            Assert.NotNull(result.StartedTimestamp);
+            Assert.NotNull(result.CompletedTimestamp);
+            Assert.Equal(1, device.Channel.NativeUps);
+            Assert.False(device.Channel.IsKeyDown(User32.VK.VK_E));
+        }
+        finally
+        {
+            // Business assertions precede cleanup: Dispose must not manufacture the expected release.
+            try { owner.ReleaseInput(inputs.Backend.ReleaseAll); }
+            finally { owner.Dispose(); }
+        }
+    }
+
+    [Theory]
+    [InlineData("unknown-source")]
+    [InlineData("wrong-frequency")]
+    [InlineData("expired-deadline")]
+    [InlineData("cancelled")]
+    [InlineData("late-prepare")]
+    public void OwnedCleanupKeepsTheOriginalUnconfirmedAdmissionFailures(string kind)
+    {
+        var clock = new FakeTimeProvider();
+        var device = new RecordingBackend();
+        device.Channel.RecordNativeUps = true;
+        var inputs = new InputSessionOwnership(device);
+        var owner = inputs.Acquire();
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            owner.Invoke(() => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_E));
+            Assert.True(device.Channel.IsKeyDown(User32.VK.VK_E));
+            var source = new CaptureFrameSource(clock).Next();
+            if (kind != "late-prepare") clock.Advance(TimeSpan.FromMilliseconds(200));
+            if (kind == "unknown-source") source = default;
+            if (kind == "wrong-frequency") source = source with { TimestampFrequency = source.TimestampFrequency + 1 };
+            var deadline = kind == "expired-deadline" ? clock.GetTimestamp() : clock.GetTimestamp() + clock.TimestampFrequency * 3;
+            var request = new CombatNativeInputRequest(Guid.NewGuid(), source, deadline);
+            if (kind == "cancelled") cancellation.Cancel();
+            var input = new CombatNativeInput(clock, NullLogger.Instance, () =>
+            {
+                if (kind == "late-prepare") clock.Advance(TimeSpan.FromMilliseconds(200));
+            });
+            var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.Unknown);
+            void Submit() => owner.ReleaseInput(() => result = input.Submit(request, "release-selection-owner",
+                inputs.Backend.ReleaseAll, cancellation.Token));
+            if (kind == "cancelled") Assert.ThrowsAny<OperationCanceledException>(Submit);
+            else
+            {
+                Submit();
+                Assert.Equal(CombatBattleHostInputStatus.NotSent, result.Status);
+                Assert.NotNull(result.Error);
+                Assert.Null(result.CompletedTimestamp);
+            }
+            Assert.Equal(0, device.Channel.NativeUps);
+            Assert.True(device.Channel.IsKeyDown(User32.VK.VK_E));
+        }
+        finally
+        {
+            try { owner.ReleaseInput(inputs.Backend.ReleaseAll); }
+            finally { owner.Dispose(); }
+        }
+    }
+
+    [Fact]
+    public void OrdinarySubmissionCannotBorrowTheCleanupKindToUseAnAgedSource()
+    {
+        var clock = new FakeTimeProvider();
+        var device = new RecordingBackend();
+        var inputs = new InputSessionOwnership(device);
+        using var owner = inputs.Acquire();
+        var source = new CaptureFrameSource(clock).Next();
+        var request = new CombatNativeInputRequest(Guid.NewGuid(), source, clock.GetTimestamp() + clock.TimestampFrequency * 3);
+        clock.Advance(TimeSpan.FromMilliseconds(200));
+        var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.Unknown);
+        owner.Invoke(() => result = new CombatNativeInput(clock, NullLogger.Instance, () => { })
+            .Submit(request, "release-selection-owner", () => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q), default));
+        Assert.Equal(CombatBattleHostInputStatus.NotSent, result.Status);
+        Assert.Null(result.CompletedTimestamp);
+        Assert.False(device.Channel.IsKeyDown(User32.VK.VK_Q));
+        Assert.Equal(0, device.Channel.Presses);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(200)]
+    public void CleanupSubmissionCannotDisguiseNewDownAsARelease(int sourceAgeMilliseconds)
+    {
+        var clock = new FakeTimeProvider();
+        var device = new RecordingBackend();
+        var inputs = new InputSessionOwnership(device);
+        using var owner = inputs.Acquire();
+        var source = new CaptureFrameSource(clock).Next();
+        var request = new CombatNativeInputRequest(Guid.NewGuid(), source, clock.GetTimestamp() + clock.TimestampFrequency * 3);
+        clock.Advance(TimeSpan.FromMilliseconds(sourceAgeMilliseconds));
+        var result = new CombatBattleHostInputResult(CombatBattleHostInputStatus.Unknown);
+        owner.ReleaseInput(() => result = new CombatNativeInput(clock, NullLogger.Instance, () => { })
+            .Submit(request, "release-selection-owner", () => inputs.Backend.Foreground.Keyboard.KeyDown(User32.VK.VK_Q), default));
+        Assert.NotEqual(CombatBattleHostInputStatus.Sent, result.Status);
+        Assert.NotNull(result.Error);
+        Assert.Null(result.CompletedTimestamp);
+        Assert.Equal(0, device.Channel.Presses);
+        Assert.False(device.Channel.IsKeyDown(User32.VK.VK_Q));
+    }
+
     private sealed class RecordingBackend : IInputBackend
     {
         internal bool FailRelease;
@@ -212,8 +359,22 @@ public class InputSessionOwnershipTests
     private sealed class RecordingChannel : InputChannelBase
     {
         internal int Presses;
+        internal bool RecordNativeUps;
+        internal int NativeUps;
         protected override void OnKeyDown(User32.VK key) => Presses++;
-        protected override void OnKeyUp(User32.VK key) { }
+        protected override void OnKeyUp(User32.VK key)
+        {
+            if (!RecordNativeUps) return;
+            var native = new WindowsInputMessageDispatcher(null, events =>
+            {
+                var input = Assert.Single(events);
+                Assert.Equal(User32.KEYEVENTF.KEYEVENTF_KEYUP, input.ki.dwFlags);
+                Assert.Equal((ushort)key, (ushort)input.ki.wVk);
+                NativeUps++;
+                return (uint)events.Length;
+            }, () => 0);
+            native.DispatchInput([new User32.INPUT(User32.KEYEVENTF.KEYEVENTF_KEYUP, (ushort)key)]);
+        }
         protected override void OnMouseButton(InputMouseButton button, bool down) { }
         protected override void OnMoveBy(int x, int y) { }
         protected override void OnMoveTo(double x, double y) { }

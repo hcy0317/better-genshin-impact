@@ -3,6 +3,7 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using Fischless.GameCapture;
 using Fischless.WindowsInput;
+using BetterGenshinImpact.Core.Input;
 using Microsoft.Extensions.Logging;
 
 namespace BetterGenshinImpact.GameTask.AutoFight;
@@ -24,9 +25,15 @@ internal sealed class CombatNativeInput(TimeProvider clock, ILogger logger, Acti
         {
             ct.ThrowIfCancellationRequested();
             TaskExecutionScope.ThrowIfFailed();
-            if (request.Id == Guid.Empty || clock.GetTimestamp() >= request.DeadlineTimestamp ||
-                clock.GetElapsedTime(requestedAt).TotalMilliseconds > 150 ||
-                !request.Source.IsFresh(clock, TimeSpan.FromMilliseconds(150)))
+            // Re-check the actual owner scope at every admission boundary, including after focus.
+            var cleanup = InputSessionOwnership.HasCurrentCleanup;
+            var now = clock.GetTimestamp();
+            var sourceAdmitted = cleanup
+                ? request.Source.IsKnown && request.Source.TimestampFrequency == clock.TimestampFrequency &&
+                  request.Source.CapturedTimestamp <= now
+                : request.Source.IsFresh(clock, TimeSpan.FromMilliseconds(150));
+            if (request.Id == Guid.Empty || now >= request.DeadlineTimestamp ||
+                clock.GetElapsedTime(requestedAt).TotalMilliseconds > 150 || !sourceAdmitted)
                 throw new TimeoutException("原生输入准入迟到或源帧过期，未发送输入");
         }
 

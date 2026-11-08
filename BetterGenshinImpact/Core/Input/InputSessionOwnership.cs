@@ -24,6 +24,9 @@ internal sealed class InputSessionOwnership
 
     internal IInputBackend Backend => Volatile.Read(ref _view);
 
+    // A read-only proof of this thread's existing cleanup capability; it grants no new input.
+    internal static bool HasCurrentCleanup => _sendingOwner?.IsCurrentCleanup == true;
+
     internal void Attach(IInputBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -111,6 +114,16 @@ internal sealed class InputSessionOwnership
 
         internal void Invoke(Action action) => InvokeCore(action, cleanup: false);
         internal void ReleaseInput(Action release) => InvokeCore(release, cleanup: true);
+
+        internal bool IsCurrentCleanup
+        {
+            get
+            {
+                lock (_inputs._gate)
+                    return ReferenceEquals(_sendingOwner, this) && _cleanupOnly &&
+                        !_released && ReferenceEquals(_inputs._owner, this) && Poison == null;
+            }
+        }
 
         private void InvokeCore(Action action, bool cleanup)
         {
