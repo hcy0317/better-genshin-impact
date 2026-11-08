@@ -69,6 +69,10 @@ public partial class PathExecutor
         internal required Func<CancellationToken, Task> RecoverAtStatue { get; init; }
         internal required Func<ImageRegion, HealingFrame> ReadHealing { get; init; }
         internal required Func<WaypointForTrack, CancellationToken, Task<CombatExecutionResult>> RunAction { get; init; }
+        internal Func<WaypointForTrack, CancellationToken, Task>? BeforeAction { get; init; }
+        internal Func<WaypointForTrack, NavigationResumePlan.MiningBinding?, CancellationToken,
+            Task<(CombatExecutionResult Outcome, NavigationResumePlan.MiningBinding? Binding)>>? RunMining { get; init; }
+        internal Func<CancellationToken, Task<NavigationResumePlan.MiningBinding?>>? ReadMiningBinding { get; init; }
         internal required Func<PathingMacroSession?> MacroFactory { get; init; }
     }
     private readonly PathingSceneIo? _sceneIo;
@@ -83,7 +87,10 @@ public partial class PathExecutor
     private bool _returningToCurrent;
     private bool _navigationProjectionActive;
     private string _routeIdentity = "";
+    private string _semanticSegmentDigest = "";
+    private string _semanticStateAtEntry = "";
     private CombatExecutionResult? _lastActionOutcome;
+    private NavigationResumePlan.MiningBinding? _lastMiningBinding;
     internal IReadOnlyDictionary<int, WaypointActionSettlement> ActionSettlements => _actionSettlements;
 
     public PathExecutor(CancellationToken ct) : this(ct, null) { }
@@ -249,6 +256,8 @@ public partial class PathExecutor
         foreach (var waypoints in waypointsList) // 按传送点分割的路径
         {
             CurWaypoints = (waypointsList.FindIndex(wps => wps == waypoints), waypoints);
+            _semanticSegmentDigest = NavigationResumePlan.SemanticDigest(waypoints);
+            _semanticStateAtEntry = NavigationResumePlan.DescribeSemanticState(waypoints);
             _completedWaypointActions.Clear();
             _actionSettlements.Clear();
             _lastReachedNavigation = null;
@@ -276,100 +285,8 @@ public partial class PathExecutor
                         _waypointBudget = new(currentIndex, _moveIo.Clock.GetUtcNow(), TimeSpan.FromSeconds(waypoint.MoveMode == MoveModeEnum.Climb.Code ? 60 : 240));
                     if (_waypointBudget == null) throw new InvalidOperationException("返回原current缺少owner票据");
                     _waypointBudget.Check(_moveIo.Clock, ct);
-                    using var nodeOwner = UiOperation.Begin("path-waypoint-owner", _waypointBudget.Deadline - _moveIo.Clock.GetUtcNow(), ct, clock: _moveIo.Clock);
-                    TryCloseSkipOtherOperations();
-                    await RecoverWhenLowHp(waypoint); // 低血量恢复
-                    _segmentHasStartedTraversal = true;
-
-                    if (waypoint.Type == WaypointType.Teleport.Code)
-                    {
-                        _pathingMacro?.Release();
-                        if (CurWaypoints.Item1 > 0)
-                        {
-                            var prevWaypoints = waypointsList[CurWaypoints.Item1 - 1];
-                            var prevWaypoint = prevWaypoints[prevWaypoints.Count - 1];
-                            if (prevWaypoint.Type == WaypointType.Teleport.Code
-                                || prevWaypoint.Action == ActionEnum.Fight.Code
-                                || prevWaypoint.Action == ActionEnum.NahidaCollect.Code
-                                || prevWaypoint.Action == ActionEnum.PickAround.Code)
-                            {
-                                // No delay
-                            }
-                            else
-                            {
-                                await Delay(1000, ct);
-                            }
-                        }
-                        await HandleTeleportWaypoint(waypoint);
-                        await RecordReachedNavigationAsync(waypoint);
-                    }
-                    else
-                    {
-                        await BeforeMoveToTarget(waypoint);
-                        // Path不用走得很近，Target需要接近，但都需要先移动到对应位置
-                        if (waypoint.Type == WaypointType.Orientation.Code)
-                        {
-                            _pathingMacro?.Release();
-                            // 方位点，只需要朝向
-                            // 考虑到方位点大概率是作为执行action的最后一个点，所以放在此处处理，不和传送点一样单独处理
-                            await FaceTo(waypoint);
-                        }
-                        else if (waypoint.Action != ActionEnum.UpDownGrabLeaf.Code)
-                        {
-                            await MoveTo(waypoint);
-                        }
-
-                        _arrivalReachedAt = Stopwatch.GetTimestamp();
-                        await BeforeMoveCloseToTarget(waypoint);
-
-                        if (IsTargetPoint(waypoint))
-                        {
-                            await MoveCloseTo(waypoint);
-                        }
-
-                        await RecordReachedNavigationAsync(waypoint);
-                        //skipOtherOperations如果重试，则跳过相关操作，
-                        if (ShouldExecuteWaypointAction(waypoint))
-                        {
-                            //战斗前的节点记录，用于游泳检测回到战斗节点
-                            AutoFightTask.FightWaypoint = waypoint.Action == ActionEnum.Fight.Code ? waypoint : null;
-
-                            // A verified navigation result ends only its ambient owner.
-                            // Keep the absolute ticket for any later recovery return.
-                            var navigationHandedOff = !string.IsNullOrWhiteSpace(waypoint.Action) &&
-                                _lastReachedNavigation is { } reached && reached.Index == currentIndex &&
-                                reached.Source.IsFresh(_moveIo.Clock, UiSnapshot.RecoveryMaximumAge) &&
-                                reached.Source.TimestampFrequency == _moveIo.Clock.TimestampFrequency &&
-                                waypoint.Type is "path" or "target" && waypoint.MoveMode is "walk" or "run" or "dash" or "climb" &&
-                                waypoint.Action != ActionEnum.UpDownGrabLeaf.Code;
-                            if (navigationHandedOff)
-                            {
-                                _waypointBudget.Check(_moveIo.Clock, ct);
-                                if (_returningToCurrent && _waypointBudget.CurrentIndex == currentIndex)
-                                {
-                                    _resumeCurrent = null;
-                                    _returningToCurrent = false;
-                                }
-                                // Dispose is idempotent and restores the original parent;
-                                // the using cleanup cannot restore it a second time.
-                                nodeOwner.Dispose();
-                            }
-                            // 执行 action
-                            await AfterMoveToTarget(waypoint);
-                            ct.ThrowIfCancellationRequested();
-                            TaskExecutionScope.ThrowIfFailed();
-                            UiOperation.Current?.Check();
-                            if (!navigationHandedOff) _waypointBudget.Check(_moveIo.Clock, ct);
-                            _completedWaypointActions.Add(CurWaypoint.Item1);
-                            if (_lastActionOutcome is { } settled) _actionSettlements[CurWaypoint.Item1] = new(CurWaypoint.Item1, NavigationResumePlan.CommandDigest(waypoint), settled);
-                        }
-                    }
-                    if (_returningToCurrent && _waypointBudget.CurrentIndex == currentIndex)
-                    {
-                        _waypointBudget.Check(_moveIo.Clock, ct);
-                        _returningToCurrent = false;
-                        _resumeCurrent = null;
-                    }
+                    await ExecuteOriginalWaypointAsync(waypoint, previousSegmentEnd:
+                        CurWaypoints.Item1 > 0 ? waypointsList[CurWaypoints.Item1 - 1][^1] : null);
                 }
 
             }, exception =>
@@ -2240,7 +2157,8 @@ public partial class PathExecutor
     {
         if (waypoint.MoveMode == MoveModeEnum.Fly.Code && waypoint.Action == ActionEnum.StopFlying.Code)
         {
-            await ActionFactory.GetBeforeHandler(ActionEnum.StopFlying.Code).RunAsync(ct, waypoint);
+            if (_sceneIo?.BeforeAction is { } beforeAction) await beforeAction(waypoint, ct);
+            else await ActionFactory.GetBeforeHandler(ActionEnum.StopFlying.Code).RunAsync(ct, waypoint);
         }
     }
 
@@ -2260,15 +2178,117 @@ public partial class PathExecutor
         }
         else if (waypoint.Action == ActionEnum.LogOutput.Code)
         {
-            Logger.LogInformation(waypoint.LogInfo);
+            _moveIo.Logger.LogInformation(waypoint.LogInfo);
         }
     }
 
-    private async Task AfterMoveToTarget(WaypointForTrack waypoint)
+    private async Task ExecuteOriginalWaypointAsync(WaypointForTrack waypoint,
+        NavigationResumePlan? semanticPlan = null, WaypointForTrack? previousSegmentEnd = null)
     {
+        if (_waypointBudget == null) throw new InvalidOperationException("原点执行缺少owner");
+        using var nodeOwner = semanticPlan == null
+            ? UiOperation.Begin("path-waypoint-owner", _waypointBudget.Deadline - _moveIo.Clock.GetUtcNow(), ct, clock: _moveIo.Clock)
+            : null;
+        void Check()
+        {
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            UiOperation.Current?.Check();
+            if (semanticPlan != null)
+            {
+                _waypointBudget.Check(_moveIo.Clock, ct);
+                if (!semanticPlan.Matches(_routeIdentity, CurWaypoints.Item2, _waypointBudget))
+                    throw new InvalidOperationException("原完整前缀计划在执行期间变化");
+            }
+        }
+        void FinishCurrent()
+        {
+            if (semanticPlan == null && _returningToCurrent && _waypointBudget.CurrentIndex == CurWaypoint.Item1)
+            {
+                _waypointBudget.Check(_moveIo.Clock, ct);
+                _returningToCurrent = false;
+                _resumeCurrent = null;
+            }
+        }
+        Check();
+        if (semanticPlan == null)
+        {
+            TryCloseSkipOtherOperations();
+            await RecoverWhenLowHp(waypoint);
+            _segmentHasStartedTraversal = true;
+        }
+        if (waypoint.Type == WaypointType.Teleport.Code)
+        {
+            _pathingMacro?.Release();
+            if (previousSegmentEnd != null && previousSegmentEnd.Type != WaypointType.Teleport.Code &&
+                previousSegmentEnd.Action != ActionEnum.Fight.Code && previousSegmentEnd.Action != ActionEnum.NahidaCollect.Code &&
+                previousSegmentEnd.Action != ActionEnum.PickAround.Code) await Delay(1000, ct);
+            await HandleTeleportWaypoint(waypoint);
+            Check();
+            await RecordReachedNavigationAsync(waypoint);
+            FinishCurrent();
+            return;
+        }
+        await BeforeMoveToTarget(waypoint);
+        Check();
+        if (waypoint.Type == WaypointType.Orientation.Code)
+        {
+            _pathingMacro?.Release();
+            await FaceTo(waypoint);
+        }
+        else if (waypoint.Action != ActionEnum.UpDownGrabLeaf.Code) await MoveTo(waypoint);
+        Check();
+        _arrivalReachedAt = Stopwatch.GetTimestamp();
+        await BeforeMoveCloseToTarget(waypoint);
+        Check();
+        if (IsTargetPoint(waypoint)) await MoveCloseTo(waypoint);
+        Check();
+        await RecordReachedNavigationAsync(waypoint);
+        Check();
+        if (semanticPlan == null ? ShouldExecuteWaypointAction(waypoint) : !string.IsNullOrEmpty(waypoint.Action))
+        {
+            AutoFightTask.FightWaypoint = waypoint.Action == ActionEnum.Fight.Code ? waypoint : null;
+            var navigationHandedOff = semanticPlan == null && !string.IsNullOrWhiteSpace(waypoint.Action) &&
+                _lastReachedNavigation is { } reached && reached.Index == CurWaypoint.Item1 &&
+                reached.Source.IsFresh(_moveIo.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                reached.Source.TimestampFrequency == _moveIo.Clock.TimestampFrequency &&
+                waypoint.Type is "path" or "target" && waypoint.MoveMode is "walk" or "run" or "dash" or "climb" &&
+                waypoint.Action != ActionEnum.UpDownGrabLeaf.Code;
+            if (navigationHandedOff)
+            {
+                _waypointBudget.Check(_moveIo.Clock, ct);
+                if (_returningToCurrent && _waypointBudget.CurrentIndex == CurWaypoint.Item1)
+                { _resumeCurrent = null; _returningToCurrent = false; }
+                nodeOwner!.Dispose();
+            }
+            await AfterMoveToTarget(waypoint, semanticPlan?.MiningBindings.GetValueOrDefault(CurWaypoint.Item1));
+            Check();
+            if (!navigationHandedOff) _waypointBudget.Check(_moveIo.Clock, ct);
+            _completedWaypointActions.Add(CurWaypoint.Item1);
+            if (_lastActionOutcome is { } settled)
+                _actionSettlements[CurWaypoint.Item1] = new(CurWaypoint.Item1, NavigationResumePlan.CommandDigest(waypoint), settled)
+                { Mining = _lastMiningBinding };
+        }
+        FinishCurrent();
+    }
+
+    private async Task AfterMoveToTarget(WaypointForTrack waypoint, NavigationResumePlan.MiningBinding? expectedMining = null)
+    {
+        _lastMiningBinding = null;
         if (_sceneIo != null)
         {
-            var outcome = await _sceneIo.RunAction(waypoint, ct);
+            CombatExecutionResult outcome;
+            if (waypoint.Action == ActionEnum.Mining.Code && _sceneIo.RunMining is { } runMining)
+            {
+                var mining = await runMining(waypoint, expectedMining, ct);
+                outcome = mining.Outcome;
+                _lastMiningBinding = mining.Binding;
+            }
+            else
+            {
+                if (expectedMining != null) throw new InvalidOperationException("完整前缀缺少实际挖矿绑定I/O");
+                outcome = await _sceneIo.RunAction(waypoint, ct);
+            }
             _lastActionOutcome = outcome;
             CombatScriptHandler.EnsureFragmentCompleted(outcome);
             var nextPoint = CurWaypoint.Item1 + 1 < CurWaypoints.Item2.Count ? CurWaypoints.Item2[CurWaypoint.Item1 + 1] : null;
@@ -2299,8 +2319,17 @@ public partial class PathExecutor
                 waypoint.Action, _arrivalReachedAt == 0 ? -1 : Stopwatch.GetElapsedTime(_arrivalReachedAt).TotalMilliseconds,
                 waypoint.Action == ActionEnum.Fight.Code ? 0 : IsTargetPoint(waypoint) ? 1000 : 0);
             //,PartyConfig
-            await DispatchArrivalActionAsync(handler, waypoint, PartyConfig, ct);
-            _lastActionOutcome = handler is CombatScriptHandler typed ? typed.LastResult : CombatScriptExecutor.FromFlowResult(CombatFlowResult.Succeeded);
+            if (handler is MiningHandler miningHandler)
+            {
+                var mining = await miningHandler.RunWithBindingAsync(ct, waypoint, expectedMining);
+                _lastActionOutcome = mining.Outcome;
+                _lastMiningBinding = mining.Binding;
+            }
+            else
+            {
+                await DispatchArrivalActionAsync(handler, waypoint, PartyConfig, ct);
+                _lastActionOutcome = handler is CombatScriptHandler typed ? typed.LastResult : CombatScriptExecutor.FromFlowResult(CombatFlowResult.Succeeded);
+            }
             //统计结束战斗的次数
             if (waypoint.Action == ActionEnum.Fight.Code)
             {

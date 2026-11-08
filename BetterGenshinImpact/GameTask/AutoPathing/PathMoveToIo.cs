@@ -68,6 +68,29 @@ internal sealed class PathMoveToIo
         CheckInput = () => Common.TaskControl.CheckAndSleep(0);
     }
 
+    internal DiagnosticInputReceipt SendObserved(GIActions action, KeyType type, CaptureFrameStamp source, CancellationToken token)
+    {
+        void Check()
+        {
+            token.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            UiOperation.Current?.Check();
+            CheckInput();
+            if (!source.IsFresh(Clock, UiSnapshot.RecoveryMaximumAge) || source.TimestampFrequency != Clock.TimestampFrequency)
+                throw new InvalidOperationException("原输入源未知或过期，禁止停止飞行输入");
+        }
+        Check();
+        using var attempt = new DiagnosticInputAttempt(Clock);
+        var admitted = false;
+        using var capture = new Fischless.WindowsInput.InputDispatchCapture(() =>
+        {
+            // Admit the first native event only; cancellation must not suppress its paired key-up.
+            if (!admitted) { Check(); admitted = true; }
+        });
+        try { Send(action, type); return attempt.Complete(true); }
+        catch (Exception error) { attempt.Complete(capture.HasDispatch, error); throw; }
+    }
+
     private static T Missing<T>(string boundary) => throw new InvalidOperationException($"Isolated path I/O requires an explicit {boundary} boundary.");
 }
 

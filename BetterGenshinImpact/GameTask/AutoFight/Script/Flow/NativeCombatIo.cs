@@ -14,6 +14,7 @@ using BetterGenshinImpact.GameTask.AutoFight.Model;
 using BetterGenshinImpact.GameTask.AutoFight.Assets;
 using BetterGenshinImpact.GameTask.Common;
 using BetterGenshinImpact.GameTask.Common.BgiVision;
+using BetterGenshinImpact.GameTask.Common.Ui;
 using BetterGenshinImpact.GameTask.Model.Area;
 using Microsoft.Extensions.Logging;
 
@@ -38,6 +39,22 @@ internal sealed class NativeCombatIo(CombatScenes scenes, InputSessionOwnership.
     public ICombatHostInputDevice ControlDevice { get; } = new NativeCombatHostInputDevice(inputOwner);
     public CombatInputCoordinator InputCoordinator => _coordinator;
     public IReadOnlyList<NativeCombatActor> Actors => scenes.GetAvatars().Select(avatar => new NativeCombatActor(avatar.Name, avatar.Index)).ToArray();
+    public bool SupportsActorIdentity => true;
+    public ReviveRecoveryFrame? ReadActorIdentity(NativeCombatActor actor, ImageRegion frame)
+    {
+        if (!frame.FrameStamp.IsFresh(Clock, UiSnapshot.RecoveryMaximumAge)) return null;
+        try
+        {
+            using var preparedRead = new RecognitionReadinessScope();
+            return scenes.ReadRecoveryFrame(frame, new ReviveTarget(actor.Name, actor.Index));
+        }
+        catch (RecognitionNotReadyException) { return null; }
+        catch (Exception error) when (error is not OperationCanceledException and not OutOfMemoryException)
+        {
+            Logger.LogDebug(error, "当前目标身份读取未确认，不形成回放binding");
+            return null;
+        }
+    }
     public double LastFinishCheckAge => Math.Max(0, (DateTime.Now - AutoFightTask.LastFightFinishCheckTime).TotalSeconds);
     private Avatar AvatarFor(NativeCombatActor actor) => scenes.SelectAvatar(actor.Name)
         ?? throw new InvalidOperationException("当前队伍缺少角色：" + actor.Name);

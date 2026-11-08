@@ -1,3 +1,8 @@
+using System;
+using Fischless.GameCapture;
+using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.Common.Ui;
+using BetterGenshinImpact.GameTask.AutoGeniusInvokation.Exception;
 using BetterGenshinImpact.Core.Input;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,40 +32,57 @@ public class StopFlyingHandler : IActionHandler
             await io.Delay(300, ct);
         }
 
-        // 路线节点不等于当前仍在空中，已在地面时禁止把下落攻击变成普攻。
+        void Check()
+        {
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            UiOperation.Current?.Check();
+        }
+        bool Fresh(CaptureFrameStamp source) => source.IsFresh(io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+            source.TimestampFrequency == io.Clock.TimestampFrequency;
+        Check();
+        using var before = io.Capture();
+        var beforeSource = before.FrameStamp;
+        var motion = io.Motion(before);
+        var world = io.CombatHud(before);
+        Check();
+        if (!world || before.FrameStamp != beforeSource || !Fresh(beforeSource))
+            throw new RetryException("停止飞行缺少当前普通场景新源，保留原期限");
+        if (motion == MotionStatus.Normal) return;
+        if (motion != MotionStatus.Fly)
+            throw new RetryException("停止飞行姿态未知或未确认飞行，禁止发送下落攻击");
+        DiagnosticInputReceipt? receipt = null;
         var attacked = LandingAttackGuard.TryAttack(() =>
         {
-            using var screen = io.Capture();
-            return io.Motion(screen);
-        }, () => io.Send(GIActions.NormalAttack, KeyType.KeyPress), ct);
-        if (!attacked)
+            Check();
+            if (!Fresh(beforeSource)) throw new RetryException("下落攻击输入前原源过期");
+            return motion;
+        }, () => receipt = io.SendObserved(GIActions.NormalAttack, KeyType.KeyPress, beforeSource, ct), ct);
+        if (!attacked || receipt is not { Status: DiagnosticInputStatus.Sent } sent ||
+            !(sent.NativeRequested > 0 && sent.NativeRequested == sent.NativeSubmitted ||
+              sent.TransportRequested > 0 && sent.TransportRequested == sent.TransportAcknowledged))
+            throw new RetryException("下落攻击原生回执不完整，停止本次恢复");
+        var previous = beforeSource;
+        for (var i = 0; i < 50; i++)
         {
-            io.Logger.LogInformation("动作：未确认飞行，跳过下落攻击");
-            return;
-        }
-        io.Logger.LogInformation("动作：下落攻击");
-        int i;
-        for (i = 0; i < 50; i++)
-        {
-            using var screen = io.Capture();
-            var isFlying = io.Motion(screen) == MotionStatus.Fly;
-            if (isFlying)
+            Check();
+            using var frame = io.Capture();
+            var source = frame.FrameStamp;
+            if (Fresh(source) && source.SessionId == beforeSource.SessionId && source.IsAfter(previous) &&
+                source.TimestampFrequency == sent.Frequency && source.CapturedTimestamp - sent.CompletedAt >= sent.Frequency * .06)
             {
-                await io.Delay(300, ct);
+                previous = source;
+                var observed = io.Motion(frame);
+                var currentWorld = io.CombatHud(frame);
+                Check();
+                if (currentWorld && frame.FrameStamp == source && Fresh(source) && observed == MotionStatus.Normal)
+                {
+                    io.Logger.LogInformation("动作：下落攻击后取得新的普通姿态观察");
+                    return; // Not a Grounded claim; subsequent MoveTo still observes its own fresh state.
+                }
             }
-            else
-            {
-                break;
-            }
+            await io.Delay(300, ct);
         }
-
-        if (i == 50)
-        {
-            io.Logger.LogWarning("动作：下落攻击 超时结束");
-        }
-        else
-        {
-            io.Logger.LogInformation("动作：下落攻击 结束");
-        }
+        throw new RetryException("停止飞行在原50次观察内未确认输入后新姿态，路线未完成");
     }
 }

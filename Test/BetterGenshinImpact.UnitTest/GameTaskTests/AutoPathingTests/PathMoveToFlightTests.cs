@@ -111,7 +111,7 @@ public class PathMoveToFlightTests
     [InlineData(true)]
     public async Task StopFlyingUsesNewObservationNotPreviousFlight(bool flyingNow)
     {
-        var replay = new PathReplay { MotionAt = _ => MotionStatus.Fly };
+        var replay = new PathReplay { MotionAt = _ => MotionStatus.Fly, EmitReceipts = true };
         await replay.Executor.MoveTo(replay.Point("fly"));
         var first = replay.Frames + 1;
         replay.MotionAt = frame => flyingNow && frame == first ? MotionStatus.Fly : MotionStatus.Normal;
@@ -225,6 +225,72 @@ public class PathMoveToFlightTests
         await Assert.ThrowsAsync<RetryException>(() => replay.Executor.MoveTo(replay.Point("fly")));
         Assert.DoesNotContain(replay.Inputs, x => x.Action == GIActions.Jump);
     }
+    [Theory]
+    [InlineData("unknown")]
+    [InlineData("duplicate")]
+    [InlineData("foreign")]
+    [InlineData("stale")]
+    [InlineData("still-flying")]
+    [InlineData("missing-receipt")]
+    public async Task StopFlyingCannotCompleteWithoutCurrentPostInputEvidence(string fault)
+    {
+        var replay = new PathReplay { EmitReceipts = fault != "missing-receipt" };
+        var attacked = false;
+        var expiredFrames = 0;
+        CaptureFrameStamp? first = null;
+        replay.CaptureTimestamp = now => attacked && fault == "stale"
+            ? now - (long)((UiSnapshot.RecoveryMaximumAge + TimeSpan.FromMilliseconds(1)).TotalSeconds * replay.Clock.TimestampFrequency)
+            : now;
+        replay.StampTransform = source =>
+        {
+            first ??= source;
+            if (!attacked)
+            {
+                Assert.True(source.IsFresh(replay.Clock, UiSnapshot.RecoveryMaximumAge));
+                return source;
+            }
+            if (fault == "stale")
+            {
+                Assert.False(source.IsFresh(replay.Clock, UiSnapshot.RecoveryMaximumAge));
+                Assert.True(replay.Clock.GetElapsedTime(source.CapturedTimestamp) > UiSnapshot.RecoveryMaximumAge);
+                expiredFrames++;
+            }
+            return fault switch
+            {
+                "duplicate" => first.Value,
+                "foreign" => source with { SessionId = Guid.NewGuid() },
+                _ => source
+            };
+        };
+        replay.OnInput = (action, _) =>
+        {
+            if (action != GIActions.NormalAttack) return;
+            attacked = true;
+            replay.Clock.Advance(TimeSpan.FromMilliseconds(1));
+        };
+        replay.MotionAt = _ => !attacked || fault == "still-flying" ? MotionStatus.Fly :
+            fault == "unknown" ? MotionStatus.Unknown : MotionStatus.Normal;
+        var started = replay.Clock.GetUtcNow();
+        await Assert.ThrowsAsync<RetryException>(() => new StopFlyingHandler().RunAsync(default, replay.Point("fly"), replay.Io));
+        Assert.Single(replay.Inputs.Where(input => input.Action == GIActions.NormalAttack));
+        Assert.DoesNotContain(replay.Inputs, input => input.Action == GIActions.Jump || input.Action == GIActions.MoveForward);
+        Assert.InRange((replay.Clock.GetUtcNow() - started).TotalSeconds, 0, 15.1);
+        if (fault == "stale") Assert.True(expiredFrames > 0);
+        Assert.All(replay.Images, frame => Assert.True(frame.SrcMat.IsDisposed));
+    }
+
+    [Fact]
+    public async Task StopFlyingKeepsItsExistingParentDeadline()
+    {
+        var replay = new PathReplay { EmitReceipts = true, MotionAt = _ => MotionStatus.Fly };
+        var started = replay.Clock.GetUtcNow();
+        using var parent = UiOperation.Begin("stop-original-parent", TimeSpan.FromMilliseconds(50), clock: replay.Clock);
+        var error = await Assert.ThrowsAnyAsync<Exception>(() => new StopFlyingHandler().RunAsync(parent.Token, replay.Point("fly"), replay.Io));
+        Assert.DoesNotContain("Application host", error.ToString());
+        Assert.Single(replay.Inputs.Where(input => input.Action == GIActions.NormalAttack));
+        Assert.InRange((replay.Clock.GetUtcNow() - started).TotalSeconds, .05, .31);
+    }
+
 }
 
 internal sealed class PathReplay
@@ -245,6 +311,8 @@ internal sealed class PathReplay
     internal Func<int, WorldFrameKind>? AvailabilityAt;
     internal Func<int, bool>? HudAt;
     internal Func<int, Point2f> PositionAt = _ => new Point2f(100, 100);
+    internal Action<WaypointForTrack>? BeforeLocate;
+    internal CaptureFrameStamp LastSource => _stamp;
     internal int MinimumWait;
     internal int ProducerIntervalMilliseconds;
     internal float CameraAngle;
@@ -262,6 +330,7 @@ internal sealed class PathReplay
     internal Action? BeforeMouseDispatch;
     internal Action<GIActions, KeyType>? OnInput;
     internal Func<CaptureFrameStamp, CaptureFrameStamp>? StampTransform;
+    internal Func<long, long>? CaptureTimestamp;
     private CaptureFrameStamp _stamp;
     private readonly HashSet<GIActions> _held = new();
     private readonly CaptureFrameSource _source;
@@ -275,8 +344,8 @@ internal sealed class PathReplay
             CheckInput = () => OnCheckInput?.Invoke(),
             CameraOrientation = _ => ReadCamera?.Invoke() ?? CameraAngle, Dpi = () => 1,
             MouseMove = (x, _) => { BeforeMouseDispatch?.Invoke(); if (EmitReceipts) new Fischless.WindowsInput.WindowsInputMessageDispatcher(null, inputs => (uint)inputs.Length, () => 0).DispatchInput(new Vanara.PInvoke.User32.INPUT[1]); MouseInputs.Add((x, Clock.GetUtcNow())); if (!LockCamera) CameraAngle += x / (Math.Abs(x) > 360 ? 4f : Math.Abs(x) > 90 ? 3f : Math.Abs(x) > 10 ? 2f : 1f); },
-            Capture = () => { Frames++; BeforeCapture?.Invoke(Frames); if (!_stamp.IsKnown || !Duplicate && (ProducerIntervalMilliseconds == 0 || Clock.GetElapsedTime(_stamp.CapturedTimestamp).TotalMilliseconds >= ProducerIntervalMilliseconds)) _stamp = _source.Next(); var image = new ImageRegion(FramePixels?.Invoke() ?? new Mat(2, 2, MatType.CV_8UC3), 0, 0) { FrameStamp = StampTransform?.Invoke(_stamp) ?? _stamp }; Images.Add(image); return image; },
-            Locate = (_, _) => { LocateCalls++; return Task.FromResult(new PathPosition(PositionAt(Frames), 0, Direct)); },
+            Capture = () => { Frames++; BeforeCapture?.Invoke(Frames); if (!_stamp.IsKnown || !Duplicate && (ProducerIntervalMilliseconds == 0 || Clock.GetElapsedTime(_stamp.CapturedTimestamp).TotalMilliseconds >= ProducerIntervalMilliseconds)) _stamp = _source.Next(CaptureTimestamp?.Invoke(Clock.GetTimestamp())); var image = new ImageRegion(FramePixels?.Invoke() ?? new Mat(2, 2, MatType.CV_8UC3), 0, 0) { FrameStamp = StampTransform?.Invoke(_stamp) ?? _stamp }; Images.Add(image); return image; },
+            Locate = (_, point) => { LocateCalls++; BeforeLocate?.Invoke(point); return Task.FromResult(new PathPosition(PositionAt(Frames), 0, Direct)); },
             Motion = _ => MotionAt(Frames), CombatHud = _ => HudAt?.Invoke(Frames) ?? Hud,
             Transformed = frame => ReadTransformation?.Invoke(frame) ?? Transformed,
             Availability = _ => AvailabilityAt?.Invoke(Frames) ?? WorldFrameKind.Playable,
