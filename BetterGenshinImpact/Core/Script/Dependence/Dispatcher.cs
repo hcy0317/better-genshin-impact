@@ -27,6 +27,14 @@ using BetterGenshinImpact.GameTask.AutoFight.SkillData;
 using BetterGenshinImpact.GameTask.AutoLeyLineOutcrop;
 using BetterGenshinImpact.GameTask.AutoStygianOnslaught;
 using BetterGenshinImpact.GameTask.Common;
+using BetterGenshinImpact.GameTask.AutoDomain.Model;
+using BetterGenshinImpact.GameTask.Common.BgiVision;
+using BetterGenshinImpact.GameTask.Common.Ui;
+using BetterGenshinImpact.GameTask.Model.Area;
+using Fischless.GameCapture;
+using OpenCvSharp;
+using System.Globalization;
+using System.Runtime.ExceptionServices;
 
 namespace BetterGenshinImpact.Core.Script.Dependence;
 
@@ -40,6 +48,10 @@ public partial class Dispatcher
         CancellationTokenSource.CreateLinkedTokenSource(ParentToken, customCt ?? CancellationToken.None);
     private readonly ILogger<Dispatcher> _logger;
     private readonly CombatSkillCatalog? _skillCatalog;
+    private readonly MapResinReadDependencies? _mapResinRead;
+
+    internal sealed record MapResinReadDependencies(TimeProvider Clock, Func<ImageRegion, bool> IsMap,
+        Func<bool> SameContext, CancellationToken ParentToken = default);
     private CombatSkillCatalog SkillCatalog => _skillCatalog ?? CombatSkillCatalog.Default;
 
     private CombatScript ParseCombatScript(string text, string? avatar, string entry, string identity)
@@ -138,6 +150,137 @@ public partial class Dispatcher
         return result is IReadOnlyDictionary<string, int> counts ? ToScriptDictionary(counts) : result;
     }
 
+    /// <summary>只读调用方持有的大地图帧。返回历史数量与来源，不授予当前输入权限。</summary>
+    public object ReadMapResin(ImageRegion image, ScriptObject rois, ScriptObject readText, CancellationToken? customCt = null)
+    {
+        using var ownedTask = _taskGuard.Enter();
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(rois);
+        ArgumentNullException.ThrowIfNull(readText);
+        var dependencies = _mapResinRead ?? CreateNativeMapResinReadDependencies();
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(dependencies.ParentToken, customCt ?? CancellationToken.None);
+        var ct = cancellation.Token;
+        void Validate()
+        {
+            using var check = _taskGuard.Enter();
+            ct.ThrowIfCancellationRequested();
+            UiOperation.Current?.Check();
+        }
+        Validate();
+        var source = image.FrameStamp;
+        var started = dependencies.Clock.GetTimestamp();
+        var originalRoi = ReadScriptResinRoi(rois, "original");
+        var condensedRoi = ReadScriptResinRoi(rois, "condensed");
+        bool isMap;
+        try { isMap = dependencies.SameContext() && dependencies.IsMap(image); }
+        catch (Exception error) when (!ResinStatus.IsTerminalReadFailure(error)) { Validate(); isMap = false; }
+        if (!isMap)
+        {
+            var unavailable = new ResinStatus.FrameReading(source, image.FrameStamp, started, dependencies.Clock.GetTimestamp(),
+                dependencies.Clock.TimestampFrequency, dependencies.SameContext(),
+                new(null, "map-not-confirmed", originalRoi, Array.Empty<string>()),
+                new(null, "map-not-confirmed", condensedRoi, Array.Empty<string>()));
+            Validate();
+            return ToScriptMapResin(unavailable, false);
+        }
+        ExceptionDispatchInfo? callbackFailure = null;
+        void RememberCallbackFailure(Exception error)
+        {
+            callbackFailure ??= ExceptionDispatchInfo.Capture(error);
+            _taskGuard.Report(error);
+            Validate();
+        }
+        var observed = ResinStatus.ReadFromImage(image, originalRoi, condensedRoi, (crop, kind) =>
+        {
+            Validate();
+            callbackFailure?.Throw();
+            object? value;
+            try { value = readText.Invoke(false, crop, kind); }
+            catch (Exception error) { RememberCallbackFailure(error); throw; }
+            Validate();
+            try
+            {
+                if (value is not ScriptObject answer || answer.GetProperty("source") is not CaptureFrameStamp textSource)
+                    throw new FormatException("OCR callback must return the supplied crop's native source stamp.");
+                if (answer.GetProperty("texts") is not ScriptObject texts)
+                    throw new FormatException("OCR callback must return a text array.");
+                var lengthValue = Convert.ToDouble(texts.GetProperty("length"), CultureInfo.InvariantCulture);
+                if (!double.IsFinite(lengthValue) || lengthValue < 0 || lengthValue > 128 || lengthValue != Math.Truncate(lengthValue))
+                    throw new FormatException("OCR callback text array is invalid.");
+                var tokens = new string[(int)lengthValue];
+                for (var i = 0; i < tokens.Length; i++)
+                    tokens[i] = texts.GetProperty(i.ToString(CultureInfo.InvariantCulture)) as string
+                        ?? throw new FormatException("OCR callback tokens must be strings.");
+                return new(textSource, tokens);
+            }
+            catch (ScriptEngineException error) { RememberCallbackFailure(error); throw; }
+        }, dependencies.Clock, Validate, dependencies.SameContext, requireKnownSource: true);
+        Validate();
+        callbackFailure?.Throw(); // Ordinary script invocation failures are not missing OCR data.
+        return ToScriptMapResin(observed, true);
+    }
+
+    private MapResinReadDependencies CreateNativeMapResinReadDependencies()
+    {
+        var runtime = TaskContext.Instance().Runtime;
+        var window = runtime?.Window.Handle;
+        return new(TimeProvider.System, Bv.IsInBigMapUi,
+            () => runtime != null && ReferenceEquals(TaskContext.Instance().Runtime, runtime) &&
+                runtime.Window.Handle == window && runtime.Capture.IsCapturing, ParentToken);
+    }
+
+    private static Rect? ReadScriptResinRoi(ScriptObject rois, string name)
+    {
+        if (rois.GetProperty(name) is not ScriptObject roi) return null;
+        int? Number(string key)
+        {
+            var value = roi.GetProperty(key);
+            if (value is not int && value is not double && value is not float) return null;
+            var number = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+            return double.IsFinite(number) && number >= int.MinValue && number <= int.MaxValue && number == Math.Truncate(number)
+                ? (int)number : null;
+        }
+        var x = Number("x"); var y = Number("y"); var width = Number("width"); var height = Number("height");
+        return x.HasValue && y.HasValue && width.HasValue && height.HasValue ? new(x.Value, y.Value, width.Value, height.Value) : null;
+    }
+
+    internal static object ToScriptMapResin(ResinStatus.FrameReading value, bool mapObserved)
+    {
+        static object Source(CaptureFrameStamp stamp)
+        {
+            IDictionary<string, object?> source = new ExpandoObject();
+            source["isKnown"] = stamp.IsKnown;
+            source["sessionId"] = stamp.SessionId.ToString("D");
+            source["sequence"] = stamp.Sequence;
+            source["capturedTimestamp"] = stamp.CapturedTimestamp;
+            source["timestampFrequency"] = stamp.TimestampFrequency;
+            source["capturedAt"] = stamp.CapturedAt.ToString("O", CultureInfo.InvariantCulture);
+            return source;
+        }
+        static object Quantity(ResinStatus.QuantityReading quantity)
+        {
+            IDictionary<string, object?> result = new ExpandoObject();
+            result["known"] = quantity.Known; result["count"] = quantity.Count; result["reason"] = quantity.Reason;
+            result["rawText"] = quantity.RawText.ToArray();
+            if (quantity.Roi is { } roi)
+            {
+                IDictionary<string, object?> bounds = new ExpandoObject();
+                bounds["x"] = roi.X; bounds["y"] = roi.Y; bounds["width"] = roi.Width; bounds["height"] = roi.Height;
+                result["roi"] = bounds;
+            }
+            else result["roi"] = null;
+            return result;
+        }
+        IDictionary<string, object?> snapshot = new ExpandoObject();
+        snapshot["schema"] = "bgi.map-resin.v1";
+        snapshot["original"] = Quantity(value.Original); snapshot["condensed"] = Quantity(value.Condensed);
+        snapshot["sourceBefore"] = Source(value.SourceBefore); snapshot["sourceAfter"] = Source(value.SourceAfter);
+        snapshot["readStartedTimestamp"] = value.ReadStarted; snapshot["readCompletedTimestamp"] = value.ReadCompleted;
+        snapshot["clockFrequency"] = value.ClockFrequency; snapshot["contextUnchanged"] = value.ContextUnchanged;
+        snapshot["mapObserved"] = mapObserved; snapshot["inputAuthorized"] = false;
+        return snapshot;
+    }
+
     private readonly object _config;
 
     public Dispatcher(object config)
@@ -147,12 +290,13 @@ public partial class Dispatcher
     }
 
     internal Dispatcher(object config, CombatSkillCatalog skillCatalog, ILogger<Dispatcher> logger,
-        CombatSessionDependencies? combatSessions = null)
+        CombatSessionDependencies? combatSessions = null, MapResinReadDependencies? mapResinRead = null)
     {
         _config = config;
         _skillCatalog = skillCatalog;
         _logger = logger;
         _combatSessions = combatSessions;
+        _mapResinRead = mapResinRead;
     }
 
     public void RunTask()
