@@ -718,6 +718,177 @@ public class PreciseApproachRecoveryTests
     }
 
     [Fact]
+    public async Task SamePostTurnFrameCanProveTheNewHeadingWithoutAnotherRotation()
+    {
+        var scene = new CurrentHeadingScene("good");
+        var error = await Record.ExceptionAsync(() => scene.Executor.MoveCloseTo(scene.Target));
+        Assert.InRange(scene.Rotations, 1, 25);
+        Assert.Equal(scene.Rotations, scene.SuccessfulNoOpRotations);
+        Assert.Empty(scene.Replay.MouseInputs); // No camera input occurred; there is no camera receipt to borrow.
+        var offered = scene.Samples.First(sample => sample.OldHeading == 113 && sample.NewHeading == 115);
+        Assert.True(offered.Source.IsKnown);
+        Assert.True(offered.Source.IsAfter(offered.BeforeRotation));
+        Assert.True(offered.Direct);
+        Assert.True(offered.SourceUsable);
+        Assert.Equal(MotionStatus.Normal, offered.Motion);
+        Assert.True(offered.Distance > 2);
+        Assert.True(float.IsFinite(offered.Reading.Angle));
+        Assert.Equal(114.5f, offered.Reading.Angle);
+        Assert.Equal(.9, offered.Reading.Confidence);
+        Assert.Equal(114.5f, offered.Reading.PrimaryAngle);
+        Assert.False(offered.Reading.FallbackUsed);
+        Assert.Equal(offered.ImageIdentity, offered.ReadingImageIdentity);
+        Assert.Null(error);
+        Assert.Single(scene.Replay.Inputs.Where(input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown));
+        Assert.Contains(scene.ActualReads, source => source == offered.Source);
+        Assert.InRange(scene.Replay.Clock.GetElapsedTime(scene.StartedAt).TotalSeconds, 0, 60);
+        Assert.Empty(scene.Replay.RecoveryInputs);
+        Assert.All(scene.Replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    [Theory]
+    [InlineData("missing-getter")]
+    [InlineData("unknown-angle")]
+    [InlineData("fallback")]
+    [InlineData("expired-read")]
+    [InlineData("foreign-source")]
+    [InlineData("window-after-read")]
+    [InlineData("outside-tolerance")]
+    public async Task AChangedHeadingCannotBorrowAnUnprovenOrOutOfToleranceCameraAngle(string kind)
+    {
+        var scene = new CurrentHeadingScene(kind);
+        var error = await Record.ExceptionAsync(() => scene.Executor.MoveCloseTo(scene.Target));
+        Assert.NotNull(error);
+        Assert.InRange(scene.Rotations, 1, 25);
+        Assert.Empty(scene.Replay.MouseInputs);
+        Assert.DoesNotContain(scene.Replay.Inputs, input => input.Action == GIActions.MoveForward && input.Type == KeyType.KeyDown);
+        Assert.Empty(scene.Replay.RecoveryInputs);
+        Assert.Equal(KeyType.KeyUp, scene.Replay.Inputs[^1].Type);
+        if (kind == "missing-getter") Assert.Empty(scene.ActualReads);
+        Assert.All(scene.Replay.Images, image => Assert.True(image.SrcMat.IsDisposed));
+    }
+
+    private readonly record struct CurrentHeadingSample(Fischless.GameCapture.CaptureFrameStamp Source,
+        Fischless.GameCapture.CaptureFrameStamp BeforeRotation, int ImageIdentity, int ReadingImageIdentity,
+        int OldHeading, int NewHeading, bool Direct, bool SourceUsable, MotionStatus Motion, double Distance,
+        BetterGenshinImpact.GameTask.Common.Map.CameraOrientation.Reading Reading);
+
+    private sealed class CurrentHeadingScene
+    {
+        internal readonly PathReplay Replay = new() { EmitReceipts = true, CameraAngle = 114.5f };
+        internal readonly BetterGenshinImpact.GameTask.AutoPathing.PathExecutor Executor;
+        internal readonly BetterGenshinImpact.GameTask.AutoPathing.Model.WaypointForTrack Target;
+        internal readonly List<CurrentHeadingSample> Samples = new();
+        internal readonly List<Fischless.GameCapture.CaptureFrameStamp> ActualReads = new();
+        internal readonly long StartedAt;
+        internal int Rotations, SuccessfulNoOpRotations;
+        private readonly string _kind;
+        private readonly Dictionary<Fischless.GameCapture.CaptureFrameStamp, CurrentHeadingSample> _data = new();
+        private readonly Fischless.GameCapture.CaptureFrameSource _foreign;
+        private Fischless.GameCapture.CaptureFrameStamp _beforeRotation;
+        private int _oldHeading;
+        private Point2f _position;
+        private double _bearing = 113.25, _radius = 10;
+        private bool _held, _arrived, _windowCurrent = true;
+
+        internal CurrentHeadingScene(string kind)
+        {
+            _kind = kind;
+            _foreign = new(Replay.Clock);
+            StartedAt = Replay.Clock.GetTimestamp();
+            Target = Replay.Point("walk");
+            _position = PositionAt(_bearing, _radius);
+            Replay.PositionAt = _ => _position;
+            Replay.BeforeCapture = _ => Replay.Clock.Advance(TimeSpan.FromMilliseconds(1));
+            Replay.OnRotateUntil = () =>
+            {
+                if (_arrived) return;
+                _bearing = _bearing < 114 ? 115.25 : 113.25;
+                _radius -= .15;
+                _position = PositionAt(_bearing, _radius);
+            };
+            Replay.OnInput = (action, type) =>
+            {
+                if (action != GIActions.MoveForward) return;
+                if (type == KeyType.KeyDown) _held = true;
+                else if (type == KeyType.KeyUp && _held)
+                {
+                    _held = false;
+                    _arrived = true;
+                    _position = new Point2f(100, 100);
+                }
+            };
+            var original = Replay.Io;
+            var io = new BetterGenshinImpact.GameTask.AutoPathing.PathMoveToIo
+            {
+                LoggerFactory = original.LoggerFactory, Clock = original.Clock, Capture = original.Capture,
+                Locate = original.Locate, LocateDirect = LocateDirect,
+                CameraOrientation = original.CameraOrientation,
+                CameraReading = kind == "missing-getter" ? null : ReadCamera,
+                MouseMove = original.MouseMove, Dpi = original.Dpi,
+                SwitchAvatar = original.SwitchAvatar, SwitchGuardianAvatar = original.SwitchGuardianAvatar,
+                EndJudgment = original.EndJudgment, RecoverUi = original.RecoverUi,
+                RotateUntil = async (heading, tolerance) =>
+                {
+                    _oldHeading = heading;
+                    _beforeRotation = Replay.Images[^1].FrameStamp;
+                    Rotations++;
+                    var rotated = await original.RotateUntil(heading, tolerance);
+                    if (rotated) SuccessfulNoOpRotations++;
+                    return rotated;
+                },
+                RotateStep = original.RotateStep, Motion = original.Motion, CombatHud = original.CombatHud,
+                Availability = original.Availability, Transformed = original.Transformed,
+                Send = original.Send, InputEnvironment = original.InputEnvironment, IsDown = original.IsDown,
+                Delay = original.Delay, HurryOn = original.HurryOn,
+                CheckInput = () =>
+                {
+                    original.CheckInput();
+                    if (!_windowCurrent) throw new InvalidOperationException("The replay target window changed during camera reading.");
+                }
+            };
+            Executor = new(default, io) { PartyConfig = Replay.Executor.PartyConfig };
+        }
+
+        private static Point2f PositionAt(double heading, double radius)
+            => new((float)(100 - radius * Math.Cos(heading * Math.PI / 180)),
+                (float)(100 - radius * Math.Sin(heading * Math.PI / 180)));
+
+        private async Task<BetterGenshinImpact.GameTask.AutoPathing.PathPosition> LocateDirect(
+            BetterGenshinImpact.GameTask.Model.Area.ImageRegion image,
+            BetterGenshinImpact.GameTask.AutoPathing.Model.WaypointForTrack target)
+        {
+            var location = await Replay.Io.Locate(image, target);
+            var identity = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(image);
+            var reading = new BetterGenshinImpact.GameTask.Common.Map.CameraOrientation.Reading(114.5f, .9, 114.5f, false);
+            var sample = new CurrentHeadingSample(image.FrameStamp, _beforeRotation, identity, identity,
+                _oldHeading, BetterGenshinImpact.GameTask.AutoPathing.Navigation.GetTargetOrientation(target, location.Point),
+                location.IsDirect, image.FrameStamp.IsKnown && image.FrameStamp.IsFresh(Replay.Clock, UiSnapshot.RecoveryMaximumAge),
+                Replay.Io.Motion(image), BetterGenshinImpact.GameTask.AutoPathing.Navigation.GetDistance(target, location.Point), reading);
+            _data[image.FrameStamp] = sample;
+            if (_beforeRotation.IsKnown && image.FrameStamp.IsAfter(_beforeRotation) && sample.NewHeading != sample.OldHeading)
+                Samples.Add(sample);
+            return location with { Source = BetterGenshinImpact.GameTask.AutoPathing.PathPositionSource.Direct };
+        }
+
+        private BetterGenshinImpact.GameTask.Common.Map.CameraOrientation.Reading ReadCamera(
+            BetterGenshinImpact.GameTask.Model.Area.ImageRegion image)
+        {
+            Assert.True(_data.TryGetValue(image.FrameStamp, out var sample));
+            Assert.Equal(sample.ImageIdentity, System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(image));
+            ActualReads.Add(image.FrameStamp);
+            var reading = sample.Reading;
+            if (_kind == "unknown-angle") reading = reading with { Angle = float.NaN };
+            if (_kind == "fallback") reading = reading with { Confidence = .1, FallbackUsed = true };
+            if (_kind == "outside-tolerance") reading = reading with { Angle = 117.5f, PrimaryAngle = 117.5f };
+            if (_kind == "expired-read") Replay.Clock.Advance(TimeSpan.FromSeconds(3));
+            if (_kind == "foreign-source") image.FrameStamp = _foreign.Next();
+            if (_kind == "window-after-read") _windowCurrent = false;
+            return reading;
+        }
+    }
+
+    [Fact]
     public async Task PostTurnHeadingChangesStillExhaustOnlyTheOriginalTwentyFiveSteps()
     {
         var position = new Point2f(97, 100);

@@ -2187,11 +2187,49 @@ public partial class PathExecutor
                 break;
             }
             if (waterConfirmationOnly) continue;
-            if (Navigation.GetTargetOrientation(waypoint, position) != targetOrientation)
+            var currentTargetOrientation = Navigation.GetTargetOrientation(waypoint, position);
+            if (currentTargetOrientation != targetOrientation)
             {
-                // Re-enter the existing observation/rotation policy and step budget;
-                // a successful rotation towards the old target is not a new heading.
-                continue;
+                // Only an explicit reading of this post-turn image can prove alignment
+                // with a changed heading. The legacy float boundary is not such proof.
+                if (_moveIo.CameraReading is not { } readCamera) continue;
+                var cameraSource = current.FrameStamp;
+                bool HasCurrentHeadingFrame()
+                    => currentLocation.IsDirect && currentObservation.Valid && currentObservation.SourceUsable &&
+                       currentObservation.Motion != MotionStatus.Unknown && cameraSource.IsKnown &&
+                       current.FrameStamp == cameraSource && currentObservation.Stamp == cameraSource &&
+                       cameraSource.SessionId == observation.Stamp.SessionId && cameraSource.IsAfter(observation.Stamp) &&
+                       cameraSource.TimestampFrequency == _moveIo.Clock.TimestampFrequency &&
+                       cameraSource.IsFresh(_moveIo.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                       (detachFence is not { } drop || drop.Accepts(cameraSource) &&
+                           _moveIo.Clock.GetElapsedTime(drop.InputCompletedTimestamp, cameraSource.CapturedTimestamp).TotalMilliseconds >= 60) &&
+                       (!waterAdvancing || cameraSource.SessionId == waterRuntime) &&
+                       (waterResponseFence is not { } water || water.Accepts(cameraSource) &&
+                           _moveIo.Clock.GetElapsedTime(water.InputCompletedTimestamp, cameraSource.CapturedTimestamp).TotalMilliseconds >= 60);
+
+                operation.Check();
+                _moveIo.CheckInput();
+                if (!HasCurrentHeadingFrame()) continue;
+                var reading = readCamera(current);
+                operation.Check();
+                _moveIo.CheckInput();
+                if (!HasCurrentHeadingFrame() || !float.IsFinite(reading.Angle) ||
+                    reading.Confidence is not { } confidence || !double.IsFinite(confidence) || confidence < .2 ||
+                    reading.FallbackUsed || reading.PrimaryAngle is not { } primary ||
+                    !float.IsFinite(primary) || primary != reading.Angle)
+                    continue;
+                var currentDiff = (reading.Angle - currentTargetOrientation + 180) % 360 - 180;
+                currentDiff += currentDiff < -180 ? 360 : 0;
+                if (Math.Abs(currentDiff) >= 2) continue;
+                var previousTargetOrientation = targetOrientation;
+                targetOrientation = currentTargetOrientation;
+                approachDiagnostics.RecordRotation(targetOrientation, true);
+                _moveIo.Logger.LogDebug("PATH_APPROACH_CURRENT_HEADING source={Session}/{Sequence} previousTarget={PreviousTarget} target={Target} angle={Angle} confidence={Confidence} diff={Diff}",
+                    cameraSource.SessionId, cameraSource.Sequence, previousTargetOrientation, targetOrientation,
+                    reading.Angle, confidence, currentDiff);
+                operation.Check();
+                _moveIo.CheckInput();
+                if (!HasCurrentHeadingFrame()) continue;
             }
             lastPulse = await PathApproachDiagnostics.RunPulseAsync(
                 () => _moveIo.Send(GIActions.MoveForward, KeyType.KeyDown),
