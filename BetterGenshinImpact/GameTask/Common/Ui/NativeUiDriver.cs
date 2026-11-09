@@ -16,7 +16,7 @@ using Vanara.PInvoke;
 namespace BetterGenshinImpact.GameTask.Common.Ui;
 
 /// <summary>仅在关键UI边界抓图，所有图像在单次读取/输入调用结束前释放。</summary>
-internal sealed class NativeUiDriver : IUiDriver, IDisposable
+internal sealed partial class NativeUiDriver : IUiDriver, IDisposable
 {
     private readonly NativeUiDriverIo _io;
     private readonly IDisposable _exclusive;
@@ -369,6 +369,21 @@ internal sealed class NativeUiDriver : IUiDriver, IDisposable
         }
         switch (action)
         {
+            case UiAction.OpenAdventurerHandbook:
+                bool HandbookAdmitted() => observed.MainReady && current.MainReady && current.IsAfter(observed) &&
+                    current.SourceStamp.CapturedTimestamp > observed.SourceStamp.CapturedTimestamp &&
+                    observed.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                    current.SourceStamp.IsFresh(_io.Clock, UiSnapshot.RecoveryMaximumAge) &&
+                    (_inputFence is not { } handbookFence || handbookFence.Accepts(current.SourceStamp));
+                if (!HandbookAdmitted()) return Task.FromResult(false);
+                void AdmitHandbookInput()
+                {
+                    ct.ThrowIfCancellationRequested();
+                    UiOperation.Current?.Check();
+                    if (!HandbookAdmitted())
+                        throw new InvalidOperationException("冒险之证输入前的主界面或来源已经失效。");
+                }
+                return Task.FromResult(Completed(_io.OtherAction(action, image, AdmitHandbookInput)));
             case UiAction.ConfirmLoginNetworkError:
                 var claimed = false;
                 var root = UiOperation.Current?.RootId;

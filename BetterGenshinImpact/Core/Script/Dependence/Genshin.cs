@@ -481,6 +481,15 @@ public class Genshin
         await new ReturnMainUiTask().Start(CancellationContext.Instance.Cts.Token);
     }
 
+    /// <summary>在同一10秒预算内确认主界面、打开冒险之证并进入委托奖励页。</summary>
+    public async Task EnterCommissionScreen()
+    {
+        using var ownedTask = _taskGuard.Enter();
+        using var driver = new NativeUiDriver();
+        await new CommissionPageEntryTask(driver, TimeProvider.System, _logger)
+            .EnterAsync(CancellationContext.Instance.Cts.Token);
+    }
+
     /// <summary>只读世界操作证据；Unknown/CanProbe仅允许非消费探测，不代表已脱离战斗。</summary>
     public string InspectWorldUi()
     {
