@@ -379,11 +379,24 @@ public partial class NavigationResumeTests
     public Task MissingCurrentUiOriginCannotBorrowAFreshReviveProofForSemanticReplay() =>
         ReplayWholeRecordedPrefixAsync("missing-ui-origin", revive: true);
 
-    private async Task ReplayWholeRecordedPrefixAsync(string scenario, bool revive)
+    [Fact]
+    public Task PublicPathingResumesTheOriginalPrefixAfterNativeReviveWithoutAnExtraUiParent() =>
+        ReplayWholeRecordedPrefixAsync("completed", revive: true, nativeReviveOrigin: true);
+
+    private async Task ReplayWholeRecordedPrefixAsync(string scenario, bool revive, bool nativeReviveOrigin = false)
     {
         BetterGenshinImpact.Helpers.ApplicationHostBootstrapGuard.ProhibitForCurrentProcess();
         using var modelData = new ModelDataFixture();
-        var replay = new PathReplay { EmitReceipts = true };
+        using var taskOwner = nativeReviveOrigin ? TaskExecutionScope.BeginOwned() : null;
+        using var cancellation = nativeReviveOrigin ? new CancellationTokenSource() : null;
+        var pathToken = cancellation?.Token ?? default;
+        var originalTaskOwner = TaskExecutionScope.DiagnosticId;
+        if (nativeReviveOrigin)
+        {
+            Assert.NotNull(originalTaskOwner);
+            Assert.Null(BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current);
+        }
+        var replay = new PathReplay(pathToken) { EmitReceipts = true };
         PathExecutor? subject = null;
         var nativeInputsAtRecovery = -1;
         var hpRestoreSeconds = BetterGenshinImpact.Service.ConfigService.Config!.TpConfig.HpRestoreDuration;
@@ -396,6 +409,17 @@ public partial class NavigationResumeTests
         bool? publishedReviveFreshnessAtVerification = null;
         var currentOriginReads = 0;
         DateTimeOffset? verifiedReviveDeadline = null;
+        BetterGenshinImpact.GameTask.Common.Ui.UiOperation? nativePointOwner = null;
+        Avatar.ReviveUiOrigin? nativeOrigin = null;
+        string? nativeSelectionId = null;
+        Fischless.GameCapture.CaptureFrameStamp nativeBeforeRecovery = default;
+        long nativeRecoveryCompleted = 0;
+        var nativeReviveCaptures = new List<BetterGenshinImpact.GameTask.Model.Area.ImageRegion>();
+        var nativeTargetRegions = new List<BetterGenshinImpact.GameTask.Model.Area.ImageRegion>();
+        var nativeHealthRegions = new List<BetterGenshinImpact.GameTask.Model.Area.ImageRegion>();
+        var nativeTargetFrames = new List<ReviveRecoveryFrame>();
+        var nativeHealth = new List<bool?>();
+        var nativeReviveSelections = 0;
         var teleports = new List<(Fischless.GameCapture.CaptureFrameStamp Before, Fischless.GameCapture.CaptureFrameStamp After, long Completed)>();
         var actions = new List<(bool Returned, int Id, string Action, string Parameters, string Ir)>();
         var initialVisits = new List<int>();
@@ -439,7 +463,8 @@ public partial class NavigationResumeTests
             var distance = Math.Sqrt(delta.X * delta.X + delta.Y * delta.Y);
             if (distance > 0) position += delta * (float)Math.Min(1, milliseconds * .03 / distance);
         };
-        using var native = new FullPrefixNativeIo(replay);
+        using var native = new FullPrefixNativeIo(replay, nativeReviveOrigin
+            ? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance : null);
         var raw = new FullPrefixMacroIo(replay, native.InputCoordinator);
         using var macro = new PathingMacroSession(raw);
         var macroOutcomes = new List<(int Id, CombatExecutionResult Result)>();
@@ -539,6 +564,98 @@ public partial class NavigationResumeTests
                 {
                     if (healed) returnedDeadline = deadline; else originalDeadline = deadline;
                     var token = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!.Token;
+                    if (nativeReviveOrigin)
+                    {
+                        nativePointOwner = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current!;
+                        nativePointOwner.Check();
+                        Assert.Equal("path-waypoint-owner", nativePointOwner.Name);
+                        Assert.Equal(nativePointOwner.Id, nativePointOwner.RootId);
+                        Assert.Equal(originalTaskOwner, TaskExecutionScope.DiagnosticId);
+                        Assert.False(pathToken.IsCancellationRequested);
+                        Assert.Equal(25, subject!.CurWaypoint.Item1);
+                        Assert.True(subject.ActionSettlements.TryGetValue(24, out var miningSettlement));
+                        Assert.Equal(CombatExecutionKind.Completed, miningSettlement!.Outcome.Kind);
+                        Assert.Single(miningSelections);
+                        Assert.False(native.HeldE);
+                        Assert.Empty(raw.Held);
+                        Assert.InRange(nativePointOwner.Remaining.TotalSeconds, .001, 240);
+                        nativeBeforeRecovery = replay.LastSource;
+                        nativeOrigin = Avatar.CaptureReviveUiOrigin();
+                        Assert.Equal(nativePointOwner.RootId, nativeOrigin.Value.RootId);
+                        Assert.Equal(nativePointOwner.Id, nativeOrigin.Value.OperationId);
+                        using var suspension = CombatActionScope.Suspend();
+                        var selectionStarted = replay.Clock.GetTimestamp();
+                        using var selection = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin(
+                            "selection-recovery", TimeSpan.FromSeconds(60) - replay.Clock.GetElapsedTime(selectionStarted), token,
+                            Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, replay.Clock);
+                        nativeSelectionId = selection.Id;
+                        Assert.Equal(nativeOrigin.Value.RootId, selection.RootId);
+                        Assert.NotEqual(nativeOrigin.Value.OperationId, selection.Id);
+                        Assert.InRange(selection.Remaining.TotalSeconds, .001, 60);
+                        var originalPixels = replay.FramePixels;
+                        replay.FramePixels = () =>
+                        {
+                            var pixels = new Mat(1080, 1920, MatType.CV_8UC3, Scalar.Black);
+                            using var bar = new Mat(pixels, new Rect(805, 1008, 7, 5));
+                            bar.SetTo(nativeReviveCaptures.Count == 0 ? new Scalar(0, 0, 255) : new Scalar(0, 200, 0));
+                            return pixels;
+                        };
+                        var io = new Avatar.ReviveVerificationIo
+                        {
+                            Capture = () =>
+                            {
+                                replay.Clock.Advance(TimeSpan.FromMilliseconds(1));
+                                var frame = replay.Io.Capture();
+                                nativeReviveCaptures.Add(frame);
+                                return frame;
+                            },
+                            ReadTarget = frame =>
+                            {
+                                nativeTargetRegions.Add(frame);
+                                var observed = new ReviveRecoveryFrame(0, true,
+                                    BetterGenshinImpact.GameTask.Common.BgiVision.ReviveUiState.None, 1,
+                                    System.Collections.Immutable.ImmutableDictionary<int, string>.Empty.Add(1, "钟离"))
+                                    .WithSource(frame.FrameStamp, replay.Clock);
+                                nativeTargetFrames.Add(observed);
+                                return observed;
+                            },
+                            ReadLowHp = frame =>
+                            {
+                                nativeHealthRegions.Add(frame);
+                                Assert.Same(nativeTargetRegions[^1], frame);
+                                Assert.Equal(nativeTargetFrames[^1].SourceStamp, frame.FrameStamp);
+                                var lowHp = BetterGenshinImpact.GameTask.Common.BgiVision.Bv.ObserveCurrentAvatarLowHp(frame, 1d);
+                                nativeHealth.Add(lowHp);
+                                return lowHp;
+                            },
+                            Select = _ => nativeReviveSelections++,
+                            BeginExclusive = () => new FullPrefixNoopScope(),
+                            Clock = replay.Clock,
+                            Logger = Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
+                            Delay = replay.Io.Delay
+                        };
+                        async Task RecoverThroughDeviceIo()
+                        {
+                            await RecoverAtStatue(selection.Token);
+                            nativeRecoveryCompleted = replay.Clock.GetTimestamp();
+                        }
+                        try
+                        {
+                            // The existing Avatar verifier creates the tuple; this case never fills an origin or proof.
+                            Avatar.RecoverVerifiedTargetAsync(RecoverThroughDeviceIo, new ReviveTarget("钟离", 1),
+                                io, nativeOrigin, selection.Token).GetAwaiter().GetResult();
+                        }
+                        catch (CombatRecoveryCompletedException signal)
+                        {
+                            publishedReviveProof = signal.Proof;
+                            publishedReviveFreshnessAtVerification = signal.Proof?.Frame.HasUsableEvidence;
+                            verifiedReviveDeadline = replay.Clock.GetUtcNow() + nativePointOwner.Remaining;
+                            reviveSignals.Add(signal);
+                            throw;
+                        }
+                        finally { replay.FramePixels = originalPixels; }
+                        throw new InvalidOperationException("Native verified recovery must propagate its completion signal.");
+                    }
                     long recoveryCompleted = 0;
                     async Task RecoverForSignal()
                     {
@@ -633,9 +750,10 @@ public partial class NavigationResumeTests
         };
         var route = FullRecordedHealingPrefix();
         var original = route.Positions.Select(point => (point.Id, point.X, point.Y, point.Type, point.MoveMode, point.Action, point.ActionParams)).ToArray();
-        subject = new PathExecutor(default, replay.Io, sceneIo: scene)
+        subject = new PathExecutor(pathToken, replay.Io, sceneIo: scene)
             { PartyConfig = new() { MainAvatarIndex = "1" } };
-        using var parent = BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin("full-recorded-prefix-parent",
+        // The native-origin tracer has only the real point owner; existing controls keep their original parent.
+        using var parent = nativeReviveOrigin ? null : BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Begin("full-recorded-prefix-parent",
             TimeSpan.FromMinutes(20), logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, clock: replay.Clock);
         var error = await Record.ExceptionAsync(() => subject.Pathing(route));
 
@@ -662,6 +780,46 @@ public partial class NavigationResumeTests
         });
         Assert.False(native.HeldE);
         Assert.Empty(raw.Held);
+        if (nativeReviveOrigin)
+        {
+            Assert.Null(parent);
+            Assert.Null(scene.ReadCurrentUiOperation); // No substitute for the production ambient owner lookup.
+            Assert.Null(BetterGenshinImpact.GameTask.Common.Ui.UiOperation.Current);
+            Assert.Equal(originalTaskOwner, TaskExecutionScope.DiagnosticId);
+            TaskExecutionScope.ThrowIfFailed();
+            Assert.False(pathToken.IsCancellationRequested);
+            Assert.NotNull(nativePointOwner);
+            Assert.Throws<ObjectDisposedException>(() => nativePointOwner!.Check());
+            Assert.Equal(2, nativeReviveCaptures.Count);
+            Assert.Equal(2, nativeTargetRegions.Count);
+            Assert.Equal(2, nativeHealthRegions.Count);
+            Assert.Equal(2, nativeTargetFrames.Count);
+            Assert.Equal(2, nativeHealth.Count);
+            Assert.Equal(0, nativeReviveSelections);
+            for (var index = 0; index < nativeReviveCaptures.Count; index++)
+            {
+                Assert.Same(nativeReviveCaptures[index], nativeTargetRegions[index]);
+                Assert.Same(nativeReviveCaptures[index], nativeHealthRegions[index]);
+                Assert.True(nativeReviveCaptures[index].SrcMat.IsDisposed);
+            }
+            Assert.True(nativeHealth[0]);
+            Assert.False(nativeHealth[1]);
+            Assert.True(nativeTargetFrames[0].SourceStamp.IsAfter(nativeBeforeRecovery));
+            Assert.True(nativeTargetFrames[1].IsAfter(nativeTargetFrames[0]));
+            Assert.True(nativeTargetFrames[1].SourceStamp.CapturedTimestamp > nativeRecoveryCompleted);
+            Assert.Equal(nativeBeforeRecovery.SessionId, nativeTargetFrames[1].SourceStamp.SessionId);
+            Assert.Single(reviveSignals);
+            Assert.NotNull(publishedReviveProof);
+            Assert.Same(nativeTargetFrames[1], publishedReviveProof.Frame);
+            Assert.Equal(new ReviveTarget("钟离", 1), publishedReviveProof.Target);
+            Assert.Equal(nativeHealth[1], publishedReviveProof.LowHp);
+            Assert.Equal(nativeOrigin!.Value.RootId, publishedReviveProof.UiRootId);
+            Assert.Equal(nativeOrigin.Value.OperationId, publishedReviveProof.UiOperationId);
+            Assert.NotEqual(nativeSelectionId, publishedReviveProof.UiOperationId);
+            Assert.Equal(nativeRecoveryCompleted, publishedReviveProof.RecoveryCompletedTimestamp);
+            Assert.Equal(originalDeadline, verifiedReviveDeadline);
+            Assert.True(replay.Clock.GetUtcNow() < originalDeadline!.Value);
+        }
         if (revive && scenario != "owner-expired")
         {
             Assert.NotEmpty(reviveSignals);
@@ -674,7 +832,7 @@ public partial class NavigationResumeTests
                 // Replay may legitimately outlive the old observation's age window; assert its admission-time value.
                 if (scenario == "stale-proof") Assert.False(publishedReviveFreshnessAtVerification);
                 else Assert.True(publishedReviveFreshnessAtVerification);
-                if (scenario == "foreign-root") Assert.NotEqual(parent.RootId, publishedReviveProof.UiRootId);
+                if (scenario == "foreign-root") Assert.NotEqual(parent!.RootId, publishedReviveProof.UiRootId);
                 if (scenario == "wrong-target") Assert.False(publishedReviveProof.Frame.Confirms(publishedReviveProof.Target));
                 if (scenario == "unknown-hp") Assert.Null(publishedReviveProof.LowHp);
                 // Until this producer precondition passes, refusal controls are drafts, not signed negatives.
@@ -812,11 +970,11 @@ public partial class NavigationResumeTests
         new(BetterGenshinImpact.GameTask.AutoFight.CombatBattleHostInputStatus.Sent, completed)
         { StartedTimestamp = started, ObservableAfterTimestamp = completed, NativeRequested = 1, NativeSubmitted = 1, NativeUncertain = false };
 
-    private sealed class FullPrefixNativeIo(PathReplay replay) : INativeCombatIo, IDisposable
+    private sealed class FullPrefixNativeIo(PathReplay replay, Microsoft.Extensions.Logging.ILogger? logger = null) : INativeCombatIo, IDisposable
     {
         public TimeProvider Clock => replay.Clock;
         private Microsoft.Extensions.Logging.ILogger? _logger;
-        public Microsoft.Extensions.Logging.ILogger Logger => _logger ??= new FullPrefixDiagnosticLogger(Diagnostics);
+        public Microsoft.Extensions.Logging.ILogger Logger => logger ?? (_logger ??= new FullPrefixDiagnosticLogger(Diagnostics));
         internal readonly List<string> Diagnostics = new();
         internal string? NativeFailure;
         public CombatInputCoordinator InputCoordinator { get; } = new();
