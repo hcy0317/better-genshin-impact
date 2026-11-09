@@ -101,6 +101,13 @@ internal sealed class NativeUiDriverIo
             case UiAction.OpenParty:
                 BetterGenshinImpact.Core.Input.InputHub.Foreground.SimulateActionPulse(GIActions.OpenPartySetupScreen);
                 return true;
+            case UiAction.OpenAdventurerHandbook:
+                var handbookKey = GIActions.OpenAdventurerHandbook.ToActionKey().ToVK();
+                UiEscapeInput.Run(admission,
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyDown(handbookKey),
+                    () => BetterGenshinImpact.Core.Input.InputHub.Foreground.Keyboard.KeyUp(handbookKey),
+                    milliseconds => Thread.Sleep(Math.Max(60, milliseconds)), "冒险之证");
+                return true;
             case UiAction.Escape:
             case UiAction.EscapeProbe:
                 UiEscapeInput.Run(admission,
