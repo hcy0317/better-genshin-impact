@@ -267,7 +267,7 @@ public partial class PathExecutor
             _returningToCurrent = false;
             _segmentHasStartedTraversal = false;
             var capturedRetryFailure = false;
-            var endedEarly = await ExecuteSegmentWithRetriesAsync(async () =>
+            var endedEarly = await ExecuteSegmentWithRetriesAsync(async handleVerifiedRecovery =>
             {
                 if (_sceneIo == null) await ResolveAnomalies(); // 异常场景处理
 
@@ -287,7 +287,8 @@ public partial class PathExecutor
                     if (_waypointBudget == null) throw new InvalidOperationException("返回原current缺少owner票据");
                     _waypointBudget.Check(_moveIo.Clock, ct);
                     await ExecuteOriginalWaypointAsync(waypoint, previousSegmentEnd:
-                        CurWaypoints.Item1 > 0 ? waypointsList[CurWaypoints.Item1 - 1][^1] : null);
+                        CurWaypoints.Item1 > 0 ? waypointsList[CurWaypoints.Item1 - 1][^1] : null,
+                        handleVerifiedRecovery: handleVerifiedRecovery);
                 }
 
             }, exception =>
@@ -322,37 +323,28 @@ public partial class PathExecutor
 
     internal sealed class EndConditionSatisfiedException() : Exception("达成结束条件，结束地图追踪");
     internal sealed class HealingRecoveryCompletedException() : RetryException("已验证回血，返回原传送分段入口");
+    private sealed class VerifiedRecoveryHandledException() : Exception("已在原路径点所有者内处理复苏");
 
     /// <summary>正常完成返回 false；仅显式结束条件返回 true；失败或取消始终向调用方传播。</summary>
-    internal static async Task<bool> ExecuteSegmentWithRetriesAsync(Func<Task> execute,
+    internal static Task<bool> ExecuteSegmentWithRetriesAsync(Func<Task> execute,
+        Action<Exception> onRetry, Action releaseInput, CancellationToken ct,
+        Func<bool>? canRestartAfterCombatRecovery = null, Func<Task>? resumeNavigation = null,
+        Func<CombatRecoveryCompletedException, bool>? assessVerifiedCombatRecovery = null) =>
+        ExecuteSegmentWithRetriesAsync(_ => execute(), onRetry, releaseInput, ct,
+            canRestartAfterCombatRecovery, resumeNavigation, assessVerifiedCombatRecovery);
+
+    private static async Task<bool> ExecuteSegmentWithRetriesAsync(
+        Func<Func<CombatRecoveryCompletedException, Task>, Task> execute,
         Action<Exception> onRetry, Action releaseInput, CancellationToken ct,
         Func<bool>? canRestartAfterCombatRecovery = null, Func<Task>? resumeNavigation = null,
         Func<CombatRecoveryCompletedException, bool>? assessVerifiedCombatRecovery = null)
     {
         var healingRestarts = 0;
         var relocationRestarts = 0;
-        for (var attempt = 0; attempt < RetryTimes; attempt++)
+        var recoveryFailed = false;
+        async Task HandleVerifiedRecoveryAsync(CombatRecoveryCompletedException exception)
         {
-            ct.ThrowIfCancellationRequested();
-            TaskExecutionScope.ThrowIfFailed();
-            UiOperation.Current?.Check();
             try
-            {
-                await execute();
-                ct.ThrowIfCancellationRequested();
-                TaskExecutionScope.ThrowIfFailed();
-                return false;
-            }
-            catch (EndConditionSatisfiedException)
-            {
-                ct.ThrowIfCancellationRequested();
-                return true;
-            }
-            catch (HandledException exception)
-            {
-                throw new InvalidOperationException("地图追踪未完整完成：" + exception.Message, exception);
-            }
-            catch (CombatRecoveryCompletedException exception)
             {
                 ct.ThrowIfCancellationRequested();
                 TaskExecutionScope.ThrowIfFailed();
@@ -370,6 +362,47 @@ public partial class PathExecutor
                     throw new InvalidOperationException("当前分段已使用两次已验证回血或复苏重启，停止而不扩大重试", exception);
                 if (resumeNavigation != null) await resumeNavigation();
                 onRetry(new HealingRecoveryCompletedException());
+            }
+            catch
+            {
+                recoveryFailed = true;
+                throw;
+            }
+        }
+        for (var attempt = 0; attempt < RetryTimes; attempt++)
+        {
+            recoveryFailed = false;
+            ct.ThrowIfCancellationRequested();
+            TaskExecutionScope.ThrowIfFailed();
+            UiOperation.Current?.Check();
+            try
+            {
+                await execute(HandleVerifiedRecoveryAsync);
+                ct.ThrowIfCancellationRequested();
+                TaskExecutionScope.ThrowIfFailed();
+                return false;
+            }
+            // A failure during recovery remains terminal, as it was inside the original recovery catch.
+            catch (Exception) when (recoveryFailed)
+            {
+                throw;
+            }
+            catch (VerifiedRecoveryHandledException)
+            {
+                attempt--; // The same kernel already assessed, reserved its ticket and resumed once.
+            }
+            catch (EndConditionSatisfiedException)
+            {
+                ct.ThrowIfCancellationRequested();
+                return true;
+            }
+            catch (HandledException exception)
+            {
+                throw new InvalidOperationException("地图追踪未完整完成：" + exception.Message, exception);
+            }
+            catch (CombatRecoveryCompletedException exception)
+            {
+                await HandleVerifiedRecoveryAsync(exception);
                 attempt--;
             }
             catch (HealingRecoveryCompletedException exception)
@@ -2227,12 +2260,34 @@ public partial class PathExecutor
     }
 
     private async Task ExecuteOriginalWaypointAsync(WaypointForTrack waypoint,
-        NavigationResumePlan? semanticPlan = null, WaypointForTrack? previousSegmentEnd = null)
+        NavigationResumePlan? semanticPlan = null, WaypointForTrack? previousSegmentEnd = null,
+        Func<CombatRecoveryCompletedException, Task>? handleVerifiedRecovery = null)
     {
         if (_waypointBudget == null) throw new InvalidOperationException("原点执行缺少owner");
         using var nodeOwner = semanticPlan == null
             ? UiOperation.Begin("path-waypoint-owner", _waypointBudget.Deadline - _moveIo.Clock.GetUtcNow(), ct, clock: _moveIo.Clock)
             : null;
+        var ownsNavigation = nodeOwner != null;
+        void ReleaseNavigationOwner()
+        {
+            ownsNavigation = false;
+            nodeOwner!.Dispose();
+        }
+        try
+        {
+            await ExecuteOriginalWaypointCoreAsync(waypoint, semanticPlan, previousSegmentEnd, ReleaseNavigationOwner);
+        }
+        catch (CombatRecoveryCompletedException exception) when (ownsNavigation && handleVerifiedRecovery != null)
+        {
+            // Keep the actual point owner alive in this context through assessment and the original resume.
+            await handleVerifiedRecovery(exception);
+            throw new VerifiedRecoveryHandledException();
+        }
+    }
+
+    private async Task ExecuteOriginalWaypointCoreAsync(WaypointForTrack waypoint,
+        NavigationResumePlan? semanticPlan, WaypointForTrack? previousSegmentEnd, Action releaseNavigationOwner)
+    {
         void Check()
         {
             ct.ThrowIfCancellationRequested();
@@ -2304,7 +2359,7 @@ public partial class PathExecutor
                 _waypointBudget.Check(_moveIo.Clock, ct);
                 if (_returningToCurrent && _waypointBudget.CurrentIndex == CurWaypoint.Item1)
                 { _resumeCurrent = null; _returningToCurrent = false; }
-                nodeOwner!.Dispose();
+                releaseNavigationOwner();
             }
             await AfterMoveToTarget(waypoint, semanticPlan?.MiningBindings.GetValueOrDefault(CurWaypoint.Item1));
             Check();
